@@ -41,8 +41,8 @@ test('Feed exports its reading operations and owns its existing DOM lifecycle (#
   assert.match(source, /escape: \(e\) => \{ if \(msgOpen\) \{ setMessageActions\(-1\); e\.stopPropagation\(\); \} \}/u);
   assert.doesNotMatch(source, /window\.addEventListener\('(?:keydown|pointerdown)'/u,
     'capture installation remains in Hub');
-  assert.match(source, /<div class="feed-wrap" class:railed=\{railOn\} bind:this=\{wrapEl\}>\s*\{#if railOn\}[\s\S]*?\{\/if\}\s*<div class="feed subtle-scroll"/u,
-    'the turn rail (#461) is a SIBLING of the scroller inside the wrap, never inside it');
+  assert.match(source, /<div class="feed-wrap" bind:this=\{wrapEl\}>\s*\{#if railWanted\}[\s\S]*?\{\/if\}\s*<div class="feed subtle-scroll"/u,
+    'the turn rail (#461/#463) is a SIBLING of the scroller inside the wrap, never inside it, and mounts with a plain {#if}');
   assert.match(source, /\.feed > :global\(\*\) \{ flex: none; \}/u,
     'all direct rows, including the parent empty snippet, retain non-shrinking layout');
   assert.match(source, /\{@render emptyFeed\?\.\(\)\}/u);
@@ -122,10 +122,8 @@ test('the agent filter is shown by the strip, never a banner in the feed (owner,
 
 test('compact tail padding contains the floating command targets without opening-time layout changes (#166)', () => {
   const compact = /:global\(\.hub-root\.compact\) \.feed \{([^}]+)\}/u.exec(source)?.[1] ?? '';
-  assert.match(compact, /padding: 14px var\(--feed-pad-x\) max\(6px, calc\(var\(--control-height\) \/ 2\)\)/u,
+  assert.match(compact, /padding: 14px 10px max\(6px, calc\(var\(--control-height\) \/ 2\)\)/u,
     'the absolute action overhang is reserved even before the row opens');
-  assert.match(source, /:global\(\.hub-root\.compact\) \.feed-wrap \{ --feed-pad-x: 10px; \}/u,
-    'the compact leading padding is still 10px; the rail column (#461) is laid over it');
   assert.doesNotMatch(compact, /msgOpen/u);
 });
 

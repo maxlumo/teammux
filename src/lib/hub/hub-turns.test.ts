@@ -2,7 +2,7 @@ import assert from 'node:assert/strict';
 import test from 'node:test';
 import type { FeedBlock } from './hub.ts';
 import {
-  askTurns, blockKey, isAskBlock, previewRows, scrubDown, scrubFactor, scrubIndex, scrubMaxFactor,
+  askTurns, blockKey, isAskBlock, scrubDown, scrubFactor, scrubIndex, scrubMaxFactor,
   scrubMove, stepTurn, tickCapacity, tickCount, tickOf, turnIndex, turnLabel, turnsSig,
 } from './hub-turns.ts';
 import type { ScrubGeom } from './hub-turns.ts';
@@ -67,14 +67,6 @@ test('arrow stepping walks real turns and starts at the newest from nothing', ()
   assert.equal(stepTurn(5, 9, -1), 4);
 });
 
-test('the popover rows are the probed turn with the neighbours that exist', () => {
-  assert.deepEqual(previewRows(5, 0), [0, 1]);
-  assert.deepEqual(previewRows(5, 2), [1, 2, 3]);
-  assert.deepEqual(previewRows(5, 4), [3, 4]);
-  assert.deepEqual(previewRows(5, -1), []);
-  assert.deepEqual(previewRows(5, 5), []);
-});
-
 test('ticks compress the drawing and never the turns', () => {
   assert.equal(tickCapacity(300, 10), 30);
   assert.equal(tickCapacity(5, 10), 2);
@@ -96,7 +88,8 @@ test('ticks compress the drawing and never the turns', () => {
 
 // -- scrubbing ---------------------------------------------------------------
 
-const geom = (height: number, reach = 88): ScrubGeom => ({ top: 100, height, edge: 44, reach });
+/** A rail at the RIGHT edge of a 390px screen: the band is x 346..390, sliding away is sliding left. */
+const geom = (height: number, reach = 88): ScrubGeom => ({ top: 100, height, edge: 346, reach });
 
 test('a press maps to the slice under the finger and the ends clamp', () => {
   const g = geom(250);
@@ -111,19 +104,21 @@ test('a press maps to the slice under the finger and the ends clamp', () => {
 test('on the band the scrub is 1:1 with the slices; away from it, finer', () => {
   const g = geom(200), M = 1000;
   assert.equal(scrubMaxFactor(M, 200), 5);
-  assert.equal(scrubFactor(44, M, g), 1);
-  assert.equal(scrubFactor(10, M, g), 1);
-  assert.equal(scrubFactor(44 + 88, M, g), 5);
-  assert.equal(scrubFactor(9000, M, g), 5);
-  assert.equal(scrubFactor(44 + 44, M, g), 3);
+  assert.equal(scrubFactor(346, M, g), 1);
+  assert.equal(scrubFactor(390, M, g), 1, 'the band itself');
+  assert.equal(scrubFactor(9000, M, g), 1, 'sliding RIGHT, off the screen edge, is not sliding away');
+  assert.equal(scrubFactor(346 - 88, M, g), 5);
+  assert.equal(scrubFactor(-9000, M, g), 5);
+  assert.equal(scrubFactor(346 - 44, M, g), 3);
   assert.equal(scrubMaxFactor(3, 200), 1);
-  assert.equal(scrubFactor(9000, 3, g), 1);
-  assert.equal(scrubFactor(9000, M, { ...g, reach: 0 }), 5);
+  assert.equal(scrubFactor(-9000, 3, g), 1);
+  assert.equal(scrubFactor(-9000, M, { ...g, reach: 0 }), 5);
+  assert.equal(scrubFactor(345, M, { ...g, reach: 0 }), 5, 'a zero reach slows at once, one pixel past the edge');
 });
 
 test('at the far end one pixel moves at most one turn, so no turn is skipped', () => {
   for (const [M, h] of [[500, 120], [2000, 40], [100000, 250], [77, 600]] as const) {
-    const g = geom(h), x = g.edge + g.reach;
+    const g = geom(h), x = g.edge - g.reach;
     let q = scrubDown(g.top + h / 2, M, g);
     for (let i = 0; i < 2000; i++) {
       const dy = i % 400 < 200 ? 1 : -1;
@@ -142,7 +137,7 @@ test('moving across the band edge and the reach never jumps the probe', () => {
     let q = scrubDown(g.top + h / 2, M, g);
     let x = g.edge;
     for (let i = 0; i < 5000; i++) {
-      x = Math.max(0, Math.min(320, x + Math.round((rnd() - 0.5) * 30)));
+      x = Math.max(0, Math.min(390, x + Math.round((rnd() - 0.5) * 30)));
       const dy = Math.round((rnd() - 0.5) * 10);
       const next = scrubMove(q, dy, x, M, g);
       assert.ok(Math.abs(next - q) <= Math.abs(dy) * (M / h) + 1e-9, 'a move is never worth more than its coarse travel');
@@ -151,7 +146,7 @@ test('moving across the band edge and the reach never jumps the probe', () => {
   }
   // The factor itself is continuous across the edge and across the reach.
   const g = geom(120), M = 2000, max = scrubMaxFactor(M, 120);
-  for (let x = 30; x < 200; x++) {
+  for (let x = 200; x < 400; x++) {
     assert.ok(Math.abs(scrubFactor(x + 1, M, g) - scrubFactor(x, M, g)) <= (max - 1) / g.reach + 1e-9, `x=${x}`);
   }
 });
@@ -177,7 +172,7 @@ test('hitting an end and reversing does not wind up', () => {
  * through scrubDown/scrubMove, so it cannot write the position directly.
  */
 function reach(M: number, h: number, target: number, viewport = 320): { moves: number; ok: boolean } {
-  const g = geom(h, Math.min(88, viewport - 44));
+  const g = { ...geom(h, Math.min(88, viewport - 44)), edge: viewport - 44 };
   const aim = target + 0.5;
   let y = g.top, best = Infinity;
   for (let yy = g.top; yy <= g.top + h; yy++) {
@@ -191,7 +186,7 @@ function reach(M: number, h: number, target: number, viewport = 320): { moves: n
     for (const dy of [-1, 1]) {
       const ny = y + dy;
       if (ny < g.top || ny > g.top + h) continue;
-      for (let x = 0; x <= g.edge + g.reach; x++) {
+      for (let x = Math.max(0, g.edge - g.reach); x <= g.edge; x++) {
         const nq = scrubMove(q, dy, x, M, g);
         const e = Math.abs(nq - aim);
         if (!pick || e < pick.e) pick = { y: ny, q: nq, e };

@@ -239,3 +239,38 @@ test('two rects intersect, and disjoint ones collapse to an empty rect (#461)', 
   assert.equal(e.right - e.left, 0);
   assert.equal(e.bottom - e.top, 0);
 });
+
+test('side left is the right rule mirrored: beside the anchor, never slid back over it (#463)', () => {
+  const rail: AnchorRect = { left: 346, right: 390, top: 300, bottom: 320 };
+  const view = { w: 390, h: 700 };
+  const p = menuPlacement(rail, { w: 200, h: 80 }, view, 8, 8, 'right', 'left');
+  assert.equal(p.x, 346 - 8 - 200, 'its right edge is the anchor\'s left edge less the gap');
+  assert.equal(p.y, 300, 'aligned with the anchor\'s top');
+  assert.equal(p.maxW, 346 - 8 - 8, 'the room left of the anchor');
+  assert.equal(p.maxH, 700 - 16);
+  // Too wide for the room: it narrows (maxW) and stays clear of the anchor.
+  const wide = menuPlacement(rail, { w: 900, h: 80 }, view, 8, 8, 'right', 'left');
+  assert.equal(wide.x, 8, 'flush with the edge margin');
+  assert.ok(wide.x + wide.maxW <= 346 - 8, 'and its box ends before the anchor');
+  // Unmeasured (0 wide) rests against the anchor until it is known.
+  assert.equal(menuPlacement(rail, { w: 0, h: 0 }, view, 8, 8, 'right', 'left').x, 346 - 8);
+  // A tall popover rests on the bottom margin, like the right side.
+  const low: AnchorRect = { left: 346, right: 390, top: 650, bottom: 670 };
+  assert.equal(menuPlacement(low, { w: 200, h: 100 }, view, 8, 8, 'right', 'left').y, 700 - 100 - 8);
+  assert.equal(menuPlacement({ ...rail, top: 2, bottom: 12 }, { w: 200, h: 100 }, view, 8, 8, 'right', 'left').y, 8);
+});
+
+test('side left grows from the right edge, and the other sides are untouched (#463)', () => {
+  const anchor: AnchorRect = { left: 346, right: 390, top: 300, bottom: 320 };
+  assert.equal(popOrigin(anchor, { x: 100, y: 300 }, 'right', 'left'), 'top right');
+  assert.equal(popOrigin(anchor, { x: 100, y: 300 }, 'left', 'left'), 'top right', 'the side decides, not the alignment');
+  assert.equal(popOrigin(anchor, { x: 100, y: 250 }, 'right', 'left'), 'bottom right');
+  assert.equal(popOrigin(anchor, { x: 400, y: 300 }, 'right', 'right'), 'top left');
+  assert.equal(popOrigin(anchor, { x: 300, y: 330 }, 'left', 'below'), 'top left');
+  // The wrapper mirrors it inside a box with an origin.
+  const box: AnchorRect = { left: 0, top: 56, right: 390, bottom: 620 };
+  const p = menuPlacementIn(box, { left: 346, right: 390, top: 300, bottom: 320 }, { w: 200, h: 80 }, 8, 8, 'right', 'left');
+  assert.equal(p.x, 138);
+  assert.equal(p.y, 300);
+  assert.equal(p.maxW, 330);
+});

@@ -12,7 +12,8 @@ const compiled = compileMount(new URL('./TurnRail.test.svelte', import.meta.url)
 
 const NOW = 1_800_000_000_000;
 const HOUR = 3_600_000;
-const BAND0 = { left: 0, top: 100, right: 44, bottom: 400 };
+/** A rail at the RIGHT edge of a 390px screen. */
+const BAND0 = { left: 346, top: 100, right: 390, bottom: 400 };
 const BAND = { ...BAND0 };
 const TOPS: Record<string, number> = { h1: 1000, h2: 2000, h3: 2800, h0: 200 };
 const topOf = (id: string) => TOPS[id] ?? (/^w(\d+)$/u.test(id) ? Number(id.slice(1)) * 120 + 100 : 0);
@@ -32,8 +33,11 @@ const base = (blocks: unknown, other: unknown = []) => ({
   a: blocks, b: other, roomReady: true, managedNames: ['dev'], agents,
 });
 
+/** The feed's classic scrollbar width (px), read by the rail as offsetWidth - clientWidth. */
+const SCROLLBAR = { w: 0 };
 async function open(context: import('node:test').TestContext, props: Record<string, unknown>) {
   Object.assign(BAND, BAND0);
+  SCROLLBAR.w = 0;
   const captured: number[] = [];
   const released: number[] = [];
   const app = await (await compiled).mount(context, {
@@ -53,6 +57,9 @@ async function open(context: import('node:test').TestContext, props: Record<stri
         configurable: true,
         get(this: Element) { return this.classList?.contains('turn-rail') ? 340 : 0; },
       });
+      Object.defineProperty(window.HTMLElement.prototype, 'offsetWidth', { configurable: true, get(this: Element) { return this.classList?.contains('feed') ? 390 : 0; } });
+      const clientWidth = Object.getOwnPropertyDescriptor(proto, 'clientWidth');
+      Object.defineProperty(proto, 'clientWidth', { configurable: true, get(this: Element) { return this.classList?.contains('feed') ? 390 - SCROLLBAR.w : (clientWidth?.get?.call(this) ?? 0); } });
       proto.setPointerCapture = function (id: number) { captured.push(id); };
       proto.hasPointerCapture = function (id: number) { return captured.includes(id) && !released.includes(id); };
       proto.releasePointerCapture = function (id: number) { released.push(id); };
@@ -77,7 +84,7 @@ async function open(context: import('node:test').TestContext, props: Record<stri
   const ev = (type: string, el: Element, y: number, o: { id?: number; kind?: string; x?: number; button?: number } = {}) =>
     el.dispatchEvent(new app.window.PointerEvent(type, {
       bubbles: true, cancelable: true, button: o.button ?? 0, pointerType: o.kind ?? 'mouse',
-      pointerId: o.id ?? 1, clientX: o.x ?? 20, clientY: y,
+      pointerId: o.id ?? 1, clientX: o.x ?? 370, clientY: y,
     }));
   /** The y of the middle of turn i of 3 on the 300px band. */
   const yOf = (i: number) => 100 + i * 100 + 50;
@@ -89,19 +96,27 @@ async function open(context: import('node:test').TestContext, props: Record<stri
   return { app, q, qa, frames, geometry, ev, yOf, rows, captured, released, BAND };
 }
 
-test('the rail is absent with one turn, appears with the second, and takes its width from the leading padding (#461)', async (context) => {
+test('the rail is absent with one turn and appears with the second WITHOUT touching the feed\'s layout or reading position (#463)', async (context) => {
   const one = feedBlocks([{ id: 'h1', ts: NOW, from: 'human', body: 'only' }, { id: 'a1', ts: NOW, from: 'dev', body: 'reply' }], [], 'chat', (n) => n);
   const t = await open(context, base(one, room()));
   try {
     assert.equal(t.q('.turn-rail'), null, 'a single turn is not a rail');
-    assert.equal(t.q('.feed-wrap.railed'), null);
+    const feed = t.geometry();
+    feed.scrollTop = 800; feed.dispatchEvent(new t.app.window.Event('scroll')); await t.frames();
+    const feedBefore = feed.getAttribute('class'), wrapBefore = t.q('.feed-wrap')!.getAttribute('class');
     t.q('.t-set-b')!.click(); await t.frames();
     assert.ok(t.q('.turn-rail'), 'the second human message brings it');
-    assert.ok(t.q('.feed-wrap.railed'), 'and the class that makes the feed\'s padding hold its column');
+    assert.equal(t.geometry().scrollTop, 800, 'the reader did not move: appearing is not a layout mutation');
+    assert.equal(t.q('.feed')!.getAttribute('class')!.replace(/\s*reveal-tail/u, ''), feedBefore!.replace(/\s*reveal-tail/u, ''), 'the feed gained no class');
+    assert.equal(t.q('.feed-wrap')!.getAttribute('class'), wrapBefore, 'nor the wrap');
+    assert.equal(t.q('.feed')!.getAttribute('style'), null, 'nor an inline padding');
     assert.equal(t.qa('.turn-rail .tr-tick').length, 3, 'one tick per turn while the band has room');
     assert.equal(t.q('.tr-band')!.getAttribute('aria-valuemax'), '3');
-    assert.ok(t.q('.feed') && t.q('.feed')!.parentElement === t.q('.feed-wrap'), 'laid over the scroller\'s padding as its sibling');
+    assert.ok(t.q('.feed') && t.q('.feed')!.parentElement === t.q('.feed-wrap'), 'a sibling of the scroller inside the wrap');
     assert.equal(t.q('.feed .turn-rail'), null, 'never inside it');
+    t.q('.t-set-a')!.click(); await t.frames();
+    t.q('.t-set-b')!.click(); await t.frames();
+    assert.equal(t.geometry().scrollTop, 800, 'and coming and going leaves the position alone');
   } finally { await t.app.close(); }
 });
 
@@ -114,20 +129,23 @@ test('an agent bubble is never a turn: the rail counts the human messages the an
   } finally { await t.app.close(); }
 });
 
-test('hovering names the turn under the pointer with its neighbours and where it sits; moving changes it (#461)', async (context) => {
+test('hovering previews ONLY the probed turn, larger, with where it sits; moving changes it (#463)', async (context) => {
   const t = await open(context, base(room()));
   try {
     const band = t.q('.tr-band')!;
     t.ev('pointermove', band, t.yOf(1)); await t.frames();
-    assert.deepEqual(t.rows(), ['first question', '@dev second question', 'third question']);
-    assert.equal(t.qa('.tr-pop .tr-row.cur').length, 1);
-    assert.equal(t.q('.tr-pop .tr-row.cur .tr-label')!.textContent, '@dev second question');
+    assert.deepEqual(t.rows(), ['@dev second question'], 'one row: no neighbours');
+    assert.equal(t.qa('.tr-pop .tr-row').length, 1);
     assert.match(t.q('.tr-pop .tr-foot')!.textContent!, /^Turn 2 of 3 · 1d$/u);
     assert.equal(t.qa('.tr-pop').length, 1, 'ONE popover');
     assert.ok(t.q('.tr-pop')!.classList.contains('menu-surface') && t.q('.tr-pop')!.classList.contains('pop-layer'));
-    assert.ok(t.q('.tr-tick.probe'));
+    assert.equal(t.qa('.tr-tick.probe').length, 1);
+    const card = t.q('.tr-pop') as HTMLElement;
+    assert.equal(card.style.top, '250px', 'the card is centred on the probed tick (turn 2 of 3 on the 100..400 band)');
     t.ev('pointermove', band, t.yOf(2)); await t.frames();
-    assert.deepEqual(t.rows(), ['@dev second question', 'third question']);
+    assert.equal(t.q('.tr-pop'), card, 'the SAME element follows the probe: no remount, so no pop-in replay');
+    assert.equal(card.style.top, '350px', 'and it moved to the new probed tick');
+    assert.deepEqual(t.rows(), ['third question']);
     assert.match(t.q('.tr-pop .tr-foot')!.textContent!, /^Turn 3 of 3/u);
     assert.equal(band.getAttribute('aria-valuetext'), 'Turn 3 of 3: third question', 'the slider speaks the PREVIEW');
     t.ev('pointerleave', band, 0); await t.frames();
@@ -148,16 +166,16 @@ test('a click on the band lands the feed on the turn\u2019s natural position, th
   } finally { await t.app.close(); }
 });
 
-test('a row of the popover jumps to its own turn, once (#461)', async (context) => {
+test('the popover\'s one row jumps to the probed turn, once (#463)', async (context) => {
   const t = await open(context, base(room()));
   try {
     const band = t.q('.tr-band')!;
     t.ev('pointermove', band, t.yOf(1)); await t.frames();
-    const third = t.qa('.tr-pop .tr-row')[2]!;
-    third.click(); await t.frames();
-    assert.equal(t.geometry().scrollTop, 2792);
-    third.click(); await t.frames();
-    assert.equal(t.geometry().scrollTop, 2792, 'a second click finds nothing to commit');
+    const row = t.q('.tr-pop .tr-row')!;
+    row.click(); await t.frames();
+    assert.equal(t.geometry().scrollTop, 1992, 'the probed (2nd) turn');
+    row.click(); await t.frames();
+    assert.equal(t.geometry().scrollTop, 1992, 'a second click finds nothing to commit');
   } finally { await t.app.close(); }
 });
 
@@ -168,10 +186,10 @@ test('touch: press and drag scrubs with the same popover; release lands; pointer
     const kind = { kind: 'touch', id: 7 };
     t.ev('pointerdown', band, t.yOf(0), kind); await t.frames();
     assert.deepEqual(t.captured, [7], 'the press captures its pointer');
-    assert.equal(t.q('.tr-pop .tr-row.cur .tr-label')!.textContent, 'first question');
+    assert.equal(t.q('.tr-pop .tr-label')!.textContent, 'first question');
     t.ev('pointermove', band, t.yOf(1), kind);
     t.ev('pointermove', band, t.yOf(2), kind); await t.frames();
-    assert.equal(t.q('.tr-pop .tr-row.cur .tr-label')!.textContent, 'third question', 'the popover follows the finger');
+    assert.equal(t.q('.tr-pop .tr-label')!.textContent, 'third question', 'the popover follows the finger');
     assert.equal(t.geometry().scrollTop, 0, 'nothing moves until the release');
     t.ev('pointerup', band, t.yOf(2), kind); await t.frames();
     assert.equal(t.geometry().scrollTop, 2792);
@@ -210,16 +228,53 @@ test('keyboard: arrows preview, Enter lands once, Escape closes, Tab is left alo
   } finally { await t.app.close(); }
 });
 
-test('the lit tick is the anchor\u2019s turn, and the preview is a different tick (#461)', async (context) => {
+test('ONE tick is emphasised: the anchor\'s when idle, the probe\'s while one is open, the anchor\'s again after (#463)', async (context) => {
   const t = await open(context, base(room()));
   try {
     const feed = t.geometry();
     feed.scrollTop = 1200; feed.dispatchEvent(new t.app.window.Event('scroll')); await t.frames();
-    const lit = t.qa('.tr-tick').findIndex((e) => e.classList.contains('cur'));
-    assert.ok(lit >= 0, 'an anchor exists once the feed can scroll');
-    t.ev('pointermove', t.q('.tr-band')!, t.yOf(2)); await t.frames();
-    assert.equal(t.qa('.tr-tick').findIndex((e) => e.classList.contains('probe')), 2);
-    assert.equal(t.qa('.tr-tick').findIndex((e) => e.classList.contains('cur')), lit, 'previewing does not move the current mark');
+    const idx = (cls: string) => t.qa('.tr-tick').findIndex((e) => e.classList.contains(cls));
+    const emphasised = () => t.qa('.tr-tick.cur, .tr-tick.probe').length;
+    const anchor = idx('cur');
+    assert.ok(anchor >= 0, 'an anchor exists once the feed can scroll');
+    assert.equal(emphasised(), 1);
+    const band = t.q('.tr-band')!;
+    // Hover: the emphasis is the probe\'s and moves with the pointer like a wheel.
+    t.ev('pointermove', band, t.yOf(0)); await t.frames();
+    assert.equal(idx('probe'), 0); assert.equal(idx('cur'), -1); assert.equal(emphasised(), 1);
+    t.ev('pointermove', band, t.yOf(1)); await t.frames();
+    assert.equal(idx('probe'), 1); assert.equal(emphasised(), 1);
+    t.ev('pointermove', band, t.yOf(2)); await t.frames();
+    assert.equal(idx('probe'), 2); assert.equal(emphasised(), 1);
+    // leave / cancel / commit / retire each hand the emphasis back to the anchor
+    t.ev('pointerleave', band, 0); await t.frames();
+    assert.equal(idx('cur'), anchor); assert.equal(idx('probe'), -1);
+    t.ev('pointerdown', band, t.yOf(2), { kind: 'touch', id: 7 }); await t.frames();
+    t.ev('pointermove', band, t.yOf(0), { kind: 'touch', id: 7 }); await t.frames();
+    assert.equal(idx('probe'), 0, 'a scrub moves it');
+    t.ev('pointercancel', band, t.yOf(0), { kind: 'touch', id: 7 }); await t.frames();
+    assert.equal(idx('cur'), anchor, 'cancel returns it'); assert.equal(emphasised(), 1);
+    t.ev('pointermove', band, t.yOf(1)); await t.frames();
+    t.q('.t-aba')!.click(); await t.frames();
+    assert.equal(idx('probe'), -1, 'retire returns it'); assert.equal(emphasised(), 1);
+    // the preview is state of the rail only: the anchor\'s key was never written
+    assert.equal(feed.scrollTop, 1200);
+    // a commit hands it to whatever the anchor says next
+    t.ev('pointerdown', band, t.yOf(1)); t.ev('pointerup', band, t.yOf(1)); await t.frames();
+    assert.equal(idx('probe'), -1); assert.equal(emphasised(), 1);
+  } finally { await t.app.close(); }
+});
+
+test('with no anchor nothing is emphasised until a probe opens, and the first arrow lands on the newest (#463)', async (context) => {
+  const t = await open(context, base(room()));
+  try {
+    const feed = t.q('.feed')!;
+    Object.defineProperty(feed, 'scrollHeight', { get: () => 400, configurable: true });
+    feed.dispatchEvent(new t.app.window.Event('scroll')); await t.frames();
+    t.q('.t-set-a')!.click(); await t.frames();
+    assert.equal(t.qa('.tr-tick.cur').length, 0);
+    t.ev('pointermove', t.q('.tr-band')!, t.yOf(0)); await t.frames();
+    assert.equal(t.qa('.tr-tick.probe').length, 1, 'a probe still lights the tick it is on');
   } finally { await t.app.close(); }
 });
 
@@ -246,7 +301,7 @@ test('the same retirements end a hover and a key preview: the old click and the 
   try {
     const band = t.q('.tr-band')!;
     t.ev('pointermove', band, t.yOf(1)); await t.frames();
-    const row = t.qa('.tr-pop .tr-row')[1]!;
+    const row = t.q('.tr-pop .tr-row')!;
     t.q('.t-aba')!.click(); await t.frames();
     row.click(); await t.frames();
     assert.equal(t.geometry().scrollTop, 0, 'the row of a retired hover finds no intent');
@@ -350,25 +405,27 @@ test('a turn already on screen is not scrolled to: the jump only re-seeds the an
 
 const withBridge = (t: Awaited<ReturnType<typeof open>>) => t.q('.tr-bridge')!;
 
-test('the pointer can leave the band into the corridor and the popover without closing the preview, and the row it reaches jumps once (#461)', async (context) => {
+test('the pointer can leave the band into the corridor (on its LEFT) and the popover without closing the preview, and the row jumps once (#463)', async (context) => {
   const t = await open(context, base(room()));
   try {
     const band = t.q('.tr-band')!;
-    // From the LOWEST tick: the popover sits at the band's top, so the way there is along the corridor.
+    // From the LOWEST tick: the card is centred on the probed tick, the corridor spans the band.
     t.ev('pointermove', band, t.yOf(2)); await t.frames();
     assert.ok(t.q('.tr-pop') && withBridge(t), 'the preview and its corridor are open');
     const bridge = withBridge(t), pop = t.q('.tr-pop')!;
+    assert.equal(bridge.style.left, '340px', 'the gap, immediately left of the band (x 346)');
+    assert.equal(bridge.style.top, '100px'); assert.equal(bridge.style.height, '300px', 'over the band\'s whole height');
     const leave = (el: Element, to: Element | null) => el.dispatchEvent(new t.app.window.PointerEvent('pointerleave', { bubbles: false, pointerType: 'mouse', pointerId: 1, relatedTarget: to } as PointerEventInit));
     leave(band, bridge); await t.frames();
     assert.ok(t.q('.tr-pop'), 'band to corridor: still open');
     leave(bridge, pop); await t.frames();
     assert.ok(t.q('.tr-pop'), 'corridor to popover: still open');
-    assert.equal(t.q('.tr-pop .tr-row.cur .tr-label')!.textContent, 'third question', 'and the probed turn was not swapped on the way');
+    assert.equal(t.q('.tr-pop .tr-label')!.textContent, 'third question', 'and the probed turn was not swapped on the way');
     leave(pop, band); await t.frames();
     assert.ok(t.q('.tr-pop'), 'popover back to the band: still open');
     leave(band, bridge); leave(bridge, pop); await t.frames();
-    t.qa('.tr-pop .tr-row')[0]!.click(); await t.frames();
-    assert.equal(t.geometry().scrollTop, 1992, 'the neighbour row jumped to its own turn');
+    t.q('.tr-pop .tr-row')!.click(); await t.frames();
+    assert.equal(t.geometry().scrollTop, 2792, 'the row jumped to the probed (3rd) turn');
     assert.equal(t.q('.tr-pop'), null);
     // and a pointer that goes anywhere else ends the hover
     t.ev('pointermove', t.q('.tr-band')!, t.yOf(1)); await t.frames();
@@ -413,21 +470,38 @@ test('a 500-turn feed through pointer events: ticks compress, the far end is rea
     // A press at 60% of the band: the slice under the finger.
     const y0 = 100 + 300 * 0.6;
     t.ev('pointerdown', band, y0, { kind: 'touch', id: 7 }); await t.frames();
-    const at = () => Number(/turn (\d+)/u.exec(t.q('.tr-pop .tr-row.cur .tr-label')!.textContent!)![1]);
+    const at = () => Number(/turn (\d+)/u.exec(t.q('.tr-pop .tr-label')!.textContent!)![1]);
     const start = at();
     assert.ok(Math.abs(start - 300) <= 2, `coarse press names about turn 300, got ${start}`);
     // 300px for 500 turns is under 2 turns per pixel: a slide away from the band never skips one.
     let y = y0, last = start;
     for (let i = 0; i < 40; i++) {
       y += 1;
-      t.ev('pointermove', band, y, { kind: 'touch', id: 7, x: 44 + 88 });
+      t.ev('pointermove', band, y, { kind: 'touch', id: 7, x: 346 - 88 });
       await t.frames();
       const now = at();
       assert.ok(now - last >= 0 && now - last <= 1, `a pixel at the far end moves at most one turn (${last} to ${now})`);
+      assert.equal(t.qa('.tr-tick.cur, .tr-tick.probe').length, 1, 'exactly ONE tick is emphasised, also when several turns share a drawn tick');
       last = now;
     }
     assert.ok(last > start, 'and it did move');
-    t.ev('pointerup', band, y, { kind: 'touch', id: 7, x: 44 + 88 }); await t.frames();
+    t.ev('pointerup', band, y, { kind: 'touch', id: 7, x: 346 - 88 }); await t.frames();
     assert.equal(t.geometry().scrollTop, topOf(`w${last}`) - 8, `landed on turn ${last}`);
+  } finally { await t.app.close(); }
+});
+
+test('a classic scrollbar is stood clear of, read from the scroller, and its going retires the rail (#463)', async (context) => {
+  const t = await open(context, base(room()));
+  try {
+    assert.equal(t.q('.turn-rail')!.getAttribute('style'), '--turn-rail-edge: 0px;', 'overlay scrollbars take no width');
+    SCROLLBAR.w = 8;
+    t.ev('pointermove', t.q('.tr-band')!, t.yOf(1)); await t.frames();
+    assert.ok(t.q('.tr-pop'));
+    t.app.window.dispatchEvent(new t.app.window.Event('resize')); await t.frames();
+    assert.equal(t.q('.tr-pop'), null, 'the rail moved sideways: the old preview is gone');
+    assert.equal(t.q('.turn-rail')!.getAttribute('style'), '--turn-rail-edge: 8px;', 'the scrollbar\'s width, measured not assumed');
+    SCROLLBAR.w = 0;
+    t.app.window.dispatchEvent(new t.app.window.Event('resize')); await t.frames();
+    assert.equal(t.q('.turn-rail')!.getAttribute('style'), '--turn-rail-edge: 0px;');
   } finally { await t.app.close(); }
 });

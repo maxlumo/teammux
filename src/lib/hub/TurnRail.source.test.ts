@@ -19,13 +19,19 @@ const script = rail.slice(0, rail.indexOf('</script>'));
 const code = (src: string) => src.replace(/\/\*[\s\S]*?\*\//gu, '').replace(/(^|[^:"'])\/\/.*$/gmu, '$1');
 
 test('the popover is the one mechanism: menuPlacementIn, the menu surface, one element, no tooltip protocol', () => {
-  assert.match(script, /menuPlacementIn\(box, a, \{ w: pw, h: ph \}, POPOVER_GAP, POPOVER_EDGE, 'right', 'right'\)/u,
-    'placed beside the band by the shared rule and the shared gap/edge, inside the feed-wrap box');
+  assert.match(script, /menuPlacementIn\(box, tick, \{ w: pw, h: ph \}, POPOVER_GAP, POPOVER_EDGE, 'right', 'left'\)/u,
+    'placed beside the band, on its LEFT, by the shared rule and the shared gap/edge, inside the feed-wrap box');
   assert.doesNotMatch(code(script), /\bGAP\s*=|const GAP/u, 'no second gap constant');
-  assert.match(script, /popOrigin\(a, p, 'right', 'right'\)/u, 'it grows from the edge that touches the band');
+  assert.match(script, /popOrigin\(tick, p, 'right', 'left'\)/u, 'it grows from the edge that touches the band');
+  // ONE row, the probed turn (owner, 2026-10-24: "只预览当前选中的那个大一点的气泡，上下两个小的气泡就不显示了").
+  assert.equal([...markup.matchAll(/class="menu-item tr-row"/gu)].length, 1, 'ONE row in the preview');
+  assert.doesNotMatch(rail, /previewRows|\{#each rows|rows\.length/u, 'no neighbour rows');
+  assert.match(markup, /onclick=\{\(\) => rail\.rowClick\(row\.key\)\}/u, 'the row commits the probed turn');
+  assert.match(style, /\.tr-row \{[^}]*font-size: var\(--fs-body\)/u, 'at the bubble\'s own type step');
+  assert.match(style, /-webkit-line-clamp: 3/u, 'a long first line is held to three lines');
   assert.equal([...markup.matchAll(/class="tr-pop menu-surface pop-layer"/gu)].length, 1, 'ONE popover element');
   assert.match(markup, /class="menu-list"/u);
-  assert.match(markup, /class="menu-item tr-row"/u, 'rows are the menu atom');
+  assert.match(markup, /class="menu-item tr-row"/u, 'the row is the menu atom');
   assert.doesNotMatch(rail, /HoverCard|hoverCard|hover\.svelte|role="tooltip"/u, 'not the tooltip protocol');
   assert.doesNotMatch(/\.tr-pop \{([^}]*)\}/u.exec(style)?.[1] ?? '', /pointer-events/u, 'the popover is operable (HoverCard is read-only; this is not)');
   assert.doesNotMatch(rail, /setTimeout|clearTimeout/u, 'the band-to-popover gap is a bridge, not a timer');
@@ -82,14 +88,30 @@ test('the band is an operable slider that keeps a Tab exit and follows the previ
   assert.doesNotMatch(code(script), /\.focus\(\)/u, 'an outside press never steals focus back to the band');
 });
 
-test('the column is the feed\'s own padding and its appearance goes through the reading anchor', () => {
-  assert.match(feed, /\.feed-wrap\.railed > \.feed \{ padding-left: max\(var\(--feed-pad-x\), calc\(var\(--turn-rail-hit\) \+ var\(--ui-gap\)\)\); \}/u,
-    'the bubbles stand where a flex gutter put them, and the column stays part of the scroller');
-  assert.match(feed, /untrack\(\(\) => \{ if \(want !== railOn\) withReadingAnchor\(\(\) => \{ railOn = want; \}\); \}\);/u,
-    'the 1-to-2 turns change is a layout mutation like every other');
+test('the rail floats over the right edge and reserves NO space: the feed\'s geometry is untouched (#463)', () => {
+  const feedStyle = feed.slice(feed.indexOf('<style>'));
+  // Nothing of the feed or its wrap depends on the rail: no class, no variable, no padding rule.
+  assert.doesNotMatch(feed, /railed|--feed-pad-x|railOn/u, 'no rail-dependent padding, class or layout effect');
+  for (const m of feedStyle.matchAll(/([^{}]+)\{([^}]*)\}/gu)) {
+    if (/\.feed(?:-wrap)?\b/u.test(m[1]!)) assert.doesNotMatch(m[2]!, /--turn-rail/u, `${m[1]!.trim()} does not read a rail token`);
+  }
+  assert.doesNotMatch(feed, /withReadingAnchor\(\(\) => \{ rail/u, 'its appearing is not a reading transaction: it changes no layout');
   assert.match(feed, /const railWanted = \$derived\(roomReady && turns\.length >= 2\);/u, 'hidden with fewer than two turns and until the room settled');
-  assert.doesNotMatch(feed, /\.feed-wrap\.railed[^{]*\{[^}]*transition/u, 'the gutter\'s width is not animated');
-  assert.match(feed, /<TurnRail bind:this=\{turnRail\} \{turns\}/u, 'laid over the scroller\'s padding, never inside it, fed the shared turns');
+  assert.match(feed, /\{#if railWanted\}\s*<TurnRail bind:this=\{turnRail\} \{turns\}/u, 'a plain {#if}, a sibling of the scroller, fed the shared turns');
+  assert.match(style, /\.turn-rail \{[^}]*position: absolute;[^}]*inset-inline-end: var\(--turn-rail-edge, 0\);/u, 'at the right (inline end), standing clear of a classic scrollbar');
+  assert.match(style, /\.turn-rail \{[^}]*inset-block: var\(--turn-rail-inset\) var\(--turn-rail-clear\);/u);
+  assert.match(style, /\.tr-tick \{[^}]*justify-content: flex-start;/u, 'ticks at the INNER (left) side of the column');
+  assert.doesNotMatch(feed, /<TurnRail[^>]*>\s*[^<]*<\/TurnRail>/u);
+});
+
+test('the rail stays clear of the back-to-tail control, hit area included', () => {
+  // The control: .to-bottom { right/bottom } in Feed.svelte, .to-tail { 38px } and its ::before overhang in app.css.
+  const bottom = Number(/\.to-bottom \{[^}]*bottom: (\d+)px/u.exec(feed)?.[1]);
+  const size = Number(/\.to-tail \{[^}]*?height: (\d+)px/u.exec(css)?.[1]);
+  const overhang = Math.abs(Number(/\.to-tail::before \{[^}]*inset: (-?\d+)px/u.exec(css)?.[1]));
+  const clear = Number(/--turn-rail-clear: (\d+)px/u.exec(css)?.[1]);
+  assert.ok(bottom > 0 && size > 0 && overhang > 0 && clear > 0, 'all four numbers were read');
+  assert.ok(clear >= bottom + size + overhang, `--turn-rail-clear (${clear}px) clears the control's whole hit area (${bottom} + ${size} + ${overhang}px)`);
 });
 
 test('retire() is CALLED at every place the reading context changes', () => {
@@ -126,10 +148,13 @@ test('the one jump reports where it landed: moved, in-view or missing', () => {
 });
 
 test('the rail\'s geometry changing is a retirement called at the change', () => {
-  assert.match(script, /window\.addEventListener\('resize', moved\)/u);
-  assert.match(script, /window\.addEventListener\('app-zoom-change', moved\)/u);
+  assert.match(script, /window\.addEventListener\('resize', changed\)/u);
+  assert.match(script, /window\.addEventListener\('app-zoom-change', changed\)/u);
+  assert.match(script, /const changed = \(\) => \{ measure\(\); moved\(\); \};/u, 'a resize or a zoom also reads the scrollbar afresh');
   assert.match(script, /vv\?\.addEventListener\('resize', moved\)/u);
   assert.match(script, /vv\?\.addEventListener\('scroll', moved\)/u);
-  assert.match(script, /const targets = \[hostEl, band, bounds\]/u, 'the column, the band and the feed-wrap are observed');
+  assert.match(script, /const targets = \[hostEl, band, bounds, scroller\]/u, 'the column, the band, the feed-wrap and the scroller are observed');
+  assert.match(script, /scroller\.offsetWidth - scroller\.clientWidth/u, 'the scrollbar width is read, never assumed');
+  assert.match(script, /if \(next !== edge\) \{ edge = next; moved\(\); \}/u, 'and a scrollbar that appears or goes retires the rail');
   assert.match(script, /const moved = \(\) => untrack\(\(\) => rail\.retire\(\)\);/u);
 });

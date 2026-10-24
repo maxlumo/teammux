@@ -70,12 +70,6 @@ export function stepTurn(count: number, from: number, delta: 1 | -1): number {
   return Math.max(0, Math.min(count - 1, from + delta));
 }
 
-/** The probed turn with its neighbours, as indices, for the popover rows. */
-export function previewRows(count: number, probe: number): number[] {
-  if (probe < 0 || probe >= count) return [];
-  return [probe - 1, probe, probe + 1].filter((i) => i >= 0 && i < count);
-}
-
 // -- paint: ticks are a compression of the drawing, never of the turns -------
 
 /** How many ticks fit a band of `height` px at `pitch` px each (at least 2). */
@@ -104,7 +98,9 @@ export interface ScrubGeom {
   /** The band's top and height, in the pointer's coordinate space. */
   top: number;
   height: number;
-  /** The band's inner edge: x at or left of it is "on the band". */
+  /** The band's inner edge, the side facing the feed (the rail is at the feed's
+   * right edge, board #463): x at or right of it is "on the band"; sliding LEFT
+   * of it is sliding away. */
   edge: number;
   /** How far past the edge the factor keeps growing (px); 0 = at once. */
   reach: number;
@@ -116,7 +112,7 @@ export const scrubMaxFactor = (count: number, height: number): number =>
 
 export function scrubFactor(x: number, count: number, g: ScrubGeom): number {
   const max = scrubMaxFactor(count, g.height);
-  const dx = Math.max(0, x - g.edge);
+  const dx = Math.max(0, g.edge - x);
   if (max === 1 || dx === 0) return 1;
   const k = g.reach > 0 ? Math.min(1, dx / g.reach) : 1;
   return 1 + (max - 1) * k;

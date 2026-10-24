@@ -29,7 +29,7 @@ export interface RailHost {
   live(): boolean;
   /** The band's hit rectangle in client pixels, or null when it is not laid out. */
   band(): Rect | null;
-  /** How far past the band's inner edge the fine scrub keeps slowing down. */
+  /** How far past the band's inner edge (its left side) the fine scrub keeps slowing down. */
   reach(rect: Rect): number;
   /** The ONE jump. */
   jump(key: string): Landing;
@@ -68,7 +68,7 @@ export function createTurnRail(host: RailHost, onchange: () => void = () => {}) 
    * remaining events (moves, the release, a trailing click) are not ours. */
   const dead = new Set<number>();
 
-  const geom = (r: Rect) => ({ top: r.top, height: r.bottom - r.top, edge: r.right, reach: host.reach(r) });
+  const geom = (r: Rect) => ({ top: r.top, height: r.bottom - r.top, edge: r.left, reach: host.reach(r) });
   // The key string is rebuilt only when the turns array itself is replaced (a
   // poll hands a new array with the same keys), not on every pointer move.
   let memo: { turns: readonly { key: string }[]; sig: string } | null = null;
@@ -117,10 +117,9 @@ export function createTurnRail(host: RailHost, onchange: () => void = () => {}) 
     const i = intent;
     if (!admitted(i)) { if (i) drop(true); return null; }
     if (source === 'press' ? i.kind !== 'press' : i.kind === 'press') return null;
-    // A press and the keyboard commit the previewed turn; a popover row may be
-    // the probed turn or the neighbour listed beside it.
+    // A press, the keyboard and the popover's one row all commit the PROBED turn.
     const at = indexOf(key), probed = indexOf(i.key);
-    if (at < 0 || probed < 0 || (source === 'row' ? Math.abs(at - probed) > 1 : at !== probed)) {
+    if (at < 0 || probed < 0 || at !== probed) {
       drop(true);
       return null;
     }

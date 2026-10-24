@@ -11,7 +11,7 @@ function rig(count = 10) {
     turns: keys(count) as { key: string }[],
     current: '',
     live: true,
-    band: { left: 0, top: 100, right: 44, bottom: 400 } as Rect | null,
+    band: { left: 346, top: 100, right: 390, bottom: 400 } as Rect | null,
     landing: 'moved' as Landing,
     jumps: [] as string[],
     captured: [] as number[],
@@ -30,8 +30,8 @@ function rig(count = 10) {
   }, () => { h.changes++; });
   /** The y that lands in turn i's slice (the band is 300px for ten turns). */
   const yOf = (i: number) => 100 + (i + 0.5) * 30;
-  const mouse = (y: number, x = 20) => ({ id: 1, type: 'mouse', x, y });
-  const touch = (y: number, x = 20, id = 7) => ({ id, type: 'touch', x, y });
+  const mouse = (y: number, x = 370) => ({ id: 1, type: 'mouse', x, y });
+  const touch = (y: number, x = 370, id = 7) => ({ id, type: 'touch', x, y });
   return { h, rail, yOf, mouse, touch };
 }
 
@@ -50,7 +50,7 @@ test('a touch has no hover; a pen does', () => {
   const { rail, yOf, touch } = rig();
   rail.pointerMove(touch(yOf(3)));
   assert.equal(rail.view().open, false);
-  rail.pointerMove({ id: 2, type: 'pen', x: 20, y: yOf(3) });
+  rail.pointerMove({ id: 2, type: 'pen', x: 370, y: yOf(3) });
   assert.equal(rail.view().key, 'k3');
 });
 
@@ -97,9 +97,9 @@ test('sliding away from the band slows the scrub (fine adjust) and keeps the pos
   const { h, rail, yOf, touch } = rig(1000);
   rail.pointerDown(touch(250));                         // slice 500 of 1000 on a 300px band
   assert.equal(rail.view().key, 'k500');
-  rail.pointerMove(touch(250, 44 + 88));                // slide to the far end: no movement yet
+  rail.pointerMove(touch(250, 346 - 88));                // slide to the far end: no movement yet
   assert.equal(rail.view().key, 'k500');
-  rail.pointerMove(touch(251, 44 + 88));                // one pixel at the far end: at most one turn
+  rail.pointerMove(touch(251, 346 - 88));                // one pixel at the far end: at most one turn
   assert.ok(Math.abs(Number(rail.view().key.slice(1)) - 500) <= 1);
   rail.pointerMove(touch(251, 20));                     // slide back: no jump of the probe
   assert.ok(Math.abs(Number(rail.view().key.slice(1)) - 500) <= 1);
@@ -235,14 +235,14 @@ test('losing the host gate mid-press, or the band moving, cancels it', () => {
   {
     const { h, rail, yOf, touch } = rig();
     rail.pointerDown(touch(yOf(3)));
-    h.band = { left: 0, top: 130, right: 44, bottom: 430 };       // a resize / keyboard / uiZoom
+    h.band = { left: 346, top: 130, right: 390, bottom: 430 };       // a resize / keyboard / uiZoom
     assert.equal(rail.pointerUp(touch(yOf(3))), null);
     assert.deepEqual(h.jumps, []);
   }
   {
     const { h, rail, yOf, touch } = rig();
     rail.pointerDown(touch(yOf(3)));
-    h.band = { left: 0, top: 100.4, right: 44, bottom: 400.4 };   // sub-pixel noise is not a change
+    h.band = { left: 346, top: 100.4, right: 390, bottom: 400.4 };   // sub-pixel noise is not a change
     rail.pointerUp(touch(yOf(3)));
     assert.deepEqual(h.jumps, ['k3']);
   }
@@ -363,17 +363,20 @@ test('blur closes a key preview; an outside press closes any preview but a held 
   assert.equal(rail.view().kind, 'press');
 });
 
-test('a popover row jumps to its own turn, the probed one or a neighbour, and only once', () => {
+test('the popover\'s one row commits the probed turn, once; any other turn is refused (#463)', () => {
   const { h, rail, yOf, mouse } = rig();
   rail.pointerMove(mouse(yOf(4)));
-  assert.equal(rail.rowClick('k5'), 'moved');
-  assert.deepEqual(h.jumps, ['k5']);
-  assert.equal(rail.rowClick('k5'), null);
-  assert.deepEqual(h.jumps, ['k5']);
-  rail.pointerMove(mouse(yOf(4)));
-  assert.equal(rail.rowClick('k8'), null, 'a turn that is not one of the listed rows');
-  assert.deepEqual(h.jumps, ['k5']);
-  assert.equal(rail.view().open, false);
+  assert.equal(rail.rowClick('k4'), 'moved');
+  assert.deepEqual(h.jumps, ['k4']);
+  assert.equal(rail.rowClick('k4'), null);
+  assert.deepEqual(h.jumps, ['k4']);
+  // The neighbour rows are gone: a stale callback for k5 or k3 is not accepted, and it ends the preview.
+  for (const stale of ['k5', 'k3', 'k8']) {
+    rail.pointerMove(mouse(yOf(4)));
+    assert.equal(rail.rowClick(stale), null, `${stale} is not the probed turn`);
+    assert.equal(rail.view().open, false);
+  }
+  assert.deepEqual(h.jumps, ['k4']);
 });
 
 test('a touch release then its compat click: only the release commits', () => {
@@ -402,13 +405,13 @@ test('a real 500-turn feed through pointer events only: every far turn is reacha
   rail.pointerDown(touch(100 + 300 * (300 / 500)));
   const start = Number(rail.view().key.slice(1));
   assert.ok(Math.abs(start - 300) <= 2);
-  rail.pointerMove(touch(100 + 300 * (300 / 500), 44 + 88));
+  rail.pointerMove(touch(100 + 300 * (300 / 500), 346 - 88));
   let y = 100 + 300 * (300 / 500);
   const target = start + 1;
   let guard = 0;
-  while (Number(rail.view().key.slice(1)) < target && guard++ < 50) { y += 1; rail.pointerMove(touch(y, 44 + 88)); }
+  while (Number(rail.view().key.slice(1)) < target && guard++ < 50) { y += 1; rail.pointerMove(touch(y, 346 - 88)); }
   assert.equal(Number(rail.view().key.slice(1)), target);
-  rail.pointerUp(touch(y, 44 + 88));
+  rail.pointerUp(touch(y, 346 - 88));
   assert.deepEqual(h.jumps, [`k${target}`]);
 });
 
@@ -431,4 +434,20 @@ test('a jump that re-enters the rail while it moves the feed still jumps once', 
   rail.pointerDown(touch(yOf(3)));
   rail.pointerUp(touch(yOf(3)));
   assert.deepEqual([...h.jumps], ['k3'], 'every intent was gone before the host moved, so nothing re-entered can commit');
+});
+
+test('on the band the scrub is coarse; only sliding LEFT of its left edge slows it (#463)', () => {
+  const { h, rail, touch } = rig(1000);                  // a 300px band: 1000 / 300 slices per pixel
+  const probe = () => Number(rail.view().key.slice(1));
+  rail.pointerDown(touch(250));                          // slice 500
+  assert.equal(probe(), 500);
+  rail.pointerMove(touch(251, 370));                     // one pixel, still on the band
+  assert.equal(probe(), 503, 'a coarse step: 1000 / 300 = 3.33 slices');
+  rail.pointerMove(touch(252, 346));                     // exactly on the band\'s left edge: still coarse
+  assert.equal(probe(), 506);
+  rail.pointerMove(touch(253, 346 - 88));                // 88px to the left: the slowest, one slice per pixel at most
+  assert.ok(probe() - 506 <= 1);
+  rail.pointerMove(touch(254, 390));                     // back on the band, at the far RIGHT: coarse again
+  assert.ok(probe() - 506 >= 3, 'the screen edge side is not a slow zone');
+  void h;
 });

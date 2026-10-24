@@ -3433,9 +3433,6 @@ test('focusing the composer is not navigation: a history reader keeps their plac
   }));
   try {
     for (let i = 0; i < 12 && app.document.querySelectorAll('.msg').length < 24; i++) await app.flush();
-    // The load also brings the turn rail's gutter (#461), which settles through the reading
-    // anchor in the microtasks after the load; a reader's first scroll is a later task.
-    await app.flush(); await app.flush();
     const feed = app.document.querySelector<HTMLElement>('.feed')!;
     Object.defineProperty(feed, 'scrollHeight', { get: () => 2563, configurable: true });
     Object.defineProperty(feed, 'clientHeight', { get: () => 724, configurable: true });
@@ -5413,7 +5410,7 @@ test('the turn rail\u2019s held press does not survive a room switch or a filter
       (window.HTMLCanvasElement.prototype as any).getContext = () => null;
       const orig = proto.getBoundingClientRect;
       proto.getBoundingClientRect = function (this: Element) {
-        if (this.classList.contains('tr-band')) return { left: 0, top: 100, right: 44, bottom: 400, width: 44, height: 300, x: 0, y: 100, toJSON() {} };
+        if (this.classList.contains('tr-band')) return { left: 346, top: 100, right: 390, bottom: 400, width: 44, height: 300, x: 346, y: 100, toJSON() {} };
         return orig.call(this);
       };
       proto.setPointerCapture = () => {};
@@ -5439,7 +5436,7 @@ test('the turn rail\u2019s held press does not survive a room switch or a filter
     return el;
   };
   const touch = (type: string, y: number) => q('.tr-band')?.dispatchEvent(new app.window.PointerEvent(type,
-    { bubbles: true, cancelable: true, pointerType: 'touch', pointerId: 7, clientX: 20, clientY: y, button: 0 }));
+    { bubbles: true, cancelable: true, pointerType: 'touch', pointerId: 7, clientX: 370, clientY: y, button: 0 }));
   const select = async (room: string) => {
     q(`[aria-label="${room}"] .proj-pick`)!.click();
     for (let i = 0; i < 12 && q('.h1-text')?.textContent !== room; i++) await app.flush();

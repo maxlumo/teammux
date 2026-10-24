@@ -70,6 +70,9 @@ export interface Placed { x: number; y: number; maxW: number; maxH: number }
  * aligns with the anchor's top, clamped into the viewport (so a tall popover
  * beside a bottom-corner control ends up resting on the bottom margin).
  *
+ * `side: 'left'` is the same rule mirrored, for a control at the right edge
+ * (board #463): beside the anchor on its left, never slid back over it.
+ *
  * Everything is in CSS pixels of the fixed layer's coordinate space; a caller
  * under CSS `zoom` must divide the trigger's client rect first (a client rect is
  * in visual pixels, a fixed child's `left` is in its own zoomed pixels).
@@ -81,9 +84,20 @@ export function menuPlacement(
   gap = POPOVER_GAP,
   edge = POPOVER_EDGE,
   align: 'right' | 'left' = 'right',
-  side: 'below' | 'right' = 'below',
+  side: 'below' | 'right' | 'left' = 'below',
 ): Placed {
   const maxH = Math.max(0, view.h - 2 * edge);
+  if (side === 'left') {
+    // The mirror of 'right' (board #463: a rail at the screen's right edge): the
+    // popover's right edge is the anchor's left edge less the gap, and it is NEVER
+    // slid back over the anchor — the room left of it becomes `maxW` instead. An
+    // unmeasured width (0) rests against the anchor until it is known.
+    const room = Math.max(0, anchor.left - gap - edge);
+    const x = anchor.left - gap - Math.min(size.w, room);
+    const h = Math.min(size.h, maxH);
+    const y = Math.max(edge, h ? Math.min(anchor.top, view.h - h - edge) : anchor.top);
+    return { x, y, maxW: room, maxH };
+  }
   if (side === 'right') {
     const x = anchor.right + gap;
     const h = Math.min(size.h, maxH);
@@ -119,7 +133,7 @@ export function menuPlacementIn(
   gap = POPOVER_GAP,
   edge = POPOVER_EDGE,
   align: 'right' | 'left' = 'right',
-  side: 'below' | 'right' = 'below',
+  side: 'below' | 'right' | 'left' = 'below',
 ): Placed {
   const local = {
     left: anchor.left - bounds.left, right: anchor.right - bounds.left,
@@ -136,16 +150,18 @@ export function menuPlacementIn(
  * above it grows from its bottom edge; the horizontal side follows `align` —
  * or, for a popover placed BESIDE its anchor, its left edge, which is the edge
  * touching the anchor.
+ * Beside it on the LEFT (board #463) it grows from its right edge, the edge
+ * touching the anchor.
  * Pure, so the intro's origin is tested with the placement it belongs to.
  */
 export function popOrigin(
   anchor: AnchorRect,
   pos: { x: number; y: number },
   align: 'right' | 'left' = 'right',
-  side: 'below' | 'right' = 'below',
+  side: 'below' | 'right' | 'left' = 'below',
 ): string {
   const v = pos.y < anchor.top ? 'bottom' : 'top';
-  return `${v} ${side === 'right' ? 'left' : align}`;
+  return `${v} ${side === 'right' ? 'left' : side === 'left' ? 'right' : align}`;
 }
 
 /** The root's CSS `zoom` (the web/Android interface scaling). 1 on the Tauri

@@ -462,6 +462,9 @@ button:disabled {
   /* The Hub feed's turn rail (board #461): a hit column painted as a few px of
      tick at its inner edge. Defined once; the component holds no px or colour. */
   --turn-rail-hit: 44px; --turn-rail-inset: calc(var(--control-height) / 2);
+  /* Below the band: the feed's back-to-tail control (bottom 12px + 38px + the 3px its ::before hit area
+     overhangs + a gap), so the two are never stacked. Pinned against those rules by a source test. */
+  --turn-rail-clear: 60px;
   --turn-tick-pitch: 10px; --turn-tick-len: 10px; --turn-tick-len-cur: 16px; --turn-tick-thick: 2px;
   --turn-pop-width: 300px;
 }
