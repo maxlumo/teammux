@@ -20,9 +20,8 @@
   import MediaRange from '../ui/MediaRange.svelte';
   import { anchorOf } from '../ui/placement.ts';
   import { t } from '../core/i18n.svelte.ts';
-  import { isAndroid, isTauriDesktop } from '../core/platform.ts';
-  import { isMac } from '../app/shortcuts.ts';
-  import { canFullscreen, canPip, clampTo, errorKind, fmtTime, Intents, seekWindow, spans, third, type Span } from './media-player.ts';
+  import { isAndroid } from '../core/platform.ts';
+  import { ANDROID_FULLSCREEN_EVENT, androidFullscreen, canFullscreen, canPip, clampTo, errorKind, fmtTime, Intents, seekWindow, spans, third, type Span } from './media-player.ts';
 
   let { kind, src, name = '', visible = true, mediaEl = $bindable(null), reopen = null }:
     { kind: 'video' | 'audio'; src: string; name?: string;
@@ -32,7 +31,6 @@
       /** A fresh stream URL for this file (Files' own open path), for a retry after a network error. */
       reopen?: (() => Promise<string>) | null } = $props();
 
-  const host = { android: isAndroid, tauriMac: isTauriDesktop && isMac() };
   const intents = new Intents();
   let player = $state<HTMLDivElement | null>(null), bar: HTMLDivElement | null = null;
   /** A self-reopen's fresh URL; the prop `src` changing is a new source. */
@@ -65,7 +63,19 @@
   // Before there is anywhere to seek, the position is not a number either.
   const posText = $derived(win ? fmtTime(shownTime, duration) : '--:--');
   const narrow = $derived(width > 0 && width < 520);
-  const fsOk = $derived(kind === 'video' && !!player && canFullscreen(host, document, player));
+  /** The Android host's answer, as state (board #454 review P1-A): queried
+   * once at mount and again on every `androidfullscreenchange` the host
+   * dispatches when its answer flips, so an install that lands after the
+   * player mounted shows the control without remounting it. */
+  let androidFs = $state(false);
+  $effect(() => {
+    if (!isAndroid) return;
+    const ask = () => { androidFs = androidFullscreen(window as never); };
+    window.addEventListener(ANDROID_FULLSCREEN_EVENT, ask);
+    ask();
+    return () => window.removeEventListener(ANDROID_FULLSCREEN_EVENT, ask);
+  });
+  const fsOk = $derived(kind === 'video' && !!player && canFullscreen({ android: isAndroid, androidFullscreen: androidFs }, document, player));
   const pipOk = $derived(kind === 'video' && !!mediaEl && canPip(document as never, mediaEl as never));
 
   function cancelGesture() { gesture++; drag = null; preview = null; }

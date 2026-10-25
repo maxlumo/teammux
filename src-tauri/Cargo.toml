@@ -70,7 +70,11 @@ serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 serde_yaml_ng = "0.10"
 uuid = { version = "1", features = ["v4"] }
-tauri = { version = "2", features = [], optional = true }
+# `macos-private-api` mirrors tauri.conf.json's `app.macOSPrivateApi` (the
+# tauri CLI keeps the two in step): it turns on wry's `fullscreen` feature,
+# WebKit's element fullscreen in the macOS app (board #454). The dmg is not a
+# Mac App Store build, which is what a private API would cost.
+tauri = { version = "2", features = ["macos-private-api"], optional = true }
 toml = "1.0.3"
 # `tmm setup` edits config.toml in place, keeping its comments and every key
 # it did not ask about (board #323). Already in the graph (through tauri).

@@ -1,6 +1,6 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { canFullscreen, canPip, clampTo, errorKind, fmtTime, Intents, seekWindow, third } from './media-player.ts';
+import { androidFullscreen, canFullscreen, canPip, clampTo, errorKind, fmtTime, Intents, seekWindow, third } from './media-player.ts';
 
 // Board #453: the player's rules.
 
@@ -52,10 +52,16 @@ test('a tap lands in a third; errors split into unplayable and transient', () =>
 
 test('fullscreen needs the host and the API; picture-in-picture the API alone (#453 P2)', () => {
   const ok = { requestFullscreen: () => {} };
-  const web = { android: false, tauriMac: false };
-  assert.equal(canFullscreen(web, { fullscreenEnabled: true }, ok), true);
-  assert.equal(canFullscreen({ android: true, tauriMac: false }, { fullscreenEnabled: true }, ok), false, 'the Android app (#454)');
-  assert.equal(canFullscreen({ android: false, tauriMac: true }, { fullscreenEnabled: true }, ok), false, 'the macOS app (#454)');
+  const web = { android: false, androidFullscreen: false };
+  assert.equal(canFullscreen(web, { fullscreenEnabled: true }, ok), true, 'a browser, and the macOS app (macOSPrivateApi, #454): the API decides');
+  assert.equal(canFullscreen({ android: true, androidFullscreen: false }, { fullscreenEnabled: true }, ok), false, 'the Android app without its custom-view host (#454): WebView reports the API anyway');
+  assert.equal(canFullscreen({ android: true, androidFullscreen: true }, { fullscreenEnabled: true }, ok), true, 'the Android app with the host installed (#454)');
+  assert.equal(canFullscreen({ android: true, androidFullscreen: true }, { fullscreenEnabled: false }, ok), false);
+  assert.equal(androidFullscreen({}), false, 'no interface: no fullscreen');
+  assert.equal(androidFullscreen({ AndroidFullscreen: { available: () => false } }), false, 'not installed yet, or the install check failed');
+  assert.equal(androidFullscreen({ AndroidFullscreen: { available: () => true } }), true);
+  assert.equal(androidFullscreen({ AndroidFullscreen: { available: () => { throw new Error('bridge'); } } }), false, 'a bridge error is a no');
+  assert.equal(androidFullscreen({ AndroidFullscreen: { available: () => 'true' } }), false, 'only a real true');
   assert.equal(canFullscreen(web, { fullscreenEnabled: false }, ok), false);
   assert.equal(canFullscreen(web, { fullscreenEnabled: true }, {}), false);
   const v = { requestPictureInPicture: () => {}, disablePictureInPicture: false };

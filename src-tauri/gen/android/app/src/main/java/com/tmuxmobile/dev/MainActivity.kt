@@ -13,6 +13,7 @@ import java.io.File
 
 class MainActivity : TauriActivity() {
   private val fileOpener = FileOpener()
+  private val fullscreen = FullscreenHost(this)
   private var appWebView: WebView? = null
 
   override fun onWebViewCreate(webView: WebView) {
@@ -22,16 +23,24 @@ class MainActivity : TauriActivity() {
     // is required; finding the WebView later from onCreate is already too late.
     appWebView = webView
     webView.addJavascriptInterface(fileOpener, "AndroidFileOpener")
+    // Element fullscreen (board #454): the interface and the request now
+    // (this WebView is current, the old answer is withdrawn); the install
+    // runs after wry's own setup, and available() stays false until it is
+    // read back.
+    webView.addJavascriptInterface(fullscreen, "AndroidFullscreen")
+    fullscreen.attach(webView)
   }
 
   override fun onResume() {
     super.onResume()
     appWebView?.post {
       appWebView?.addJavascriptInterface(fileOpener, "AndroidFileOpener")
+      appWebView?.addJavascriptInterface(fullscreen, "AndroidFullscreen")
     }
   }
 
   override fun onDestroy() {
+    fullscreen.release()
     appWebView = null
     super.onDestroy()
   }

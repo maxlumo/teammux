@@ -587,9 +587,11 @@ An hls/dash engine is out of scope (the files are files, not manifests).
   stream signature) as one intent. `emptied` (a new load) forgets the old
   source's error; a paused player never shows `waiting`.
 - **v1 scope.** Mute only, no volume range (the device has one). Speed in
-  "More". Fullscreen where the host gives it: NOT in the Android app (wry's
-  `onShowCustomView` cancels at once) or the macOS app (wry's `fullscreen`
-  feature is off) — board #454 for the owner; PiP wherever the API exists.
+  "More". Fullscreen where the host gives it (board #454): a browser and the
+  macOS app by the API (`macOSPrivateApi` turns WebKit's element fullscreen
+  on); the Android app only when its custom-view host answers
+  `AndroidFullscreen.available()` (android-platform.md § Element
+  fullscreen); PiP wherever the API exists.
   Under 520 px the range takes its own row and PiP/fullscreen fold into
   "More"; when even that row has no room (347 px at uiZoom 1.2 on the rig
   pushed More 30 px out of the bar), the time keeps its position and drops

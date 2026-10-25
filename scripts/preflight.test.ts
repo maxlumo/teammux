@@ -12,6 +12,7 @@ import { mkdtempSync, mkdirSync, readFileSync, rmSync, symlinkSync, writeFileSyn
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { fileURLToPath } from 'node:url';
+import { lockedWry } from './wry-chrome-client.mjs';
 
 // A path with a space and a `$`, so nothing depends on shell-safe names.
 const base = mkdtempSync(join(tmpdir(), 'preflight sdk $x-'));
@@ -23,9 +24,20 @@ mkdirSync(join(home, 'Android', 'sdk', 'ndk', '28.2.13676358'), { recursive: tru
 writeFileSync(join(home, 'Android', 'sdk', 'ndk', '28.2.13676358', 'source.properties'), 'Pkg.Revision = 28.2.13676358\n');
 
 const script = fileURLToPath(new URL('./preflight.mjs', import.meta.url));
+/** A cargo registry holding the LOCKED wry's chrome client, with wry
+ * 0.54.2's real signatures (board #454, scripts/fixtures): android-env reads it and the wrapper must
+ * cover it. The NDK tests below are about the NDK, so it is always there. */
+const cargo = join(base, 'cargo');
+{
+  const root = fileURLToPath(new URL('..', import.meta.url));
+  const [wry] = lockedWry(readFileSync(join(root, 'src-tauri', 'Cargo.lock'), 'utf8'));
+  const kotlin = join(cargo, 'registry', 'src', 'index.test', `wry-${wry}`, 'src', 'android', 'kotlin');
+  mkdirSync(kotlin, { recursive: true });
+  writeFileSync(join(kotlin, 'RustWebChromeClient.kt'), readFileSync(new URL('./fixtures/RustWebChromeClient-0.54.2.kt', import.meta.url), 'utf8'));
+}
 const run = (env: Record<string, string>) => spawnSync(process.execPath, [script, 'android-env'], {
   // Only what is given: no ANDROID_HOME/NDK_HOME leaks in from the shell.
-  env: { PATH: process.env.PATH ?? '', HOME: home, ...env }, encoding: 'utf8', stdio: ['ignore', 'pipe', 'pipe'],
+  env: { PATH: process.env.PATH ?? '', HOME: home, CARGO_HOME: cargo, ...env }, encoding: 'utf8', stdio: ['ignore', 'pipe', 'pipe'],
 });
 /** An SDK holding one NDK (its source.properties), as tauri reads it. */
 const sdk = join(base, 'sdk');
@@ -138,4 +150,24 @@ test('android-env: NDK_HOME is optional, and when set must be the SDK s NDK — 
 test('build:android runs the guard before tauri, so a missing NDK stops it before tauri can ask', () => {
   const pkg = JSON.parse(readFileSync(new URL('../package.json', import.meta.url), 'utf8'));
   assert.match(pkg.scripts['build:android'], /^node scripts\/preflight\.mjs android-env && npx tauri android build /u);
+});
+
+// Board #454: android-env also refuses when the fullscreen wrapper does not
+// cover the locked wry's chrome client, and when that source is not found.
+test('android-env: the locked wry overriding a method the fullscreen wrapper does not forward → refused, naming it', () => {
+  const extra = join(base, 'cargo-extra');
+  const lockText = readFileSync(join(fileURLToPath(new URL('..', import.meta.url)), 'src-tauri', 'Cargo.lock'), 'utf8');
+  const kotlin = join(extra, 'registry', 'src', 'index.test', `wry-${lockedWry(lockText)[0]}`, 'src', 'android', 'kotlin');
+  mkdirSync(kotlin, { recursive: true });
+  const fixture = readFileSync(join(cargo, 'registry', 'src', 'index.test', `wry-${lockedWry(lockText)[0]}`, 'src', 'android', 'kotlin', 'RustWebChromeClient.kt'), 'utf8');
+  writeFileSync(join(kotlin, 'RustWebChromeClient.kt'), fixture.replace(/\}\n$/u, '  override fun onCloseWindow(window: WebView) {}\n}\n'));
+  const r = run({ ANDROID_HOME: sdk, CARGO_HOME: extra });
+  assert.equal(r.status, 1);
+  assert.match(r.stderr, /overrides onCloseWindow\(WebView\)/u);
+});
+
+test('android-env: the locked wry\'s source missing from the registry → refused, not skipped', () => {
+  const r = run({ ANDROID_HOME: sdk, CARGO_HOME: join(base, 'no-cargo') });
+  assert.equal(r.status, 1);
+  assert.match(r.stderr, /is not in .*does not skip/u);
 });

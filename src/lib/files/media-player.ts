@@ -66,12 +66,25 @@ export function errorKind(code: number | undefined): 'unplayable' | 'transient' 
 }
 
 /** The host facts the two modes are offered on (#453 P2: separately). */
-export type Host = { android: boolean; tauriMac: boolean };
+export type Host = { android: boolean; androidFullscreen: boolean };
 
-/** Fullscreen of the player container: the host must not be one #454 records
- * as blocked (the Android app, the macOS app), and the API must be there. */
+/** Fullscreen of the player container (#454): the API must be there, and in
+ * the Android app the native custom-view host must say it is installed —
+ * Android's WebView reports `fullscreenEnabled` whether or not the app shows
+ * the custom view, so there the API alone cannot decide. The macOS app turns
+ * WebKit's fullscreen on (`macOSPrivateApi`), so there the API decides. */
 export function canFullscreen(host: Host, doc: { fullscreenEnabled?: boolean }, el: { requestFullscreen?: unknown } | null): boolean {
-  return !host.android && !host.tauriMac && !!doc.fullscreenEnabled && typeof el?.requestFullscreen === 'function';
+  return (!host.android || host.androidFullscreen) && !!doc.fullscreenEnabled && typeof el?.requestFullscreen === 'function';
+}
+
+/** The event the Android host dispatches on `window` whenever its answer
+ * flips (`FullscreenHost` in the app's Kotlin): ask again. */
+export const ANDROID_FULLSCREEN_EVENT = 'androidfullscreenchange';
+
+/** The Android host's answer (`FullscreenHost.available()` in the app's
+ * Kotlin): false when the interface is missing or the call throws. */
+export function androidFullscreen(win: { AndroidFullscreen?: { available?: () => unknown } }): boolean {
+  try { return win.AndroidFullscreen?.available?.() === true; } catch { return false; }
 }
 
 /** Picture-in-picture: the API alone decides (no host rule). */

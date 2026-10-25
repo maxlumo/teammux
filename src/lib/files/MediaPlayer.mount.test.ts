@@ -374,6 +374,50 @@ test('fullscreen and PiP stay hidden without the API', async (context) => {
   } finally { await p.app.close(); }
 });
 
+/** The Android app: a Tauri shell with an Android user agent, and the
+ * native host's `AndroidFullscreen` whose answer the test flips (#454). */
+const androidApp = (initial: boolean) => (win: any) => {
+  Object.defineProperty(win.navigator, 'userAgent', { value: 'Mozilla/5.0 (Linux; Android 15) AppleWebKit/537.36', configurable: true });
+  win.__TAURI_INTERNALS__ = {};
+  win.__host = { ready: initial, asks: 0 };
+  win.AndroidFullscreen = { available: () => { win.__host.asks++; return win.__host.ready; } };
+};
+
+test('Android app: the control follows the host\'s answer as it flips, on the SAME player; a late notice after unmount is ignored (#454 review P1-A)', async (context) => {
+  const p = await player(context, {}, { fullscreen: true }, androidApp(false));
+  const flip = async (ready: boolean) => { p.w.__host.ready = ready; p.w.dispatchEvent(new p.w.Event('androidfullscreenchange')); await p.app.flush(); };
+  try {
+    await p.loaded();
+    const video = p.video();
+    assert.equal(p.button('Full screen'), null, 'not installed yet: WebView reports the API, the host says no');
+    await flip(true);
+    assert.ok(p.button('Full screen'), 'the install landed after the mount: the control appears');
+    assert.equal(p.video(), video, 'without remounting the player');
+    await flip(false);
+    assert.equal(p.button('Full screen'), null, 'revoked (a new install, onDestroy): the control goes');
+    await flip(false);
+    assert.equal(p.button('Full screen'), null, 'a failed install stays without the control');
+    await p.app.unmount();
+    const asks = p.w.__host.asks;
+    p.w.__host.ready = true;
+    p.w.dispatchEvent(new p.w.Event('androidfullscreenchange'));
+    assert.equal(p.w.__host.asks, asks, 'an unmounted player no longer asks (the window lives on)');
+  } finally { await p.app.close(); }
+});
+
+test('Android app: a host already installed at mount offers the control at once; no interface, no control (#454)', async (context) => {
+  const ready = await player(context, {}, { fullscreen: true }, androidApp(true));
+  try {
+    await ready.loaded();
+    assert.ok(ready.button('Full screen'));
+  } finally { await ready.app.close(); }
+  const none = await player(context, {}, { fullscreen: true }, (win: any) => { androidApp(true)(win); delete win.AndroidFullscreen; });
+  try {
+    await none.loaded();
+    assert.equal(none.button('Full screen'), null);
+  } finally { await none.app.close(); }
+});
+
 test('the player\'s keys act only on the container, never with modifiers or while composing', async (context) => {
   const p = await player(context);
   try {

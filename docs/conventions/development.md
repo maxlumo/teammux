@@ -268,6 +268,9 @@ not exist afterwards; pinned on a scratch root with the real config's plugins), 
 ## Build targets
 
 - **macOS** — `npm run build:mac` → `src-tauri/target/release/bundle/dmg/`.
+  `tauri.conf.json` sets `app.macOSPrivateApi` (and `Cargo.toml` the matching
+  `macos-private-api` tauri feature) for WebKit's element fullscreen (board
+  #454): a private API, so the app is a dmg and never a Mac App Store build.
 - **Android** — `rustup target add aarch64-linux-android && npm run build:android`.
   Needs the Android SDK, NDK 28+ and Java 17+; signing is below. The build
   needs `ANDROID_HOME` (or `ANDROID_SDK_ROOT`) naming an SDK that holds an NDK

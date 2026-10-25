@@ -41,7 +41,9 @@
 //
 // 3. `preflight android-env`: before `tauri android build`, refuse to start
 //    unless the SDK tauri will use holds an NDK — without one tauri stops at
-//    an interactive NDK prompt (board #460; see that mode below).
+//    an interactive NDK prompt (board #460; see that mode below), and unless
+//    the fullscreen wrapper covers every method the locked wry's chrome
+//    client overrides (board #454, scripts/wry-chrome-client.mjs).
 //
 // Zero dependencies; runs everywhere node does.
 import { execSync } from 'node:child_process';
@@ -50,6 +52,7 @@ import { basename, dirname, join, resolve } from 'node:path';
 import { createHash } from 'node:crypto';
 import { fileURLToPath } from 'node:url';
 import { DEV_WEB_PORT, devServerPort } from './dev-ports.mjs';
+import { checkChromeClient } from './wry-chrome-client.mjs';
 
 const root = resolve(dirname(fileURLToPath(import.meta.url)), '..');
 const mode = process.argv[2] || 'dev';
@@ -195,11 +198,20 @@ if (mode === 'android-env') {
   else if (ndkHome && real(ndkHome) !== real(picked)) {
     problems.push(`NDK_HOME=${ndkHome} is not ${picked}, the NDK tauri builds with (the name under ${ndkDir} that sorts last); unset NDK_HOME or name that one`);
   }
-  if (problems.length === 0) process.exit(0);
-  console.error('\n✋ build:android needs an Android SDK that holds an NDK — refusing to start (tauri would stop at an interactive NDK prompt).\n');
-  for (const p of problems) console.error(`   ${p}`);
-  if (names.length) console.error(`\n   Under ${ndkDir}: ${names.join(', ')} — tauri uses ${picked}`);
-  console.error('\n   See docs/conventions/development.md § Build targets (Android).\n');
+  if (problems.length) {
+    console.error('\n✋ build:android needs an Android SDK that holds an NDK — refusing to start (tauri would stop at an interactive NDK prompt).\n');
+    for (const p of problems) console.error(`   ${p}`);
+    if (names.length) console.error(`\n   Under ${ndkDir}: ${names.join(', ')} — tauri uses ${picked}`);
+    console.error('\n   See docs/conventions/development.md § Build targets (Android).\n');
+    process.exit(1);
+  }
+  // Board #454: the fullscreen wrapper must forward every method the locked
+  // wry's chrome client overrides (scripts/wry-chrome-client.mjs).
+  const chrome = checkChromeClient(root);
+  if (chrome.length === 0) process.exit(0);
+  console.error('\n✋ build:android: the fullscreen chrome-client wrapper does not cover wry\'s chrome client — refusing to start.\n');
+  for (const p of chrome) console.error(`   ${p}`);
+  console.error('\n   See docs/design-docs/features/android-platform.md § Element fullscreen.\n');
   process.exit(1);
 }
 
