@@ -46,12 +46,38 @@ test('the composer measures once per frame, never in the input handler (#444)', 
   assert.match(source, /onDestroy\(\(\) => \{ if \(growFrame\) cancelAnimationFrame\(growFrame\); \}\);/u);
 });
 
-test('natural textarea measurement cannot transiently expand the Feed (#180)', () => {
+test('natural textarea measurement cannot transiently expand the Feed (#180, by the #466 boundary)', () => {
+  // The row holds its EXPLICIT height (a size-contained box) while the textarea
+  // measures at height:auto inside it, and the new height is published once,
+  // after the measurement — the Feed never sees the transient shrink.
   const grow = source.slice(source.indexOf('function growComposer()'), source.indexOf('let lastShellH'));
-  assert.match(grow, /row\.style\.minHeight = `\$\{row\.offsetHeight\}px`/u);
-  assert.ok(grow.indexOf('row.style.minHeight = `${row.offsetHeight}px`') < grow.indexOf("el.style.height = 'auto'"));
-  assert.match(grow, /finally \{\s*row\.style\.minHeight = previousMin;/u);
-  assert.ok(grow.indexOf('row.style.minHeight = previousMin') < grow.indexOf('const shellH'));
+  assert.match(rule('.compose-line'), /contain: size layout; height: var\(--control-height\);/u, 'one line until the first measurement');
+  assert.doesNotMatch(grow, /row\.style\.(minHeight|height) = /u, 'no pin and no unconditional write on the row');
+  assert.ok(grow.indexOf("el.style.height = 'auto'") < grow.indexOf("put(row.style, 'height'"), 'measure first, publish after');
+  assert.doesNotMatch(grow, /row\.style\.paddingBottom = ''/u, 'the reserved band is not cleared and restored around the measurement');
+});
+
+test('a keystroke\'s layout stays inside the composer row: a relayout boundary, written only on a change (#466)', () => {
+  // Measured (board #466): per key, growComposer's writes on the row dirtied
+  // its ancestors and ~4 forced layouts ran from the document root — 1163 ms
+  // of layout over 30 keys at 6x with 320 messages loaded vs 230 ms with 20.
+  assert.match(rule('.compose-line'), /contain: size layout;/u, 'size + layout: a relayout boundary');
+  assert.doesNotMatch(rule('.compose-line'), /contain:[^;]*(paint|strict|content)/u, 'not paint: the focus ring, the commands and the mirror must not clip');
+  assert.match(source, /const put = \(style, prop, value\) => \{ if \(style\[prop\] !== value\) style\[prop\] = value; \};/u, 'an equal value is no write');
+  const grow = source.slice(source.indexOf('function growComposer()'), source.indexOf('let lastShellH'));
+  assert.match(grow, /put\(row\.style, 'paddingBottom', layout\.reserved \? `\$\{layout\.reserved\}px` : ''\);/u);
+  const fieldExpr = /const field = (Math\.max\(Math\.min\(layout\.inputHeight, parseFloat\(style\.maxHeight\) \|\| Infinity\), parseFloat\(style\.minHeight\) \|\| 0\));/u.exec(grow)?.[1];
+  assert.ok(fieldExpr, 'the field\'s used height: its own clamp in CSS order, fractional');
+  // CSS2 §10.7: max-height first, then min-height — min wins when they cross.
+  const used = new Function('layout', 'style', `return ${fieldExpr};`) as (l: object, s: object) => number;
+  const at = (inputHeight: number, minHeight: string, maxHeight: string) => used({ inputHeight }, { minHeight, maxHeight });
+  assert.equal(at(30, '44px', '33.6px'), 44, 'min > max: min wins');
+  assert.equal(at(60, '44px', '44px'), 44, 'min = max');
+  assert.equal(at(60, '28px', '208.3px'), 60, 'inside the range: the measured height');
+  assert.equal(at(300, '28px', '208.3px'), 208.3, 'past the ceiling: the fractional max');
+  assert.equal(at(10, '28px', 'none'), 28, 'no max: the min');
+  assert.match(grow, /put\(row\.style, 'height', `\$\{field \+ \(layout\.reserved \|\| 0\)\}px`\);/u, 'plus the band, counted once');
+  assert.doesNotMatch(grow, /shellEl|onheightchange/u, 'the measurement reads nothing outside the row');
 });
 
 test('retired recipient and send-arm mechanisms stay removed when measurement returns (#186)', () => {
@@ -95,8 +121,10 @@ test('Composer owns local UI state, while transport and capture ordering stay ou
     '#186 font-face completion is a measurement signal, not an input-capture listener');
   assert.match(source, /const paletteBackend = \$derived\(paletteBackendFor\(composerText, recipient, agents\)\);/u);
   assert.match(source, /onmodels: modelsList/u, 'models use the explicit transport command');
-  assert.match(source, /if \(shellH !== lastShellH\) \{\s*lastShellH = shellH;\s*onheightchange\(\);/u,
+  assert.match(source, /if \(h === lastShellH\) return;\s*lastShellH = h;\s*onheightchange\(\);/u,
     'height intent fires only when the shell really changed');
+  assert.equal([...source.matchAll(/onheightchange\(\)/gu)].length, 1, 'one notification source: the shell observer (#466 review P1)');
+  assert.match(source, /observer\.observe\(shellEl, \{ box: 'border-box' \}\);/u, 'the row, attachments, the reply chip and thumbnails all change the shell it observes, border box included');
   assert.doesNotMatch(source, /onfocus/u, 'focusing the composer is not navigation (#303)');
   assert.match(source, /export function caret\(\) \{ return composerEl\?\.selectionStart; \}/u);
   assert.match(source, /export function focus\(\) \{ composerEl\?\.focus\(\); \}/u);
@@ -238,7 +266,7 @@ test('measured signature actions reuse shared commands without hardcoded avoidan
   assert.doesNotMatch(source, /\.send-btn|\.attach-btn|backdrop-filter|SEND_ZONE/u);
   assert.match(source, /if \(empty\) el\.style\.paddingRight = `\$\{controlsWidth \+ gap\}px`/u,
     'only an empty placeholder gives width to the controls, never a typed line');
-  assert.match(source, /row\.style\.paddingBottom = layout\.reserved \? `\$\{layout\.reserved\}px` : ''/u);
+  assert.match(source, /put\(row\.style, 'paddingBottom', layout\.reserved \? `\$\{layout\.reserved\}px` : ''\)/u);
   assert.match(rule('.compose-line :global(.composer-measure)'), /height: 0/u);
   assert.match(rule('.compose-line :global(.composer-measure)'), /overflow: hidden; visibility: hidden; pointer-events: none/u,
     'the mirror neither paints, handles input nor adds scrollable space');

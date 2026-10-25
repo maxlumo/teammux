@@ -86,51 +86,69 @@
   onDestroy(() => measureRoot?.remove());
 
   /** One measurement transaction owns natural height and the signature band. */
+  /** A style write that changes nothing is not a write (#466): an equal
+   * value would still dirty the element and force the next read to lay out. */
+  const put = (style, prop, value) => { if (style[prop] !== value) style[prop] = value; };
   function growComposer() {
     const el = composerEl;
     const row = el?.parentElement;
     if (!el || !row || !actionsEl || !el.clientWidth) return;
-    const previousMin = row.style.minHeight;
-    // Measuring a shorter textarea must not transiently expand the Feed and
-    // clamp its scrollTop. Keep the row in place until the real height is ready.
-    row.style.minHeight = `${row.offsetHeight}px`;
-    try {
-      row.style.paddingBottom = '';
-      el.style.paddingRight = '';
-      el.style.height = 'auto';
-      el.style.overflowY = 'hidden';
-      const style = getComputedStyle(el);
-      const controlsWidth = actionsEl.offsetWidth, controlsHeight = actionsEl.offsetHeight;
-      const actionsStyle = getComputedStyle(actionsEl);
-      const gap = parseFloat(actionsStyle.columnGap) || 0;
-      const paintInset = parseFloat(actionsStyle.getPropertyValue('--control-paint-inset')) || 0;
-      const lift = parseFloat(actionsStyle.bottom) || 0;
-      const inkInset = Math.max(0, ((parseFloat(style.lineHeight) || 0) - (parseFloat(style.fontSize) || 0)) / 2);
-      const empty = !el.value;
-      if (empty && measureValue) measureValue.data = '';
-      const layout = signatureLayout({
-        width: parseFloat(style.width) || el.clientWidth, naturalHeight: el.scrollHeight,
-        maxHeight: parseFloat(style.maxHeight) || Infinity,
-        controlsWidth, controlsHeight, gap, empty, paintInset, inkInset, lift,
-        textRects: empty ? [] : textBoxes(el, style),
-      });
-      if (empty) el.style.paddingRight = `${controlsWidth + gap}px`;
-      row.style.paddingBottom = layout.reserved ? `${layout.reserved}px` : '';
-      el.style.overflowY = layout.overflow ? 'auto' : 'hidden';
-      el.style.height = `${layout.inputHeight}px`;
-      if (layout.overflow) textBoxes(el, getComputedStyle(el)); // Match the native scrollbar gutter too.
-    } finally {
-      row.style.minHeight = previousMin;
-    }
-    // Attachments and actions count toward the shell; unchanged height must
-    // not re-park the feed on every keystroke.
-    const shellH = shellEl?.offsetHeight ?? el.offsetHeight;
-    if (shellH !== lastShellH) {
-      lastShellH = shellH;
-      onheightchange();
-    }
+    // The row is a relayout boundary (`contain: size layout`, board #466): its
+    // explicit height holds the space while the textarea measures inside it,
+    // so the measuring writes below never reach the Feed — neither as a
+    // transient expansion (#180) nor as a layout of the whole document per key
+    // (with a long room, the Feed was most of that cost). The row itself is
+    // written only when its height or reserved band really changes.
+    el.style.paddingRight = '';
+    el.style.height = 'auto';
+    el.style.overflowY = 'hidden';
+    const style = getComputedStyle(el);
+    const controlsWidth = actionsEl.offsetWidth, controlsHeight = actionsEl.offsetHeight;
+    const actionsStyle = getComputedStyle(actionsEl);
+    const gap = parseFloat(actionsStyle.columnGap) || 0;
+    const paintInset = parseFloat(actionsStyle.getPropertyValue('--control-paint-inset')) || 0;
+    const lift = parseFloat(actionsStyle.bottom) || 0;
+    const inkInset = Math.max(0, ((parseFloat(style.lineHeight) || 0) - (parseFloat(style.fontSize) || 0)) / 2);
+    const empty = !el.value;
+    if (empty && measureValue) measureValue.data = '';
+    const layout = signatureLayout({
+      width: parseFloat(style.width) || el.clientWidth, naturalHeight: el.scrollHeight,
+      maxHeight: parseFloat(style.maxHeight) || Infinity,
+      controlsWidth, controlsHeight, gap, empty, paintInset, inkInset, lift,
+      textRects: empty ? [] : textBoxes(el, style),
+    });
+    if (empty) el.style.paddingRight = `${controlsWidth + gap}px`;
+    el.style.overflowY = layout.overflow ? 'auto' : 'hidden';
+    el.style.height = `${layout.inputHeight}px`;
+    if (layout.overflow) textBoxes(el, getComputedStyle(el)); // Match the native scrollbar gutter too.
+    // The row's border box: the field's USED height — its own min/max clamp in
+    // CSS order (max first, then min, so min wins when they cross: CSS2 §10.7),
+    // fractional as the textarea lays out (offsetHeight would round a 30vh
+    // ceiling) — plus the reserved band, counted once. Unchanged, nothing
+    // outside the row is written.
+    const field = Math.max(Math.min(layout.inputHeight, parseFloat(style.maxHeight) || Infinity), parseFloat(style.minHeight) || 0);
+    put(row.style, 'paddingBottom', layout.reserved ? `${layout.reserved}px` : '');
+    put(row.style, 'height', `${field + (layout.reserved || 0)}px`);
   }
+  /* The SHELL's height is what the Hub follows (the row, attachments, the
+     reply chip, a chip wrap, a thumbnail's size landing — board #466 review
+     P1): ONE notification source, a ResizeObserver on the shell, so every one
+     of those reaches the same comparison and no measurement reads the shell
+     back (a forced layout per key). An unchanged height does not re-park the
+     feed. */
   let lastShellH = 0;
+  $effect(() => {
+    if (!shellEl) return;
+    const observer = new ResizeObserver(([entry]) => {
+      const box = entry?.borderBoxSize?.[0];
+      const h = Math.round(box ? box.blockSize : entry?.contentRect.height ?? 0);
+      if (h === lastShellH) return;
+      lastShellH = h;
+      onheightchange();
+    });
+    observer.observe(shellEl, { box: 'border-box' });
+    return () => observer.disconnect();
+  });
   /* ONE measurement per pending frame, never in the input handler (board
      #444): every trigger asks for the next animation frame and the triggers
      that come before it share that one. A key used to run the transaction
@@ -414,7 +432,16 @@
   .compose-shell.cmd .c-input { font-family: var(--font-mono); }
   /* The line's own height is captured HERE, before a dense group inside
      redefines --control-height (board #229): the controls centre on it. */
-  .compose-line { position: relative; min-width: 0; box-sizing: border-box; --composer-line-h: var(--control-height); }
+  /* A relayout boundary (board #466): size and layout containment, NOT paint
+     (the focus ring, the commands and the measure mirror must not clip). Its
+     height is the one growComposer computes and writes only when it changes;
+     until the first measurement it is one line. A keystroke's layout stays
+     inside this row instead of laying out the whole document — with a long
+     room, the Feed was most of that cost. */
+  .compose-line {
+    position: relative; min-width: 0; box-sizing: border-box; --composer-line-h: var(--control-height);
+    contain: size layout; height: var(--control-height);
+  }
   .c-input {
     display: block; min-width: 0; width: 100%; box-sizing: border-box; min-height: var(--control-height);
     max-height: calc(30vh / var(--ui-zoom, 1)); padding: max(2px, calc((var(--control-height) - 1.5em) / 2)) 0;

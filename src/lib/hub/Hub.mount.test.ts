@@ -5492,3 +5492,57 @@ test('the turn rail\u2019s held press does not survive a room switch or a filter
     assert.equal(q('.feed')!.scrollTop, 0, 'and its release landed nowhere');
   } finally { await app.close(); }
 });
+
+test('a keystroke touches the composer only: no DOM write outside its row and no row write while the height holds, over a long room (#466)', { timeout: 60000 }, async (context) => {
+  // Board #466: per key, growComposer's writes on the row dirtied its
+  // ancestors and every forced layout ran from the document root, so typing
+  // cost ∝ the loaded feed. Here the measurement runs (a field with a width),
+  // and every mutation the frame causes is counted by where it lands.
+  const log = Array.from({ length: 120 }, (_, i) => ({
+    id: `m${i}`, seq: i + 1, ts: 1000 + i, from: i % 4 ? 'alice' : 'human',
+    body: i % 4 ? `## Pass ${i}\n\n- a **list** with \`code\` and a [link](https://example.com/${i})\n\n\`\`\`ts\nconst x = ${i};\n\`\`\`` : `@alice question ${i}?`,
+  }));
+  const { rpc } = roomFixture();
+  const app = await (await compiledHub()).mount(context, {
+    props: { visible: true },
+    setup(window) {
+      window.Element.prototype.getAnimations = () => [];
+      window.HTMLCanvasElement.prototype.getContext = () => null;
+      window.Range.prototype.getClientRects = () => [] as unknown as DOMRectList;
+      // A field with a width, so the measurement really runs; a fixed natural height.
+      Object.defineProperty(window.HTMLTextAreaElement.prototype, 'clientWidth', { get: () => 300, configurable: true });
+      Object.defineProperty(window.HTMLTextAreaElement.prototype, 'scrollHeight', { get: () => 28, configurable: true });
+      Object.defineProperty(window.HTMLElement.prototype, 'offsetHeight', { get() { return this.classList?.contains('c-input') ? 28 : 0; }, configurable: true });
+    },
+    modules: [{ ...rpc, hubLog: async () => ({ messages: log, has_more: false }) }],
+  });
+  try {
+    for (let i = 0; i < 20 && app.document.querySelectorAll('.feed .md').length < 90; i++) await app.flush();
+    assert.ok(app.document.querySelectorAll('.feed .md').length >= 90, 'a long room is rendered');
+    const input = app.document.querySelector<HTMLTextAreaElement>('.c-input')!;
+    const row = input.parentElement!;
+    const type = async (ch: string) => {
+      input.value += ch;
+      input.dispatchEvent(new app.window.Event('input', { bubbles: true }));
+      for (let i = 0; i < 4; i++) await app.flush();
+    };
+    await type('a');                                  // the first measurement publishes the row's height once
+    assert.equal(row.style.height, '28px', 'the measured height is the row\'s');
+    const outside: string[] = [];
+    let rowWrites = 0, inside = 0;
+    const observer = new app.window.MutationObserver((records) => {
+      for (const r of records) {
+        if (r.target === row && r.attributeName === 'style') { rowWrites++; continue; }
+        if (row.contains(r.target)) { inside++; continue; } // inside the boundary: the field, the mirror
+        outside.push(`${r.type} ${(r.target as Element).className ?? r.target.nodeName}`);
+      }
+    });
+    observer.observe(app.document.body, { subtree: true, attributes: true, childList: true, characterData: true });
+    for (const ch of 'bcdefghij') await type(ch);
+    observer.disconnect();
+    assert.equal(input.value, 'abcdefghij');
+    assert.ok(inside > 0, 'the measurement did run on every key (inside the row)');
+    assert.equal(rowWrites, 0, 'the height holds: the row is not written');
+    assert.deepEqual(outside, [], 'nothing outside the composer row changes: the feed, the rail and the roster are untouched');
+  } finally { await app.close(); }
+});
