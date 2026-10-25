@@ -50,7 +50,7 @@ test('natural textarea measurement cannot transiently expand the Feed (#180, by 
   // The row holds its EXPLICIT height (a size-contained box) while the textarea
   // measures at height:auto inside it, and the new height is published once,
   // after the measurement — the Feed never sees the transient shrink.
-  const grow = source.slice(source.indexOf('function growComposer()'), source.indexOf('let lastShellH'));
+  const grow = source.slice(source.indexOf('function growComposer()'), source.indexOf('The composer tells nobody its height'));
   assert.match(rule('.compose-line'), /contain: size layout; height: var\(--control-height\);/u, 'one line until the first measurement');
   assert.doesNotMatch(grow, /row\.style\.(minHeight|height) = /u, 'no pin and no unconditional write on the row');
   assert.ok(grow.indexOf("el.style.height = 'auto'") < grow.indexOf("put(row.style, 'height'"), 'measure first, publish after');
@@ -64,7 +64,7 @@ test('a keystroke\'s layout stays inside the composer row: a relayout boundary, 
   assert.match(rule('.compose-line'), /contain: size layout;/u, 'size + layout: a relayout boundary');
   assert.doesNotMatch(rule('.compose-line'), /contain:[^;]*(paint|strict|content)/u, 'not paint: the focus ring, the commands and the mirror must not clip');
   assert.match(source, /const put = \(style, prop, value\) => \{ if \(style\[prop\] !== value\) style\[prop\] = value; \};/u, 'an equal value is no write');
-  const grow = source.slice(source.indexOf('function growComposer()'), source.indexOf('let lastShellH'));
+  const grow = source.slice(source.indexOf('function growComposer()'), source.indexOf('The composer tells nobody its height'));
   assert.match(grow, /put\(row\.style, 'paddingBottom', layout\.reserved \? `\$\{layout\.reserved\}px` : ''\);/u);
   const fieldExpr = /const field = (Math\.max\(Math\.min\(layout\.inputHeight, parseFloat\(style\.maxHeight\) \|\| Infinity\), parseFloat\(style\.minHeight\) \|\| 0\));/u.exec(grow)?.[1];
   assert.ok(fieldExpr, 'the field\'s used height: its own clamp in CSS order, fractional');
@@ -77,7 +77,7 @@ test('a keystroke\'s layout stays inside the composer row: a relayout boundary, 
   assert.equal(at(300, '28px', '208.3px'), 208.3, 'past the ceiling: the fractional max');
   assert.equal(at(10, '28px', 'none'), 28, 'no max: the min');
   assert.match(grow, /put\(row\.style, 'height', `\$\{field \+ \(layout\.reserved \|\| 0\)\}px`\);/u, 'plus the band, counted once');
-  assert.doesNotMatch(grow, /shellEl|onheightchange/u, 'the measurement reads nothing outside the row');
+  assert.doesNotMatch(grow, /shellEl/u, 'the measurement reads nothing outside the row');
 });
 
 test('retired recipient and send-arm mechanisms stay removed when measurement returns (#186)', () => {
@@ -121,10 +121,7 @@ test('Composer owns local UI state, while transport and capture ordering stay ou
     '#186 font-face completion is a measurement signal, not an input-capture listener');
   assert.match(source, /const paletteBackend = \$derived\(paletteBackendFor\(composerText, recipient, agents\)\);/u);
   assert.match(source, /onmodels: modelsList/u, 'models use the explicit transport command');
-  assert.match(source, /if \(h === lastShellH\) return;\s*lastShellH = h;\s*onheightchange\(\);/u,
-    'height intent fires only when the shell really changed');
-  assert.equal([...source.matchAll(/onheightchange\(\)/gu)].length, 1, 'one notification source: the shell observer (#466 review P1)');
-  assert.match(source, /observer\.observe\(shellEl, \{ box: 'border-box' \}\);/u, 'the row, attachments, the reply chip and thumbnails all change the shell it observes, border box included');
+  assert.doesNotMatch(source, /onheightchange|lastShellH/u, 'the composer notifies nobody of its height: the feed follows its own size (#467)');
   assert.doesNotMatch(source, /onfocus/u, 'focusing the composer is not navigation (#303)');
   assert.match(source, /export function caret\(\) \{ return composerEl\?\.selectionStart; \}/u);
   assert.match(source, /export function focus\(\) \{ composerEl\?\.focus\(\); \}/u);

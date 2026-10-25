@@ -190,7 +190,7 @@ test('Hub keeps Composer transport and capture listeners at the coordinator boun
   assert.match(source, /<Composer bind:this=\{composer\} bind:composerText \{selected\} \{compact\} \{recipient\}/u);
   assert.match(source, /onsend=\{send\} onstage=\{stageFiles\} onremove=\{removeAttachment\}/u);
   assert.match(source, /onmodels=\{modelsList\} oninterrupt=\{interrupt\}/u);
-  assert.match(source, /onheightchange=\{\(\) => \{ if \(following\) scrollFeed\(true\); \}\}/u);
+  assert.doesNotMatch(source, /onheightchange/u, 'the feed follows its own size; the composer notifies nothing (#467)');
   assert.doesNotMatch(source, /onfocus=/u, 'focusing the composer must not drag a reader to the tail (#303)');
   assert.match(source, /caret: \(\) => composer\?\.caret\(\),/u, 'tokens land at the composer caret');
   assert.match(source, /focus: \(\) => composer\?\.focus\(\),/u);

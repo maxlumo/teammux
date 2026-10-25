@@ -18,7 +18,7 @@
     onsend: send = () => {},
     onstage: stageFiles = async () => {}, onremove: removeAttachment = () => {},
     onmodels: modelsList = async () => ({ models: [] }), oninterrupt = async (_target) => {},
-    onpreview = () => {}, onheightchange = () => {},
+    onpreview = () => {},
     registerBack = null, replyTo = null, onclearreply = () => {},
     issues = [], onissues = () => {},
   } = $props();
@@ -130,25 +130,12 @@
     put(row.style, 'paddingBottom', layout.reserved ? `${layout.reserved}px` : '');
     put(row.style, 'height', `${field + (layout.reserved || 0)}px`);
   }
-  /* The SHELL's height is what the Hub follows (the row, attachments, the
-     reply chip, a chip wrap, a thumbnail's size landing — board #466 review
-     P1): ONE notification source, a ResizeObserver on the shell, so every one
-     of those reaches the same comparison and no measurement reads the shell
-     back (a forced layout per key). An unchanged height does not re-park the
-     feed. */
-  let lastShellH = 0;
-  $effect(() => {
-    if (!shellEl) return;
-    const observer = new ResizeObserver(([entry]) => {
-      const box = entry?.borderBoxSize?.[0];
-      const h = Math.round(box ? box.blockSize : entry?.contentRect.height ?? 0);
-      if (h === lastShellH) return;
-      lastShellH = h;
-      onheightchange();
-    });
-    observer.observe(shellEl, { box: 'border-box' });
-    return () => observer.disconnect();
-  });
+  /* The composer tells nobody its height (board #467). Whatever changes it
+     (the row, attachments, the reply chip, a chip wrap, a thumbnail's size
+     landing) shrinks or grows the feed above it, and the feed follows its
+     own size: its ResizeObserver re-takes the tail for a follower, before
+     paint. The Hub's shell-height notification it replaced only repeated
+     that a frame later. */
   /* ONE measurement per pending frame, never in the input handler (board
      #444): every trigger asks for the next animation frame and the triggers
      that come before it share that one. A key used to run the transaction

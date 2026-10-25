@@ -2697,7 +2697,6 @@
         onclearreply={() => { replyTo = null; composer?.focus(); }}
         onsend={send} onstage={stageFiles} onremove={removeAttachment}
         onmodels={modelsList} oninterrupt={interrupt} onpreview={(path) => showShot(viewerOpen(path))}
-        onheightchange={() => { if (following) scrollFeed(true); }}
         registerBack={onGoBack ? backLayers.register : null} />
       {#if commandFeedback && commandFeedbackAnchor}
         <div class="composer-feedback pop-layer" use:feedbackPosition={{

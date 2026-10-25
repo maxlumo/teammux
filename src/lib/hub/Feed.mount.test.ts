@@ -197,3 +197,51 @@ test('a folded picture message has the same content held and in flow; only Expan
     assert.ok(!q('.msg.held'), 'an expanded message is never pinned');
   } finally { await app.close(); }
 });
+
+// Board #467: the feed follows its OWN size. Whatever shrinks its box (the
+// composer growing under it, a chip row, the keyboard), its ResizeObserver
+// runs the reading transaction, and a follower re-takes the tail — the one
+// mechanism since Hub's shell-height notification was deleted.
+test('a follower whose feed box shrinks re-takes the tail through the feed\u2019s own ResizeObserver; an unchanged size writes nothing (#467)', async (context) => {
+  const blocks = feedBlocks([
+    { id: 'a', ts: 100, from: 'dev', body: 'one' },
+    { id: 'q', ts: 200, from: 'human', body: 'two' },
+    { id: 'b', ts: 300, from: 'dev', body: 'three' },
+  ], [], 'chat', (n) => n);
+  const observed: { el: Element; cb: () => void }[] = [];
+  const app = await (await compiled).mount(context, {
+    props: { selected: 'fixture', roomReady: true, visible: true, blocks, managedNames: ['dev'],
+      agents: [{ name: 'dev', window: 0, managed: true, agent: 'kiro', state: 'idle' }] },
+    setup(window: any) {
+      window.Element.prototype.getAnimations = () => []; window.HTMLCanvasElement.prototype.getContext = () => null;
+      window.ResizeObserver = class {
+        cb: () => void;
+        constructor(cb: () => void) { this.cb = cb; }
+        observe(el: Element) { observed.push({ el, cb: this.cb }); }
+        unobserve() {} disconnect() {}
+      };
+    },
+    modules: [],
+  });
+  try {
+    const frames = async () => { for (let i = 0; i < 4; i++) { await app.advance(20); await app.flush(); } };
+    await frames();
+    const feed = app.document.querySelector<HTMLElement>('.feed')!;
+    let height = 500;
+    Object.defineProperty(feed, 'scrollHeight', { get: () => 3000, configurable: true });
+    Object.defineProperty(feed, 'clientHeight', { get: () => height, configurable: true });
+    Object.defineProperty(feed, 'clientWidth', { get: () => 390, configurable: true });
+    const resize = async () => { for (const o of observed) if (o.el === feed) o.cb(); await frames(); };
+    assert.ok(observed.some((o) => o.el === feed), 'the feed observes its own box');
+    // At the tail, and the reading size recorded.
+    feed.scrollTop = 2500; feed.dispatchEvent(new app.window.Event('scroll')); await frames();
+    await resize();
+    feed.scrollTop = 2500;
+    await resize();
+    assert.equal(feed.scrollTop, 2500, 'the same size again: no tail write');
+    // The composer grows under the feed: the box is 100px shorter.
+    height = 400;
+    await resize();
+    assert.equal(feed.scrollTop, 3000, 'the follower is back at the tail, by the feed\u2019s own observer');
+  } finally { await app.close(); }
+});
