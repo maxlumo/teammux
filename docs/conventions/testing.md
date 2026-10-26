@@ -399,6 +399,51 @@ The browser matrix itself (alias/canonical absorb, address redial, block and
 Retry, orphan ask — reviewer M1 + validator E1–E3) is the follow-up on #352;
 until it lands, the validator uses `--keep` and runs those cells by hand.
 
+## Two rules for measuring in a real browser (boards #467, #468)
+
+**Coarse-pointer CSS is measured under a real coarse match, on the unmodified
+stylesheet (#468).** A rule inside `@media (any-pointer: coarse)` is measured
+in a context where `matchMedia('(any-pointer: coarse)')` is true, and the
+check reads `getComputedStyle`. What was measured in #468: with the
+agent-browser used there (Chromium 152), `set device "iPhone 14"` left that
+query false, and Playwright's touch emulation (`hasTouch` and `isMobile`, via
+`playwright-core` from `node_modules`) made it true on Chromium 152 and, for the
+validator, 153. That is a measured configuration, not a capability of any
+version or tool, so every run asserts the `matchMedia` result first, then reads
+the computed value, and runs the fine pointer too. Never set the variable on `:root` by hand: that skips the cascade, which is
+the thing under test. Incident: the turn rail's touch override
+(`--turn-tick-edge: 10px`) was declared 340 lines BEFORE the unconditional
+default (24px). A media query adds no specificity, so the later default won on
+a phone too. A measurement that wrote 10px onto the root passed, and the
+reviewer found the bug by reading the file. On the unmodified stylesheet the
+reviewed build computed 24px under touch and the fixed one 10px. A source pin
+now holds the order.
+
+**Geometry read inside a `requestAnimationFrame` can precede that frame's
+ResizeObserver correction, so a rig states its sampling phase and keeps a
+control that must drift (#467).** An rAF callback runs before the frame's
+ResizeObserver step; a read taken there can be the state before the observers
+have re-anchored. A rig therefore says when it samples, takes its baseline
+BEFORE the trigger, and orders its reads after the writes it is testing. A read
+deferred to the next task or the next frame is a sampling strategy for that rig,
+not a reconstruction of the previous frame: other rAF callbacks, or the read's
+own forced layout, may already have moved things, and a write queued for the
+next frame (the old composer-shell notification wrote the tail one frame later)
+would turn a one-frame drift into a 0. A 0 in the next sample does not prove the
+earlier non-zero was never shown. In #467 the validator's rig scored sample
+k+1 as frame k; the only non-zero tail samples were single ones on attachment
+changes, and both builds had them, each back to 0 at the next sample (1280: 46
+and 42px; 390: 116px on `main`, 174px a frame later on the tip).
+They are pre-correction differences read in rAF with later samples settled, not
+proven un-presented drift. Keep a control with the mechanism removed: with the
+feed's ResizeObserver doing nothing ("noro"), the tail drifted 57, 62, 174 and
+62px at 390 (46, 42, 46 and 344px at 1280, the viewport shrink never
+recovered), so this rig can see a drift of that kind. One control that is
+caught does not show that every transient is. Reports say "sampled geometry"
+(no sampled frame drifted), never "no frame drifted"; a claim about presented
+frames needs a trace or a screenshot, and a case the script did not exercise (a
+thumbnail whose size arrives late) is not named as covered.
+
 ## Three Test Tiers
 
 ### 1. Unit tests — `<module>.test.ts`
