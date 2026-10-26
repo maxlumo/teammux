@@ -70,6 +70,14 @@ test('tokens and atoms only: no px, no literal colour, two declared tempos and n
     assert.equal([...css.matchAll(new RegExp(`${token}:`, 'gu'))].length, 1, `${token} is defined once, in app.css`);
   }
   assert.match(css, /--turn-rail-hit: 44px;/u, 'the hit column is 44px on both screens');
+  // The tick's distance from the edge (board #468): one declaration for the desktop and ONE touch override; the column does not move.
+  assert.equal([...css.matchAll(/--turn-tick-edge:/gu)].length, 2, 'declared once at :root and overridden once for touch, nowhere else');
+  assert.match(css, /--turn-tick-edge: 24px;/u, 'desktop: the emphasised tick stays where the inner-aligned ticks had it');
+  const touch = /@media \(any-pointer: coarse\) \{[^}]*:root \{ --turn-tick-edge: 10px; \}/u.exec(css);
+  assert.ok(touch, 'touch: near the screen edge (owner 2026-10-26)');
+  assert.ok(touch.index > css.indexOf('--turn-tick-edge: 24px;') && css.indexOf('--turn-tick-edge: 24px;') > 0,
+    'the touch override comes AFTER the default: a media query adds no specificity, so an earlier override never applies (reviewer #468; the first build had it 340 lines before and the phone kept 24px)');
+
   assert.doesNotMatch(styleCode(), /transition:[^;]*\b(?:width|height|top|left|margin|padding)\b/u, 'layout properties are not animated (motion.md)');
   assert.equal([...styleCode().matchAll(/touch-action:/gu)].length, 2, 'the band: auto while hidden, none while shown');
   assert.match(styleCode(), /\.tr-band \{[^}]*touch-action: auto/u);
@@ -148,7 +156,8 @@ test('the rail floats over the right edge and reserves NO space: the feed\'s geo
   assert.match(feed, /\{#if railWanted\}\s*<TurnRail bind:this=\{turnRail\} \{turns\}/u, 'a plain {#if}, a sibling of the scroller, fed the shared turns');
   assert.match(style, /\.turn-rail \{[^}]*position: absolute;[^}]*inset-inline-end: var\(--turn-rail-edge, 0\);/u, 'at the right (inline end), standing clear of a classic scrollbar');
   assert.match(style, /\.turn-rail \{[^}]*inset-block: var\(--turn-rail-inset\) var\(--turn-rail-clear\);/u);
-  assert.match(style, /\.tr-tick \{[^}]*justify-content: flex-start;/u, 'ticks at the INNER (left) side of the column');
+  assert.match(style, /\.tr-tick \{[^}]*justify-content: flex-end;[^}]*padding-inline-end: var\(--turn-tick-edge\);/u, 'every tick ends at the column\u2019s OUTER (screen) edge, the distance one token (board #468)');
+  assert.doesNotMatch(style, /\.tr-tick \{[^}]*padding-inline-start/u, 'and nothing pushes them in from the inner side');
   assert.doesNotMatch(feed, /<TurnRail[^>]*>\s*[^<]*<\/TurnRail>/u);
 });
 

@@ -315,7 +315,7 @@
 
 <style>
   /* The hit column: --turn-rail-hit wide on both screens, painted as a few px of
-     tick at its INNER (left) edge, floating over the feed's RIGHT edge, vertically
+     tick ending at its OUTER (screen) edge, floating over the feed's RIGHT edge, vertically
      centred between the top inset and the clearance above the to-tail control. It
      reserves no space (the feed's padding is untouched) and is itself inert
      (pointer-events none): the wheel and a finger that start anywhere but on the
@@ -354,8 +354,8 @@
   @media (prefers-reduced-motion: reduce) { .tr-paint { transform: none; } }
   .tr-band:focus-visible { outline: var(--turn-tick-thick) solid var(--accent); outline-offset: calc(-1 * var(--turn-tick-thick)); border-radius: var(--ui-radius-control); }
   .tr-tick {
-    flex: 1 1 0; min-height: 0; display: flex; align-items: center; justify-content: flex-start;
-    padding-inline-start: var(--ui-gap);
+    flex: 1 1 0; min-height: 0; display: flex; align-items: center; justify-content: flex-end;
+    padding-inline-end: var(--turn-tick-edge);
   }
   .tr-tick::before {
     content: ''; width: var(--turn-tick-len); height: var(--turn-tick-thick); border-radius: var(--turn-tick-thick);

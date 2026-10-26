@@ -469,7 +469,19 @@ button:disabled {
      motion.md). The ONE definition; hub-turn-visibility.ts reads it. */
   --turn-rail-dwell: 1500ms; --turn-rail-shift: 6px;
   --turn-tick-pitch: 10px; --turn-tick-len: 10px; --turn-tick-len-cur: 16px; --turn-tick-thick: 2px;
+  /* From the column's OUTER edge (the screen's, on a phone) to the tick's outer end: every tick ends here and the emphasised
+     one grows inward. 24px keeps the emphasised tick where the inner-aligned ticks had it; touch brings it to the edge
+     (board #468, owner 2026-10-26), see the any-pointer block below. */
+  --turn-tick-edge: 24px;
   --turn-pop-width: 300px;
+}
+
+/* AFTER the :root default above: a media query adds no specificity, so the later declaration wins and an override
+   written before it would never apply (reviewer #468). Source-pinned by position. */
+@media (any-pointer: coarse) {
+  /* The turn rail's ticks sit near the screen edge (board #468; the 44px hit column already reaches it). The price: a finger
+     that lands there can be the system's back gesture, which arrives as a pointercancel and jumps nowhere. */
+  :root { --turn-tick-edge: 10px; }
 }
 
 .chip-btn {
