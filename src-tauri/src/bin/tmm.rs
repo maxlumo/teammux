@@ -262,6 +262,16 @@ fn fail(code: i32, msg: &str) -> ! {
     std::process::exit(code);
 }
 
+const GATEWAY_SUBCOMMANDS: &str = "start | install | uninstall | status | restart | logs";
+
+/// Decide the configuration root once (board #472): a refusal (two different directories, one that
+/// cannot be examined) stops here, before anything is read, created or written.
+fn init_config_root() {
+    if let Err(e) = tmux_mobile::config::init_root() {
+        fail(EXIT_ERR, &e);
+    }
+}
+
 #[tokio::main(flavor = "current_thread")]
 async fn main() {
     let args: Vec<String> = std::env::args().skip(1).collect();
@@ -333,9 +343,15 @@ async fn main() {
         return;
     }
     if pos[0] == "ui" {
+        init_config_root();
         cmd_ui(flags.contains_key("open")).await;
         return;
     }
+    // Everything from here reads the configuration: decide its root ONCE, before the first
+    // Config, database, lock or hook access (board #472). The early returns above (--help,
+    // unknown flags, claude-statusline, the local task and mcp subtrees) read none, so a
+    // refused root does not stop them.
+    init_config_root();
     // `tmm setup` (board #323): before Config::load, which would create
     // config.toml with a token and so make every run look like a second one.
     if pos[0] == "setup" {
@@ -2012,6 +2028,13 @@ fn open_browser(url: &str) {
 async fn cmd_gateway(rest: &[String], flags: &Flags) {
     use tmux_mobile::gateway::{self, probe, service};
     let sub = rest.first().map(String::as_str).unwrap_or("");
+    // An unknown subcommand is the usage error and nothing else: it reads no configuration, so it
+    // answers before the service name, the environment note or the root (board #472). Every known
+    // one reads it.
+    if !matches!(sub, "" | "install" | "start" | "uninstall" | "restart" | "status" | "logs") {
+        fail(EXIT_USAGE, &format!("gateway {sub}: {GATEWAY_SUBCOMMANDS}"));
+    }
+    init_config_root();
     // No config.toml yet: the first-run setup, in this (foreground) caller.
     // The installed service (`--service`) never prompts: it has no terminal.
     if matches!(sub, "" | "install" | "start") && !flags.contains_key("service") {
@@ -2101,7 +2124,7 @@ async fn cmd_gateway(rest: &[String], flags: &Flags) {
                 fail(EXIT_ERR, &format!("gateway logs: {cmd} {} failed", args.join(" ")));
             }
         }
-        other => fail(EXIT_USAGE, &format!("gateway {other}: start | install | uninstall | status | restart | logs")),
+        other => fail(EXIT_USAGE, &format!("gateway {other}: {GATEWAY_SUBCOMMANDS}")),
     }
 }
 
@@ -2153,6 +2176,9 @@ fn print_status(sys: &tmux_mobile::gateway::service::Sys, name: &str, show_token
     }
     println!("listen    {}:{}{}", cfg.host, cfg.port, if cfg.tls_cert.is_some() { " (TLS)" } else { "" });
     println!("config    {}", tmux_mobile::config::config_dir().display());
+    if tmux_mobile::config::root_is_legacy() {
+        println!("          (this install predates the rename to Teammux and keeps its directory; a fresh one uses teammux)");
+    }
     let token = if cfg.token.is_empty() { " (none yet — run tmm setup or tmm gateway)".to_string() }
         else if show_token { format!(" {}", cfg.token) } else { " (tmm gateway status --show-token)".into() };
     println!("connect   from the app: the address of this machine, port {}, and the token{token}", cfg.port);

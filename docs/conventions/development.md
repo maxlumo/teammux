@@ -21,7 +21,7 @@ The build puts `tmm` in `src-tauri/target/release`; nothing installs it on your
 PATH, and the gateway service records the absolute path of the `tmm` that
 installed it, so link the real file rather than copying it.
 
-The first launch generates a token in `~/.config/tmux-mobile/config.toml`.
+The first launch generates a token in `config.toml` in `~/.config/teammux/` (an install made before the rename keeps `~/.config/tmux-mobile/`).
 Open `http://localhost:5173` on this machine; the connection field is pre-filled
 with `ws://localhost:5173/ws`, because Vite proxies `/ws` and `/dl` to the
 loopback-only Rust server. Only port 5173 needs to be reachable — and Vite

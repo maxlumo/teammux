@@ -499,6 +499,9 @@ pub struct Sys {
     pub home: PathBuf,
     pub uid: String,
     pub me: Identity,
+    /// The configuration root this process uses (board #472): the log lives in it. It is the root
+    /// `config::config_dir()` chose, not a name rebuilt from `me.config_home`.
+    pub root: PathBuf,
     pub path_env: String,
     /// Run a native command: Ok(stdout) or Err(stderr).
     pub run: Box<dyn Fn(&str, &[&str]) -> Result<String, String>>,
@@ -517,6 +520,7 @@ impl Sys {
             // SAFETY: getuid has no preconditions.
             uid: unsafe { libc::getuid() }.to_string(),
             me,
+            root: crate::config::config_dir(),
             path_env: std::env::var("PATH").unwrap_or_default(),
             run: Box::new(|cmd, args| {
                 let out = std::process::Command::new(cmd).args(args).output().map_err(|e| format!("{cmd}: {e}"))?;
@@ -541,7 +545,7 @@ impl Sys {
     }
 
     pub fn spec(&self, name: &str) -> Spec {
-        let log = Path::new(&self.me.config_home).join("tmux-mobile").join("gateway.log");
+        let log = self.root.join("gateway.log");
         Spec { name: name.into(), id: self.me.clone(), path_env: self.path_env.clone(), home: self.home.to_string_lossy().into(), log: log.to_string_lossy().into() }
     }
 
@@ -1102,6 +1106,19 @@ mod tests {
         }
     }
 
+    /// Board #472, B1: the log is under the root the process CHOSE, not under a name rebuilt
+    /// from the XDG base. Two roots on the same base give two different logs.
+    #[test]
+    fn the_log_lives_in_the_chosen_root_not_in_a_name_rebuilt_from_the_base() {
+        let home = std::env::temp_dir().join(format!("tmm-log-root-{}", std::process::id()));
+        let (sys, _) = fake(&home, true);
+        for root in ["teammux", "tmux-mobile"] {
+            let sys = Sys { root: home.join(".config").join(root), ..fake(&home, true).0 };
+            assert_eq!(sys.spec("x.test").log, home.join(".config").join(root).join("gateway.log").to_string_lossy(), "{root}");
+        }
+        assert!(sys.spec("x.test").log.ends_with("/gateway.log"));
+    }
+
     #[test]
     fn systemd_quoting_escapes_specifiers_expansion_quotes_and_backslashes() {
         assert_eq!(systemd_arg("/opt/tmm"), "\"/opt/tmm\"");
@@ -1253,6 +1270,7 @@ mod tests {
             home: home.to_path_buf(),
             uid: "501".into(),
             me: Identity { exe: "/opt/tmm".into(), config_home: home.join(".config").to_string_lossy().into() },
+            root: home.join(".config").join("tmux-mobile"),
             path_env: "/usr/bin".into(),
             run: Box::new(move |cmd, args| {
                 let line = format!("{cmd} {}", args.join(" "));

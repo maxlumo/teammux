@@ -93,7 +93,7 @@ npm run dev:all        # Vite on 127.0.0.1:5173 — open http://localhost:5173 (
 
 To install the app and the background gateway rather than build from source, see [docs/reference/install.md](docs/reference/install.md).
 
-The first launch writes a token to `~/.config/tmux-mobile/config.toml`.
+The first launch writes a token to `config.toml` in `~/.config/teammux/` (an install made before the rename keeps `~/.config/tmux-mobile/`); see [the configuration reference](docs/reference/config.md#where-the-configuration-lives-board-472).
 Prerequisites, the desktop and Android builds and remote access are in
 [docs/conventions/development.md](docs/conventions/development.md); every
 configuration key is in [docs/reference/config.md](docs/reference/config.md).

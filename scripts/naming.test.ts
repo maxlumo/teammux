@@ -22,6 +22,7 @@ const FILES: Array<[RegExp, string]> = [
   [/^LICENSE$/u, 'the copyright holder, an owner decision'],
   [/^docs\/reference\/naming\.md$/u, 'the list itself'],
   [/^scripts\/naming\.test\.ts$/u, 'this file'],
+  [/^src-tauri\/tests\/config_root_(?:cli|cache|cache_refusal|service)\.rs$/u, 'the test of which directory is the configuration root: the old name is its subject'],
 ];
 
 /** The shape of the word around an occurrence. */
@@ -64,8 +65,9 @@ const LINES: Array<[RegExp, RegExp, string]> = [
   [/^src-tauri\/gen\/android\/app\/\.gitignore$/u, /tmuxmobile/u, 'the Kotlin package path'],
   [/FullscreenChromeClient\.kt$/u, /Log\.w\("tmux-mobile"/u, 'the logcat tag people filter on'],
   [/^src-tauri\/src\/backends\/kiro\.rs$/u, /GIT_EXCLUDE_MARK/u, 'the dedup key of an existing .git/info/exclude'],
-  [/^src-tauri\/src\/config\.rs$/u, /config directory|join\("tmux-mobile"\)/u, 'the config directory, until phase B'],
-  [/^src-tauri\/src\/gateway\/service\.rs$/u, /join\("tmux-mobile"\)/u, 'the config directory, until phase B'],
+  [/^src-tauri\/src\/config\.rs$/u, /./u, 'the root resolver and its tests: the old directory name an install made before the rename keeps (B1)'],
+  [/^src-tauri\/src\/gateway\/service\.rs$/u, /join\("tmux-mobile"\)|\["teammux", "tmux-mobile"\]/u, 'test fixtures for the old directory name'],
+  [/^docs\/reference\/config\.md$/u, /`tmux-mobile`/u, 'the table of which directory is chosen'],
   [/^src-tauri\/src\/projects\/spawn\.rs$/u, /contains\("tmux-mobile"\)/u, 'the hook marker'],
   [/^src-tauri\/tests\/(?:local_socket_cli|setup_cli|project_archive_cli)\.rs$/u, /tmux-mobile/u, 'the config directory and a project name in a CLI rig'],
   [/^src\/App\.shell\.mount\.test\.ts$/u, /tmux-mobile/u, 'a project named tmux-mobile in a saved-state fixture'],
@@ -144,7 +146,7 @@ test('the kept identifiers are kept verbatim (board #472)', () => {
   has('src-tauri/src/backends/grok.rs', 'join("tmux-mobile.json")');
   has('src-tauri/tauri.conf.json', '"identifier": "com.tmuxmobile.dev"');
   has('src-tauri/gen/android/app/build.gradle.kts', 'namespace = "com.tmuxmobile.dev"', 'applicationId = "com.tmuxmobile.dev"');
-  has('src-tauri/src/config.rs', 'base.join("tmux-mobile")');
+  has('src-tauri/src/config.rs', 'pub const ROOT_NAME: &str = "teammux";', 'pub const LEGACY_ROOT_NAME: &str = "tmux-mobile";');
   has('src-tauri/src/gateway/service.rs', 'LABEL: &str = "cc.voka.tmux-mobile"', 'UNIT: &str = "tmux-mobile-gateway.service"');
   has('src-tauri/Cargo.toml', 'name = "tmux-mobile"', 'name = "tmux_mobile"');
 });

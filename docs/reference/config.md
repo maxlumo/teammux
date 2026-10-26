@@ -2,7 +2,7 @@
 
 Runtime configuration of the WebSocket server and the Team feature. Build and dev-loop settings are in `../conventions/development.md`.
 
-`tmm setup` writes the connection keys interactively (board #323; the first `tmm gateway` asks too when the file is absent), keeping every other key and comment and saving paths absolute; a file it cannot read or parse is left untouched and stops the command. File: `$XDG_CONFIG_HOME/tmux-mobile/config.toml` (fallback `~/.config/tmux-mobile/`) — token, host, port, tmux_socket, tls_cert, tls_key, scrollback, disconnect_grace_secs, kiro_engine, ui_dir, restore_on_start, trusted_proxies.
+`tmm setup` writes the connection keys interactively (board #323; the first `tmm gateway` asks too when the file is absent), keeping every other key and comment and saving paths absolute; a file it cannot read or parse is left untouched and stops the command. File: `<config>/config.toml`, the configuration directory chosen as described under *Where the configuration lives* — token, host, port, tmux_socket, tls_cert, tls_key, scrollback, disconnect_grace_secs, kiro_engine, ui_dir, restore_on_start, trusted_proxies.
 
 ```toml
 token = "auto-generated-uuid"  # written on first launch
@@ -21,7 +21,7 @@ Env vars `TOKEN`, `HOST`, `PORT`, `TMUX_SOCKET`, `TLS_CERT`, `TLS_KEY`, `SCROLLB
 Default scrollback: 500 lines.
 `ui_dir` (config.toml only, absolute): a built web UI the gateway serves on its own port (board #323). Unset: the UI built into the binary (`--features embed-ui`, what `npm run build:server` builds), else none. A `ui_dir` without a readable `index.html` serves nothing — `tmm ui` says why. See tmm-cli.md § The web UI on the gateway's own port.
 `<config>/AGENTS.md` — optional app-wide agent instructions, prepended to every managed agent's system prompt at spawn (`tmm prompt`, Settings → Agents). Absent = none. See `docs/design-docs/features/tmm-cli.md` § The app-wide instructions.
-`state.db` must live in a directory only you can change: the default `<config>/tmux-mobile/` is made 0700, and a custom `TMM_STATE_DB` directory must be yours and not group- or other-writable, under ancestors owned by root or you (sticky allowed), or the store refuses to open (board #448; agents-overview.md § A definition's secrets). Per-agent settings are not in this file: each registry definition (backend, model, effort, input mode `queue`|`steer`, prompt, skills, MCP) lives in `state.db` and is edited in Settings → Agents or with `tmm registry save`. The input mode is offered only for kiro and codex; see agents-overview.md § The input mode.
+`state.db` must live in a directory only you can change: the default configuration directory is made 0700, and a custom `TMM_STATE_DB` directory must be yours and not group- or other-writable, under ancestors owned by root or you (sticky allowed), or the store refuses to open (board #448; agents-overview.md § A definition's secrets). Per-agent settings are not in this file: each registry definition (backend, model, effort, input mode `queue`|`steer`, prompt, skills, MCP) lives in `state.db` and is edited in Settings → Agents or with `tmm registry save`. The input mode is offered only for kiro and codex; see agents-overview.md § The input mode.
 `kiro_engine` (default `v2`; env `KIRO_ENGINE`): the kiro-cli agent engine managed kiro agents launch with — `v2` (the CLI's default) or `v3` (kiro-cli 2.22.1's KAS engine). Read at spawn and at every refresh; an agent takes it at its next restart. Under `v3` each managed kiro agent also gets a symlink `<ws>/.kiro/agents/<name>.json` into its isolated home (see agents-overview.md § kiro 2.22.1). Board #207.
 
 Default restore_on_start: true (since board #422 round 4's live acceptance, `scripts/restore-acceptance.sh`). A gateway start after a host reboot brings back the sessions and agents the last checkpoint saw live (`docs/design-docs/features/projects.md` § After a host reboot); `false` turns that off, and so does a config.toml that cannot be read or parsed (said on stderr by kind and line/column only, never the file's text, which holds the token: a person's opt-out is never lost to a torn file). The switch governs only the automatic start: `tmm project restore --run` is the person's door either way, and `tmm project restore` shows the switch's state.
@@ -169,3 +169,18 @@ Default restore_on_start: true (since board #422 round 4's live acceptance, `scr
 - *A known limit, IPv6:* a viewer's key is its full IPv6 address (/128), so one viewer can change addresses inside its own /64 and get a fresh counter each time (validator, #441). Against a 122-bit token this does not make guessing feasible; it means the lockout does not slow an IPv6 guesser. Keying IPv6 by /64 would close it and is not built.
 
 Default disconnect_grace_secs: 600 (10 min). Delay before a disconnected client's tmux window is auto-resized back; set to 0 for legacy immediate restore. See `docs/design-docs/features/disconnect-grace.md`.
+
+## Where the configuration lives (board #472)
+
+The directory is `<base>/teammux`, where `<base>` is `$XDG_CONFIG_HOME` when it is absolute, else `~/.config`, taken exactly as the environment gives it (the gateway service records it). It is chosen ONCE per process, before anything is read, created or written, by looking at the two names under `<base>`:
+
+| `teammux` | `tmux-mobile` | result |
+|---|---|---|
+| absent | absent | `teammux`, created on first use (a fresh install) |
+| absent | a directory | `tmux-mobile`, for good: an install made before the rename keeps its directory, and nothing is renamed, linked or copied |
+| a directory | absent | `teammux` |
+| a directory | a directory reaching the SAME place | `teammux` (the other name is another way in; the base is still `<base>`, wherever the links lead) |
+| a directory | a directory reaching a DIFFERENT place | refused before any write, whichever side is empty |
+| anything that cannot be examined, a link that dangles or loops, a link owned by another user, a name that is not a directory | | refused; "absent" means not found and nothing else |
+
+A refusal names both paths and says nothing was changed; the commands that read no configuration (`--help`, `claude-statusline`, a local `task`) still answer. `tmm gateway status` prints the directory in use and says when it is the old name. Limits: two processes starting at once on an empty base can each create a different name (an older build knows nothing of this rule), and the next start then refuses; a fresh `teammux` install followed by an older binary on the same base is an unsupported downgrade. Design and review: board #472.

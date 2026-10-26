@@ -25,7 +25,7 @@ Install the gateway first, then open the app. The other way round, the app start
    tmm gateway
    ```
 
-   With no `~/.config/tmux-mobile/config.toml` yet it asks a few questions (port, listen address, tmux socket, optional TLS) and writes it; `tmm setup` runs the same questions again later. It then installs and starts the launchd agent `cc.voka.tmux-mobile`, which starts at login. `tmm gateway status` shows it and prints the connect hint; `tmm ui --open` opens the web UI the gateway serves.
+   With no `config.toml` yet (in `~/.config/teammux/` (an install made before the rename keeps `~/.config/tmux-mobile/`)) it asks a few questions (port, listen address, tmux socket, optional TLS) and writes it; `tmm setup` runs the same questions again later. It then installs and starts the launchd agent `cc.voka.tmux-mobile`, which starts at login. `tmm gateway status` shows it and prints the connect hint; `tmm ui --open` opens the web UI the gateway serves.
 
 4. Open the app. At start it checks for this machine's gateway (the same check `tmm gateway status` makes: a login with your token, answered with this machine's id):
    - the gateway answers → the app uses it and starts no server of its own;
@@ -260,4 +260,4 @@ again (`TEAMMUX_DEV_WITH_SERVER=1`).
 tmm gateway uninstall      # stops and removes the service
 ```
 
-The configuration stays in `~/.config/tmux-mobile/`. The design behind every step is in [tmm-cli.md § The gateway](../design-docs/features/tmm-cli.md#the-gateway-tmm-gateway-board-323).
+The configuration stays in its directory (`~/.config/teammux/` (an install made before the rename keeps `~/.config/tmux-mobile/`)). The design behind every step is in [tmm-cli.md § The gateway](../design-docs/features/tmm-cli.md#the-gateway-tmm-gateway-board-323).

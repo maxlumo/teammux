@@ -142,21 +142,128 @@ fn config_path() -> PathBuf {
     dirs_next().join("config.toml")
 }
 
-/// The tmux-mobile config directory (`~/.config/tmux-mobile`).
+/// The configuration directory: `<base>/teammux` on a fresh install, and
+/// `<base>/tmux-mobile` on an install that already has one (board #472, B1).
+/// ONE directory per process, chosen by [`init_root`] (or on first use) and
+/// never changed afterwards.
 pub fn config_dir() -> PathBuf {
     dirs_next()
 }
 
+/// The directory name of a fresh install, and the one an install made before the
+/// rename keeps. Both are names under the same XDG base.
+pub const ROOT_NAME: &str = "teammux";
+pub const LEGACY_ROOT_NAME: &str = "tmux-mobile";
+
+/// What looking at one of the two names found.
+#[derive(Debug)]
+enum Found {
+    Absent,
+    /// A directory, or a link that reaches one; `reaches` is its real path and is
+    /// used ONLY to ask whether two names lead to the same place, never returned.
+    Dir { reaches: PathBuf },
+}
+
+/// Look at one name without writing. "Absent" means NotFound and nothing else:
+/// a name that cannot be examined (permission, a loop, a dangling link, not a
+/// directory, a link owned by someone else) refuses, it is never read as absent.
+fn examine(path: &std::path::Path) -> Result<Found, String> {
+    use std::os::unix::fs::MetadataExt;
+    let link = match std::fs::symlink_metadata(path) {
+        Ok(m) => m,
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(Found::Absent),
+        Err(e) => return Err(format!("cannot examine {}: {e}", path.display())),
+    };
+    if link.file_type().is_symlink() && link.uid() != crate::safe_fs::euid() {
+        return Err(format!("{} is a symbolic link owned by another user", path.display()));
+    }
+    let target = std::fs::metadata(path)
+        .map_err(|e| format!("{} cannot be followed ({e}); a dangling or looping link?", path.display()))?;
+    if !target.is_dir() {
+        return Err(format!("{} is not a directory", path.display()));
+    }
+    let reaches = std::fs::canonicalize(path).map_err(|e| format!("cannot resolve {}: {e}", path.display()))?;
+    Ok(Found::Dir { reaches })
+}
+
+/// Which directory under `base` is the configuration root (board #472, B1). Pure
+/// choice, no write: nothing is created, renamed, linked or deleted here.
+///
+/// | `teammux` | `tmux-mobile` | result |
+/// |---|---|---|
+/// | absent | absent | `teammux` (a fresh install creates it) |
+/// | absent | a directory | `tmux-mobile`, for good: an existing install keeps its directory |
+/// | a directory | absent | `teammux` |
+/// | a directory | a directory, SAME real place | `teammux` (the other name is another way in) |
+/// | a directory | a directory, DIFFERENT places | refused, whichever side is empty |
+/// | anything that cannot be examined or is not a directory | | refused |
+///
+/// The result is `base` joined with one of the two names, so its parent is `base`
+/// exactly as given: the half of the gateway service's identity that is the XDG base.
+pub(crate) fn resolve_root(base: &std::path::Path) -> Result<PathBuf, String> {
+    let new = base.join(ROOT_NAME);
+    let old = base.join(LEGACY_ROOT_NAME);
+    let refuse = |why: String| format!("{why}. Nothing was changed.");
+    match (examine(&new).map_err(&refuse)?, examine(&old).map_err(&refuse)?) {
+        (Found::Absent, Found::Absent) => Ok(new),
+        (Found::Absent, Found::Dir { .. }) => Ok(old),
+        (Found::Dir { .. }, Found::Absent) => Ok(new),
+        (Found::Dir { reaches: a }, Found::Dir { reaches: b }) if a == b => Ok(new),
+        (Found::Dir { reaches: a }, Found::Dir { reaches: b }) => Err(format!(
+            "Two configuration directories exist and they are different places: {} (reaches {}) and {} (reaches {}). \
+             Teammux does not choose between them and does not merge them: the token, the machine id and state.db may differ. \
+             Move or remove the one you do not want, then start again. Nothing was changed.",
+            new.display(), a.display(), old.display(), b.display()
+        )),
+    }
+}
+
+/// The XDG base: `$XDG_CONFIG_HOME` when absolute, else `$HOME/.config`. Taken as the
+/// environment gives it, never resolved: the gateway service records it.
 #[cfg(not(test))]
-fn dirs_next() -> PathBuf {
-    // Follow the XDG Base Directory convention: $XDG_CONFIG_HOME if set,
-    // else ~/.config. App state lives under the `tmux-mobile/` subdir.
-    let base = std::env::var_os("XDG_CONFIG_HOME")
+fn xdg_base() -> PathBuf {
+    std::env::var_os("XDG_CONFIG_HOME")
         .map(PathBuf::from)
         .filter(|p| p.is_absolute())
         .or_else(|| std::env::var_os("HOME").map(|h| PathBuf::from(h).join(".config")))
-        .unwrap_or_else(|| PathBuf::from(".config"));
-    base.join("tmux-mobile")
+        .unwrap_or_else(|| PathBuf::from(".config"))
+}
+
+/// Decide the configuration root ONCE for this process and remember the answer
+/// (or the refusal). Call it at the first point that needs the configuration,
+/// before the first config, database, lock or hook access; an entry that reads no
+/// configuration (`--help`, `claude-statusline`, a local `task`) does not call it.
+/// Calling it again returns the same answer.
+pub fn init_root() -> Result<PathBuf, String> {
+    #[cfg(not(test))]
+    {
+        root().clone()
+    }
+    #[cfg(test)]
+    {
+        Ok(dirs_next())
+    }
+}
+
+#[cfg(not(test))]
+fn root() -> &'static Result<PathBuf, String> {
+    static ROOT: std::sync::OnceLock<Result<PathBuf, String>> = std::sync::OnceLock::new();
+    ROOT.get_or_init(|| resolve_root(&xdg_base()))
+}
+
+/// Is the chosen root the one an install made before the rename keeps?
+pub fn root_is_legacy() -> bool {
+    config_dir().file_name().is_some_and(|n| n == LEGACY_ROOT_NAME)
+}
+
+#[cfg(not(test))]
+fn dirs_next() -> PathBuf {
+    // A refusal stops the process, loudly, before anything is written: an entry that
+    // forgot `init_root()` still never works on a different root than another consumer.
+    match root() {
+        Ok(dir) => dir.clone(),
+        Err(why) => panic!("{why}"),
+    }
 }
 
 /// The unit-test process never sees the operator's config directory. Every
@@ -685,5 +792,106 @@ mod engine_tests {
         assert_eq!(normalize_engine(" v3 "), "v3");
         assert_eq!(normalize_engine("v1"), "v2", "v1 is not offered: v2");
         assert_eq!(normalize_engine("kas"), "v2");
+    }
+}
+
+/// Board #472, B1: the table that chooses the configuration root, on real directories.
+#[cfg(test)]
+mod root_choice_tests {
+    use super::*;
+    use std::os::unix::fs::symlink;
+
+    fn base(tag: &str) -> PathBuf {
+        let b = std::env::temp_dir().join(format!("tmm-root-{tag}-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&b);
+        std::fs::create_dir_all(&b).unwrap();
+        b
+    }
+
+    fn listing(dir: &std::path::Path) -> Vec<String> {
+        let mut out = Vec::new();
+        fn walk(d: &std::path::Path, out: &mut Vec<String>) {
+            let mut es: Vec<_> = std::fs::read_dir(d).unwrap().flatten().collect();
+            es.sort_by_key(|e| e.file_name());
+            for e in es {
+                let m = std::fs::symlink_metadata(e.path()).unwrap();
+                out.push(format!("{} {}", e.path().display(), if m.file_type().is_symlink() { "link" } else if m.is_dir() { "dir" } else { "file" }));
+                if m.is_dir() { walk(&e.path(), out); }
+            }
+        }
+        walk(dir, &mut out);
+        out
+    }
+
+    #[test]
+    fn the_rows_of_the_table() {
+        let b = base("rows");
+        assert_eq!(resolve_root(&b).unwrap(), b.join("teammux"), "neither exists: a fresh install is teammux");
+        std::fs::create_dir(b.join("tmux-mobile")).unwrap();
+        assert_eq!(resolve_root(&b).unwrap(), b.join("tmux-mobile"), "only the old one: it stays the root");
+        std::fs::remove_dir(b.join("tmux-mobile")).unwrap();
+        std::fs::create_dir(b.join("teammux")).unwrap();
+        assert_eq!(resolve_root(&b).unwrap(), b.join("teammux"), "only the new one");
+    }
+
+    #[test]
+    fn two_names_for_the_same_place_choose_teammux_and_keep_the_base_as_the_parent() {
+        let b = base("same");
+        let ext = base("same-ext").join("disk/state");
+        std::fs::create_dir_all(&ext).unwrap();
+        symlink(&ext, b.join("teammux")).unwrap();
+        symlink(&ext, b.join("tmux-mobile")).unwrap();
+        let root = resolve_root(&b).unwrap();
+        assert_eq!(root, b.join("teammux"));
+        assert_eq!(root.parent().unwrap(), b, "the parent is the base as given, never the disk the links lead to");
+        // the other direction: the new name is a link to the old directory
+        let c = base("same-alias");
+        std::fs::create_dir(c.join("tmux-mobile")).unwrap();
+        symlink(c.join("tmux-mobile"), c.join("teammux")).unwrap();
+        assert_eq!(resolve_root(&c).unwrap(), c.join("teammux"));
+    }
+
+    #[test]
+    fn two_different_places_refuse_whichever_side_is_empty_and_write_nothing() {
+        for (tag, new_full, old_full) in [("ee", false, false), ("ef", false, true), ("fe", true, false), ("ff", true, true)] {
+            let b = base(tag);
+            std::fs::create_dir(b.join("teammux")).unwrap();
+            std::fs::create_dir(b.join("tmux-mobile")).unwrap();
+            if new_full { std::fs::write(b.join("teammux/config.toml"), "token = \"n\"").unwrap(); }
+            if old_full { std::fs::write(b.join("tmux-mobile/config.toml"), "token = \"o\"").unwrap(); }
+            let before = listing(&b);
+            let why = resolve_root(&b).unwrap_err();
+            assert!(why.contains("Two configuration directories exist") && why.contains("Nothing was changed"), "{tag}: {why}");
+            assert!(why.contains(&b.join("teammux").display().to_string()) && why.contains(&b.join("tmux-mobile").display().to_string()), "both paths named: {why}");
+            assert_eq!(listing(&b), before, "{tag}: nothing created, renamed, linked or deleted");
+        }
+    }
+
+    #[test]
+    fn a_name_that_cannot_be_read_as_a_directory_refuses_and_is_never_absent() {
+        let looped = base("loop");
+        symlink(looped.join("teammux"), looped.join("teammux")).unwrap();
+        assert!(resolve_root(&looped).unwrap_err().contains("cannot be followed"));
+        let dangling = base("dangling");
+        symlink(dangling.join("nowhere"), dangling.join("tmux-mobile")).unwrap();
+        assert!(resolve_root(&dangling).unwrap_err().contains("cannot be followed"), "a dangling link is not 'absent'");
+        let file = base("file");
+        std::fs::write(file.join("teammux"), "x").unwrap();
+        assert!(resolve_root(&file).unwrap_err().contains("not a directory"));
+        // The other name is checked even when the first is absent or fine.
+        let both = base("second");
+        std::fs::create_dir(both.join("teammux")).unwrap();
+        std::fs::write(both.join("tmux-mobile"), "x").unwrap();
+        assert!(resolve_root(&both).is_err(), "an unreadable second name refuses too");
+        // Permission denied while looking is an error, not 'absent' (skipped as root, which can look anywhere).
+        if crate::safe_fs::euid() != 0 {
+            use std::os::unix::fs::PermissionsExt;
+            let locked = base("locked");
+            std::fs::create_dir(locked.join("inner")).unwrap();
+            std::fs::set_permissions(&locked, std::fs::Permissions::from_mode(0o000)).unwrap();
+            let r = resolve_root(&locked.join("inner"));
+            std::fs::set_permissions(&locked, std::fs::Permissions::from_mode(0o700)).unwrap();
+            assert!(r.unwrap_err().contains("cannot examine"), "permission denied is not NotFound");
+        }
     }
 }

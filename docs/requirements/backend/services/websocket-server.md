@@ -15,7 +15,7 @@ Rust-based WebSocket server providing JSON-RPC interface to tmux and filesystem 
 - Before auth a connection gets 8 KB per text frame and 10 s to finish the handshake; over either, the server closes it. The 80 MB message allowance exists for authenticated `fs_upload`, not for a stranger on a 0.0.0.0 port.
 - E2E v2 derives three keys per session (proof, client→server, server→client) so the two directions never share a (key, nonce); a client that does not ask for v2 gets the single-key v1 handshake. Contract: `docs/requirements/api-contracts/websocket-rpc.md`
 - Encrypted mode: all subsequent messages are binary AES-256-GCM frames; decrypted payloads use a one-byte raw-JSON/raw-deflate framing tag
-- Token auto-generated on first run, persisted in `~/.config/tmux-mobile/config.toml` (mode 0600). Printed at startup only when stdout is a terminal; under a supervisor or redirect the line names the config file instead, so the secret never lands in a log
+- Token auto-generated on first run, persisted in `config.toml` in `~/.config/teammux/` (an install made before the rename keeps `~/.config/tmux-mobile/`) (mode 0600). Printed at startup only when stdout is a terminal; under a supervisor or redirect the line names the config file instead, so the secret never lands in a log
 - Environment variable `TOKEN` overrides config
 - Rate limiting: per-IP auth failure tracking for TCP peers. Five failures inside 60 s lock that IP out for the rest of the 60 s, refused before the WebSocket handshake. A success from the IP clears its count. The local socket below carries no lockout. The IP is the TCP peer, or, behind a proxy named in `trusted_proxies`, the client its X-Forwarded-For names (below, board #441).
 
@@ -74,7 +74,7 @@ Every client of the owner's remote route reaches the gateway from 127.0.0.1, so 
 - Sets tmux hook (`client-session-changed`) so real terminal clients restore size when they next attach
 
 ## Configuration
-- File: `~/.config/tmux-mobile/config.toml`
+- File: `config.toml` in `~/.config/teammux/` (an install made before the rename keeps `~/.config/tmux-mobile/`)
 - Fields: token, host (default 0.0.0.0), port (default 9899), tmux_socket, tls_cert, tls_key, scrollback (default 500), disconnect_grace_secs (default 600)
 - Env vars: TOKEN, HOST, PORT, TMUX_SOCKET, TLS_CERT, TLS_KEY, SCROLLBACK, DISCONNECT_GRACE_SECS
 - TLS support via tls_cert + tls_key paths

@@ -214,7 +214,7 @@ native WebView/IME behavior and the owner's actual build remain separate gates.
 ## Edge Cases
 - Auto ws/wss detection based on address format
 - Multi-address reconnect: server machine_id tracks alternate addresses, auto-failover on disconnect
-- Tauri desktop auto-fills config from local `~/.config/tmux-mobile/config.toml`
+- Tauri desktop auto-fills config from the local `config.toml` (in `~/.config/teammux/` (an install made before the rename keeps `~/.config/tmux-mobile/`))
 - Language auto-detected from `navigator.language` on first visit (zh → Chinese, else English)
 
 ## Motion

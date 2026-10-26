@@ -295,6 +295,11 @@ pub fn run() {
         // rules, before anything is started. Only a refused connection starts
         // the embedded server; a port held by something unproven starts
         // nothing (never a second server). Decided once at start.
+        // The configuration root is decided before anything reads or seeds it (board #472).
+        if let Err(e) = crate::config::init_root() {
+            eprintln!("Teammux: {e}");
+            std::process::exit(1);
+        }
         let cfg = Config::load();
         tmux::set_scrollback(cfg.scrollback);
         let rt = tokio::runtime::Runtime::new().expect("tokio runtime");
