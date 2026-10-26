@@ -11,13 +11,13 @@ const compiled = compileMount(new URL('./MediaPlayer.svelte', import.meta.url), 
 
 type Pending = { resolve: () => void; reject: (name: string) => void };
 type Media = { paused: boolean; t: number; d: number; buf: number[][]; seek: number[][]; err: number | null; muted: boolean;
-  plays: Pending[]; pauses: number; seeks: number[] };
+  plays: Pending[]; pauses: number; seeks: number[]; rs: number; vw: number; vh: number };
 
 function stubMedia(win: any, opts: { fullscreen?: boolean; pip?: boolean } = {}) {
   const P = win.HTMLMediaElement.prototype;
   const states = new WeakMap<object, Media>();
   const s = (el: object): Media => {
-    if (!states.has(el)) states.set(el, { paused: true, t: 0, d: NaN, buf: [], seek: [], err: null, muted: false, plays: [], pauses: 0, seeks: [] });
+    if (!states.has(el)) states.set(el, { paused: true, t: 0, d: NaN, buf: [], seek: [], err: null, muted: false, plays: [], pauses: 0, seeks: [], rs: 0, vw: 0, vh: 0 });
     return states.get(el)!;
   };
   const ranges = (a: number[][]) => ({ length: a.length, start: (i: number) => a[i]![0], end: (i: number) => a[i]![1] });
@@ -29,6 +29,9 @@ function stubMedia(win: any, opts: { fullscreen?: boolean; pip?: boolean } = {})
   prop('buffered', (m) => ranges(m.buf));
   prop('seekable', (m) => ranges(m.seek));
   prop('error', (m) => (m.err == null ? null : { code: m.err }));
+  prop('readyState', (m) => m.rs);
+  Object.defineProperty(win.HTMLVideoElement.prototype, 'videoWidth', { configurable: true, get() { return s(this).vw; } });
+  Object.defineProperty(win.HTMLVideoElement.prototype, 'videoHeight', { configurable: true, get() { return s(this).vh; } });
   prop('muted', (m) => m.muted, (m, v, el) => { m.muted = v; el.dispatchEvent(new win.Event('volumechange')); });
   P.play = function (this: any) {
     const m = s(this), el = this;
@@ -686,4 +689,117 @@ test('the narrow/wide switch mid-drag destroys the range: its drag is retired, s
     p.fireRange('pointerdown'); p.range().value = '120'; p.fireRange('input'); p.fireRange('pointerup'); await p.app.flush();
     assert.deepEqual(p.m().seeks, [120]);
   } finally { await p.app.close(); }
+});
+
+// Board #470: before the picture is on screen the player shows OUR tile —
+// never the browser's (Android WebView's default poster). Three states, the
+// hand-over read from the element itself, per load.
+const tile = (p: Awaited<ReturnType<typeof player>>) => p.app.document.querySelector<HTMLElement>('.mp-ph');
+const state = (p: Awaited<ReturnType<typeof player>>) => {
+  const t = tile(p); if (!t) return 'frame';
+  const inner = t.querySelector('.mp-ph-tile')!;
+  return `${inner.classList.contains('still') ? 'still' : 'shimmer'}${t.querySelector('.mp-ph-play') ? '+play' : ''}`;
+};
+const dataLands = async (p: Awaited<ReturnType<typeof player>>, vw = 1280, vh = 720) => {
+  Object.assign(p.m(), { rs: 1, vw, vh, d: 178 }); p.ev('loadedmetadata'); await p.app.flush();
+  p.m().rs = 2; p.ev('loadeddata'); await p.app.flush();
+};
+
+test('desktop: preparing shimmers in the picture\u2019s aspect; the first frame hands over on the SAME element; no poster attribute (#470)', async (context) => {
+  const p = await player(context);
+  try {
+    const video = p.video();
+    assert.equal(video.hasAttribute('poster'), false, 'desktop keeps its first-frame preview: a poster would hide it until play');
+    assert.equal(state(p), 'shimmer', 'preparing: the loading skeleton, nothing else');
+    assert.ok(tile(p)!.classList.contains('skel-wrap'), 'the 150ms delay of motion.md 15');
+    assert.equal(tile(p)!.style.getPropertyValue('--mp-aspect'), String(16 / 9), '16:9 until the metadata says');
+    Object.assign(p.m(), { rs: 1, vw: 720, vh: 1280 }); p.ev('loadedmetadata'); await p.app.flush();
+    assert.equal(tile(p)!.style.getPropertyValue('--mp-aspect'), String(720 / 1280), 'a portrait picture\u2019s own aspect');
+    p.m().rs = 2; p.ev('loadeddata'); await p.app.flush();
+    assert.equal(state(p), 'frame');
+    assert.equal(p.video(), video, 'the frame lands in the same element: nothing remounts');
+    // Ordinary pause, buffering and seeking after the frame: never the initial tile again.
+    p.m().rs = 1; p.ev('waiting'); p.ev('seeking'); await p.app.flush();
+    assert.equal(state(p), 'frame', 'buffering after the frame keeps the frame');
+    await p.app.setProps({ visible: false }); await p.app.setProps({ visible: true });
+    assert.equal(state(p), 'frame', 'hidden and shown again: still the frame');
+  } finally { await p.app.close(); }
+});
+
+test('desktop: a new source starts over; an old source\u2019s readiness never reaches it (#470)', async (context) => {
+  const p = await player(context);
+  try {
+    await dataLands(p);
+    assert.equal(state(p), 'frame');
+    Object.assign(p.m(), { rs: 0, vw: 0, vh: 0 });
+    p.ev('emptied'); await p.app.flush();
+    assert.equal(state(p), 'shimmer', 'emptied alone (the old media is gone) starts over');
+    await dataLands(p);
+    Object.assign(p.m(), { rs: 0, vw: 0, vh: 0 });
+    p.ev('loadstart'); await p.app.flush();
+    assert.equal(state(p), 'shimmer', 'loadstart alone (a new load) starts over');
+    await p.app.setProps({ src: 'https://h/dl?path=%2Fb.mp4&stream=1' });
+    p.ev('canplay'); await p.app.flush();
+    assert.equal(state(p), 'shimmer', 'an event without data on THIS element is no frame');
+  } finally { await p.app.close(); }
+});
+
+test('desktop: an error before any frame is still, with no play glyph and no loading motion; the bar says what failed (#470)', async (context) => {
+  const p = await player(context);
+  try {
+    p.m().err = 4; p.ev('error'); await p.app.flush();
+    assert.equal(state(p), 'still', 'no shimmer, no glyph');
+    assert.ok(p.app.document.querySelector('.mp-error'), 'the existing error feedback names it');
+  } finally { await p.app.close(); }
+});
+
+test('Android app: a transparent poster from the first mount, so WebView never paints its own; ready-but-not-played is a STILL tile with the play glyph, in either event order (#470)', async (context) => {
+  const p = await player(context, {}, {}, androidApp(false));
+  try {
+    const video = p.video();
+    assert.match(video.getAttribute('poster') ?? '', /^data:image\/gif;base64,/u, 'set at mount, before any data');
+    assert.equal(state(p), 'shimmer', 'preparing');
+    await dataLands(p);
+    assert.equal(state(p), 'still+play', 'data is there, but the poster still covers the frame until play: no endless shimmer');
+    p.ev('play'); await p.app.flush();
+    assert.equal(state(p), 'frame', 'play clears the show-poster flag: the frame shows');
+    assert.equal(p.video(), video);
+  } finally { await p.app.close(); }
+  // play BEFORE the data: still preparing, then the frame when it lands.
+  const q = await player(context, {}, {}, androidApp(false));
+  try {
+    q.ev('play'); await q.app.flush();
+    assert.equal(state(q), 'shimmer', 'play is no frame: nothing to show yet');
+    await dataLands(q);
+    assert.equal(state(q), 'frame', 'the data lands after play: the frame shows');
+  } finally { await q.app.close(); }
+  // A seek clears the flag too; a play the browser refused (no play event) does not.
+  const r = await player(context, {}, {}, androidApp(false));
+  try {
+    await dataLands(r);
+    r.button('Play')!.click(); await r.app.flush();
+    await r.settlePlay(0, 'NotAllowedError');
+    assert.equal(state(r), 'still', 'a refused play leaves the poster up: the tile stays, as the error state (the bar says it was blocked)');
+    assert.ok(r.app.document.querySelector('.mp-error'));
+    r.ev('seeking'); await r.app.flush();
+    assert.equal(state(r), 'frame', 'a seek clears the show-poster flag');
+  } finally { await r.app.close(); }
+});
+
+test('Android app: a load that played does not lend its cleared poster flag to the next one — emptied alone and loadstart alone each start over (#470 review P2)', async (context) => {
+  for (const reset of ['emptied', 'loadstart']) {
+    const p = await player(context, {}, {}, androidApp(false));
+    try {
+      await dataLands(p);
+      p.ev('play'); await p.app.flush();
+      assert.equal(state(p), 'frame', `${reset}: the first load played and shows its frame`);
+      Object.assign(p.m(), { rs: 0, vw: 0, vh: 0 });
+      p.ev(reset); await p.app.flush();
+      assert.equal(state(p), 'shimmer', `${reset}: the next load prepares again`);
+      await dataLands(p);
+      assert.equal(state(p), 'still+play', `${reset}: data, but no play or seek on THIS load: the poster still covers the frame`);
+      p.ev('play'); await p.app.flush();
+      assert.equal(state(p), 'frame', `${reset}: its own play hands over`);
+    } finally { await p.app.close(); }
+  }
 });

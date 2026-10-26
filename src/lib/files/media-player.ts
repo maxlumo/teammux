@@ -65,6 +65,15 @@ export function errorKind(code: number | undefined): 'unplayable' | 'transient' 
   return code === 3 || code === 4 ? 'unplayable' : 'transient';
 }
 
+/** The poster the Android app gives every <video> (board #470): a 1x1
+ * transparent GIF. Without one, Android WebView paints its own default
+ * poster (Blink's DefaultVideoPosterURL: a grey box with a black circled
+ * play glyph) until the user plays, whatever controls/preload say. A data
+ * URI fetches nothing and the CSP's img-src allows it. Not set elsewhere: a
+ * poster keeps the show-poster flag's picture until play or a seek, which
+ * would hide the first frame desktop browsers show before play. */
+export const BLANK_POSTER = 'data:image/gif;base64,R0lGODlhAQABAIAAAAAAAP///yH5BAEAAAAALAAAAAABAAEAAAIBRAA7';
+
 /** The host facts the two modes are offered on (#453 P2: separately). */
 export type Host = { android: boolean; androidFullscreen: boolean };
 

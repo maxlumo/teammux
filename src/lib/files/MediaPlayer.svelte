@@ -21,7 +21,8 @@
   import { anchorOf } from '../ui/placement.ts';
   import { t } from '../core/i18n.svelte.ts';
   import { isAndroid } from '../core/platform.ts';
-  import { ANDROID_FULLSCREEN_EVENT, androidFullscreen, canFullscreen, canPip, clampTo, errorKind, fmtTime, Intents, seekWindow, spans, third, type Span } from './media-player.ts';
+  import Icon from '../ui/Icon.svelte';
+  import { ANDROID_FULLSCREEN_EVENT, BLANK_POSTER, androidFullscreen, canFullscreen, canPip, clampTo, errorKind, fmtTime, Intents, seekWindow, spans, third, type Span } from './media-player.ts';
 
   let { kind, src, name = '', visible = true, mediaEl = $bindable(null), reopen = null }:
     { kind: 'video' | 'audio'; src: string; name?: string;
@@ -40,6 +41,25 @@
   let buffered = $state<Span[]>([]), seekable = $state<Span[]>([]);
   let error = $state<{ text: string; unplayable: boolean; network: boolean } | null>(null);
   let preview = $state<number | null>(null);
+  /** The picture is on screen (board #470) once the CURRENT load has data
+   * AND, in the Android app, the show-poster flag is cleared: our transparent
+   * poster (BLANK_POSTER) keeps covering the first frame until play or a
+   * seek, as any poster does. Both facts are per load: `loadstart` (a new
+   * load's resource selection, where Blink sets the show-poster flag again)
+   * and `emptied` clear them, so an old source's never reaches a new one, and they may arrive
+   * in either order. Until then the player shows its own tile, in the
+   * picture's aspect (16:9 until the metadata says). */
+  let hasData = $state(false), posterCleared = $state(false), framed = $state(false), aspect = $state(16 / 9);
+  /** Read the element itself, on every event that can change the answer:
+   * data is HAVE_CURRENT_DATA or better on THIS element now. Once the frame
+   * is on screen it stays for this load — a later pause, seek or buffering
+   * never brings the initial tile back. */
+  function settleFrame() {
+    if (framed || !mediaEl) return;
+    hasData = mediaEl.readyState >= 2;
+    if (hasData && (!isAndroid || posterCleared)) framed = true;
+  }
+  function newLoad() { hasData = false; posterCleared = false; framed = false; aspect = 16 / 9; }
   /** The range transaction being dragged and the seek ticket it opened. */
   let drag: { tx: number; ticket: ReturnType<Intents['begin']> } | null = null;
   /** `life` bumps at every life end (menus built before it are stale);
@@ -256,13 +276,24 @@
     ];
   });
   const media = {
-    onplay: () => { paused = false; }, onpause: () => { paused = true; }, onended: () => { paused = true; },
-    onwaiting: () => { waiting = true; }, onseeking: () => { waiting = true; readTimes(); },
-    onplaying: () => { waiting = false; error = null; }, onseeked: () => { waiting = false; readTimes(); },
-    oncanplay: () => { waiting = false; },
-    ontimeupdate: readTimes, ondurationchange: readTimes, onloadedmetadata: readTimes, onprogress: readTimes,
-    // A new load: the old source's state, its error included, is gone.
-    onemptied: () => { reset(); paused = true; error = null; },
+    // Blink clears the show-poster flag where it fires `play` (PlayInternal)
+    // and `seeking` (Seek step 1); a play() the browser refuses fires neither.
+    onplay: () => { paused = false; posterCleared = true; settleFrame(); }, onpause: () => { paused = true; }, onended: () => { paused = true; },
+    onwaiting: () => { waiting = true; }, onseeking: () => { waiting = true; posterCleared = true; readTimes(); settleFrame(); },
+    onplaying: () => { waiting = false; error = null; settleFrame(); }, onseeked: () => { waiting = false; readTimes(); settleFrame(); },
+    oncanplay: () => { waiting = false; settleFrame(); },
+    ontimeupdate: readTimes, ondurationchange: readTimes, onprogress: readTimes,
+    onloadedmetadata: () => {
+      readTimes();
+      const v = mediaEl as HTMLVideoElement | null;
+      if (v?.videoWidth && v.videoHeight) aspect = v.videoWidth / v.videoHeight;
+    },
+    onloadeddata: settleFrame,
+    // A new load: the old source's state, its error included, is gone
+    // (`loadstart` comes from the resource selection that sets the
+    // show-poster flag again).
+    onloadstart: newLoad,
+    onemptied: () => { reset(); paused = true; error = null; newLoad(); },
     onerror: () => {
       const code = mediaEl?.error?.code, unplayable = errorKind(code) === 'unplayable';
       error = { text: t(unplayable ? 'mediaUnplayable' : 'mediaFailed'), unplayable, network: code === 2 };
@@ -288,7 +319,22 @@
   {#if kind === 'video'}
     <!-- svelte-ignore a11y_media_has_caption -->
     <video bind:this={mediaEl} playsinline preload="metadata" src={ownSrc ?? src} {...media}
+      poster={isAndroid ? BLANK_POSTER : undefined}
       onpointerdown={(e) => { down = live() ? { x: e.clientX, y: e.clientY, shown } : null; }} onpointerup={onPictureUp}></video>
+    <!-- Until the picture is on screen, OUR placeholder (board #470): the
+         .skel atom in the picture's aspect, centred where the frame will
+         land, invisible for its first 150ms (.skel-wrap, motion.md 15).
+         Three states (review P1): LOADING shimmers, nothing else; READY to
+         play but not yet showing its frame (the Android app's poster flag,
+         until play) is still, with the one small play glyph; an ERROR is
+         still with no glyph, and the bar says what failed. Taps go through. -->
+    {#if !framed}
+      <div class="mp-ph skel-wrap" aria-hidden="true" style:--mp-aspect={aspect}>
+        <span class="skel mp-ph-tile" class:still={hasData || !!error}>
+          {#if hasData && !error}<span class="mp-ph-play"><Icon name="play" /></span>{/if}
+        </span>
+      </div>
+    {/if}
   {:else}
     <!-- svelte-ignore a11y_media_has_caption -->
     <audio bind:this={mediaEl} preload="metadata" src={ownSrc ?? src} {...media}></audio>
@@ -330,6 +376,13 @@
   .media-player { position: relative; display: flex; flex-direction: column; justify-content: center; width: 100%; max-height: 100%; outline: none; }
   .media-player.video { align-self: stretch; flex: 1; min-height: 0; }
   video { flex: 1; min-height: 0; width: 100%; max-height: 100%; object-fit: contain; border-radius: 4px; background: var(--bg); }
+  /* The placeholder covers the video's box (the bar is absolute, so the
+     video IS the player's box) and fits the picture's aspect in it the way
+     object-fit: contain fits the frame. */
+  .mp-ph { position: absolute; inset: 0; display: flex; align-items: center; justify-content: center; container-type: size; pointer-events: none; }
+  .mp-ph-tile { display: flex; align-items: center; justify-content: center; width: min(100cqw, calc(100cqh * var(--mp-aspect))); aspect-ratio: var(--mp-aspect); }
+  .mp-ph-tile.still::after { content: none; }
+  .mp-ph-play { display: flex; color: var(--text3); }
   .mp-bar {
     display: flex; flex-direction: column; gap: var(--tool-gap); padding: var(--ui-gap) calc(2 * var(--ui-gap));
     border-radius: var(--ui-radius-row); background: var(--surface2);

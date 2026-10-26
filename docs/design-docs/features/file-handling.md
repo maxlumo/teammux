@@ -596,6 +596,59 @@ An hls/dash engine is out of scope (the files are files, not manifests).
   "More"; when even that row has no room (347 px at uiZoom 1.2 on the rig
   pushed More 30 px out of the bar), the time keeps its position and drops
   "/ duration" (one line that wraps the second part away), never a control.
+- **Before the picture is on screen it is OUR tile** (board #470; owner,
+  2026-10-26: "为什么手机app里看这个预览界面，加载前，很不好看", a screenshot
+  of the Android app with a grey box and a huge black circled play glyph).
+  *Mechanism* (Chromium main, read 2026-10-26: Blink's `HTMLVideoElement`,
+  `LayoutVideo`, `HTMLMediaElement`; not run on a device):
+  `ImageSourceURL()` is the `poster` attribute, else the
+  `DefaultVideoPosterURL` setting. Android WebView fills that setting with
+  its own `android-webview-video-poster:` image
+  (`WebChromeClient.getDefaultVideoPoster()`, which wry's client does not
+  override: the grey box with the glyph). Desktop Chrome and WebKit leave it
+  empty. `LayoutVideo::GetDisplayMode()` paints the poster while the
+  show-poster flag is set OR no frame is available, and the flag clears only
+  on play or a seek. So the WebView's poster stayed up after the metadata
+  (and the first frame) had arrived, until play. `controls` and `preload` do
+  not decide it.
+  *Fix:* the Android app gives the element a poster of its own,
+  `BLANK_POSTER` (a 1x1 transparent GIF data URI: no fetch, and the CSP's
+  `img-src` allows `data:`), from the first mount, so the WebView never
+  paints its default. Desktop gets none: measured in headless Chromium 153,
+  a transparent poster leaves 0% of the box painted after `loadeddata` (99.5%
+  without one, or after a seek or play). It would hide the first-frame
+  preview desktop shows before play. Until the element shows a frame, the
+  player draws the `.skel` atom inside `.skel-wrap` (invisible for 150ms,
+  motion.md principle 15), centred and sized to the picture's aspect the way
+  `object-fit: contain` fits the frame (16:9 until `loadedmetadata`). It has
+  three states, each its own paint (review P1):
+  - preparing: shimmer, nothing else;
+  - ready but not showing its frame (the Android app's flag, until play):
+    still, with one small `ui/Icon` play glyph at `--text3`;
+  - an error: still with no glyph; the bar's existing error line says what
+    failed.
+  The hand-over reads the element itself (`settleFrame`): `readyState` ≥
+  HAVE_CURRENT_DATA, plus on Android a `play` or `seeking` event, the two
+  places Blink clears the flag (a play the browser refuses fires neither).
+  Any order works, it is decided per load (`loadstart`, where a new load's
+  resource selection sets the flag again, and `emptied` clear it), and once
+  the frame shows it stays for that load: a later pause, buffering or hide
+  never brings the tile back.
+  *Geometry* (the real FilePreview + MediaPlayer in Chromium 153, a 390x700
+  box, 16:9, 9:16 and 1:1 clips, the Android branch forced on to run the
+  same Blink). The player, the video box and the bar are identical to main
+  before metadata, after data and after play in all three. The tile is
+  342×192.4 before metadata, then 342×192.4 / 342×608 / 342×342,
+  contain-fitted in the 342×652 picture area. So the 1x1 poster changes no
+  layout here (the video's box is sized by flex, not by its natural size).
+  *Cost* (headless desktop Chromium 153 throttled like 4G, a 57.4 MB 3-minute
+  clip, 8 s; not the WebView, not a guarantee for every file):
+  `preload="metadata"` received 1.12 MB, with `loadedmetadata`/`loadeddata`
+  at 271–273 ms (events, not a measured presented frame); `auto` 5.5–5.8 MB
+  and `loadeddata` no sooner (357–430 ms); `none` 0 bytes and no frame before
+  play. `metadata` is kept. The shimmer's energy cost is not measured; it
+  runs only while preparing. *Not verified:* the WebView itself. The owner's
+  phone is the final row.
 - **Cost.** Whole-build delta against main 7b4705f0 (every JS/CSS asset,
   gzip -9): +7.63 KB with the post-merge P2, +7.57 KB after review round 5 (+7.43 KB at round 4, +6.91 KB at hand-off one, which
   the orchestrator accepted over the 6 KB yardstick, no lazy chunk); per
