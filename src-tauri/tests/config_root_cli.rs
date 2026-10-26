@@ -206,12 +206,25 @@ fn entries_that_read_it_refuse_and_write_nothing_in_every_empty_or_full_combinat
             (SERVER, vec![]),
         ] {
             let out = b.run(program, &args, "");
-            assert!(!out.status.success(), "{program} {args:?} must refuse (new files {new_files}, old files {old_files})");
+            assert_eq!(out.status.code(), Some(1), "{program} {args:?} must refuse with exit 1 (new files {new_files}, old files {old_files}): {}", text(&out.stderr));
             assert!(text(&out.stderr).contains(REFUSAL), "{program} {args:?}: {}", text(&out.stderr));
+            // The refusal comes from the explicit init at the entry, a clean line. A panic (exit 101) would
+            // mean the entry forgot it and only the lazy backstop stopped the process.
+            assert!(!text(&out.stderr).contains("panicked"), "{program} {args:?} reached the backstop: {}", text(&out.stderr));
             assert!(text(&out.stderr).contains("Nothing was changed"), "{}", text(&out.stderr));
             assert_eq!(b.tree(), before, "{program} {args:?} wrote something (new files {new_files}, old files {old_files})");
         }
     }
+}
+
+#[test]
+fn a_relative_xdg_config_home_is_ignored_and_nothing_is_created_beside_it() {
+    // XDG says a relative value is invalid and must be ignored: the base falls back to $HOME/.config.
+    let b = Base::new("relative");
+    let before = b.tree();
+    let out = b.run_in(Path::new("relative/xdg"), TMM, &["gateway", "status"], "");
+    assert_eq!(config_line(&out), b.root.join("home/.config/teammux").to_string_lossy(), "{}", text(&out.stdout));
+    assert_eq!(b.tree(), before, "the relative path was not created or used, and nothing else was either");
 }
 
 #[test]
