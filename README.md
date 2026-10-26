@@ -16,10 +16,10 @@
 
 ---
 
-You run Kiro CLI, Claude Code, Codex, Grok, OMP or Kimi Code inside tmux.
-tmux-mobile connects those real sessions to your phone or desktop, gives every
-project a chat room shared by you and your agents, and lets agents spawn, brief
-and review one another.
+You run Kiro CLI, Claude Code, Codex, Grok, OMP, Kimi Code or DeepSeek Harness
+inside tmux. tmux-mobile connects those real sessions to your phone or desktop,
+gives every project a chat room shared by you and your agents, and lets agents
+spawn, brief and review one another.
 
 ## Design philosophy
 
@@ -68,8 +68,11 @@ The full tenets, with the reasons and incidents behind each, are in
   servers once; every spawn gets an isolated home.
 - **Terminal** — the same tmux pane you have at your desk, with touch scrolling,
   shortcut keys, and a keyboard that overlays agent TUIs instead of resizing them.
-- **Files** — browse, preview (Markdown, code, images, PDF, CSV, HTML, PPTX) and
-  edit, with a built-in git panel to diff, commit and push.
+- **Files** — browse, preview (Markdown, code, images, PDF, CSV, HTML, PPTX, and
+  video and audio in a player with our own controls) and edit, with a built-in
+  git panel to diff, commit and push. Select text in a code, Markdown or HTML
+  preview to leave a review comment; agents read and resolve them with
+  `tmm review`.
 - **Projects** — every tmux session is a project you can bring up, take down or
   archive.
 - **`tmm`** — the agent's hands: `send`, `log`, `board`, `spawn`, `project`,
