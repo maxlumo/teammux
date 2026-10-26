@@ -19,7 +19,7 @@ reference to a session, pane, room, issue or project carries its `ServerId`
 - **Browser development has one public origin.** `npm run dev:all` exposes
   Vite on `:5173`; Vite proxies WebSocket upgrades at `/ws` and streaming
   downloads at `/dl` to the loopback-bound backend (the gateway service, or
-  the watched server with `TMUX_MOBILE_DEV_WITH_SERVER=1`). A fresh
+  the watched server with `TEAMMUX_DEV_WITH_SERVER=1`). A fresh
   dev browser defaults its connection field to `ws(s)://location.host/ws`.
   `httpOriginForWs()` deliberately discards the trailing `/ws` segment when it
   builds signed download URLs, so downloads use the sibling `/dl` route while

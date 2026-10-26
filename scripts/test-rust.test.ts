@@ -52,11 +52,11 @@ test('the test process cannot see the real tmux: TMUX/TMUX_PANE gone, TMUX_TMPDI
 test('the test process cannot see its caller\'s gateway, identity or token: every TMM_* and TOKEN gone (#407)', () => {
   const env = isolatedEnv({
     TMM_SERVER: 'ws://127.0.0.1:9899', TMM_TOKEN: 'fake-tmm-token', TMM_PROJECT: 'tmux-mobile', TMM_AGENT: 'validator',
-    TMM_STATE_DB: '/home/x/state.db', TOKEN: 'fake-token', TMUX_MOBILE_GATEWAY_TMM: '/x/tmm', XDG_CONFIG_HOME: '/c', PATH: '/bin',
+    TMM_STATE_DB: '/home/x/state.db', TOKEN: 'fake-token', TEAMMUX_GATEWAY_TMM: '/x/tmm', XDG_CONFIG_HOME: '/c', PATH: '/bin',
   }, '/tmp/iso-x');
   assert.deepEqual(Object.keys(env).filter((k) => k.startsWith('TMM_')), []);
   assert.equal(env.TOKEN, undefined, 'Config::load reads bare TOKEN');
-  assert.equal(env.TMUX_MOBILE_GATEWAY_TMM, '/x/tmm', 'only the TMM_ prefix');
+  assert.equal(env.TEAMMUX_GATEWAY_TMM, '/x/tmm', 'only the TMM_ prefix');
   assert.equal(env.PATH, '/bin');
 });
 

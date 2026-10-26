@@ -3,6 +3,7 @@ import { spawn, spawnSync } from 'node:child_process';
 import { dirname, join, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { DEV_SERVER_PORT_ENV, devServerPort } from './dev-ports.mjs';
+import { readEnv } from './env-names.mjs';
 
 export const repoRoot = resolve(dirname(fileURLToPath(import.meta.url)), '..');
 const STOP_TIMEOUT_MS = 5000;
@@ -11,18 +12,19 @@ const STOP_TIMEOUT_MS = 5000;
  * a machine with no gateway). Off by default since board #343: the backend
  * is the tmm-managed gateway (`tmm gateway`), rebuilt and restarted by
  * `npm run gateway:update`, so the dev stack is Vite alone. */
-export const DEV_WITH_SERVER_ENV = 'TMUX_MOBILE_DEV_WITH_SERVER';
+export const DEV_WITH_SERVER_ENV = 'TEAMMUX_DEV_WITH_SERVER';
+export const DEV_WITH_SERVER_ENV_LEGACY = 'TMUX_MOBILE_DEV_WITH_SERVER';
 
 /** Commands are kept explicit so neither child re-runs a partial preflight. */
-export function serviceSpecs(root = repoRoot, env = process.env) {
-  const port = String(devServerPort(env));
+export function serviceSpecs(root = repoRoot, env = process.env, read = readEnv) {
+  const port = String(devServerPort(env, read));
   const web = {
     name: 'web',
     command: join(root, 'node_modules/.bin/vite'),
     args: ['dev'],
     env: { [DEV_SERVER_PORT_ENV]: port },
   };
-  if (env[DEV_WITH_SERVER_ENV] !== '1') return [web];
+  if (read(env, DEV_WITH_SERVER_ENV, DEV_WITH_SERVER_ENV_LEGACY) !== '1') return [web];
   return [
     {
       name: 'server',

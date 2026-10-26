@@ -27,8 +27,10 @@ with `ws://localhost:5173/ws`, because Vite proxies `/ws` and `/dl` to the
 loopback-only Rust server. Only port 5173 needs to be reachable — and Vite
 listens on the LOOPBACK only (board #393, see [The dev server](#the-dev-server-what-it-watches-and-a-lost-hmr-socket-393)):
 to open it from another device on your network, start it with
-`TMUX_MOBILE_DEV_HOST=0.0.0.0 npm run dev:all` and open
+`TEAMMUX_DEV_HOST=0.0.0.0 npm run dev:all` and open
 `http://<your-machine-ip>:5173`, which then pre-fills `ws://<your-machine-ip>:5173/ws`.
+
+**Environment variable names (board #472, phase B2).** The `TMUX_MOBILE_*` variables of these scripts are now `TEAMMUX_*` (`DEV_HOST`, `DEV_SERVER_PORT`, `DEV_WITH_SERVER`, `GATEWAY_TMM`). The old names are still read: alone they work and each prints one line, once per process, naming the variable (never its value); with both set and different the new one wins and the line says so; a provided new value that is invalid or empty is the new value's problem, never a silent return to the old one. `scripts/env-names.mjs` is the one rule; `TMM_*` are not renamed.
 
 `tmm` is built next to the server binary and is on every managed agent's PATH.
 From any shell:
@@ -82,8 +84,8 @@ before the merge.
 ## Commands
 
 ```bash
-npm run dev:all          # one :5173 (loopback unless TMUX_MOBILE_DEV_HOST says otherwise); proxies /ws + /dl to the gateway
-npm run dev              # Vite dev server only (web UI on 127.0.0.1:5173; TMUX_MOBILE_DEV_HOST=0.0.0.0 for the LAN)
+npm run dev:all          # one :5173 (loopback unless TEAMMUX_DEV_HOST says otherwise); proxies /ws + /dl to the gateway
+npm run dev              # Vite dev server only (web UI on 127.0.0.1:5173; TEAMMUX_DEV_HOST=0.0.0.0 for the LAN)
 npm run gateway:update   # rebuild; restart the gateway if it is not running these bytes
 npm run dev:server:watch # standalone WS server; rebuild/restart on Rust changes
 npm run tauri:dev        # Desktop app + WS server (dev mode)
@@ -152,7 +154,7 @@ the runbook in
 [install.md § Switching a dev host](../reference/install.md#switching-a-dev-host-to-the-gateway).
 
 **The watcher is still there, for a machine with no gateway**:
-`TMUX_MOBILE_DEV_WITH_SERVER=1 npm run dev:all` puts
+`TEAMMUX_DEV_WITH_SERVER=1 npm run dev:all` puts
 `scripts/dev-server-watch.sh` back beside vite (and preflights both ports), and
 `npm run dev:server:watch` runs it alone. It is what
 `tauri dev` would have given us for the server half, which cannot build here (no
@@ -365,7 +367,7 @@ a plain URL and over `/@fs/<absolute path>`. Now (`devHost`, `fsDeny` in
 - `server.host` is `127.0.0.1` by default. The only intended path from outside
   this host is the reverse SSH tunnel, which dials `127.0.0.1`, so the CloudFront
   route keeps working (measured: no Tailscale on this host). A person who wants the
-  dev server on the LAN says so — `TMUX_MOBILE_DEV_HOST=0.0.0.0` (Tauri's own
+  dev server on the LAN says so — `TEAMMUX_DEV_HOST=0.0.0.0` (Tauri's own
   `TAURI_DEV_HOST` for mobile dev is honoured too). `ss -ltn` on a Vite started
   with no flag: `127.0.0.1:<port>`. `allowedHosts` is not widened.
 - `server.fs.deny` REPLACES Vite's defaults, so it restates them (`.env`, `.env.*`,

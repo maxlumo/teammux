@@ -247,10 +247,12 @@ tried again next run, and exit 0 — with the commit it prints — means this
 machine's gateway answered as ours after everything that run did. It supports the default Cargo layout only:
 a `CARGO_TARGET_DIR`, a `--target`, or a `target-dir` in a cargo config moves
 the artifact, and the run stops and asks you to name it with
-`TMUX_MOBILE_GATEWAY_TMM` rather than hash one file and restart another.
+`TEAMMUX_GATEWAY_TMM` (the old `TMUX_MOBILE_GATEWAY_TMM` is still read) rather than hash one file and restart another.
+
+**One restart after the rename.** The unit text carries `Description=Teammux gateway` now; a unit installed earlier has the old text. `tmm gateway install` compares the whole file, so on an existing host the next explicit install plans an Update, which stops the running gateway and starts it again once (`KillMode=process` keeps the tmux servers and the agents). Nothing else changes, and `npm run gateway:update` restarts the gateway anyway.
 
 To go back: `tmm gateway uninstall`, then run the dev stack with the watcher
-again (`TMUX_MOBILE_DEV_WITH_SERVER=1`).
+again (`TEAMMUX_DEV_WITH_SERVER=1`).
 
 ## Removing
 

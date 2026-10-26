@@ -62,6 +62,7 @@ import { createHash } from 'node:crypto';
 import { readFileSync, unlinkSync, writeFileSync } from 'node:fs';
 import { dirname, isAbsolute, join, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
+import { readEnv } from './env-names.mjs';
 
 export const repoRoot = resolve(dirname(fileURLToPath(import.meta.url)), '..');
 
@@ -70,7 +71,8 @@ export const repoRoot = resolve(dirname(fileURLToPath(import.meta.url)), '..');
  * what makes `gateway restart` accept the unit. Overridable so a test can
  * point it at a fake, and so a host that builds into another target dir can
  * name the real artifact. */
-export const TMM_BIN_ENV = 'TMUX_MOBILE_GATEWAY_TMM';
+export const TMM_BIN_ENV = 'TEAMMUX_GATEWAY_TMM';
+export const TMM_BIN_ENV_LEGACY = 'TMUX_MOBILE_GATEWAY_TMM';
 /** tmm's own override for the service name; part of what a receipt describes. */
 export const SERVICE_ENV = 'TMM_GATEWAY_SERVICE';
 export const RECEIPT_FILE = '.tmm-gateway-deployed.json';
@@ -86,8 +88,8 @@ export function serviceName(env = process.env, platform = process.platform) {
   return env[SERVICE_ENV] || (platform === 'darwin' ? DEFAULT_SERVICE.darwin : DEFAULT_SERVICE.other);
 }
 
-export function tmmPath(root = repoRoot, env = process.env) {
-  const given = env[TMM_BIN_ENV];
+export function tmmPath(root = repoRoot, env = process.env, readVar = readEnv) {
+  const given = readVar(env, TMM_BIN_ENV, TMM_BIN_ENV_LEGACY);
   return given ? resolve(given) : join(root, 'src-tauri/target/release/tmm');
 }
 
@@ -114,9 +116,9 @@ export function configHome(root = repoRoot, env = process.env) {
  * deliberately crude (no TOML parser) because its only outcome is to STOP and
  * ask for the artifact by name — a false positive costs one env var, a false
  * negative is a stale hash. A layout chosen some other way is not detected;
- * name the artifact with `TMUX_MOBILE_GATEWAY_TMM` and it is used verbatim. */
-export function targetDirConflict(env = process.env, root = repoRoot, read = readFileSync) {
-  if (env[TMM_BIN_ENV]) return null;
+ * name the artifact with `TEAMMUX_GATEWAY_TMM` and it is used verbatim. */
+export function targetDirConflict(env = process.env, root = repoRoot, read = readFileSync, readVar = readEnv) {
+  if (readVar(env, TMM_BIN_ENV, TMM_BIN_ENV_LEGACY)) return null;
   const why = ['CARGO_TARGET_DIR', 'CARGO_BUILD_TARGET'].filter((k) => env[k]);
   const cargoHome = env.CARGO_HOME || (env.HOME ? join(env.HOME, '.cargo') : null);
   const configs = [join(root, 'src-tauri/.cargo'), join(root, '.cargo'), ...(cargoHome ? [cargoHome] : [])]

@@ -29,7 +29,6 @@ const WORDS: Array<[RegExp, string]> = [
   [/tmux-mobile-e2e/u, 'HKDF info strings of the encrypted handshake: a protocol constant'],
   [/tmux-mobile-agent-notify|tmux-mobile\.json/u, 'hook markers written into agents\' configs'],
   [/config\}?\/tmux-mobile|XDG_CONFIG_HOME\/tmux-mobile|^\$S\/tmux-mobile|^\/tmux-mobile\/?$|^tmux-mobile\/$|tmux-mobile\/(?:teams|system_prompt)/u, 'the config directory, until phase B'],
-  [/TMUX_MOBILE/u, 'environment variables, until phase B'],
   [/tmux-mobile-(?:gateway|dev)/u, 'systemd units, until phase B'],
   [/cc\.voka\.tmux-mobile/u, 'the launchd label, an owner decision'],
   [/tmux_mobile::|libtmux_mobile|_tmux_mobile_test|tmux_mobile_cfg_test|Theme\.tmux_mobile/u, 'the Rust crate path, library and test scratch names, until phase B'],
@@ -49,6 +48,11 @@ const LINES: Array<[RegExp, RegExp, string]> = [
   [/^docs\/design-docs\/features\/tmm-cli\.md$/u, /Contents\/MacOS/u, 'the bundle\'s binary names'],
   [/^docs\/reference\/config\.md$/u, /behavior\(s\)|reverse_proxy/u, 'steps against the owner\'s live CloudFront and Caddy, worded as they show'],
   [/^docs\/reference\/install\.md$/u, /TmuxMobile\.app/u, 'the move from the old app bundle'],
+  [/^scripts\/(?:dev-ports|dev-stack|gateway-update)\.mjs$/u, /_LEGACY = 'TMUX_MOBILE_|`TMUX_MOBILE_/u, 'the legacy names of the renamed variables, still read (B2)'],
+  [/^scripts\/env-names\.mjs$/u, /tmux-mobile|TMUX_MOBILE_/u, 'the module that reads the legacy names'],
+  [/^scripts\/env-names\.test\.ts$/u, /TMUX_MOBILE_/u, 'the test of the legacy names'],
+  [/^docs\/(?:conventions\/development|reference\/install)\.md$/u, /TMUX_MOBILE_/u, 'one sentence saying the old names are still read'],
+  [/^src-tauri\/src\/main\.rs$/u, /TMUX_MOBILE_TEST_12345/u, 'a test sentinel string'],
   [/^src-tauri\/src\/lib\.rs$/u, /<Downloads>\/TmuxMobile\//u, 'the Android downloads folder, an owner decision'],
   [/^src\/lib\/files\/Files\.mount\.test\.ts$/u, /TmuxMobile\\\//u, 'the Android downloads folder in a test'],
   [/^\.gitignore$/u, /\/tmuxmobile\.svg/u, 'an ignore entry for a stray file'],
@@ -107,7 +111,8 @@ test('the check sees what it should: prose, a UI string and a banner fail; an id
   assert.equal(fake('src/lib/core/i18n.svelte.ts', "installTitle: 'Install tmux-mobile',").length, 1);
   assert.equal(fake('src-tauri/src/server/mod.rs', 'println!("tmux-mobile server listening")').length, 1);
   assert.equal(fake('README.md', 'a token in `~/.config/tmux-mobile/config.toml`').length, 0, 'a path is an identifier');
-  assert.equal(fake('README.md', 'set TMUX_MOBILE_DEV_HOST=0.0.0.0').length, 0, 'an env var is an identifier');
+  assert.equal(fake('README.md', 'set TMUX_MOBILE_DEV_HOST=0.0.0.0').length, 1, 'the old variable names are legacy now: only the scripts that still read them, and one sentence, may name them');
+  assert.equal(fake('scripts/dev-ports.mjs', "export const DEV_HOST_ENV_LEGACY = 'TMUX_MOBILE_DEV_HOST';").length, 0);
   assert.equal(fake('docs/exec-plans/x.md', 'the tmux-mobile server').length, 0, 'history keeps its name');
   // the old DISPLAY name in every spelling a person could type
   assert.equal(fake('README.md', 'TmuxMobile connects those sessions').length, 1, 'the CamelCase product name');
