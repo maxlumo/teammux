@@ -240,7 +240,7 @@ pub(crate) fn kimi_config_toml_from(user_config: Option<&str>, effort: &str, not
     }
     root.insert("hooks".into(), toml::Value::Array(kimi_hooks(notify)));
     let body = toml::to_string(&root).unwrap_or_default();
-    format!("# Written by tmux-mobile — regenerated at every spawn and restart.\n{body}")
+    format!("# Written by Teammux — regenerated at every spawn and restart.\n{body}")
 }
 
 /// `tui.toml` for an UNATTENDED pane: no self-update (a restart replays the
@@ -248,7 +248,7 @@ pub(crate) fn kimi_config_toml_from(user_config: Option<&str>, effort: &str, not
 /// expired" dialog on resume (a modal nobody sees, blocking the composer),
 /// no rating prompt, no desktop notifications (the Hub has its own).
 pub(crate) fn kimi_tui_toml() -> &'static str {
-    "# Written by tmux-mobile — regenerated at every spawn and restart.\n\
+    "# Written by Teammux — regenerated at every spawn and restart.\n\
      cache_expiry_hint = false\n\
      disable_feedback_survey = true\n\n\
      [notifications]\nenabled = false\n\n\
@@ -368,7 +368,7 @@ pub(crate) fn refresh(home: &Path, notify: &str) -> Result<bool, String> {
     }
     root.insert("hooks".into(), fresh);
     let Ok(body) = toml::to_string(&root) else { return Ok(false) };
-    shared::write_atomic(&path, &format!("# Written by tmux-mobile — regenerated at every spawn and restart.\n{body}")).map(|_| true)
+    shared::write_atomic(&path, &format!("# Written by Teammux — regenerated at every spawn and restart.\n{body}")).map(|_| true)
 }
 
 /// kimi resume dialect: `-S <id>` exact, `-c` the cwd's previous session

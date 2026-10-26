@@ -1,6 +1,6 @@
 <p align="center">
-  <img src="assets/icon.svg" width="128" alt="tmuxmobile"><br>
-  <img src="assets/logo.svg" width="220" alt="tmuxmobile">
+  <img src="assets/icon.svg" width="128" alt="Teammux"><br>
+  <img src="assets/logo.svg" width="220" alt="Teammux">
 </p>
 
 <p align="center">
@@ -17,7 +17,7 @@
 ---
 
 You run Kiro CLI, Claude Code, Codex, Grok, OMP, Kimi Code or DeepSeek Harness
-inside tmux. tmux-mobile connects those real sessions to your phone or desktop,
+inside tmux. Teammux connects those real sessions to your phone or desktop,
 gives every project a chat room shared by you and your agents, and lets agents
 spawn, brief and review one another.
 
@@ -25,7 +25,7 @@ spawn, brief and review one another.
 
 **A shell, not an engine.** tmux owns processes and sessions. Each agent CLI
 owns its intelligence and its harness. MCP servers and skills own the tools.
-tmux-mobile owns only four things:
+Teammux owns only four things:
 
 | We own | What it is |
 |---|---|

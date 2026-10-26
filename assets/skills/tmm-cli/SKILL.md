@@ -5,7 +5,7 @@ description: The full tmm CLI reference — project chat, the task board, agent/
 
 # The tmm CLI
 
-`tmm` is how an agent talks to the tmux-mobile project hub and manages its
+`tmm` is how an agent talks to the Teammux project hub and manages its
 own workspace. It is fail-soft by design: if the server is unreachable it
 exits 2 in ~20ms and NEVER blocks — telemetry must not stop your work.
 

@@ -1,4 +1,4 @@
-# tmux-mobile Tenets
+# Teammux Tenets
 
 > Draft v7 · 2026-09-09 · English edition of the Chinese discussion draft,
 > translated at the owner's direction. Owner quotes remain in Chinese as evidence.

@@ -192,7 +192,7 @@ pub(crate) fn codex_profile(defs: &[McpDef], model: &str, effort: &str) -> Strin
         doc.insert("mcp_servers".into(), T::Table(servers));
     }
     let body = toml::to_string(&T::Table(doc)).unwrap_or_default();
-    format!("# tmux-mobile managed codex profile (regenerated on every launch; boards #448, #455)\n{body}")
+    format!("# Teammux managed codex profile (regenerated on every launch; boards #448, #455)\n{body}")
 }
 
 /// Keep the managed home's runtime state isolated while sharing the system
@@ -434,7 +434,7 @@ pub(crate) fn exact_id_ok(id: &str) -> bool {
 pub(crate) fn write_launch_script(home: &std::path::Path, name: &str, full_cmd: &str) -> Result<std::path::PathBuf, String> {
     let path = home.join(format!("launch-{}.sh", name));
     // The line carries the launch env; written privately (board #448).
-    write_atomic(&path, &format!("# tmux-mobile team launcher (regenerated on every launch)\n{}\n", full_cmd))
+    write_atomic(&path, &format!("# Teammux team launcher (regenerated on every launch)\n{}\n", full_cmd))
         .map_err(|e| format!("write {e}"))?;
     Ok(path)
 }

@@ -763,7 +763,7 @@ pub(super) fn handle_subscribe(params: &serde_json::Value, subs: &mut HashMap<St
         Err(e) => return Response::from_error(None, e),
     };
     subs.insert(target.to_string(), String::new());
-    // Record "last opened from tmux-mobile" for MRU sorting on the Sessions
+    // Record "last opened from Teammux" for MRU sorting on the Sessions
     // page. Target is "name:window.pane"; the session name is everything
     // before the first colon.
     let session_name = target.split(':').next().unwrap_or(target);

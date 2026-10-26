@@ -170,7 +170,7 @@ test('a photo is reachable while the camera is still starting and never settles,
 });
 
 test('on the Android app a refused camera says where to allow it, and a browser keeps the short sentence; the photo command is there either way', async context => {
-  for (const [android, text] of [[true, 'Camera access is off. Allow it in Android Settings > Apps > tmux-mobile > Permissions'], [false, 'Camera access is off']] as const) {
+  for (const [android, text] of [[true, 'Camera access is off. Allow it in Android Settings > Apps > Teammux > Permissions'], [false, 'Camera access is off']] as const) {
     const app = await (await compiled).mount(context, {
       props: { camera: async () => { throw new CameraError('denied'); }, onscanned: () => {}, oncancel: () => {} },
       setup(window) {

@@ -34,7 +34,7 @@ stayed put (owner report, 2026-09-03). Leaving the member out yields
 back to the manifest, and do not call `screen.orientation.lock()`.
 
 ## Why no offline caching
-tmux-mobile is useless without a live WebSocket server — there's nothing
+Teammux is useless without a live WebSocket server — there's nothing
 meaningful to serve offline. A caching SW would only add risk: serving a stale
 build after deploy. So the SW deliberately caches nothing; it exists solely for
 the installability signal.
@@ -94,6 +94,20 @@ and pushed the actions out.
   `InstallPrompt.source.test.ts` (sizing, wrap, measured reserve, the page
   rule) and `InstallPrompt.mount.test.ts` (the reserve appears with the
   banner and goes when it is dismissed).
+
+## The name Teammux (board #472, 2026-10-26)
+
+The manifest's `name` and `short_name`, the page `<title>` and the iOS
+`apple-mobile-web-app-title` say Teammux; they said tmux-mobile. `start_url` and
+`scope` are untouched and the manifest has no `id`, so the install's identity and
+its storage are the same as before. WHEN an app that is already installed shows
+the new name is the platform's call, and it was not measured here: Chromium on
+Android (WebAPK) and desktop Chrome and Edge have a manifest update mechanism that
+re-reads the manifest ([web.dev: update a PWA](https://web.dev/learn/pwa/update)),
+while a shortcut that took its name when it was added (an iOS Home Screen icon)
+keeps the old one until it is added again. So the honest statement is that the new
+name appears on a new install, and on an existing one when the platform updates it
+or the app is reinstalled.
 
 ## Gotchas / constraints
 - **HTTPS required.** Service workers + `beforeinstallprompt` only work on

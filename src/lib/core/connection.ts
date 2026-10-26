@@ -1,4 +1,4 @@
-// ONE connection to one tmux-mobile server.
+// ONE connection to one Teammux server.
 //
 // Everything mutable about a live link belongs to the object `createConnection`
 // returns: the socket, the request counter and its pending map, the

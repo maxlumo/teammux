@@ -255,7 +255,7 @@ pub(crate) fn omp_telemetry_extension(notify: &str) -> String {
     // string literal.
     let cmd = serde_json::to_string(notify).unwrap();
     format!(
-        r#"// tmux-mobile telemetry hook — auto-generated, rewritten on every start
+        r#"// Teammux telemetry hook — auto-generated, rewritten on every start
 // (refresh_hooks). Forwards turn edges and tool events to the tmm notify
 // helper, which is a no-op outside a tmux pane. Do not edit.
 import {{ spawn }} from "node:child_process";

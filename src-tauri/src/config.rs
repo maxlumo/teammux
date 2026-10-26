@@ -573,7 +573,7 @@ pub fn get_config_json() -> serde_json::Value {
     })
 }
 
-/// Per-session "last opened in tmux-mobile" timestamp store.
+/// Per-session "last opened in Teammux" timestamp store.
 /// Persisted to ~/.config/tmux-mobile/session_usage.json as a name → unix-seconds map.
 /// Used by the Sessions page to sort recently-used sessions to the top.
 fn session_usage_path() -> std::path::PathBuf {

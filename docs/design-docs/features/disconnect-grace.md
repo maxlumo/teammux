@@ -109,7 +109,7 @@ side benefit.
 **Checking tmux `list-clients` on disconnect to decide whether to restore.**
 Would give perfect semantics ("nobody's watching → restore"). But tmux
 clients are per-session, not per-window, and the mapping to "would a
-remaining tmux-mobile client see this pane wrong" is gnarly. The grace
+remaining Teammux client see this pane wrong" is gnarly. The grace
 timer sidesteps this: we just wait, and if someone reconnects and resizes,
 we don't restore.
 

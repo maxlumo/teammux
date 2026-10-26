@@ -292,7 +292,7 @@ pub(crate) fn grok_config_toml_from(mcps: &[shared::McpDef], user_config: Option
         root.insert("mcp_servers".into(), toml::Value::Table(servers));
     }
     let body = toml::to_string(&root).unwrap_or_default();
-    format!("# Written by tmux-mobile — regenerated at every spawn.\n{body}")
+    format!("# Written by Teammux — regenerated at every spawn.\n{body}")
 }
 
 

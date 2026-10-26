@@ -50,7 +50,7 @@ pub fn local_url(cfg: &Config) -> String {
 pub(crate) fn judge(answer: &serde_json::Value, our_machine: &str, url: &str) -> Verdict {
     let r = answer.get("result");
     if r.and_then(|r| r.get("authenticated")).and_then(|v| v.as_bool()) != Some(true) {
-        return Verdict::Occupied(format!("{url} answered, but not as a tmux-mobile gateway"));
+        return Verdict::Occupied(format!("{url} answered, but not as a Teammux gateway"));
     }
     let id = r.and_then(|r| r.get("machine_id")).and_then(|v| v.as_str()).unwrap_or("");
     if id == our_machine && !id.is_empty() {
@@ -254,7 +254,7 @@ impl Refusal {
     fn say(self, url: &str) -> String {
         match self {
             Refusal::NotWebSocket => format!("{url} is not a WebSocket server"),
-            Refusal::NoGreeting => format!("{url} speaks WebSocket but not the tmux-mobile protocol"),
+            Refusal::NoGreeting => format!("{url} speaks WebSocket but not the Teammux protocol"),
             Refusal::TokenRefused => format!("a gateway at {url} refused this machine's token"),
             Refusal::Undecryptable => format!("{url} answered without knowing this machine's token"),
         }
@@ -426,7 +426,7 @@ mod tests {
         assert!(matches!(probe(&cfg(forged)).await, Verdict::Occupied(_)), "an unsealed success is a forgery");
         // A WebSocket that does not greet with a nonce.
         let mute = ws_answering(false, serde_json::json!({ "hello": "LEAK-ME" })).await;
-        match probe(&cfg(mute)).await { Verdict::Occupied(w) => assert!(w.contains("not the tmux-mobile protocol") && !w.contains("LEAK-ME"), "{w}"), v => panic!("{v:?}") }
+        match probe(&cfg(mute)).await { Verdict::Occupied(w) => assert!(w.contains("not the Teammux protocol") && !w.contains("LEAK-ME"), "{w}"), v => panic!("{v:?}") }
         // A listener that is not a WebSocket at all.
         let (l, plain) = listener().await;
         tokio::spawn(async move {

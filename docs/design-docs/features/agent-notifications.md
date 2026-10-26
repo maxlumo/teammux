@@ -38,7 +38,7 @@ agent lifecycle hook
 `agent_notification` snapshots that Sessions/Terminal chips rendered as
 attention markers — that half is retired; see the note above.)
 
-The helper uses a filesystem inbox under tmux-mobile's config directory rather
+The helper uses a filesystem inbox under the app's config directory rather
 than a second HTTP listener. This avoids another exposed port and authentication
 surface. It writes a temporary file and renames it into the inbox so the server
 never reads a partial payload. The hook does not connect to the desktop server:

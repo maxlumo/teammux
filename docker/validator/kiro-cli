@@ -15,7 +15,7 @@ if [ "${1:-}" != chat ]; then
   echo "fake kiro-cli: only 'chat' is understood (got: $*)" >&2
   exit 2
 fi
-echo "fake kiro-cli (tmux-mobile e2e) — args: $*"
+echo "fake kiro-cli (Teammux e2e) — args: $*"
 echo "type a line and it comes back; Ctrl-D ends the session"
 while IFS= read -r line; do
   printf '> %s\n' "$line"

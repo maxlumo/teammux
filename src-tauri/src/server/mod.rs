@@ -351,7 +351,7 @@ pub async fn start_with_socket_ready(
     };
 
     let scheme = if tls_acceptor.is_some() { "wss" } else { "ws" };
-    println!("🚀 tmux-mobile server listening on {}://{}", scheme, addr);
+    println!("🚀 Teammux server listening on {}://{}", scheme, addr);
     // The token is the one secret. Show it to a person at a terminal (first
     // run, pairing a phone); never write it into a log — a supervised server's
     // stdout is a file, and that file would undo config.toml's 0600.

@@ -1,6 +1,6 @@
 // Minimal service worker for PWA installability.
 //
-// tmux-mobile is useless offline (it needs a live WebSocket server), so this
+// Teammux is useless offline (it needs a live WebSocket server), so this
 // SW deliberately does NOT cache assets — caching would only risk serving a
 // stale build after an update. Its sole purpose is to satisfy the browser's
 // "installable" criteria (a registered SW with a fetch handler) so the

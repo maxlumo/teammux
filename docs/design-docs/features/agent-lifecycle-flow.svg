@@ -28,7 +28,7 @@
   </defs>
   <rect width="1240" height="1190" fill="#ffffff"/>
   <text class="t ti" x="40" y="42">Agent lifecycle: spawn -&gt; conversation -&gt; completion</text>
-  <text class="t sub" x="40" y="64">tmux-mobile · solid = what the app DOES · dashed = what it OBSERVES from hooks · one turn is a bracket</text>
+  <text class="t sub" x="40" y="64">Teammux · solid = what the app DOES · dashed = what it OBSERVES from hooks · one turn is a bracket</text>
   <rect x="38" y="96" width="180" height="44" rx="9" fill="#f1f5f9" stroke="#cbd5e1"/>
   <text class="t hd" x="128" y="114" text-anchor="middle">Phone / Browser</text>
   <text class="t sm mono" x="128" y="130" text-anchor="middle">Hub.svelte</text>

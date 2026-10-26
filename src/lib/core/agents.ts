@@ -1,4 +1,4 @@
-// Known coding-agent CLIs that tmux-mobile treats as "AI sessions".
+// Known coding-agent CLIs that Teammux treats as "AI sessions".
 // Adding a new agent = one entry here + the matching icon in /assets/.
 // Icons are lobehub-style AVATARS (visible on light AND dark themes):
 // @lobehub/icons is React-only and its static packages ship no avatar

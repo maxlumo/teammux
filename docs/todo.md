@@ -46,7 +46,7 @@
 - [x] **Entry-point map** (verified 2026-09-27, board #244): CLAUDE.md's
   ownership boundaries and documentation map point to `tenet.md` and
   `guidance/`; the app-wide `<config>/AGENTS.md` (projects/global_prompt.rs)
-  sends tmux-mobile work to the Zen section of `tenet.md`, describing process
+  sends Teammux work to the Zen section of `tenet.md`, describing process
   only (tenet 11).
 - [x] **Consolidate `docs/unresolved.md` and this document** (board #104,
   2026-09-09): unresolved.md's surviving details are folded into the matching

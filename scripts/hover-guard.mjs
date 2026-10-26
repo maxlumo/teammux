@@ -116,7 +116,7 @@ const normal = (selector) => generate(parseSelector(selector));
 
 export function hoverGuard() {
   return {
-    postcssPlugin: 'tmux-mobile-hover-guard',
+    postcssPlugin: 'teammux-hover-guard',
     Once(root) {
       // every selector that already has an :active rule of its own
       const pressed = new Set();

@@ -1,6 +1,6 @@
 {
-  "name": "tmux-mobile",
-  "short_name": "tmux-mobile",
+  "name": "Teammux",
+  "short_name": "Teammux",
   "description": "Remotely monitor and control your coding agents from your phone.",
   "start_url": "/",
   "scope": "/",

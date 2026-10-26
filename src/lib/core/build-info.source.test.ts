@@ -37,7 +37,7 @@ test('BOTH login answers carry the build, and nothing else builds one', async ()
 test('the repository link has ONE home: About, not the connect form', async () => {
   const prefs = await read('../app/Preferences.svelte');
   const connect = await read('../app/Settings.svelte');
-  assert.equal(prefs.split('github.com/vokako/tmux-mobile').length - 1, 2, 'About\'s href and its text');
+  assert.equal(prefs.split('github.com/maxlumo/teammux').length - 1, 2, 'About\'s href and its text');
   assert.doesNotMatch(connect, /github\.com|about-link/u, 'moved out of the connect form, not duplicated');
   const i18n = await read('./i18n.svelte.ts');
   assert.doesNotMatch(i18n, /^\s*about:/mu, 'the old one-line "About — github…" key is gone');

@@ -72,8 +72,8 @@ function whoOwnsPort(port) {
 const serverPort = devServerPort();
 const devPorts = {
   web: [[DEV_WEB_PORT, 'vite dev server']],
-  server: [[serverPort, 'tmux-mobile WS server']],
-  dev: [[DEV_WEB_PORT, 'vite dev server'], [serverPort, 'tmux-mobile WS server']],
+  server: [[serverPort, 'Teammux WS server']],
+  dev: [[DEV_WEB_PORT, 'vite dev server'], [serverPort, 'Teammux WS server']],
 };
 
 if (mode in devPorts) {

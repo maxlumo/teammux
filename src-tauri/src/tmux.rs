@@ -9,7 +9,7 @@ pub struct TmuxSession {
     pub windows: usize,
     pub attached: bool,
     pub created: String,
-    /// Unix seconds of the last time this session was opened via tmux-mobile,
+    /// Unix seconds of the last time this session was opened via Teammux,
     /// persisted across server restarts. `None` if never opened from the app.
     /// Clients use this to sort the most-recently-used sessions to the top.
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -361,7 +361,7 @@ pub fn list_sessions() -> Result<Vec<TmuxSession>, String> {
         })
         .collect();
 
-    // Annotate with the last time each session was opened via tmux-mobile
+    // Annotate with the last time each session was opened via Teammux
     // (persisted, per-server). The client uses this to sort MRU-first.
     let usage = crate::config::get_session_usage();
     for s in sessions.iter_mut() {

@@ -1903,7 +1903,7 @@ fn build_prompt(def: &RegAgent, name: &str, session: &str, _brief: &str, _by: &s
         s += "\n\n";
     }
     s += &format!(
-        "You are agent \"{name}\" in project \"{session}\" (a tmux session managed by tmux-mobile).\n\
+        "You are agent \"{name}\" in project \"{session}\" (a tmux session managed by Teammux).\n\
          \n\
          tmm collaboration flow:\n\
          - Messages arrive in your pane as `[tmm chat YYYY-MM-DD HH:MM] <sender>: <text>`. A message that arrives while you work either waits for the current turn to end or joins it, depending on your CLI and its input mode; it never cancels your turn.\n\

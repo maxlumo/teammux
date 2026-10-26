@@ -304,7 +304,7 @@ pub fn run() {
         // outside: the start DECISION here (`starting` for an embedded start
         // — only the later "listening" line, and a real listener, prove it).
         let decided = if mode.mode == "embedded" { "starting" } else { mode.mode };
-        eprintln!("tmux-mobile: local server decision {decided} at {}{}", mode.url, mode.reason.as_deref().map(|r| format!(" ({r})")).unwrap_or_default());
+        eprintln!("Teammux: local server decision {decided} at {}{}", mode.url, mode.reason.as_deref().map(|r| format!(" ({r})")).unwrap_or_default());
         if mode.mode == "embedded" {
             // `starting` until the listener is bound: the app says
             // `embedded` only for a server that is really listening. A
@@ -321,7 +321,7 @@ pub fn run() {
                     let ready_url = url.clone();
                     tokio::spawn(async move {
                         if rx.await.is_ok() {
-                            eprintln!("tmux-mobile: local server embedded at {ready_url} (listening)");
+                            eprintln!("Teammux: local server embedded at {ready_url} (listening)");
                             set_server_mode(GEN, ServerMode { mode: "embedded", url: ready_url, reason: None });
                         }
                     });

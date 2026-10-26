@@ -1,4 +1,4 @@
-# Installing tmux-mobile
+# Installing Teammux
 
 Two pieces run on the machine whose tmux you want to reach:
 
@@ -7,16 +7,16 @@ Two pieces run on the machine whose tmux you want to reach:
 
 ## macOS from the DMG
 
-You need tmux (`brew install tmux`). The app is not signed or notarized yet: the first time, macOS refuses to open it. Right-click it in Finder → **Open** → **Open**, or run `xattr -dr com.apple.quarantine /Applications/TmuxMobile.app`.
+You need tmux (`brew install tmux`). The app is not signed or notarized yet: the first time, macOS refuses to open it. Right-click it in Finder → **Open** → **Open**, or run `xattr -dr com.apple.quarantine /Applications/Teammux.app`.
 
 Install the gateway first, then open the app. The other way round, the app starts its own server on the gateway's port, and `tmm gateway` refuses to start next to it.
 
-1. Open the DMG and drag **TmuxMobile.app** into `/Applications` (or `~/Applications`). Use it from there: the gateway service records the path of the `tmm` inside the app, and a path on the mounted DMG, or a temporary copy macOS made on a first launch from the DMG, disappears.
+1. Open the DMG and drag **Teammux.app** into `/Applications` (or `~/Applications`). Use it from there: the gateway service records the path of the `tmm` inside the app, and a path on the mounted DMG, or a temporary copy macOS made on a first launch from the DMG, disappears.
 2. Make the bundled `tmm` reachable:
 
    ```bash
    mkdir -p ~/.local/bin
-   ln -s /Applications/TmuxMobile.app/Contents/MacOS/tmm ~/.local/bin/tmm   # ~/.local/bin must be on your PATH
+   ln -s /Applications/Teammux.app/Contents/MacOS/tmm ~/.local/bin/tmm   # ~/.local/bin must be on your PATH
    ```
 
 3. Start the gateway:
@@ -40,13 +40,27 @@ Install the gateway first, then open the app. The other way round, the app start
 
 After moving the app, run `tmm gateway install --replace` with the new `tmm`: the installed service names the old path, so to the new `tmm` it is not its own and a plain `tmm gateway` refuses it.
 
+**Moving from TmuxMobile.app (the rename to Teammux, board #472).** The app's name changed with the project; its bundle id did not (`com.tmuxmobile.dev`). The new DMG installs `Teammux.app` BESIDE the old `TmuxMobile.app`. macOS sees one app identity, so the saved servers and tokens are shared; quit the old app before opening the new one (two copies of the same app is not a state this was tested in). The gateway service records the path of the `tmm` it runs, so after the move it still points into the OLD bundle. Do these in order, yourself; nothing in the app does them:
+
+1. Re-point the symlink, but look before you overwrite it (`ln -sfn` replaces any file or link of that name). First check that `/Applications/Teammux.app/Contents/MacOS/tmm` exists, then read `~/.local/bin/tmm` with `ls -l` and `readlink`:
+   - missing: create it with `ln -s /Applications/Teammux.app/Contents/MacOS/tmm ~/.local/bin/tmm`;
+   - a link into `TmuxMobile.app`: replace it with `ln -sfn /Applications/Teammux.app/Contents/MacOS/tmm ~/.local/bin/tmm`;
+   - a regular file, or a link to anywhere else: stop. It is not ours to overwrite; back it up or keep it, your call.
+
+   A bare `tmm` may otherwise still run the old bundle's binary, and `install` records the path of the binary that is running.
+2. Install with the full path, not a bare `tmm`: `/Applications/Teammux.app/Contents/MacOS/tmm gateway install --replace`.
+3. Check that the service names the new path (the `ProgramArguments` of `~/Library/LaunchAgents/cc.voka.tmux-mobile.plist`) and that `/Applications/Teammux.app/Contents/MacOS/tmm gateway status` (the same full path, so another `tmm` earlier on your PATH cannot answer for it) says the gateway answers.
+4. Only then delete `TmuxMobile.app`. A new app that connects to the old, still running gateway does not mean the gateway was updated.
+
+On Android the new APK upgrades the installed app in place (same application id and signing key; only the launcher label changes), so nothing is entered again. None of this was run on a Mac or a phone.
+
 ## Linux
 
 Build the server and `tmm` (`npm run build:server`: the web UI is embedded), put `src-tauri/target/release/tmm` on your PATH and run `tmm gateway`. It installs a systemd user unit, `tmux-mobile-gateway.service`. On a headless machine, `loginctl enable-linger <user>` lets it start at boot.
 
 ## Switching a dev host to the gateway
 
-A machine that has been developing tmux-mobile for a while starts its backend
+A machine that has been developing Teammux for a while starts its backend
 from `scripts/dev-server-watch.sh` inside `tmux-mobile-dev.service`: that
 watcher's `server` IS the gateway binary, just not under the gateway's own
 unit, so `tmm gateway status` says "not installed" while something answers on

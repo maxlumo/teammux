@@ -170,7 +170,7 @@ pub(crate) fn plugin_js(notify: &str) -> String {
     // A JSON string literal is also a valid JS string literal.
     let cmd = serde_json::to_string(notify).unwrap();
     format!(
-        r#"// tmux-mobile telemetry plugin for DeepSeek Harness — generated, rewritten
+        r#"// Teammux telemetry plugin for DeepSeek Harness — generated, rewritten
 // on every start (board #404). Do not edit.
 import {{ spawnSync }} from 'node:child_process'
 import {{ appendFileSync, mkdirSync, readFileSync, realpathSync, renameSync, unlinkSync, writeFileSync }} from 'node:fs'
@@ -687,7 +687,7 @@ pub(crate) fn profile_workspace_yaml() -> &'static str {
 /// The profile root: an empty entry list (the tree is composed as patches).
 #[cfg(not(any(target_os = "android", target_os = "ios")))]
 pub(crate) fn profile_cordis_yml() -> &'static str {
-    "# dsh profile root — an empty entry list; the tree is the bundles' patches\n# plus cordis.patch.yml. Written by tmux-mobile.\n[]\n"
+    "# dsh profile root — an empty entry list; the tree is the bundles' patches\n# plus cordis.patch.yml. Written by Teammux.\n[]\n"
 }
 
 /// The profile's own patch layer: the plugin, the model (its config is the
@@ -705,7 +705,7 @@ pub(crate) fn profile_patch_yml(plugin_entry: &std::path::Path, model: &str, eff
     let effort = effort.trim();
     let effort_line = if effort.is_empty() { String::new() } else { format!("    reasoningEffort: {}\n", q(effort)) };
     format!(
-        "# Written by tmux-mobile — regenerated at every spawn and restart (board #404).\n\
+        "# Written by Teammux — regenerated at every spawn and restart (board #404).\n\
          - insert:\n    - id: {PLUGIN_NAME}\n      name: {}\n      config:\n        requireEnv: {}\n{mcp}\
          - id: agent-default-model\n  config:\n    provider: {}\n    model: {}\n{effort_line}\
          - id: session-title-llm\n  disabled: true\n\
@@ -873,7 +873,7 @@ pub(crate) fn dsh_skill_name(dir: &Path) -> Result<String, String> {
 /// is inherited from the launching shell.
 #[cfg(not(any(target_os = "android", target_os = "ios")))]
 pub(crate) fn zshenv() -> &'static str {
-    "# Written by tmux-mobile — regenerated at every spawn and restart (board #404).\nunsetopt GLOBAL_RCS\n"
+    "# Written by Teammux — regenerated at every spawn and restart (board #404).\nunsetopt GLOBAL_RCS\n"
 }
 
 /// The managed shell's `.zshrc` — the whole "CLI" a dsh agent's pane runs.
@@ -905,7 +905,7 @@ pub(crate) fn zshenv() -> &'static str {
 pub(crate) fn zshrc(notify: &str) -> String {
     let notify = crate::shell::quote_always(notify);
     format!(
-        r#"# Written by tmux-mobile — regenerated at every spawn and restart (board #404).
+        r#"# Written by Teammux — regenerated at every spawn and restart (board #404).
 # The pane of a managed dsh agent: every line you type is a message to it,
 # run as one resumed dsh turn; start a line with ! to run a shell command.
 zmodload zsh/datetime zsh/zselect

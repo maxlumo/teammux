@@ -4,7 +4,7 @@
 Rust wrapper around tmux CLI commands. File: `src-tauri/src/tmux.rs`
 
 ## Operations
-- `list_sessions` — list all sessions with `name`, `windows`, `attached`, `created` (tmux's `session_activity`), and `last_opened` (per-session timestamp of the last `subscribe` from tmux-mobile, sourced from `config::get_session_usage()`). Baseline sort is `session_activity` descending; clients apply MRU on top.
+- `list_sessions` — list all sessions with `name`, `windows`, `attached`, `created` (tmux's `session_activity`), and `last_opened` (per-session timestamp of the last `subscribe` from Teammux, sourced from `config::get_session_usage()`). Baseline sort is `session_activity` descending; clients apply MRU on top.
 - `list_panes(session)` — list all panes across all windows (id, session, window, index, active, command, title, cwd, width, height)
 - `capture_pane(target, lines?)` — capture content with ANSI escapes, joined soft-wrapped lines
 - `capture_pane_with_width(target, lines?, width)` — capture with CJK double-width character fix, returns (content, trailing_trimmed)

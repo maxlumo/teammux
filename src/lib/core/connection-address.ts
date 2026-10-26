@@ -15,7 +15,7 @@ export function defaultConnectionAddress(location: LocationLike, dev: boolean, h
   return `${scheme}//${location.host}/ws`;
 }
 
-/** Was this page served by a tmux-mobile gateway? */
+/** Was this page served by a Teammux gateway? */
 export function hostedByGateway(doc: { querySelector: (s: string) => unknown } | undefined): boolean {
   return !!doc?.querySelector('meta[name="tmm-gateway"]');
 }

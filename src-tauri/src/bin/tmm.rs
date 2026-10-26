@@ -1,4 +1,4 @@
-//! tmm — the agent's hands, and the geek's. CLI front for the tmux-mobile
+//! tmm — the agent's hands, and the geek's. CLI front for the Teammux
 //! project hub (agents-v2): send/read project chat, report progress, list
 //! agents and projects. See docs/exec-plans/agents-v2.md §4.4 and
 //! docs/design-docs/features/tmm-cli.md.
@@ -33,7 +33,7 @@ const EXIT_USAGE: i32 = 5;
 const CONNECT_TIMEOUT: Duration = Duration::from_secs(2);
 const RPC_TIMEOUT: Duration = Duration::from_secs(10);
 
-const USAGE: &str = r#"tmm — talk to the tmux-mobile project hub
+const USAGE: &str = r#"tmm — talk to the Teammux project hub
 
 USAGE (agent):
   tmm send "@name message"            send a message to one or more recipients
@@ -2751,7 +2751,7 @@ async fn try_rpc_with(ctx: &Ctx, method: &str, params: Value, need: Option<&str>
     let connect = tokio_tungstenite::connect_async(&ctx.server);
     let (ws, _) = tokio::time::timeout_at(deadline, connect)
         .await
-        .map_err(|_| (EXIT_NET, format!("server not reachable at {} (2s timeout) — is tmux-mobile running?", ctx.server)))?
+        .map_err(|_| (EXIT_NET, format!("server not reachable at {} (2s timeout) — is Teammux running?", ctx.server)))?
         .map_err(|e| (EXIT_NET, tcp_connect_failure(&ctx.server, &e)))?;
     session(ws, ctx, method, params, need, None).await
 }

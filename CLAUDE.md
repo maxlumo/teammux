@@ -1,4 +1,4 @@
-# AGENTS.md — tmux-mobile
+# AGENTS.md — Teammux
 
 This file is the MAP, not the manual. It says why the project exists, the
 tenets every decision answers to, the rules every change must respect, and
@@ -126,7 +126,7 @@ Each links to the doc that holds the reason and the details.
 
 ### Conventions, reference, history
 - [Development (commands, dev loop, build gotchas)](docs/conventions/development.md) · [Frontend conventions](docs/conventions/frontend.md) · [Testing](docs/conventions/testing.md)
-- [Configuration reference](docs/reference/config.md) · [Backend module map](docs/reference/backend-map.md)
+- [Configuration reference](docs/reference/config.md) · [Backend module map](docs/reference/backend-map.md) · [Naming (Teammux, and what still says tmux-mobile)](docs/reference/naming.md)
 - [Execution plans (history)](docs/exec-plans/)
 
 ## One entry point

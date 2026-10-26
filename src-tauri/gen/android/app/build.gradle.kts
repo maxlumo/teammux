@@ -62,7 +62,7 @@ android {
             if (hasReleaseKey) {
                 signingConfig = signingConfigs.getByName("release")
             } else {
-                logger.warn("tmux-mobile: gen/android/key.properties missing — release APK will be unsigned")
+                logger.warn("Teammux: gen/android/key.properties missing — release APK will be unsigned")
             }
             isMinifyEnabled = true
             proguardFiles(

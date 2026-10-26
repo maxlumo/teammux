@@ -111,7 +111,7 @@ pub fn wizard(input: &mut dyn BufRead, out: &mut dyn Write, start: &Start, new_t
             match got { Some(x) => x, None => return Ok(Outcome::Cancelled) }
         }};
     }
-    writeln!(out, "tmux-mobile setup — {}", crate::config::config_file().display()).map_err(|e| e.to_string())?;
+    writeln!(out, "Teammux setup — {}", crate::config::config_file().display()).map_err(|e| e.to_string())?;
     let port = get!("Port", &start.port.to_string(), |v: &str| v.parse::<u16>().ok().filter(|p| *p > 0).ok_or("a port is 1–65535".to_string()));
     writeln!(out, "  0.0.0.0 = reachable from your phone on this network (the token is the guard, not encryption — use TLS or Tailscale off your LAN);").map_err(|e| e.to_string())?;
     writeln!(out, "  127.0.0.1 = this machine only.").map_err(|e| e.to_string())?;

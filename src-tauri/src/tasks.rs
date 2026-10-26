@@ -2,7 +2,7 @@
 //! `docs/design-docs/features/tmm-cli.md`.
 //!
 //! LOCAL ONLY: nothing here touches the network. `tmm task *` works with no
-//! tmux-mobile server running, which is the whole point — the thing an agent
+//! Teammux server running, which is the whole point — the thing an agent
 //! most often wants to background *is* the server.
 //!
 //! Design contract (load-bearing, all three verified on tmux 3.7b):

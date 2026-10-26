@@ -44,7 +44,7 @@ test('About names this app\'s build and the server\'s, dim while they are the sa
   const { app, rows } = await about(context, { serverInfo: { hostname: 'devbox', machineId: 'm', build: SAME } });
   try {
     const r = rows();
-    assert.deepEqual(r.map((x) => x.label), ['tmux-mobile', 'Server', 'Source', 'License']);
+    assert.deepEqual(r.map((x) => x.label), ['Teammux', 'Server', 'Source', 'License']);
     assert.equal(r[0]!.value, 'v1.0.0 · 46392f16 · 2026-10-14 07:40 UTC');
     assert.equal(r[1]!.value, 'v1.0.0 · 46392f16 · 2026-10-14 07:40 UTC');
     assert.doesNotMatch(r[1]!.el.textContent!, /devbox/, 'the label is the word; the focus is named by the Settings head, not by a hostname that wraps a phone column');
@@ -73,14 +73,14 @@ test('an older server is "unknown", never blank and never a mismatch; offline th
   } finally { await old.app.close(); }
   const off = await about(context, { connected: false, serverInfo: { hostname: '', machineId: '', build: null } });
   try {
-    assert.deepEqual(off.rows().map((x) => x.label), ['tmux-mobile', 'Source', 'License']);
+    assert.deepEqual(off.rows().map((x) => x.label), ['Teammux', 'Source', 'License']);
   } finally { await off.app.close(); }
 });
 
 test('the GitHub link lives here once, opens outside, and carries no tracking of its own', async context => {
   const { app } = await about(context, { serverInfo: { hostname: 'h', machineId: 'm', build: SAME } });
   try {
-    const links = [...app.document.querySelectorAll<HTMLAnchorElement>('a[href*="github.com/vokako/tmux-mobile"]')];
+    const links = [...app.document.querySelectorAll<HTMLAnchorElement>('a[href*="github.com/maxlumo/teammux"]')];
     assert.equal(links.length, 1);
     assert.equal(links[0]!.target, '_blank');
     assert.match(links[0]!.rel, /noopener/);

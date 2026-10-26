@@ -196,7 +196,7 @@ pub fn render_systemd(spec: &Spec) -> Result<String, String> {
     Ok(format!(
         "# Managed by `tmm gateway install` (board #323). Edit with tmm, not by hand.\n\
          [Unit]\n\
-         Description=tmux-mobile gateway\n\
+         Description=Teammux gateway\n\
          After=network.target\n\
          \n\
          [Service]\n\

@@ -842,7 +842,7 @@ pub(crate) fn ensure_workspace_entry(workspace: &Path, home: &Path, name: &str) 
             std::fs::remove_file(&link).map_err(|e| format!("replace stale link {}: {e}", link.display()))?;
         } else {
             return Err(format!(
-                "{} exists and is not a tmux-mobile link — the v3 engine would read it as '{name}'; move it aside or rename the agent",
+                "{} exists and is not a Teammux link — the v3 engine would read it as '{name}'; move it aside or rename the agent",
                 link.display()
             ));
         }
@@ -2302,7 +2302,7 @@ mod tests {
         let other = workspace_entry_path(&ws, "ops");
         std::fs::write(&other, "{\"name\":\"ops\",\"mine\":true}").unwrap();
         let err = ensure_workspace_entry(&ws, &home, "ops").unwrap_err();
-        assert!(err.contains("ops.json") && err.contains("not a tmux-mobile link"), "{err}");
+        assert!(err.contains("ops.json") && err.contains("not a Teammux link"), "{err}");
         assert_eq!(std::fs::read_to_string(&other).unwrap(), "{\"name\":\"ops\",\"mine\":true}");
         assert!(!remove_workspace_entry(&ws, "ops"), "not ours to remove");
 

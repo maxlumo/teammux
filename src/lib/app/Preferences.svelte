@@ -982,7 +982,7 @@
         {/snippet}
         <div class="config-section">
           <div class="preference-row">
-            <div class="pref-label"><strong class="config-field-label">tmux-mobile</strong><small class="config-note">{t('aboutThisApp')}</small></div>
+            <div class="pref-label"><strong class="config-field-label">Teammux</strong><small class="config-note">{t('aboutThisApp')}</small></div>
             <div class="pref-control">
               {#if uiBuild.devServer}
                 <small class="config-note connection-id about-build">{t('aboutDevServer').replace('{time}', clockOf(uiBuild.built))}</small>
@@ -1001,7 +1001,7 @@
           {/if}
           <div class="preference-row">
             <div class="pref-label"><strong class="config-field-label">{t('aboutSource')}</strong></div>
-            <div class="pref-control"><a class="config-note about-link" href="https://github.com/vokako/tmux-mobile" target="_blank" rel="noopener">github.com/vokako/tmux-mobile</a></div>
+            <div class="pref-control"><a class="config-note about-link" href="https://github.com/maxlumo/teammux" target="_blank" rel="noopener">github.com/maxlumo/teammux</a></div>
           </div>
           {#if uiLicense}
             <div class="preference-row">
