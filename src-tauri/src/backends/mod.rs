@@ -264,17 +264,12 @@ impl Backend {
         }
     }
 
-    /// Does this reassembled pane paint block show one of THIS backend's own
-    /// transient model errors (auto-continue, `projects/recovery.rs`)? Each
+    /// Which of this backend's OWN transient-error shapes this reassembled
+    /// pane paint block is (auto-continue, `projects/recovery.rs`), by the
+    /// name its `recovery_shapes` row carries (board #362), or `None`. Each
     /// backend owns its measured shapes in its own file (board #280): one
-    /// CLI's text inside another's pane is never a hit. `false` where none
+    /// CLI's text inside another's pane is never a hit; `None` where none
     /// was measured.
-    pub fn transient_error(self, glued: &str, spaced: &str) -> bool {
-        self.transient_shape(glued, spaced).is_some()
-    }
-
-    /// Which of this backend's transient-error shapes the block is, by the
-    /// name its `recovery_shapes` row carries (board #362), or `None`.
     pub fn transient_shape(self, glued: &str, spaced: &str) -> Option<&'static str> {
         match self {
             Backend::Kiro => kiro::transient_shape(glued, spaced),
@@ -752,6 +747,17 @@ pub struct Measured {
     /// before versions were written down; the first version on record on
     /// this host is 2.18.1, 2026-09-03).
     pub at_most: bool,
+    /// `true` when the WHOLE screen this shape is painted on is read by a
+    /// measured grammar (`Backend::newest_block`), so a transient shape is
+    /// continued only while it is the newest block of the capture (board
+    /// #473). `false` where that grammar was never measured — kiro's two
+    /// ≤ 2.18.1 shapes (no bullet head, the old box composer) and claude's
+    /// 5xx — which keep the ungated send they always had.
+    pub screen_grammar: bool,
+    /// What the shape is called where a person reads it: the reason the
+    /// feed's auto-continue row gives (board #473, P-1), e.g. "connection
+    /// interrupted". Not part of an incident's identity.
+    pub words: &'static str,
 }
 
 impl Measured {
@@ -867,7 +873,7 @@ mod tests {
         assert_eq!(parse_version("v1.2"), Some(vec![1, 2]));
         assert_eq!(parse_version("no version here"), None);
         assert_eq!(parse_version("build 42"), None, "a lone number is not a version");
-        let m = |v: &'static str, at_most| Measured { shape: "s", version: v, at_most };
+        let m = |v: &'static str, at_most| Measured { shape: "s", version: v, at_most, screen_grammar: false, words: "s" };
         assert!(newer_than_measured(&[2, 31, 0], &m("2.28.0", false)));
         assert!(newer_than_measured(&[2, 28, 1], &m("2.28.0", false)));
         assert!(newer_than_measured(&[2, 100, 0], &m("2.28.0", false)), "by number, not by text");

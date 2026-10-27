@@ -1323,8 +1323,33 @@ const MODEL_NAME_WORDS: usize = 5;
 /// `BASE_BACKOFF_SECS` and doubling); it does not get a shorter one. The
 /// ladder bounds one Request ID only: a fresh id is a fresh incident.
 const TOO_MANY_REQUESTS: &str = "Too many requests, please wait before trying again. (Request ID: ";
+/// Fifth and sixth kiro shapes (kiro-cli 2.34.0, `--agent-engine v3`, board
+/// #473, measured 2026-10-27): the two network failures. kiro retries a
+/// stream reset once by itself (`recoveries: ["streamErrorRetry"]` in its
+/// session record, the rig's R1, after which the turn finished); when that
+/// retry fails too it ends the turn with NO hook (no Stop: 5 of 5 rig
+/// failures, 0 of 1089 errored turns in this host's session files) and
+/// paints one of these under its bullet head, then waits at the idle
+/// composer. `ConnectionResetError` (a reset mid-stream with the reconnect
+/// refused, R2, R9, and the live sound-factory:kiro-2 incident, 10-27 13:40)
+/// and `ClientNetworkError` (the connection refused, R5, R8). Neither names a
+/// model or carries a Request ID, so the block is EXACTLY a head glyph and
+/// the sentence, whitespace collapsed (a hard wrap is a space), nothing
+/// before or after: the same strictness as `TOO_MANY_REQUESTS`, because
+/// letters alone are prose ABOUT the error.
+const CONNECTION_INTERRUPTED: &str = "Your connection was interrupted. Please try again in a moment.";
+const NETWORK_ERROR: &str = "A network error occurred. Please check your connection and try again.";
 
 use super::is_uuid;
+
+/// Is this block, its lines joined with spaces, exactly `sentence` under one
+/// of kiro's head glyphs?
+fn exactly(spaced: &str, sentence: &str) -> bool {
+    let flat = spaced.split_whitespace().collect::<Vec<_>>().join(" ");
+    flat.strip_prefix(|c: char| HEAD_GLYPHS.contains(&c))
+        .and_then(|rest| rest.strip_prefix(' '))
+        .is_some_and(|body| body == sentence)
+}
 
 /// Is this block, its lines joined with spaces, exactly the rate-limit error?
 fn too_many_requests(spaced: &str) -> bool {
@@ -1372,6 +1397,10 @@ pub(crate) fn transient_shape(glued: &str, spaced: &str) -> Option<&'static str>
         Some("high_traffic")
     } else if too_many_requests(spaced) {
         Some("too_many_requests")
+    } else if exactly(spaced, CONNECTION_INTERRUPTED) {
+        Some("connection_interrupted")
+    } else if exactly(spaced, NETWORK_ERROR) {
+        Some("network_error")
     } else {
         None
     }
@@ -1383,16 +1412,24 @@ pub(crate) fn transient_shape(glued: &str, spaced: &str) -> Option<&'static str>
 /// was written down; the first kiro-cli on record on this host is 2.18.1
 /// (2026-09-03), so both are an upper bound, and neither has been seen since.
 /// `high_traffic` was captured on 2.22.1 (`●`, #267) and 2.28.0 (`•`, #361),
-/// `too_many_requests` on 2.28.0 (#370). `conversation_blocked` (a person's
+/// `too_many_requests` on 2.28.0 (#370), `connection_interrupted` and
+/// `network_error` on 2.34.0 (#473). `conversation_blocked` (a person's
 /// error, `person_paint`) on 2.28.0 (#362, video-factory:checker 10-13).
+/// `screen_grammar` (#473): the shapes painted under a bullet head above the
+/// v3 idle composer are read by `newest_block` (measured on 2.22.1, 2.28.0
+/// and 2.34.0), so they are continued only as the newest block; the two
+/// ≤ 2.18.1 shapes have no bullet and sat above the old box composer, a
+/// grammar never measured, so they keep the ungated send.
 /// Raise a version only with a new capture as its fixture
 /// (`recovery::tests::FIXTURES`).
 pub(crate) const RECOVERY_SHAPES: &[super::Measured] = &[
-    super::Measured { shape: "stream_error", version: "2.18.1", at_most: true },
-    super::Measured { shape: "model_unavailable", version: "2.18.1", at_most: true },
-    super::Measured { shape: "high_traffic", version: "2.28.0", at_most: false },
-    super::Measured { shape: "too_many_requests", version: "2.28.0", at_most: false },
-    super::Measured { shape: "conversation_blocked", version: "2.28.0", at_most: false },
+    super::Measured { shape: "stream_error", version: "2.18.1", at_most: true, screen_grammar: false, words: "stream error" },
+    super::Measured { shape: "model_unavailable", version: "2.18.1", at_most: true, screen_grammar: false, words: "model unavailable" },
+    super::Measured { shape: "high_traffic", version: "2.28.0", at_most: false, screen_grammar: true, words: "high traffic" },
+    super::Measured { shape: "too_many_requests", version: "2.28.0", at_most: false, screen_grammar: true, words: "too many requests" },
+    super::Measured { shape: "connection_interrupted", version: "2.34.0", at_most: false, screen_grammar: true, words: "connection interrupted" },
+    super::Measured { shape: "network_error", version: "2.34.0", at_most: false, screen_grammar: true, words: "network error" },
+    super::Measured { shape: "conversation_blocked", version: "2.28.0", at_most: false, screen_grammar: true, words: "conversation blocked" },
 ];
 
 /// A kiro error no `continue` can fix (board #362 c): the conversation holds
@@ -1490,11 +1527,13 @@ const TRUST_BANNER: &str = "Trust All Tools active, confirmations are off · /qu
 /// What kiro paints between its newest block and the idle composer once a
 /// turn has ended, top to bottom, read by its measured TEXT (kiro-cli 2.28.0
 /// on video-factory:checker and builder; 2.22.1 adds the tasks line,
-/// lingting:kiro): the turn's `▸ Credits … | Time …` (or `▸ Time …`) line
-/// and ` ◐ N tasks remaining · ctrl+x expand`; a rule; the one-space Trust
+/// lingting:kiro): the turn's `▸ Credits … | Time …` (or `▸ Time …`) line,
+/// its hard wrap rejoined only into a measured form (`wrapped_turn_line`,
+/// board #473), and ` ◐ N tasks remaining · ctrl+x expand`; a rule; the one-space Trust
 /// banner, exactly `TRUST_BANNER` however it wraps; a rule; then one to
 /// three column-zero status lines, the first with kiro's ` · ` segments
-/// (`<agent> · <model> · …`), the rest its wrap or the cwd. Blank lines
+/// (`<agent> · <model> · …`), the rest its wrap or the cwd, or the spill a
+/// resize paints (`status_region`, board #473). Blank lines
 /// anywhere. Anything else (a two-space-indented line such as a submitted
 /// prompt or tool output, the older ` Kiro is working` footer, a third rule,
 /// a status line with no segments) is not furniture.
@@ -1503,10 +1542,31 @@ fn idle_furniture(region: &[&str]) -> bool {
     let mut rules = 0;
     let mut banner = String::new();
     let mut status: Vec<&str> = Vec::new();
+    // The turn line and the two-space lines that continue it (board #473),
+    // while it can still wrap; checked whole when the run ends.
+    let mut turn: Option<String> = None;
+    let mut wrapped = false;
     let one_space = |l: &str| l.starts_with(' ') && !l.starts_with("  ");
     for line in region {
         let t = line.trim();
+        if turn.is_some() && line.starts_with("  ") && !t.is_empty() {
+            let run = turn.as_mut().expect("checked");
+            run.push(' ');
+            run.push_str(t);
+            wrapped = true;
+            continue;
+        }
+        if wrapped && !turn.take().is_some_and(|run| wrapped_turn_line(&run)) {
+            return false;
+        }
+        turn = None;
+        wrapped = false;
         if t.is_empty() {
+            // In the status region a blank line can be a spilled space
+            // (`spilled_status`), so its place is kept there.
+            if rules == 2 {
+                status.push("");
+            }
             continue;
         }
         if t.chars().all(|c| c == '─') {
@@ -1517,7 +1577,11 @@ fn idle_furniture(region: &[&str]) -> bool {
             continue;
         }
         let fits = match rules {
-            0 => line.starts_with("▸ ") || (one_space(line) && t.contains(" tasks remaining")),
+            0 if line.starts_with("▸ ") => {
+                turn = Some(t.to_string());
+                true
+            }
+            0 => one_space(line) && t.contains(" tasks remaining"),
             // The banner is checked by its whole text below, which no other
             // line between the rules can pass.
             1 => {
@@ -1527,17 +1591,153 @@ fn idle_furniture(region: &[&str]) -> bool {
             }
             _ => {
                 status.push(line);
-                !line.starts_with(' ')
+                true
             }
         };
         if !fits {
             return false;
         }
     }
+    if wrapped && !turn.is_some_and(|run| wrapped_turn_line(&run)) {
+        return false;
+    }
     rules == 2
         && banner.split_whitespace().collect::<Vec<_>>().join(" ") == TRUST_BANNER
-        && (1..=3).contains(&status.len())
-        && status[0].contains(" · ")
+        && status_region(&status)
+}
+
+/// kiro's status region, below the second rule (board #473): today's one
+/// to three column-zero lines, the first with kiro's ` · ` segments
+/// (`<agent> · <model> · …`), the rest its wrap or the cwd; or EXACTLY the
+/// spill measured after a resize (`spilled_status`). Blank lines are kept
+/// in place (`""`): outside a spill they are only spacing.
+#[cfg(not(any(target_os = "android", target_os = "ios")))]
+fn status_region(region: &[&str]) -> bool {
+    let start = region.iter().position(|l| !l.is_empty()).unwrap_or(region.len());
+    let end = region.iter().rposition(|l| !l.is_empty()).map_or(start, |i| i + 1);
+    let lines = &region[start..end];
+    let Some(first) = lines.first() else { return false };
+    if first.starts_with(' ') || !first.contains(" · ") {
+        return false;
+    }
+    let shown: Vec<&str> = lines.iter().copied().filter(|l| !l.is_empty()).collect();
+    if shown.iter().all(|l| !l.starts_with(' ')) {
+        return shown.len() <= 3;
+    }
+    spilled_status(lines)
+}
+
+/// The status line kiro-cli 2.34.0 repaints after its pane is RESIZED
+/// narrower (board #473, the validator's row B; reproduced on kiro's rig as
+/// R12): when a character of the status line lands exactly in the last
+/// column, kiro paints the rest of the line one character per line down
+/// that column. The first status line fills the width (`… · ◔ 1% · M`), the
+/// cwd line (a path) ends in the next character there (`/tmp/… … i`), and
+/// every line below is spaces and one character in that same column, or
+/// blank for a spilled space. Resized back to the wide size the line
+/// repaints whole. Read geometrically AND by text: the first line and the
+/// spilled characters, rejoined, must be one of kiro's status lines
+/// (`spilled_status_line`, review P2-D on f6c6b048). Nothing else is
+/// admitted: a line of another width, a character in another column, text
+/// before it, a cwd that is not a path, or a rejoined line that is not a
+/// status line.
+#[cfg(not(any(target_os = "android", target_os = "ios")))]
+fn spilled_status(lines: &[&str]) -> bool {
+    let width = lines[0].chars().count();
+    let Some(col) = width.checked_sub(1).filter(|c| *c > 0) else { return false };
+    let Some((cwd, rest)) = lines[1..].split_first() else { return false };
+    let cwd: Vec<char> = cwd.chars().collect();
+    if cwd.len() != width || !matches!(cwd[0], '/' | '~') || cwd[col] == ' ' || cwd[col - 1] != ' ' {
+        return false;
+    }
+    let path: String = cwd[..col].iter().collect();
+    if path.trim_end().contains(' ') {
+        return false;
+    }
+    let mut spilled = String::from(cwd[col]);
+    for l in rest {
+        if l.is_empty() {
+            spilled.push(' ');
+            continue;
+        }
+        let c: Vec<char> = l.chars().collect();
+        if c.len() != width || c[..col].iter().any(|ch| *ch != ' ') || c[col] == ' ' {
+            return false;
+        }
+        spilled.push(c[col]);
+    }
+    spilled_status_line(&format!("{}{}", lines[0], spilled.trim_end()))
+}
+
+/// The status line a spill rejoins to, as measured (board #473: row B and
+/// R12, `kn · claude-haiku-5.5 · thinking · medium · ◔ 1% · Midway:
+/// expired`, and every unspilled status line in this host's captures):
+/// ` · ` segments, the first a plain agent name, one a context gauge (a
+/// glyph and `N%`), and the LAST, where the spill lands, `Midway: expired`
+/// or `Midway: <N>h <N>m` / `Midway: <N>m`.
+#[cfg(not(any(target_os = "android", target_os = "ios")))]
+fn spilled_status_line(text: &str) -> bool {
+    let segs: Vec<&str> = text.split(" · ").collect();
+    let name = segs.first().is_some_and(|n| !n.is_empty() && n.chars().all(|c| c.is_ascii_alphanumeric() || "-_".contains(c)));
+    let gauge = segs.iter().any(|s| {
+        let mut parts = s.splitn(2, ' ');
+        let glyph = parts.next().unwrap_or("");
+        glyph.chars().count() == 1
+            && !glyph.is_ascii()
+            && parts.next().and_then(|p| p.strip_suffix('%')).is_some_and(|n| !n.is_empty() && n.chars().all(|c| c.is_ascii_digit()))
+    });
+    let unit = |s: &str, u: char| s.strip_suffix(u).is_some_and(|n| !n.is_empty() && n.chars().all(|c| c.is_ascii_digit()));
+    let midway = segs.last().and_then(|s| s.strip_prefix("Midway: ")).is_some_and(|m| {
+        m == "expired"
+            || match m.split(' ').collect::<Vec<_>>()[..] {
+                [h, mm] => unit(h, 'h') && unit(mm, 'm'),
+                [mm] => unit(mm, 'm'),
+                _ => false,
+            }
+    });
+    segs.len() >= 3 && name && gauge && midway
+}
+
+/// A turn line that kiro hard-wrapped, rejoined (board #473, reviewer P1-A):
+/// a long turn's `▸ Credits: turn 267.16 • session 2416.53 | Time:` with
+/// `  123m 39s` on the next line, as the live sound-factory:kiro-2 incident
+/// (52 columns) and the rig's R10 (44 columns) painted it on kiro-cli
+/// 2.34.0. Only the measured forms pass, whole: `▸ Time: D`, `▸ Credits:
+/// turn N | Time: D`, `▸ Credits: turn N • session N | Time: D` (this
+/// host's panes on 10-27: 297 unwrapped lines in these forms) and 2.22.1's
+/// `▸ Credits: N • Time: D`, D being `Ns` or `Nm Ns`. A submitted prompt, a
+/// tool's output or any other text in the continuation is not a turn line.
+#[cfg(not(any(target_os = "android", target_os = "ios")))]
+fn wrapped_turn_line(run: &str) -> bool {
+    let flat = run.split_whitespace().collect::<Vec<_>>().join(" ");
+    let number = |s: &str| {
+        let mut parts = s.splitn(2, '.');
+        let whole = parts.next().unwrap_or("");
+        !whole.is_empty() && whole.chars().all(|c| c.is_ascii_digit()) && parts.next().map_or(true, |f| !f.is_empty() && f.chars().all(|c| c.is_ascii_digit()))
+    };
+    let unit = |s: &str, u: char| s.strip_suffix(u).is_some_and(|n| !n.is_empty() && n.chars().all(|c| c.is_ascii_digit()));
+    let duration = |s: &str| match s.split(' ').collect::<Vec<_>>()[..] {
+        [secs] => unit(secs, 's'),
+        [mins, secs] => unit(mins, 'm') && unit(secs, 's'),
+        _ => false,
+    };
+    let Some(rest) = flat.strip_prefix("▸ ") else { return false };
+    let Some((credits, time)) = rest.split_once("Time: ") else { return false };
+    if !duration(time) {
+        return false;
+    }
+    if credits.is_empty() {
+        return true;
+    }
+    let Some(credits) = credits.strip_prefix("Credits: ") else { return false };
+    if let Some(n) = credits.strip_suffix(" • ") {
+        return number(n);
+    }
+    let Some(turn) = credits.strip_prefix("turn ").and_then(|c| c.strip_suffix(" | ")) else { return false };
+    match turn.split_once(" • session ") {
+        Some((t, s)) => number(t) && number(s),
+        None => number(turn),
+    }
 }
 
 /// The program whose `--version` names the kiro-cli a pane runs.
@@ -2341,5 +2541,37 @@ mod tests {
         })).unwrap()).unwrap();
         assert!(!patch_profile(&path, kiro_hooks("n")).unwrap());
         let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// Board #473, reviewer P1-A: a hard-wrapped turn line, rejoined, passes
+    /// only in the forms measured on this host; a prompt, tool output or any
+    /// other text in the wrap does not.
+    #[cfg(not(any(target_os = "android", target_os = "ios")))]
+    #[test]
+    fn a_wrapped_turn_line_passes_only_in_its_measured_forms() {
+        for ok in [
+            "▸ Time: 10s",
+            "▸ Time: 2m 49s",
+            "▸ Credits: turn 267.16 • session 2416.53 | Time: 123m 39s",
+            "▸ Credits: turn 0.08 • session 0.08 | Time: 23s",
+            "▸ Credits: turn 7.85 | Time: 29s",
+            "▸ Credits: 121.98 • Time: 129m 30s",
+        ] {
+            assert!(super::wrapped_turn_line(ok), "{ok}");
+        }
+        for bad in [
+            "▸ Time: 10s › continue",
+            "▸ Time: soon",
+            "▸ Time: 10",
+            "▸ Time: 1h 2m 3s",
+            "▸ Credits: turn x | Time: 3s",
+            "▸ Credits: turn 1. | Time: 3s",
+            "▸ Credits: turn 1 • session 2 Time: 3s",
+            "▸ Note: Time: 3s",
+            "Time: 3s",
+            "▸ Credits: turn 1 | Time: 3s extra",
+        ] {
+            assert!(!super::wrapped_turn_line(bad), "{bad}");
+        }
     }
 }

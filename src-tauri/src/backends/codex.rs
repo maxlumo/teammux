@@ -262,7 +262,7 @@ fn codex_content_line(line: &str) -> bool {
 /// (10-14 and 10-15; the version asked of the running binary, which the
 /// installed 0.162.1 had replaced on disk).
 pub(crate) const RECOVERY_SHAPES: &[super::Measured] = &[
-    super::Measured { shape: "auth_expired", version: "0.154.0", at_most: false },
+    super::Measured { shape: "auth_expired", version: "0.154.0", at_most: false, screen_grammar: true, words: "auth expired" },
 ];
 
 /// The program whose `--version` names the codex-cli a pane runs.

@@ -27,9 +27,10 @@
 //!    when an id is not on screen).
 //! 2. A send is VERIFIED through the hooks, not the screen: the error text
 //!    stays painted long after the agent moved on, so "error still visible"
-//!    means nothing. Before any retry the tracker asks whether a turn fact
-//!    (accepted prompt, turn end, tool call — `telemetry::turn_fact_since`)
-//!    arrived after the send; if one did the incident is CONFIRMED and goes
+//!    means nothing. Before any retry the tracker asks whether the agent
+//!    PROGRESSED (a tool call or a CLI-sent turn end, never the continue's
+//!    own prompt — `telemetry::progress_since`, board #473) after the send;
+//!    if it did the incident is CONFIRMED and goes
 //!    silent. A tool call observed by telemetry confirms it directly too —
 //!    and must never erase the record, because an erased record plus the
 //!    still-painted error re-opened the incident every tick and typed
@@ -137,18 +138,33 @@ pub fn deep_error_signature(backend: &str, text: &str) -> Option<String> {
 }
 
 /// Is this reassembled paint block one of `backend`'s OWN error shapes
-/// (validator / orchestrator 12:08, #280)? A shape belongs to the CLI that
-/// paints it, and lives in that backend's file: kiro's prose uses the same
-/// flush-left `●` bullet claude does, so a kiro pane showing claude's text
-/// must never be typed into, and the reverse. An unknown or unmeasured
-/// backend has no shape.
-fn is_backend_error(backend: &str, glued: &str, spaced: &str) -> bool {
-    crate::backends::Backend::parse(backend).is_some_and(|b| b.transient_error(glued, spaced))
+/// (validator / orchestrator 12:08, #280), and which? A shape belongs to the
+/// CLI that paints it, and lives in that backend's file: kiro's prose uses
+/// the same flush-left `●` bullet claude does, so a kiro pane showing
+/// claude's text must never be typed into, and the reverse. An unknown or
+/// unmeasured backend has no shape.
+fn backend_shape(backend: &str, glued: &str, spaced: &str) -> Option<&'static str> {
+    crate::backends::Backend::parse(backend).and_then(|b| b.transient_shape(glued, spaced))
+}
+
+/// What ONE capture shows (board #473): the incident's signature, and the
+/// shape of every hit in screen order. Signature, shapes and send
+/// eligibility are all read from the same capture.
+#[derive(Debug, PartialEq)]
+struct Reading {
+    sig: String,
+    shapes: Vec<&'static str>,
+    /// The Request IDs read off the hits, sorted, deduplicated.
+    ids: Vec<String>,
 }
 
 fn signature_within(backend: &str, text: &str, window: usize) -> Option<String> {
+    reading_within(backend, text, window).map(|r| r.sig)
+}
+
+fn reading_within(backend: &str, text: &str, window: usize) -> Option<Reading> {
     let blocks = paint_blocks(text, window);
-    let mut hits = 0u32;
+    let mut shapes: Vec<&'static str> = Vec::new();
     let mut ids: Vec<String> = Vec::new();
     for (block, spaced) in &blocks {
         let c = crate::backends::canonical(block);
@@ -158,21 +174,66 @@ fn signature_within(backend: &str, text: &str, window: usize) -> Option<String> 
         if c.contains("tmmchat") {
             continue;
         }
-        if !is_backend_error(backend, block, spaced) {
-            continue;
-        }
-        hits += 1;
+        let Some(shape) = backend_shape(backend, block, spaced) else { continue };
+        shapes.push(shape);
         if let Some(id) = extract_request_id(block) {
             ids.push(id);
         }
     }
-    if hits == 0 {
+    if shapes.is_empty() {
         return None;
     }
     ids.sort();
     ids.dedup();
-    Some(format!("{}|{}", hits, ids.join(",")))
+    Some(Reading { sig: format!("{}|{}", shapes.len(), ids.join(",")), shapes, ids })
 }
+
+/// What the screen `tail` shows, and the deep capture it was read from when
+/// one was needed (`deep` is asked at most once, only for a headless tail;
+/// board #473: the reading and the send eligibility come from that same
+/// capture).
+fn read_capture(backend: &str, tail: &str, deep: impl FnOnce() -> Option<String>) -> Option<(Reading, Option<String>)> {
+    if let Some(r) = reading_within(backend, tail, 40) {
+        return Some((r, None));
+    }
+    if !headless_error_tail(tail) {
+        return None;
+    }
+    let deep = deep()?;
+    reading_within(backend, &deep, DEEP_CAPTURE_LINES + 120).map(|r| (r, Some(deep)))
+}
+
+/// May `continue` be typed for what `capture` shows (board #473: detection
+/// is not eligibility)? A shape whose whole screen is read by a measured
+/// grammar (`Measured::screen_grammar`) is continued only while an error is
+/// the NEWEST block of this same capture — the idle composer under it and
+/// nothing but the CLI's furniture between — so nothing is typed into a pane
+/// that has moved on (a submitted prompt, a working turn, a tool call, a
+/// typed composer). A hit of a shape whose screens were never measured
+/// (kiro's two ≤ 2.18.1 shapes, claude's 5xx) keeps the ungated send it
+/// always had, also beside a gated one: that is the explicit compatibility
+/// boundary, not an oversight.
+fn send_eligible(backend: &str, capture: &str, shapes: &[&'static str]) -> bool {
+    let Some(b) = crate::backends::Backend::parse(backend) else { return false };
+    let gated = |s: &str| crate::backends::measured_version(b, s).is_some_and(|m| m.screen_grammar);
+    shapes.iter().any(|s| !gated(s)) || error_is_newest(backend, capture)
+}
+
+/// The reason a feed row gives for `capture` (board #473, P-1): the newest
+/// block's shape when an error is the newest block, else the shape of the
+/// capture's only hit, else the generic word — an older error painted above
+/// a newer one is never named as this one's cause.
+fn reason(backend: &str, capture: &str, shapes: &[&'static str]) -> &'static str {
+    let Some(b) = crate::backends::Backend::parse(backend) else { return GENERIC_REASON };
+    let shape = newest_shape(backend, capture).or(match shapes {
+        [only] => Some(*only),
+        _ => None,
+    });
+    shape.and_then(|s| crate::backends::measured_version(b, s)).map_or(GENERIC_REASON, |m| m.words)
+}
+
+/// The reason when the capture cannot say which error this is.
+const GENERIC_REASON: &str = "transient error";
 
 /// The last `window` lines of `text` reassembled into paint blocks, each as
 /// (glued, spaced).
@@ -272,7 +333,15 @@ pub fn headless_error_tail(text: &str) -> bool {
 pub struct SendMark {
     attempts: u32,
     sent_at: u64,
+    sent_seq: u64,
     next_at: u64,
+}
+
+#[cfg(test)]
+impl SendMark {
+    fn attempts_for_test(&self) -> u32 {
+        self.attempts
+    }
 }
 
 #[derive(Default)]
@@ -284,12 +353,31 @@ struct Rec {
     attempts: u32,
     /// Unix seconds before which no further attempt may run.
     next_at: u64,
-    /// When the last `continue` was typed — the hook check measures from here.
+    /// When the last `continue` was typed (the backoff measures from here).
     sent_at: u64,
+    /// The window's fact sequence when it was decided (board #473): the
+    /// progress check counts only facts that arrived after it.
+    sent_seq: u64,
     /// Hooks showed a turn fact after `sent_at`: the incident is OVER, even
     /// though the error text is still painted on the screen. Nothing more is
     /// sent until the error leaves the screen and a fresh one appears.
     confirmed: bool,
+    /// A SENT incident was confirmed by `note_answered` (a tool call or a
+    /// real reply) and "took effect" has not been said yet (board #473): the
+    /// next tick that sees the incident, or the one that clears it, says it.
+    effect_unsaid: bool,
+    /// A turn version newer than this incident's own, seen once with its
+    /// error still the newest block (board #473, `Tracker::bind`); the next
+    /// tick that sees the same version settles it as a new failure.
+    settling: Option<u64>,
+    /// The newest error block's own Request ID when this incident was bound
+    /// (`bind`); `None` until bound, `Some(None)` for an id-less error.
+    bound: Option<Option<String>>,
+    /// The arrival number of the progress fact that CONFIRMED this incident
+    /// (board #473, orchestrator's ruling 20:02; review P2-A on 0126b589):
+    /// progress after it is the resumed turn working on, so an error the
+    /// newest block afterwards is a new failure. `None` until confirmed.
+    conf_seq: Option<u64>,
     /// The give-up warning is emitted once per incident, not once per tick.
     gave_up_reported: bool,
     /// This incident arrived with the window's cross-incident cap reached
@@ -350,19 +438,29 @@ pub struct Tracker {
 
 impl Tracker {
     /// The error with signature `sig` is visible in (session, window) at
-    /// `now` — what do we do? `verified(sent_at)` answers "did any turn fact
-    /// arrive at/after that time" (see `telemetry::turn_fact_since`); it is
+    /// `now` — what do we do? `verified(sent_at)` answers "did the agent
+    /// progress at/after that time" (see `telemetry::progress_since`); it is
     /// consulted before any retry, so a `continue` that WORKED is never
     /// followed by another one just because the error text is still painted
     /// (owner, 2026-08-26). A DIFFERENT signature than the record's replaces
     /// it wholesale — confirmed, mid-backoff or given-up alike: whatever the
     /// old incident's state, a new error instance is a new incident (owner,
     /// 2026-08-26: "有可能还会出现二次报错并停止…就需要再次发送指令").
-    pub fn decide(
+    #[cfg(test)]
+    pub fn decide(&mut self, session: &str, window: &str, now: u64, sig: &str, verified: impl FnOnce(u64) -> bool) -> Decision {
+        self.decide_seq(session, window, now, 0, sig, verified)
+    }
+
+    /// `decide` at the window's fact sequence `seq` (`telemetry::turn_version`
+    /// read before the capture, board #473): a send records it, and
+    /// `verified(sent_seq)` asks whether the agent progressed AFTER it in
+    /// arrival order, never by whole seconds.
+    pub fn decide_seq(
         &mut self,
         session: &str,
         window: &str,
         now: u64,
+        seq: u64,
         sig: &str,
         verified: impl FnOnce(u64) -> bool,
     ) -> Decision {
@@ -373,12 +471,13 @@ impl Tracker {
         let rec = self.map.entry(key).or_default();
         rec.sig = sig.to_string();
         if rec.confirmed {
-            return Decision::Confirmed { first: false };
+            let first = std::mem::take(&mut rec.effect_unsaid);
+            return Decision::Confirmed { first };
         }
         // A send exists: ask the hooks FIRST. Verification outranks both the
         // backoff ladder and the give-up — a 4th attempt that finally landed
         // is a success, not an exhausted budget.
-        if rec.attempts > 0 && verified(rec.sent_at) {
+        if rec.attempts > 0 && verified(rec.sent_seq) {
             rec.confirmed = true;
             return Decision::Confirmed { first: true };
         }
@@ -408,9 +507,118 @@ impl Tracker {
         }
         rec.attempts += 1;
         rec.sent_at = now;
+        rec.sent_seq = seq;
         // 30s after the 1st attempt, 60s after the 2nd, 120s after the 3rd.
         rec.next_at = now + BASE_BACKOFF_SECS * (1 << (rec.attempts - 1));
         Decision::Send { attempt: rec.attempts }
+    }
+
+    /// A screen showing the window's error is NOT eligible for a send (board
+    /// #473): nothing is decided, spent or cleared, but a send already made
+    /// is still verified, so "took effect" is said when the agent PROGRESSED
+    /// even while the pane is busy with the resumed turn. It asks the
+    /// window's incident whatever the screen's signature: an ineligible
+    /// screen carries no turn binding. `true` exactly once per incident.
+    pub fn verify_pending(&mut self, session: &str, window: &str, verified: impl FnOnce(u64) -> bool) -> bool {
+        match self.map.get_mut(&(session.to_string(), window.to_string())) {
+            Some(r) if r.confirmed => std::mem::take(&mut r.effect_unsaid),
+            Some(r) if r.attempts > 0 && verified(r.sent_seq) => {
+                r.confirmed = true;
+                true
+            }
+            _ => false,
+        }
+    }
+
+    /// The key of a GATED error seen as the newest block (board #473): the
+    /// turn it ended, `turn:<prompt>`, the arrival number of the window's
+    /// newest accepted PROMPT (`telemetry::prompt_seq`). kiro v3 ends an
+    /// errored turn with no hook, so a new failure needs a new prompt, while a
+    /// tool call, an end (our own missed end included), an ask, an interrupt,
+    /// a redraw, a resize or a scroll never moves it (review P1-A on f6c6b048:
+    /// the all-facts version moved with our own give-up and reopened the
+    /// ladder). A moved prompt is a NEW incident only when
+    /// - it is SETTLED: seen at two eligible ticks in a row (`unsettle` drops
+    ///   the candidate on any ineligible tick, never the incident). kiro paints
+    ///   a submitted prompt within a second (#362: 154-533 ms), so an error
+    ///   still the newest block a tick later is a new failure, not a prompt
+    ///   about to paint; and
+    /// - there is evidence of a new FAILURE (orchestrator's ruling 20:02):
+    ///   - our own send went unanswered (sent, never confirmed): the row A
+    ///     outage, where each accepted `continue` failed again and the
+    ///     screen could repeat byte for byte;
+    ///   - the incident is CONFIRMED and the agent PROGRESSED after the
+    ///     confirmation (`progressed(conf_seq)`: a later tool call or valid
+    ///     CLI end). The resumed turn worked on, so its output lies below the
+    ///     old error, and an error the newest block now is the resumed turn
+    ///     dying again (orchestrator's ruling 19:29). No progress since the
+    ///     confirmation: the same incident, whatever the display does (the
+    ///     Midway segment, a gauge, a reflow, a taller window re-exposing
+    ///     older errors and their Request IDs; review P1 on e2ba9948: no text
+    ///     of the screen is identity);
+    ///   - an incident never sent to (capped): a newest block with another
+    ///     Request ID than the one it was bound on.
+    ///   When both newest blocks carry a Request ID, the same ID is the same
+    ///   error whatever else holds, in every branch (review P2-B on 0126b589:
+    ///   an unanswered incident keeps its backoff retries then, it does not
+    ///   start a new ladder).
+    /// `None` while it settles: that tick decides nothing.
+    pub fn bind(&mut self, session: &str, window: &str, prompt: u64, newest_id: Option<String>, progressed: impl FnOnce(u64) -> bool) -> Option<String> {
+        let own = format!("turn:{prompt}");
+        let Some(r) = self.map.get_mut(&(session.to_string(), window.to_string())) else { return Some(own) };
+        if !r.sig.starts_with("turn:") || r.sig == own {
+            r.settling = None;
+            return Some(own);
+        }
+        let bound_id = r.bound.clone().flatten();
+        let same_id = matches!((&bound_id, &newest_id), (Some(a), Some(b)) if a == b);
+        let new_failure = if same_id {
+            false
+        } else if r.attempts > 0 && !r.confirmed {
+            true
+        } else if r.confirmed {
+            r.conf_seq.is_some_and(progressed)
+        } else {
+            matches!((&bound_id, &newest_id), (Some(a), Some(b)) if a != b)
+        };
+        if !new_failure {
+            r.settling = None;
+            return Some(r.sig.clone());
+        }
+        if r.settling == Some(prompt) {
+            return Some(own);
+        }
+        r.settling = Some(prompt);
+        None
+    }
+
+    /// A confirmation the TICK made (no `note_answered` behind it, e.g. a
+    /// valid end with no usable reply) is bound to the earliest progress fact
+    /// after the send that is still known (`first(sent_seq)`,
+    /// `telemetry::progress_seq_since`), never to the tick's own snapshot
+    /// (review P2-A on 0126b589).
+    pub fn settle_conf(&mut self, session: &str, window: &str, first: impl FnOnce(u64) -> Option<u64>) {
+        if let Some(r) = self.map.get_mut(&(session.to_string(), window.to_string())) {
+            if r.confirmed && r.conf_seq.is_none() && r.attempts > 0 {
+                r.conf_seq = Some(first(r.sent_seq).unwrap_or(r.sent_seq));
+            }
+        }
+    }
+
+    /// An ineligible tick: a settling candidate is dropped (review P2-C on
+    /// f6c6b048), the incident, its budget and its confirmation are not.
+    pub fn unsettle(&mut self, session: &str, window: &str) {
+        if let Some(r) = self.map.get_mut(&(session.to_string(), window.to_string())) {
+            r.settling = None;
+        }
+    }
+
+    /// Remember the newest error's Request ID an incident was first bound on
+    /// (`bind`); later captures do not move it.
+    pub fn remember_newest(&mut self, session: &str, window: &str, newest_id: Option<String>) {
+        if let Some(r) = self.map.get_mut(&(session.to_string(), window.to_string())) {
+            r.bound.get_or_insert(newest_id);
+        }
     }
 
     /// Where the window's incident about `sig` stood before a decision (its
@@ -419,7 +627,7 @@ impl Tracker {
     /// marks a fresh incident.
     pub fn send_mark(&self, session: &str, window: &str, sig: &str) -> SendMark {
         match self.map.get(&(session.to_string(), window.to_string())) {
-            Some(r) if r.sig == sig => SendMark { attempts: r.attempts, sent_at: r.sent_at, next_at: r.next_at },
+            Some(r) if r.sig == sig => SendMark { attempts: r.attempts, sent_at: r.sent_at, sent_seq: r.sent_seq, next_at: r.next_at },
             _ => SendMark::default(),
         }
     }
@@ -434,6 +642,7 @@ impl Tracker {
         if let Some(rec) = self.map.get_mut(&key) {
             rec.attempts = mark.attempts;
             rec.sent_at = mark.sent_at;
+            rec.sent_seq = mark.sent_seq;
             rec.next_at = mark.next_at;
         }
         if mark.attempts == 0 {
@@ -451,9 +660,15 @@ impl Tracker {
     /// made the next tick open a brand-new incident and type `continue` into
     /// the now-working agent — the repeat-send the owner reported
     /// (2026-08-26: "系统会反复发送好几次 auto recovery").
-    pub fn confirm(&mut self, session: &str, window: &str) {
+    pub fn confirm(&mut self, session: &str, window: &str, seq: u64) {
         let key = (session.to_string(), window.to_string());
         if let Some(rec) = self.map.get_mut(&key) {
+            // A send of ours that this progress answers is said once, by the
+            // tick (board #473): telemetry is recording here, not narrating.
+            rec.effect_unsaid |= rec.attempts > 0 && !rec.confirmed;
+            if !rec.confirmed {
+                rec.conf_seq = Some(seq);
+            }
             rec.confirmed = true;
         }
         // The agent works again: a later cap is a new stretch, said again.
@@ -462,9 +677,10 @@ impl Tracker {
 
     /// The error is no longer on the window's screen: the incident is over,
     /// whatever its state was. The record is dropped so a FRESH error later
-    /// starts a fresh incident with a full budget.
-    pub fn clear(&mut self, session: &str, window: &str) {
-        self.map.remove(&(session.to_string(), window.to_string()));
+    /// starts a fresh incident with a full budget. `true` when the incident
+    /// had taken effect and that was not said yet (board #473).
+    pub fn clear(&mut self, session: &str, window: &str) -> bool {
+        self.map.remove(&(session.to_string(), window.to_string())).is_some_and(|r| r.effect_unsaid)
     }
 
     /// Has the window's current incident NOT had its exhausted decision
@@ -502,6 +718,13 @@ impl Tracker {
     }
 }
 
+/// Test seam (board #473): run once between a tick's decision and its send,
+/// so a test can land a turn fact exactly where the stale-screen check looks.
+#[cfg(test)]
+thread_local! {
+    static AFTER_DECIDE: std::cell::RefCell<Option<Box<dyn FnOnce(&str, &str)>>> = std::cell::RefCell::new(None);
+}
+
 /// Test-only: the tracker's window housekeeping, as `check_once` runs it.
 #[cfg(test)]
 pub(crate) fn retain_windows_for_test(session: &str, live: &[String]) {
@@ -529,8 +752,11 @@ pub(crate) fn incident_confirmed_for_test(session: &str, window: &str) -> Option
 /// real reply (board #362: the reply resets a capped stretch too): either is
 /// proof the model answered, so an open incident is CONFIRMED (never erased —
 /// see `Tracker::confirm` for the repeat-send that erasing caused).
-pub fn note_answered(session: &str, window: &str) {
-    tracker().lock().unwrap().confirm(session, window);
+/// `seq` is the arrival number of the fact that answered (board #473 review
+/// P2-A on 0126b589): the confirmation is bound to it, never to a later
+/// snapshot of every fact.
+pub fn note_answered(session: &str, window: &str, seq: u64) {
+    tracker().lock().unwrap().confirm(session, window, seq);
 }
 
 /// Record the turn end the hooks missed for a person-needed PAINT (board
@@ -576,10 +802,45 @@ fn commit_exhausted(session: &str, window: &str, capped: bool, newest: bool, see
 /// measured grammar (`Backend::newest_block`) and its own transient shape?
 /// `false` where no grammar was measured (claude): unattributable.
 fn error_is_newest(backend: &str, tail: &str) -> bool {
-    let Some(b) = crate::backends::Backend::parse(backend) else { return false };
-    b.newest_block(tail).is_some_and(|(glued, spaced)| {
-        !crate::backends::canonical(&glued).contains("tmmchat") && b.transient_shape(&glued, &spaced).is_some()
+    newest_shape(backend, tail).is_some()
+}
+
+/// The transient shape of `tail`'s newest block, by the backend's own
+/// measured grammar; `None` when the newest block is not one of its errors
+/// or no grammar was measured.
+fn newest_shape(backend: &str, tail: &str) -> Option<&'static str> {
+    let b = crate::backends::Backend::parse(backend)?;
+    let (glued, spaced) = b.newest_block(tail)?;
+    if crate::backends::canonical(&glued).contains("tmmchat") {
+        return None;
+    }
+    b.transient_shape(&glued, &spaced)
+}
+
+/// Is `capture`'s newest block a GATED error (board #473)? Such an incident
+/// is identified by the turn it ended (`Tracker::bind`), not by the screen:
+/// a short pane shows only the last errors, so their count and ids are not
+/// identity, and a resize changes both.
+fn turn_bound(backend: &str, capture: &str) -> bool {
+    crate::backends::Backend::parse(backend).is_some_and(|b| {
+        newest_shape(backend, capture).and_then(|s| crate::backends::measured_version(b, s)).is_some_and(|m| m.screen_grammar)
     })
+}
+
+/// The newest error block's own Request ID on `capture`, by the backend's
+/// grammar (board #473): `Tracker::bind`'s equality check, never a reading
+/// of the rest of the screen.
+fn newest_request_id(backend: &str, capture: &str) -> Option<String> {
+    let b = crate::backends::Backend::parse(backend)?;
+    let (glued, _) = b.newest_block(capture)?;
+    extract_request_id(&glued)
+}
+
+/// The one "took effect" row: said when the agent PROGRESSED after our send
+/// (a tool call or a turn end the CLI sent, board #473), never on the
+/// continue's own prompt.
+fn say_took_effect(session: &str, window: &str) {
+    super::telemetry::record_recovery(session, window, &format!("auto-continue took effect — {window} is working again"));
 }
 
 fn now_secs() -> u64 {
@@ -623,6 +884,8 @@ pub fn check_once() {
             // fact that lands while it runs makes the observation stale
             // (board #362 review P1-A). No lock is held across the capture.
             let seen = super::telemetry::turn_version(&project.session, &p.window_name);
+            // The turn identity (board #473): the newest accepted prompt.
+            let prompt = super::telemetry::prompt_seq(&project.session, &p.window_name);
             let Ok(tail) = crate::tmux::capture_pane_plain(&target, Some(0)) else { continue };
             // An error only a person can clear, as the NEWEST paint (board
             // #362 c): its turn end is recorded once, the hooks having missed
@@ -642,30 +905,64 @@ pub fn check_once() {
             // capture brings the head back into view so it can be read
             // (2026-09-05: the kirocrew agent sat stalled under exactly such
             // a paint for half an hour).
-            let sig = error_signature(backend, &tail).or_else(|| {
-                if !headless_error_tail(&tail) {
-                    return None;
-                }
-                crate::tmux::capture_pane_plain(&target, Some(DEEP_CAPTURE_LINES))
-                    .ok()
-                    .and_then(|deep| deep_error_signature(backend, &deep))
-            });
-            let Some(sig) = sig else {
+            let found = read_capture(backend, &tail, || crate::tmux::capture_pane_plain(&target, Some(DEEP_CAPTURE_LINES)).ok());
+            let Some((reading, deep)) = found else {
                 // The error left the screen: the incident (if any) is over.
                 // Dropping the record here is what scopes "one incident" to
                 // one CONTINUOUS sighting — a fresh error later starts fresh.
-                tracker().lock().unwrap().clear(&project.session, &p.window_name);
+                if tracker().lock().unwrap().clear(&project.session, &p.window_name) {
+                    say_took_effect(&project.session, &p.window_name);
+                }
                 continue;
             };
+            // Eligibility, shape and signature from the SAME capture (board
+            // #473): the deep one when it was taken, which holds the real
+            // head and the current composer at its bottom.
+            let capture = deep.as_deref().unwrap_or(&tail);
+            // A gated error that is the newest block is identified by the
+            // turn it ended (board #473, `Tracker::bind`); `None` while a
+            // moved turn version is still settling. Every other capture keeps
+            // the screen's `hits|ids`.
+            let key = if !send_eligible(backend, capture, &reading.shapes) {
+                tracker().lock().unwrap().unsettle(&project.session, &p.window_name);
+                None
+            } else if turn_bound(backend, capture) {
+                tracker().lock().unwrap().bind(&project.session, &p.window_name, prompt, newest_request_id(backend, capture), |after| {
+                    super::telemetry::progress_since(&project.session, &p.window_name, after)
+                })
+            } else {
+                Some(reading.sig.clone())
+            };
+            let Some(sig) = key else {
+                // The error is still painted but the pane moved on (or its
+                // turn version is settling): nothing is typed, and nothing is
+                // decided, spent or cleared. A send already made is still
+                // verified against the hooks.
+                let confirmed = {
+                    let mut t = tracker().lock().unwrap();
+                    let said = t.verify_pending(&project.session, &p.window_name, |sent_seq| {
+                        super::telemetry::progress_since(&project.session, &p.window_name, sent_seq)
+                    });
+                    t.settle_conf(&project.session, &p.window_name, |after| super::telemetry::progress_seq_since(&project.session, &p.window_name, after));
+                    said
+                };
+                if confirmed {
+                    say_took_effect(&project.session, &p.window_name);
+                }
+                continue;
+            };
+            let why = reason(backend, capture, &reading.shapes);
             // The mark and the decision under one lock, at one `now`: a send
             // the barrier refuses is taken back exactly.
             let now = now_secs();
             let (mark, decision) = {
                 let mut t = tracker().lock().unwrap();
                 let mark = t.send_mark(&project.session, &p.window_name, &sig);
-                let decision = t.decide(&project.session, &p.window_name, now, &sig, |sent_at| {
-                    super::telemetry::turn_fact_since(&project.session, &p.window_name, sent_at)
+                let decision = t.decide_seq(&project.session, &p.window_name, now, seen, &sig, |sent_seq| {
+                    super::telemetry::progress_since(&project.session, &p.window_name, sent_seq)
                 });
+                t.remember_newest(&project.session, &p.window_name, newest_request_id(backend, capture));
+                t.settle_conf(&project.session, &p.window_name, |after| super::telemetry::progress_seq_since(&project.session, &p.window_name, after));
                 (mark, decision)
             };
             // Recovery stopped for this incident (capped or given up): the
@@ -673,32 +970,37 @@ pub fn check_once() {
             // recorded once for the incident (board #362 c).
             if matches!(decision, Decision::Capped { .. } | Decision::GiveUp { .. }) {
                 let capped = matches!(decision, Decision::Capped { .. });
-                let newest = capped && error_is_newest(backend, &tail);
+                let newest = capped && error_is_newest(backend, capture);
                 commit_exhausted(&project.session, &p.window_name, capped, newest, seen);
             }
+            #[cfg(test)]
+            AFTER_DECIDE.with(|f| {
+                if let Some(f) = f.borrow_mut().take() {
+                    f(&project.session, &p.window_name);
+                }
+            });
             match decision {
                 // Automated input: through the one send door (board #422
                 // round 3). A restore barrier's refusal wrote nothing, so it
-                // spends nothing of the incident's budget.
+                // spends nothing of the incident's budget. Nor does a turn
+                // fact that landed since the capture (board #473): the pane
+                // moved on, the screen this send was decided on is stale, and
+                // the send is taken back the same way. The check and the
+                // keystrokes are not atomic: a key typed in between is not
+                // caught.
+                Decision::Send { .. } if super::telemetry::turn_version(&project.session, &p.window_name) != seen => {
+                    tracker().lock().unwrap().undo_send(&project.session, &p.window_name, mark, now)
+                }
                 Decision::Send { attempt } => match super::delivery::send_into(&project.session, &p.window_name, &target, CONTINUE_LINE) {
                     Ok(()) => super::telemetry::record_recovery(
                         &project.session,
                         &p.window_name,
-                        &format!(
-                            "auto-continue {attempt}/{MAX_ATTEMPTS} — transient model error in {}",
-                            p.window_name
-                        ),
+                        &format!("auto-continue {attempt}/{MAX_ATTEMPTS} — {why} in {}", p.window_name),
                     ),
                     Err(e) if super::delivery::barred(&e) => tracker().lock().unwrap().undo_send(&project.session, &p.window_name, mark, now),
                     Err(_) => {}
                 },
-                Decision::Confirmed { first: true } => {
-                    super::telemetry::record_recovery(
-                        &project.session,
-                        &p.window_name,
-                        &format!("auto-continue took effect — {} resumed its turn", p.window_name),
-                    );
-                }
+                Decision::Confirmed { first: true } => say_took_effect(&project.session, &p.window_name),
                 Decision::GiveUp { first: true } => {
                     super::telemetry::record_recovery(
                         &project.session,
@@ -740,7 +1042,7 @@ pub fn drift_warning(backend: crate::backends::Backend, installed: &str) -> Opti
     let version = crate::backends::parse_version(installed)?;
     let mut by_label: Vec<(String, Vec<String>)> = Vec::new();
     for m in backend.recovery_shapes().iter().filter(|m| crate::backends::newer_than_measured(&version, m)) {
-        let name = m.shape.replace('_', " ");
+        let name = m.words.to_string();
         match by_label.iter_mut().find(|(l, _)| *l == m.label()) {
             Some((_, names)) => names.push(name),
             None => by_label.push((m.label(), vec![name])),
@@ -1131,7 +1433,7 @@ mod tests {
         assert!(cl.contains("\ncontinue"), "the claude pane got the key: {cl:?}");
         assert!(!q.contains("\ncontinue"), "a quote gets nothing: {q:?}");
         assert!(!ki.contains("\ncontinue"), "a kiro pane painting claude's block gets nothing: {ki:?}");
-        assert_eq!(notes, vec!["auto-continue 1/4 — transient model error in cl".to_string()], "one send, one record, over two ticks");
+        assert_eq!(notes, vec!["auto-continue 1/4 — Bedrock 5xx in cl".to_string()], "one send, one record, over two ticks");
     }
 
     /// Board #422 round 3 (validator, orchestrator 14:56): the auto-continue
@@ -1236,7 +1538,7 @@ mod tests {
         check_once();
         std::thread::sleep(std::time::Duration::from_millis(500));
         assert!(screen().contains("\ncontinue"), "the window is ordinary again: {:?}", screen());
-        assert_eq!(notes(), vec!["auto-continue 1/4 — transient model error in cl".to_string()], "the refusals spent nothing");
+        assert_eq!(notes(), vec!["auto-continue 1/4 — Bedrock 5xx in cl".to_string()], "the refusals spent nothing");
     }
 
     /// The take-back itself (board #422 round 3): a refused send restores the
@@ -1419,8 +1721,16 @@ mod tests {
         // B'': the newest block QUOTES the error: not the agent having it.
         assert_eq!(st("kq"), ("idle".to_string(), String::new()), "B'': a quote is not the error's turn");
         assert_eq!(ends("kq"), 0, "B''");
-        for w in ["ki", "kp", "kh", "cl", "kr", "kq"] {
+        // The cap is said where a send could have gone (board #473): the
+        // error as the newest block (ki) or an ungated shape (claude). A
+        // gated kiro error under a newer prompt, a half-drawn screen, a later
+        // turn's work or a quote is history: nothing is decided there, so no
+        // "needs a person" either.
+        for w in ["ki", "cl"] {
             assert_eq!(paused(w), 1, "{w}: the cap is still said");
+        }
+        for w in ["kp", "kh", "kr", "kq"] {
+            assert_eq!(paused(w), 0, "{w}: an ineligible screen decides nothing");
         }
         // A: a new prompt to ki, the screen unchanged (a cat pane never repaints).
         tm::record_prompt(&session, "ki", "[tmm chat 2026-10-16 02:41] human: @ki B");
@@ -1435,6 +1745,10 @@ mod tests {
         std::fs::write(ws.join("ki2.txt"), HIGH_TRAFFIC_SCREEN.replace("ef8dd12f-668e-4cdb-a8a7-7ecc7baa4146", "0a1b2c3d-4e5f-6071-8293-a4b5c6d7e8f9")).unwrap();
         std::process::Command::new("tmux").args(["respawn-pane", "-k", "-t", &format!("{session}:ki"), &format!("cat {}; cat", ws.join("ki2.txt").display())]).status().unwrap();
         std::thread::sleep(std::time::Duration::from_millis(300));
+        // The moved version settles over one tick first (board #473,
+        // `Tracker::bind`): a new failure is read on the second.
+        check_once();
+        assert_eq!(ends("ki"), 1, "settling: nothing decided yet");
         check_once();
         assert_eq!(st("ki"), ("idle".to_string(), EXHAUSTED.to_string()), "D again: its own end");
         assert_eq!(ends("ki"), 2);
@@ -1888,11 +2202,12 @@ mod tests {
     fn a_verified_send_is_never_repeated() {
         let mut t = Tracker::default();
         let t0 = 1_000_000;
-        assert_eq!(t.decide("s", "w1", t0, "1|a", silent), Decision::Send { attempt: 1 });
-        // Next tick, error still painted, but a turn fact arrived after the
+        // Sent at fact sequence 7 (board #473: progress is ordered by it).
+        assert_eq!(t.decide_seq("s", "w1", t0, 7, "1|a", silent), Decision::Send { attempt: 1 });
+        // Next tick, error still painted, but the agent progressed after the
         // send: confirmed ONCE, then silence for as long as the error shows.
         assert_eq!(
-            t.decide("s", "w1", t0 + 20, "1|a", |sent| sent == t0),
+            t.decide("s", "w1", t0 + 20, "1|a", |sent| sent == 7),
             Decision::Confirmed { first: true }
         );
         assert_eq!(
@@ -1949,13 +2264,15 @@ mod tests {
         // SURVIVES: erasing it here re-opened the incident on the next tick
         // (the error is still painted) and re-sent `continue` into a working
         // agent — the owner's repeat-send report (2026-08-26).
-        t.confirm("s", "w1");
+        t.confirm("s", "w1", 0);
+        // Said once, by the tick (board #473), then silent.
+        assert_eq!(t.decide("s", "w1", t0 + 60, "1|a", silent), Decision::Confirmed { first: true });
         assert_eq!(
-            t.decide("s", "w1", t0 + 60, "1|a", silent),
+            t.decide("s", "w1", t0 + 80, "1|a", silent),
             Decision::Confirmed { first: false }
         );
         // A tool call with no open incident is a no-op, not a new record.
-        t.confirm("s", "w2");
+        t.confirm("s", "w2", 0);
         assert_eq!(t.decide("s", "w2", t0, "1|a", silent), Decision::Send { attempt: 1 });
     }
 
@@ -2000,7 +2317,7 @@ mod tests {
         );
         // And the new incident verifies independently.
         assert_eq!(
-            t.decide("s", "w1", t0 + 6_020, "2|a,b", |sent| sent == t0 + 6_000),
+            t.decide("s", "w1", t0 + 6_020, "2|a,b", |sent| sent == 0),
             Decision::Confirmed { first: true }
         );
     }
@@ -2110,6 +2427,70 @@ mod tests {
     /// same pane under that (real, from the screen above).
     const CODEX_0154_401_THEN_PROMPT: &str = "■ unexpected status 401 Unauthorized: Authentication failed: Please make sure\nyour API Key is valid., url:\nhttps://bedrock-runtime.us-west-2.amazonaws.com/openai/v1/responses, request id:\n23a04597-c6d8-4439-954f-2216f9c7d687\n\n\n› [tmm team context — background since your previous delivery; not new\n  instructions]\n  [10-14 11:46] evaluator -> @engineer: The KL-only run (abl-b1-klonly)\n  finished with clean checks. Removing the CE loss lowered training KL by about\n  17% over the first 2,500 steps. The readout is §8.35 in `docs/q35-eval-\n  plan.md` (main `8c70ac7`), with a pointer on #35, and I've sent it to\n\n› Ask Codex to do anything\n\n  global.openai.gpt-6-astra · Context 45% used · /local/home/cfu/work/projects/…\n";
 
+    /// Board #473, kiro-cli 2.34.0 `--agent-engine v3`: the two network
+    /// failures, each a REAL visible screen read with `capture-pane -p -J`
+    /// as `check_once` reads it, from the 2026-10-27 rig (a scratch kiro-cli
+    /// whose upstream ran through a local CONNECT proxy). R2, 80 columns: a
+    /// reset mid-stream with the reconnect refused, the partial essay above
+    /// the error, kiro's idle furniture and composer under it.
+    const KIRO_234_CONN_SCREEN: &str = "  years or decades, continued burial squeezes out most of the air, and the firn\n  becomes dense glacial ice, often with a faint blue tint because the compact\n  ice absorbs red light and scatters blue.\n  \n  Once the mass of ice becomes thick enough, usually several tens of meters,\n  gravity makes it move. A glacier is not simply a frozen block. It flows. Ice\n  deforms internally, its crystals slowly sliding past one another, and in many\n  glaciers the whole mass also slides over its bed on a thin film of meltwater.\n  Speeds vary widely. Some glaciers move only a few meters per year, while fast\n  ones, especially those that surge, can advance many meters in a single day.\n  \n  Accumulation, Ablation, and Balance\n  \n  The life of a glacier can be understood as a budget. The upper part, the\n  accumulation zone, is where snow gains exceed losses. The lower part, the\n  ablation zone, is where melting, evaporation, and calving remove more than\n  falls. Between them lies the equilibrium line, where gains and losses balance\n  over a year. Ice flows from the accumulation zone toward the ablation zone,\n  carrying mass downhill to replace what is lost.\n  \n  If accumulation and ablation balance over many years, the glacier's terminus,\n  or snout, stays roughly in place, even though the ice itself is constantly\n  moving. If snowfall increases or temperatures drop, the glacier gains mass and\n  advances. If melting outpaces accumulation, it loses mass and retreats.\n  Because glaciers respond to long-term averages rather than daily weather, they\n  act as natural thermometers, smoothing out short\n\n• Your connection was interrupted. Please try again in a moment.\n \n▸ Time: 10s\n\n────────────────────────────────────────────────────────────────────────────────\n Trust All Tools active, confirmations are off · /quit to exit\n────────────────────────────────────────────────────────────────────────────────\nrig · auto · ◔ 3% · Midway: expired                            /tmp/kiro473/work\n\n›  ask a question or describe a task ↵\n                                       /sessions to resume · /copy to clipboard\n";
+    /// R9, 44 columns: the same failure, the sentence hard-wrapped once.
+    const KIRO_234_CONN_NARROW: &str = "  ship, and the first lighthouse there,\n  finished in 1698, was swept away in a\n  storm only a few years later. Later\n  versions of wood also failed, burning or\n  washing off. In 1759 John Smeaton designed\n  a tower modeled on the shape of an oak\n  trunk, with interlocking granite blocks\n  that resisted the waves. His method\n  influenced builders for generations.\n  Robert Stevenson's Bell Rock Lighthouse in\n  Scotland, completed in 1810, was built on\n  a reef that was submerged at high tide, so\n  workers could labor only for brief periods\n  between the tides.\n\n  The Light Itself\n\n  Early lamps burned candles, then oil, and\n  gave weak, flickering beams. Improvements\n  came with Argand lamps, which drew air\n  through a hollow wick for a brighter\n  flame, and with polished reflectors. The\n  great breakthrough was the Fresnel lens,\n\n• Your connection was interrupted. Please\n  try again in a moment.\n\n▸ Time: 10s\n\n────────────────────────────────────────────\n Trust All Tools active, confirmations are\n off · /quit to exit\n────────────────────────────────────────────\nrig · auto · ◔ 4% · Midway: expired\n/tmp/kiro473/work\n\n›  ask a question or describe a task ↵\n   /sessions to resume · /copy to clipboard\n";
+    /// The live incident (sound-factory:kiro-2, 2026-10-27 13:40, 52
+    /// columns), from its scrollback: the error block and the turn's credits
+    /// line and rule under it. Detection only: its furniture was repainted
+    /// by the turn a person's `continue` started.
+    const KIRO_234_CONN_LIVE: &str = "• Your connection was interrupted. Please try again\n  in a moment.\n \n▸ Credits: turn 267.16 • session 2416.53 | Time:\n  123m 39s\n────────────────────────────────────────────────────\n";
+    /// R8, 44 columns: the connection refused (`ClientNetworkError`), after
+    /// an earlier successful turn and its submitted prompt.
+    const KIRO_234_NET_NARROW: &str = "  visitors seeking solitude and scale.\n  Balancing access with protection of\n  fragile habitats is a continuing\n  challenge.\n\n  Patterns in Motion\n\n  What makes dunes so compelling is their\n  combination of order and change. A dune\n  field is a pattern emerging from countless\n  individual collisions, with regular\n  spacing and recurring shapes, yet no two\n  dunes are identical, and none stays put\n  forever. They are an enduring reminder\n  that even the solid-seeming ground is\n  sometimes a slow river of grains, governed\n  by wind and gravity, writing and rewriting\n  the shape of the land.\n\n▸ Credits: turn 0.65 • session 1.24 | Time:\n  46s\n────────────────────────────────────────────\n  › Say hello in one word.\n\n• A network error occurred. Please check\n  your connection and try again.\n\n▸ Time: 0s\n\n────────────────────────────────────────────\n Trust All Tools active, confirmations are\n off · /quit to exit\n────────────────────────────────────────────\nrig · auto · ◔ 4% · Midway: expired\n/tmp/kiro473/work\n\n›  ask a question or describe a task ↵\n   /sessions to resume · /copy to clipboard\n";
+    /// R5, 80 columns: R4's connection error, then R5's network error as the
+    /// newest block — two errors on one real screen.
+    const KIRO_234_BOTH_SCREEN: &str = "  \n  Looking Ahead\n  \n  How much ice survives will depend on choices made in the coming decades.\n  Studies suggest that limiting warming to about 1.5 degrees Celsius could\n  preserve roughly half of the world's glacier mass outside the ice sheets,\n  while higher warming would remove far more. Adaptation, such as improved water\n  storage, flood early-warning systems, and careful land-use planning, can\n  reduce harm, but it cannot replace the ice itself.\n  \n  Mountain glaciers are slow-moving yet sensitive, grand yet fragile. They carve\n  the peaks we admire, store the water we drink, and keep a frozen archive of\n  past climates. Watching them recede is a reminder that even the most enduring\n  features of the natural world respond to the changing atmosphere above them.\n  Whether they remain as rivers of ice for future generations is a question we\n  are answering now.\n \n▸ Credits: turn 0.31 • session 0.59 | Time: 20s\n────────────────────────────────────────────────────────────────────────────────\n  › Write a 1200-word essay about river deltas, in plain prose, no tools.\n \n• Your connection was interrupted. Please try again in a moment.\n \n▸ Time: 1s\n────────────────────────────────────────────────────────────────────────────────\n  › Write a 1200-word essay about sand dunes, in plain prose, no tools.\n \n• A network error occurred. Please check your connection and try again.\n \n▸ Time: 0s\n\n────────────────────────────────────────────────────────────────────────────────\n Trust All Tools active, confirmations are off · /quit to exit\n────────────────────────────────────────────────────────────────────────────────\nrig · auto · ◔ 3% · Midway: expired                            /tmp/kiro473/work\n\n›  ask a question or describe a task ↵\n                                       /sessions to resume · /copy to clipboard\n";
+
+    /// COMPOSED, two real 2.28.0 captures joined (board #473): the builder's
+    /// rate-limit block (TMR_BUILDER, 80 columns) and video-factory:checker's
+    /// idle furniture and composer (KIRO_228_IDLE, 59 columns). No single
+    /// capture of a rate-limit screen with its composer was kept; this is the
+    /// whole-screen fixture its `screen_grammar` row stands on.
+    const KIRO_228_TMR_SCREEN_COMPOSED: &str = concat!("\n• Too many requests, please wait before trying again. (Request ID:\n  319ae15c-f2d3-4ada-bafc-9b9b20927ea8)\n \n▸ Credits: turn 31.76 • session 597.47 | Time: 8m 37s\n────────────────────────────────────────────────────────────────────────────────\n", " Trust All Tools active, confirmations are off · /quit to\n exit\n───────────────────────────────────────────────────────────\nchecker · claude-opus-5.5 · high · ◑ 58% · Midway: 9h 16m\n/local/home/cfu/work/projects/video-factory\n\n›  ask a question or describe a task ↵\n                  /sessions to resume · /copy to clipboard\n");
+    /// R10, 44 columns (board #473, reviewer P1-A): a turn whose first
+    /// request completed (a tool ran) and whose next one hit the refused
+    /// reconnect. Its turn line carries credits and kiro HARD-WRAPS it,
+    /// `| Time:` with `  23s` on the next line — the live incident's form —
+    /// above the idle furniture and composer. A real whole screen.
+    const KIRO_234_CONN_WRAPPED_TURN: &str = "\n────────────────────────────────────────────\n\n ▸ Kiro CLI 3.0 launches at the end of\n   October. If you have auto-updates on,\n   you'll be upgraded to 3.0 automatically.\n   It brings cloud sessions, memory,\n   workflows, an improved trust model,\n   expanded hooks and specs.\n   Note: 3.0 doesn't support the legacy\n   --classic experience or the legacy\n   desktop app.\n────────────────────────────────────────────\n  ›Use the shell tool to run exactly: sleep\n   20; echo done. Then write a 300-word note\n   about tides.\n \n• Shell sleep 20; echo done\n    ╰ description=Run sleep then echo done,\n      run_in_background=false\n    ╰ output:\n        done\n\n• Your connection was interrupted. Please\n  try again in a moment.\n \n▸ Credits: turn 0.08 • session 0.08 | Time:\n  23s\n\n────────────────────────────────────────────\n Trust All Tools active, confirmations are\n off · /quit to exit\n────────────────────────────────────────────\nrig · auto · ◔ 3% · Midway: expired\n/tmp/kiro473/work\n\n›  ask a question or describe a task ↵\n   /sessions to resume · /copy to clipboard\n";
+    /// COMPOSED, two real 2.34.0 captures joined (board #473, P1-A): the live
+    /// incident's error block and wrapped turn line (KIRO_234_CONN_LIVE, 52
+    /// columns) and R9's idle furniture below its first rule (44 columns).
+    /// The live pane's own furniture was repainted by the person's
+    /// `continue` before it could be captured.
+    const KIRO_234_CONN_LIVE_SCREEN_COMPOSED: &str = concat!("• Your connection was interrupted. Please try again\n  in a moment.\n \n▸ Credits: turn 267.16 • session 2416.53 | Time:\n  123m 39s\n────────────────────────────────────────────────────\n", " Trust All Tools active, confirmations are\n off · /quit to exit\n────────────────────────────────────────────\nrig · auto · ◔ 4% · Midway: expired\n/tmp/kiro473/work\n\n›  ask a question or describe a task ↵\n   /sessions to resume · /copy to clipboard\n");
+    /// Board #473, the validator's row A (its own rig, 2026-10-27 17:24-17:25,
+    /// a managed kiro-cli 2.34.0 `kr` at 80x24 behind a proxy resetting every
+    /// connection): three REAL visible screens. The first error; the second
+    /// under our `continue`; the third, whose visible 24 rows are byte for
+    /// byte the second's (the first error scrolled off), which is why a hit
+    /// count is no identity.
+    const ROWA_1: &str = "\n ▸ Kiro CLI 3.0 launches at the end of October. If you have auto-updates on,\n   you'll be upgraded to 3.0 automatically.\n   It brings cloud sessions, memory, workflows, an improved trust model,\n   expanded hooks and specs.\n   Note: 3.0 doesn't support the legacy --classic experience or the legacy\n   desktop app.\n────────────────────────────────────────────────────────────────────────────────\n  › [tmm chat 2026-10-27 17:24] human: ＠kr reply with the word ok\n\n• Your connection was interrupted. Please try again in a moment.\n\n▸ Time: 0s\n\n────────────────────────────────────────────────────────────────────────────────\n Trust All Tools active, confirmations are off · /quit to exit\n────────────────────────────────────────────────────────────────────────────────\nkr · claude-haiku-5.5 · thinking · medium · ◔ 1% · Midway: expired\n/tmp/val473/rig/ws\n\n›  ask a question or describe a task ↵\n                                       /sessions to resume · /copy to clipboard\n";
+    const ROWA_2: &str = "   desktop app.\n────────────────────────────────────────────────────────────────────────────────\n  › [tmm chat 2026-10-27 17:24] human: ＠kr reply with the word ok\n\n• Your connection was interrupted. Please try again in a moment.\n\n▸ Time: 0s\n────────────────────────────────────────────────────────────────────────────────\n  › continue\n\n• Your connection was interrupted. Please try again in a moment.\n\n▸ Time: 0s\n\n────────────────────────────────────────────────────────────────────────────────\n Trust All Tools active, confirmations are off · /quit to exit\n────────────────────────────────────────────────────────────────────────────────\nkr · claude-haiku-5.5 · thinking · medium · ◔ 1% · Midway: expired\n/tmp/val473/rig/ws\n\n›  ask a question or describe a task ↵\n                                       /sessions to resume · /copy to clipboard\n";
+    const ROWA_3: &str = "▸ Time: 0s\n────────────────────────────────────────────────────────────────────────────────\n  › continue\n\n• Your connection was interrupted. Please try again in a moment.\n\n▸ Time: 0s\n────────────────────────────────────────────────────────────────────────────────\n  › continue\n\n• Your connection was interrupted. Please try again in a moment.\n\n▸ Time: 0s\n\n────────────────────────────────────────────────────────────────────────────────\n Trust All Tools active, confirmations are off · /quit to exit\n────────────────────────────────────────────────────────────────────────────────\nkr · claude-haiku-5.5 · thinking · medium · ◔ 1% · Midway: expired\n/tmp/val473/rig/ws\n\n›  ask a question or describe a task ↵\n                                       /sessions to resume · /copy to clipboard\n";
+
+    /// Board #473, reviewer/validator P1-2: kiro-cli 2.34.0's status line after
+    /// a RESIZE, real visible screens. Row B (the validator's rig, `kn` born at
+    /// 80 columns and resized to 52, the port closed): the status fills the
+    /// width and the rest of `Midway: expired` spills one character per line
+    /// down column 51, the first beside the cwd.
+    const KIRO_234_NET_SPILL_ROWB: &str = "\n ▸ Kiro CLI 3.0 launches at the end of October. If\n   you have auto-updates on, you'll be upgraded to\n   3.0 automatically.\n   It brings cloud sessions, memory, workflows, an\n   improved trust model, expanded hooks and specs.\n   Note: 3.0 doesn't support the legacy --classic\n   experience or the legacy desktop app.\n────────────────────────────────────────────────────\n  ›\n  [tmm chat 2026-10-27 17:30] human: ＠kn reply with\n  the word ok\n\n• A network error occurred. Please check your\n  connection and try again.\n\n▸ Time: 0s\n\n────────────────────────────────────────────────────\n Trust All Tools active, confirmations are off ·\n /quit to exit\n────────────────────────────────────────────────────\nkn · claude-haiku-5.5 · thinking · medium · ◔ 1% · M\n/tmp/val473/rig/ws                                 i\n                                                   d\n                                                   w\n                                                   a\n                                                   y\n                                                   :\n\n                                                   e\n                                                   x\n                                                   p\n                                                   i\n                                                   r\n                                                   e\n                                                   d\n\n›  ask a question or describe a task ↵\n           /sessions to resume · /copy to clipboard\n";
+    /// R12 (kiro's rig, the same layout in another session: `kn` born at 80,
+    /// resized to 52, the port closed).
+    const KIRO_234_NET_SPILL_R12: &str = "\n────────────────────────────────────────────────────\n\n ▸ Kiro CLI 3.0 launches at the end of October. If\n   you have auto-updates on, you'll be upgraded to\n   3.0 automatically.\n   It brings cloud sessions, memory, workflows, an\n   improved trust model, expanded hooks and specs.\n   Note: 3.0 doesn't support the legacy --classic\n   experience or the legacy desktop app.\n────────────────────────────────────────────────────\n  › Say ok.\n \n• A network error occurred. Please check your\n  connection and try again.\n \n▸ Time: 1s\n\n────────────────────────────────────────────────────\n Trust All Tools active, confirmations are off ·\n /quit to exit\n────────────────────────────────────────────────────\nkn · claude-haiku-5.5 · thinking · medium · ◔ 1% · M\n/tmp/kiro473/work                                  i\n                                                   d\n                                                   w\n                                                   a\n                                                   y\n                                                   :\n                                                   \n                                                   e\n                                                   x\n                                                   p\n                                                   i\n                                                   r\n                                                   e\n                                                   d\n\n›  ask a question or describe a task ↵\n           /sessions to resume · /copy to clipboard\n";
+    /// R12 resized back to 80: the status repaints whole on one line.
+    const KIRO_234_NET_BACK_WIDE_R12: &str = "        ⢸⣿⠀⠀⠀⠀⠀⣠⡀⠀⠀ ⠹⣷⡄    ⢸⣿⠀⠀⠀⠀⣿⡇⠀⢸⣿⠀⠀⠀⠀⣤⣄  ⠀⠀⠹⣿⡅   ⠸⣿⠀⠀ ⠸⣿⠀⠀⠀⠀ ⣿⠇⠀  ⣿⠇\n        ⢸⣿⠀⠀⠀⠀⣾⡟⣷⡀⠀⠀ ⠘⣿⣆   ⢸⣿⠀⠀⠀⠀⣿⡇ ⢸⣿⠀⠀⠀⠀⣿⡟⣷⡀⠀⠀ ⠘⣿⣆   ⢻⣧⠀⠀ ⠹⣷⣦⣤⣤⣾⠏⠀⠀⠀⣼⡟\n        ⢸⣿⠀⠀⠀⠀⣿⡇⠹⣷⡀  ⠀⠈⢻⡇  ⢸⣿⠀⠀⠀⠀⣿⡇ ⢸⣿⠀⠀⠀⠀⣿⡇⠹⣷⡀  ⠀⠈⢻⡇   ⢻⣧⠀⠀⠀ ⠉⠉⠉    ⣼⡟\n        ⠸⣿⣄⡀⢀⣠⣿⠇⠀⠙⣷⡀  ⢀⣼⠇  ⠸⣿⣄⡀⢀⣠⣿⠇ ⠸⣿⣄⡀⢀⣠⣿⠇⠀⠙⣷⡀  ⢀⣼⠇    ⠻⣷⣦⣄⡀   ⢀⣠⣴⣾⠟\n         ⠈⠻⠿⠿⠟⠁⠀⠀⠀⠈⠻⠿⠿⠟⠁    ⠈⠻⠿⠿⠟⠁   ⠈⠻⠿⠿⠟⠁⠀⠀⠀⠈⠻⠿⠿⠟⠁     ⠀⠀⠈⠙⠻⠿⠿⠿⠿⠟⠋⠁\n\n                            Welcome to Kiro CLI V3!\n         Upgrade your V2 agent configurations to V3 with /upgrade-agent\n                         https://kiro.dev/docs/cli/v3/\n           Prefer the previous experience? Launch with kiro-cli --v2\n                                        \n     Tip: Use /tangent to explore a side quest in a separate conversation —\n     /tangent ls lists and switches between them.\n\n\n────────────────────────────────────────────────────────────────────────────────\n\n ▸ Kiro CLI 3.0 launches at the end of October. If you have auto-updates on,\n   you'll be upgraded to 3.0 automatically.\n   It brings cloud sessions, memory, workflows, an improved trust model,\n   expanded hooks and specs.\n   Note: 3.0 doesn't support the legacy --classic experience or the legacy\n   desktop app.\n────────────────────────────────────────────────────────────────────────────────\n  › Say ok.\n \n• A network error occurred. Please check your connection and try again.\n \n▸ Time: 1s\n\n────────────────────────────────────────────────────────────────────────────────\n Trust All Tools active, confirmations are off · /quit to exit\n────────────────────────────────────────────────────────────────────────────────\nkn · claude-haiku-5.5 · thinking · medium · ◔ 1% · Midway: expired\n/tmp/kiro473/work\n\n›  ask a question or describe a task ↵\n                                       /sessions to resume · /copy to clipboard\n";
+    /// The validator's row C: `kw` BORN at 44 columns, its status cut to one
+    /// line, the wrapped credits turn line above the furniture.
+    const KIRO_234_CONN_BORN44_ROWC: &str = "\n▸ Time: 3m 49s\n• Cancelled\n────────────────────────────────────────────\n  ›[tmm chat 2026-10-27 17:38] human: ＠kw\n   Use the shell tool to run exactly: sleep\n   15; echo done. Then reply with the single\n   word ok.\n\n• Thought for 1s...\n    ╰ This is just a benign sleep and echo\n      command, shown twice in the message\n      with what looks like pasted output\n      already claiming success. I'll go\n      ahead and run it once myself rather\n      than trust the pasted output, treating\n      the duplicate as a retry.\n• Shell sleep 15; echo done\n    ╰ description=Sleep 15 seconds then\n      echo done, run_in_background=false\n    ╰ output:\n        done\n\n• Your connection was interrupted. Please\n  try again in a moment.\n\n▸ Credits: turn 0.02 • session 0.02 | Time:\n  20s\n\n────────────────────────────────────────────\n Trust All Tools active, confirmations are\n off · /quit to exit\n────────────────────────────────────────────\nkw · claude-haiku-5.5 · thinking · medium ·\n/tmp/val473/rig/ws\n\n›  ask a question or describe a task ↵\n   /sessions to resume · /copy to clipboard\n";
+
     const FIXTURES: &[(&str, &str, &str, &str)] = &[
         ("kiro", "stream_error", "≤ 2.18.1", REAL),
         ("kiro", "stream_error", "≤ 2.18.1", REAL_WRAPPED),
@@ -2123,6 +2504,17 @@ mod tests {
         ("kiro", "too_many_requests", "2.28.0", TMR_WRITER_CREDITS),
         ("kiro", "too_many_requests", "2.28.0", TMR_BUILDER),
         ("kiro", "too_many_requests", "2.28.0", TMR_NARROW),
+        ("kiro", "connection_interrupted", "2.34.0", KIRO_234_CONN_SCREEN),
+        ("kiro", "connection_interrupted", "2.34.0", KIRO_234_CONN_NARROW),
+        ("kiro", "connection_interrupted", "2.34.0", KIRO_234_CONN_LIVE),
+        ("kiro", "connection_interrupted", "2.34.0", KIRO_234_CONN_WRAPPED_TURN),
+        ("kiro", "connection_interrupted", "2.34.0", KIRO_234_CONN_LIVE_SCREEN_COMPOSED),
+        ("kiro", "network_error", "2.34.0", KIRO_234_NET_NARROW),
+        ("kiro", "network_error", "2.34.0", KIRO_234_NET_SPILL_ROWB),
+        ("kiro", "network_error", "2.34.0", KIRO_234_NET_SPILL_R12),
+        ("kiro", "network_error", "2.34.0", KIRO_234_NET_BACK_WIDE_R12),
+        ("kiro", "connection_interrupted", "2.34.0", KIRO_234_CONN_BORN44_ROWC),
+        ("kiro", "too_many_requests", "2.28.0", KIRO_228_TMR_SCREEN_COMPOSED),
         ("claude", "bedrock_5xx", "2.1.284", CLAUDE_503_WIDE),
         ("claude", "bedrock_5xx", "2.1.284", CLAUDE_503_NARROW),
         ("kiro", "conversation_blocked", "2.28.0", KIRO_228_IMAGE_SCREEN),
@@ -2270,7 +2662,7 @@ mod tests {
         let sig = error_signature("claude", CLAUDE_503_NARROW).unwrap();
         assert_eq!(sig, "1|", "no Request ID: a hit count, no paint identity");
         let ends = || tm::recent_events(&session, 0).into_iter().filter(|e| e.kind == "notif" && e.text == "failed").count();
-        let decide = |at: u64| tracker().lock().unwrap().decide(&session, "w", at, &sig, |t| tm::turn_fact_since(&session, "w", t));
+        let decide = |at: u64| tracker().lock().unwrap().decide(&session, "w", at, &sig, |t| tm::progress_since(&session, "w", t));
         // The tracker's clock is simulated; every turn fact uses the real one.
         let mut sends = 0;
         let t0 = now_secs();
@@ -2360,7 +2752,7 @@ mod tests {
         tm::record_prompt(&session, "w", "[tmm chat 2026-10-16 00:09] maker: @w go");
         let t0 = now_secs();
         let mut t = Tracker::default();
-        let verified = |at: u64| tm::turn_fact_since(&session, "w", at);
+        let verified = |at: u64| tm::progress_since(&session, "w", at);
         for (n, at) in [(1, t0 + 10), (2, t0 + 40), (3, t0 + 100), (4, t0 + 220)] {
             assert_eq!(t.decide(&session, "w", at, "1|a", verified), Decision::Send { attempt: n });
         }
@@ -2408,7 +2800,7 @@ mod tests {
         assert_eq!(drift_warning(Backend::Kiro, "2.18.1"), None);
         assert_eq!(drift_warning(Backend::Claude, "2.1.284"), None, "running what was measured");
         assert_eq!(drift_warning(Backend::Claude, "2.1.200"), None, "older than measured is not drift");
-        assert!(drift_warning(Backend::Claude, "2.1.288").unwrap().contains("measured on 2.1.284 (bedrock 5xx), installed 2.1.288 (used at the next launch)"));
+        assert!(drift_warning(Backend::Claude, "2.1.288").unwrap().contains("measured on 2.1.284 (Bedrock 5xx), installed 2.1.288 (used at the next launch)"));
         assert_eq!(drift_warning(Backend::Codex, "0.162.1").as_deref(), Some(
             "recovery shapes for codex were measured on 0.154.0 (auth expired), installed 0.162.1 (used at the next launch) — re-measure when one of them is next seen"),
             "codex joins the guard with its one person-needed shape");
@@ -2611,7 +3003,7 @@ mod tests {
         }
         assert_eq!(rows, 1, "cap reached, 5 more fresh incidents: exactly one row");
         // The agent works again (a tool call): the stretch is over; the next cap is said.
-        t.confirm("s", "w");
+        t.confirm("s", "w", 0);
         assert_eq!(t.decide("s", "w", t0 + 200, "1|y", silent), Decision::Capped { first: true });
         assert_eq!(t.decide("s", "w", t0 + 220, "1|z", silent), Decision::Capped { first: false });
         // The window frees: a ladder starts; capped again later, it is said again.
@@ -2657,5 +3049,1019 @@ mod tests {
         // A window that goes away takes its count with it.
         t.retain_windows("s", &["other".to_string()]);
         assert_eq!(t.decide("s", "w", t0 + 301, "1|g", silent), Decision::Send { attempt: 1 });
+    }
+
+
+    /// Board #473, R1 (80 columns, 15 s after one reset with the reconnect
+    /// allowed): kiro retried by itself (`streamErrorRetry`) and is streaming
+    /// again under its working footer. No error is painted, so nothing at all
+    /// is read, let alone typed.
+    const KIRO_234_SELF_RETRY: &str = "  zone, the strip of shore alternately covered and uncovered by the sea.\n  Organisms living there must endure crashing waves, wide swings in temperature,\n  drying air, and changes in salinity as rain or evaporation alters the water\n  left in tide pools. Barnacles clamp shut to hold moisture. Mussels attach\n  themselves with strong threads. Sea stars, crabs, anemones, and snails each\n  occupy different heights on the shore, creating bands of life that reflect how\n  long each species can tolerate exposure.\n  \n  Tides also deliver food and oxygen, flush wastes, and move larvae and\n  nutrients. Salt marshes and mangrove forests depend on tidal flooding to\n  distribute sediment and sustain the nurseries that support fisheries. Many\n  shorebirds time their feeding to the falling tide, when mudflats reveal worms\n  and mollusks. Some animals go further: certain fish and crabs time their\n  spawning to particular tides, releasing eggs when currents will carry them\n  safely out to sea.\n  \n  Human Uses and Challenges\n  \n  People have always organized their lives around the tides. Fishermen and\n  sailors learned to read them long before anyone could explain them. Harbors\n  with shallow entrances can be used only at high water, and strong tidal\n  currents can help or hinder a vessel by several knots. Early tide tables,\n  compiled from careful observation, were treasured navigational tools. Today,\n  tidal predictions rely on harmonic analysis, which breaks the observed tide\n  into dozens of components, each corresponding to a periodic astronomical\n  influence, and then recombines them to forecast future water levels with\n  remarkable accuracy.\n  \n  Tides are also a source of energy. Unlike wind or sunlight, they are\n  predictable years\n\n────────────────────────────────────────────────────────────────────────────────\n Trust All Tools active, confirmations are off · /quit to exit\n────────────────────────────────────────────────────────────────────────────────\nrig · auto · ◔ 1% · Midway: expired                            /tmp/kiro473/work\n\n›  Kiro is working · 23s · Type to steer · Ctrl+S to queue\n";
+    /// kiro-cli 2.34.0's working footer, as R1 painted it during the turn.
+    const KIRO_234_WORKING: &str = "›  Kiro is working · 8s · Type to steer · Ctrl+S to queue";
+    /// kiro's idle composer line, as every 2.28+ capture above paints it.
+    const KIRO_IDLE_LINE: &str = "›  ask a question or describe a task ↵";
+
+    /// Board #473: the two network failures are kiro's own shapes on every
+    /// capture (wide, narrow, live). They carry no Request ID, so the hit
+    /// count is the signature, as for claude's 5xx; two errors are two hits.
+    #[test]
+    fn kiro_2_34_network_errors_are_detected() {
+        for (what, text, shape) in [
+            ("R2, 80 columns", KIRO_234_CONN_SCREEN, "connection_interrupted"),
+            ("R9, 44 columns", KIRO_234_CONN_NARROW, "connection_interrupted"),
+            ("the live incident, 52 columns", KIRO_234_CONN_LIVE, "connection_interrupted"),
+            ("R8, 44 columns", KIRO_234_NET_NARROW, "network_error"),
+        ] {
+            assert_eq!(reading_within("kiro", text, 40), Some(Reading { sig: "1|".into(), shapes: vec![shape], ids: vec![] }), "{what}");
+        }
+        let both = reading_within("kiro", KIRO_234_BOTH_SCREEN, 40).unwrap();
+        assert_eq!(both, Reading { sig: "2|".into(), shapes: vec!["connection_interrupted", "network_error"], ids: vec![] }, "screen order");
+        for glyph in HEADS {
+            assert!(scan_tail("kiro", &KIRO_234_CONN_LIVE.replace('•', &glyph.to_string())), "{glyph}");
+        }
+        assert_eq!(read_capture("kiro", KIRO_234_SELF_RETRY, || panic!("no deep capture")), None, "kiro's own retry worked: nothing");
+    }
+
+    /// The same sentences QUOTED, reworded, cut or under another head are
+    /// not having the error: a false hit types `continue` into a working kiro.
+    #[test]
+    fn quoting_the_network_errors_is_not_having_it() {
+        for sentence in [
+            "Your connection was interrupted. Please try again in a moment.",
+            "A network error occurred. Please check your connection and try again.",
+        ] {
+            assert!(scan_tail("kiro", &format!("• {sentence}\n")), "the control: {sentence}");
+            for (bad, why) in [
+                (format!("  › [tmm chat 2026-10-27 15:48] orchestrator: • {sentence}\n"), "a delivered quote"),
+                (format!("[tmm chat 2026-10-27 15:48] human: • {sentence}\n"), "a stamped quote"),
+                (format!("• Shell tmm board show 473\n  ╰ output:\n    • {sentence}\n"), "tool output under a tool head"),
+                (format!("• kiro painted \"{sentence}\" at 13:40\n"), "prose about it"),
+                (format!("• {sentence} I will retry.\n"), "text after it"),
+                (format!("• {}\n", &sentence[..sentence.len() - 1]), "cut short"),
+                (format!("• {}\n", sentence.replace("Please", "please")), "reworded"),
+                (format!("■ {sentence}\n"), "an unmeasured head glyph"),
+                (format!("{sentence}\n"), "no head at all"),
+            ] {
+                assert!(!scan_tail("kiro", &bad), "{why}: {bad}");
+            }
+            for b in ["claude", "codex", "grok", "omp", "kimi"] {
+                assert!(!scan_tail(b, &format!("● {sentence}\n")) && !scan_tail(b, &format!("• {sentence}\n")), "{b}: kiro's shape alone");
+            }
+        }
+    }
+
+    /// `screen` with `insert` painted under its newest error, before the
+    /// turn's `▸` line: what kiro shows once the pane moved on.
+    fn under_error(screen: &str, insert: &str) -> String {
+        let mut s = screen.to_string();
+        let at = s.rfind("\n▸ ").expect("a turn line under the error") + 1;
+        s.insert_str(at, insert);
+        s
+    }
+
+    /// Board #473, the shape × screen grammar × eligibility table, WHOLE
+    /// screens. A gated shape (its `screen_grammar` measured) may be
+    /// continued only while an error is the newest block of the same
+    /// capture; the pane having moved on (a submitted prompt, the working
+    /// footer, a tool call, a typed composer) types nothing, though the error
+    /// is still DETECTED. kiro's two ≤ 2.18.1 shapes and claude's 5xx were
+    /// never measured that way and keep the ungated send, also beside a gated
+    /// hit: the explicit compatibility boundary.
+    #[test]
+    fn send_eligibility_follows_the_shape_table() {
+        use crate::backends::{measured_version, Backend::{Claude, Kiro}};
+        let gated = |b, s| measured_version(b, s).unwrap().screen_grammar;
+        for s in ["connection_interrupted", "network_error", "high_traffic", "too_many_requests"] {
+            assert!(gated(Kiro, s), "{s} is gated");
+        }
+        for s in ["stream_error", "model_unavailable"] {
+            assert!(!gated(Kiro, s), "{s}: grammar unmeasured, ungated");
+        }
+        assert!(!gated(Claude, "bedrock_5xx"), "claude: no newest-block grammar, ungated");
+        // Composed screens are two REAL captures joined, labelled as such:
+        // a 2.28.0 error block with the 2.28.0 idle composer line, and a
+        // 2.28.0 rate-limit block with checker's 2.28.0 idle furniture.
+        let opus = format!("{KIRO_228_OPUS}{KIRO_IDLE_LINE}\n");
+        let tmr = format!("{TMR_BUILDER}{KIRO_228_IDLE}");
+        for (what, screen, shape) in [
+            ("R2 connection, 80 columns", KIRO_234_CONN_SCREEN, "connection_interrupted"),
+            ("R9 connection, 44 columns", KIRO_234_CONN_NARROW, "connection_interrupted"),
+            ("R8 network, 44 columns", KIRO_234_NET_NARROW, "network_error"),
+            ("R10 connection, a wrapped credits turn line, 44 columns", KIRO_234_CONN_WRAPPED_TURN, "connection_interrupted"),
+            ("composed live incident, 52 columns", KIRO_234_CONN_LIVE_SCREEN_COMPOSED, "connection_interrupted"),
+            ("row B: resized 80 to 52, the status spilled down a column", KIRO_234_NET_SPILL_ROWB, "network_error"),
+            ("R12: the same spill in another session", KIRO_234_NET_SPILL_R12, "network_error"),
+            ("R12 back at 80 columns", KIRO_234_NET_BACK_WIDE_R12, "network_error"),
+            ("row C: born at 44, the status cut to one line", KIRO_234_CONN_BORN44_ROWC, "connection_interrupted"),
+            ("R5, two errors, the network one newest", KIRO_234_BOTH_SCREEN, "network_error"),
+            ("2.22.1 high traffic, a real whole screen", HIGH_TRAFFIC_SCREEN, "high_traffic"),
+            ("composed 2.28.0 high traffic", opus.as_str(), "high_traffic"),
+            ("composed 2.28.0 too many requests", tmr.as_str(), "too_many_requests"),
+        ] {
+            let (r, deep) = read_capture("kiro", screen, || panic!("{what}: no deep capture")).unwrap_or_else(|| panic!("{what}: detected"));
+            assert_eq!(deep, None, "{what}");
+            assert_eq!(newest_shape("kiro", screen), Some(shape), "{what}");
+            assert!(send_eligible("kiro", screen, &r.shapes), "{what}: eligible");
+            for (moved, why) in [
+                (screen.replace(KIRO_IDLE_LINE, KIRO_234_WORKING), "the working footer"),
+                (screen.replace(KIRO_IDLE_LINE, "›  continue"), "a typed composer"),
+                (under_error(screen, "  › continue\n\n"), "a submitted prompt"),
+                (under_error(screen, "• Shell ls\n  ╰ output:\n    a.txt\n\n"), "a tool call"),
+            ] {
+                let r = reading_within("kiro", &moved, 40).unwrap_or_else(|| panic!("{what}, {why}: still detected"));
+                assert!(!send_eligible("kiro", &moved, &r.shapes), "{what}, {why}: nothing is typed");
+            }
+        }
+        // Ungated stays ungated: never the newest block by the 2.28+ grammar,
+        // continued as before.
+        for (what, b, screen) in [
+            ("stream error", "kiro", REAL),
+            ("stream error, wrapped, old box composer", "kiro", REAL_WRAPPED),
+            ("model unavailable", "kiro", MODEL_ERR),
+            ("claude 503, 100 columns", "claude", CLAUDE_503_WIDE),
+            ("claude 503, 57 columns", "claude", CLAUDE_503_NARROW),
+        ] {
+            let r = reading_within(b, screen, 40).unwrap_or_else(|| panic!("{what}"));
+            assert!(!error_is_newest(b, screen), "{what}: no measured grammar reads it");
+            assert!(send_eligible(b, screen, &r.shapes), "{what}: the ungated send it always had");
+        }
+        // A legacy ungated hit beside a gated history hit keeps the send.
+        let mixed = format!("{REAL}\n\n{tmr}").replace(KIRO_IDLE_LINE, KIRO_234_WORKING);
+        let r = reading_within("kiro", &mixed, 400).unwrap();
+        assert_eq!(r.shapes, ["stream_error", "too_many_requests"]);
+        assert!(send_eligible("kiro", &mixed, &r.shapes), "any ungated hit: today's behaviour");
+        let gated_only = tmr.replace(KIRO_IDLE_LINE, KIRO_234_WORKING);
+        assert!(!send_eligible("kiro", &gated_only, &reading_within("kiro", &gated_only, 40).unwrap().shapes), "the gated hit alone types nothing");
+    }
+
+    /// The deep path (board #473): a headless visible screen is never judged
+    /// on its own; the reading AND the eligibility come from the deep
+    /// capture, which holds the real head and the current composer.
+    #[test]
+    fn a_deep_capture_decides_both_the_reading_and_the_eligibility() {
+        let below = format!(" \n▸ Time: 9s\n{}\n{KIRO_228_IDLE}", "─".repeat(52));
+        let headless: String = TMR_NARROW.lines().skip(1).map(|l| format!("{l}\n")).collect();
+        let visible = format!("{headless}{below}");
+        let deep = format!("earlier output\n\n{TMR_NARROW}{below}");
+        assert!(headless_error_tail(&visible));
+        assert!(!send_eligible("kiro", &visible, &["too_many_requests"]), "the visible screen alone has no head");
+        let (r, got) = read_capture("kiro", &visible, || Some(deep.clone())).unwrap();
+        assert_eq!(got.as_deref(), Some(deep.as_str()), "read from the deep capture");
+        assert_eq!(r.shapes, ["too_many_requests"]);
+        assert!(send_eligible("kiro", got.as_deref().unwrap(), &r.shapes), "head and idle composer: eligible");
+        let busy = deep.replace(KIRO_IDLE_LINE, KIRO_234_WORKING);
+        let (r, got) = read_capture("kiro", &visible.replace(KIRO_IDLE_LINE, KIRO_234_WORKING), || Some(busy.clone())).unwrap();
+        assert!(!send_eligible("kiro", got.as_deref().unwrap(), &r.shapes), "head found, but a turn runs: nothing");
+        assert_eq!(read_capture("kiro", &visible, || None), None, "no deep capture: nothing guessed");
+    }
+
+    /// P-1: the feed row's reason is the newest error's, else the only
+    /// hit's, else the generic word; an older error never names a newer one.
+    #[test]
+    fn the_feed_row_names_the_newest_error() {
+        let r = |b: &str, s: &str| reason(b, s, &reading_within(b, s, 400).unwrap().shapes);
+        assert_eq!(r("kiro", KIRO_234_CONN_SCREEN), "connection interrupted");
+        assert_eq!(r("kiro", KIRO_234_NET_NARROW), "network error");
+        assert_eq!(r("kiro", KIRO_234_BOTH_SCREEN), "network error", "the newest of two");
+        assert_eq!(r("kiro", &KIRO_234_BOTH_SCREEN.replace(KIRO_IDLE_LINE, KIRO_234_WORKING)), "transient error", "two hits, none the newest");
+        assert_eq!(r("kiro", HIGH_TRAFFIC_SCREEN), "high traffic");
+        assert_eq!(r("kiro", REAL), "stream error", "the only hit, ungated");
+        assert_eq!(r("claude", CLAUDE_503_NARROW), "Bedrock 5xx");
+    }
+
+    /// An ineligible screen decides nothing (board #473), but a send already
+    /// made is verified there, once. "Took effect" is said once per incident
+    /// whichever door saw the progress first: the tick's check, or
+    /// `note_answered` (a tool call, a real reply), which only records it.
+    #[test]
+    fn a_pending_send_is_verified_on_an_ineligible_screen_and_nothing_else_moves() {
+        let mut t = Tracker::default();
+        assert!(!t.verify_pending("s", "w", |_| true), "no incident");
+        assert_eq!(t.decide("s", "w", 100, "turn:1", |_| false), Decision::Send { attempt: 1 });
+        let before = t.send_mark("s", "w", "turn:1");
+        assert!(!t.verify_pending("s", "w", |_| false), "no progress yet");
+        assert_eq!(t.send_mark("s", "w", "turn:1"), before, "nothing spent or moved");
+        assert!(t.verify_pending("s", "w", |sent| sent == 0), "it progressed after the send (the test wrapper sends at sequence 0)");
+        assert!(!t.verify_pending("s", "w", |_| true), "said once");
+        assert_eq!(t.decide("s", "w", 400, "turn:1", |_| true), Decision::Confirmed { first: false }, "a confirmed incident stays silent");
+        // The progress seen by telemetry first: said by the next tick, once,
+        // through whichever path it takes; and when the record clears unsaid.
+        let mut t = Tracker::default();
+        assert_eq!(t.decide("s", "w", 100, "turn:1", |_| false), Decision::Send { attempt: 1 });
+        t.confirm("s", "w", 0);
+        assert_eq!(t.decide("s", "w", 120, "turn:1", |_| false), Decision::Confirmed { first: true });
+        assert_eq!(t.decide("s", "w", 140, "turn:1", |_| false), Decision::Confirmed { first: false });
+        assert!(!t.verify_pending("s", "w", |_| true), "already said");
+        let mut t = Tracker::default();
+        assert_eq!(t.decide("s", "w", 100, "turn:1", |_| false), Decision::Send { attempt: 1 });
+        t.confirm("s", "w", 0);
+        assert!(t.verify_pending("s", "w", |_| false), "the busy screen says it");
+        assert!(!t.clear("s", "w"), "said already");
+        let mut t = Tracker::default();
+        assert_eq!(t.decide("s", "w", 100, "turn:1", |_| false), Decision::Send { attempt: 1 });
+        t.confirm("s", "w", 0);
+        assert!(t.clear("s", "w"), "the error left the screen before any tick said it");
+        // A progress with no send of ours to answer is nothing to say.
+        let mut t = Tracker::default();
+        t.confirm("s", "w", 0);
+        assert!(!t.clear("s", "w"), "no send, no effect");
+    }
+
+    /// Board #473 end to end on real managed kiro panes: the R2 screen gets
+    /// ONE `continue` over two ticks, named by its error; the same screen
+    /// with a working turn under it gets none over two ticks and keeps its
+    /// whole budget, so once it is idle the first attempt goes at once.
+    #[test]
+    fn a_managed_kiro_pane_painting_a_network_error_gets_one_continue_and_a_busy_one_none() {
+        super::super::tests::use_test_store();
+        let mut scratch = crate::tmux::Scratch::new("rec-473");
+        let session = scratch.session("s");
+        let ws = std::path::PathBuf::from(scratch.path());
+        for name in ["conn", "flip", "live", "wrap", "spill"] {
+            let home = ws.join(".tmm/agents").join(name);
+            std::fs::create_dir_all(&home).unwrap();
+            std::fs::write(home.join("launch.json"), serde_json::json!({ "backend": "kiro", "cmd": "kiro", "team": "" }).to_string()).unwrap();
+        }
+        let idle = ws.join("idle.txt");
+        std::fs::write(&idle, KIRO_234_CONN_SCREEN).unwrap();
+        let busy = ws.join("busy.txt");
+        std::fs::write(&busy, KIRO_234_CONN_SCREEN.replace(KIRO_IDLE_LINE, KIRO_234_WORKING)).unwrap();
+        let show = |f: &std::path::Path| format!("cat {}; cat", f.display());
+        let ok = std::process::Command::new("tmux")
+            .args(["new-session", "-d", "-x", "80", "-y", "40", "-s", &session, "-n", "conn", "-c", &ws.to_string_lossy(), &show(&idle)])
+            .status().map(|s| s.success()).unwrap_or(false);
+        if !ok {
+            eprintln!("no tmux server — skipping");
+            return;
+        }
+        std::process::Command::new("tmux").args(["new-window", "-d", "-t", &session, "-n", "flip", "-c", &ws.to_string_lossy(), &show(&busy)]).status().unwrap();
+        // The live incident's screen and R10: the turn line hard-wrapped
+        // (reviewer P1-A), each eligible.
+        for (name, text) in [("live", KIRO_234_CONN_LIVE_SCREEN_COMPOSED), ("wrap", KIRO_234_CONN_WRAPPED_TURN), ("spill", KIRO_234_NET_SPILL_R12)] {
+            let f = ws.join(format!("{name}.txt"));
+            std::fs::write(&f, text).unwrap();
+            std::process::Command::new("tmux").args(["new-window", "-d", "-t", &session, "-n", name, "-c", &ws.to_string_lossy(), &show(&f)]).status().unwrap();
+        }
+        super::super::adopt(&session, Some("rec-473-test")).expect("adopt");
+        std::thread::sleep(std::time::Duration::from_millis(300));
+        let notes = || -> Vec<String> {
+            super::super::telemetry::recent_events(&session, 0).into_iter().map(|e| e.text).filter(|t| t.starts_with("auto-continue")).collect()
+        };
+        check_once();
+        check_once();
+        std::thread::sleep(std::time::Duration::from_millis(500));
+        let pane = |w: &str| crate::tmux::capture_pane_plain(&format!("{session}:{w}"), Some(0)).unwrap_or_default();
+        assert!(pane("conn").contains("\ncontinue"), "the idle pane got the key: {:?}", pane("conn"));
+        assert!(!pane("flip").contains("\ncontinue"), "a busy pane gets nothing");
+        for w in ["live", "wrap", "spill"] {
+            assert!(pane(w).contains("\ncontinue"), "{w}: the wrapped turn line and the resize spill are furniture: {:?}", pane(w));
+        }
+        let mut got = notes();
+        got.sort();
+        assert_eq!(got, ["auto-continue 1/4 — connection interrupted in conn", "auto-continue 1/4 — connection interrupted in live", "auto-continue 1/4 — connection interrupted in wrap", "auto-continue 1/4 — network error in spill"], "one send each over two ticks, named");
+        // The busy pane's turn ends: the same error is now the newest block.
+        std::process::Command::new("tmux").args(["respawn-pane", "-k", "-t", &format!("{session}:flip"), &show(&idle)]).status().unwrap();
+        std::thread::sleep(std::time::Duration::from_millis(300));
+        check_once();
+        std::thread::sleep(std::time::Duration::from_millis(500));
+        assert!(pane("flip").contains("\ncontinue"), "now it gets the key: {:?}", pane("flip"));
+        assert_eq!(notes().iter().filter(|n| n.ends_with(" in flip")).collect::<Vec<_>>(), ["auto-continue 1/4 — connection interrupted in flip"], "its first attempt, at once: the busy ticks spent nothing");
+    }
+
+    /// Board #473: a turn fact that lands between the decision and the
+    /// keystrokes makes the screen stale. Nothing is typed, the send is taken
+    /// back (no attempt, no backoff, no cap slot), and the next tick types
+    /// the FIRST attempt at once.
+    #[test]
+    fn a_turn_fact_between_the_decision_and_the_send_cancels_it_at_no_cost() {
+        super::super::tests::use_test_store();
+        let mut scratch = crate::tmux::Scratch::new("rec-473s");
+        let session = scratch.session("s");
+        let ws = std::path::PathBuf::from(scratch.path());
+        let home = ws.join(".tmm/agents/st");
+        std::fs::create_dir_all(&home).unwrap();
+        std::fs::write(home.join("launch.json"), serde_json::json!({ "backend": "kiro", "cmd": "kiro", "team": "" }).to_string()).unwrap();
+        let idle = ws.join("idle.txt");
+        std::fs::write(&idle, KIRO_234_CONN_SCREEN).unwrap();
+        let ok = std::process::Command::new("tmux")
+            .args(["new-session", "-d", "-x", "80", "-y", "40", "-s", &session, "-n", "st", "-c", &ws.to_string_lossy(), &format!("cat {}; cat", idle.display())])
+            .status().map(|s| s.success()).unwrap_or(false);
+        if !ok {
+            eprintln!("no tmux server — skipping");
+            return;
+        }
+        super::super::adopt(&session, Some("rec-473s-test")).expect("adopt");
+        std::thread::sleep(std::time::Duration::from_millis(300));
+        let notes = || -> Vec<String> {
+            super::super::telemetry::recent_events(&session, 0).into_iter().map(|e| e.text).filter(|t| t.starts_with("auto-continue")).collect()
+        };
+        let pane = || crate::tmux::capture_pane_plain(&format!("{session}:st"), Some(0)).unwrap_or_default();
+        AFTER_DECIDE.with(|f| {
+            *f.borrow_mut() = Some(Box::new(|s: &str, w: &str| {
+                super::super::telemetry::record_prompt(s, w, "a person typed this");
+            }))
+        });
+        check_once();
+        std::thread::sleep(std::time::Duration::from_millis(400));
+        assert!(AFTER_DECIDE.with(|f| f.borrow().is_none()), "the seam ran");
+        assert!(!pane().contains("\ncontinue"), "a stale screen types nothing");
+        assert!(notes().is_empty(), "nothing recorded");
+        assert_eq!(tracker().lock().unwrap().send_mark(&session, "st", "1|"), SendMark::default(), "the send was taken back whole");
+        check_once();
+        std::thread::sleep(std::time::Duration::from_millis(400));
+        assert!(pane().contains("\ncontinue"), "the next tick types: {:?}", pane());
+        assert_eq!(notes(), ["auto-continue 1/4 — connection interrupted in st"], "the FIRST attempt, at once");
+    }
+
+    /// Board #473: a shape's `screen_grammar` is a measured fact, held by its
+    /// fixtures. Every row that says true has a whole-screen fixture the
+    /// backend's grammar reads as that very shape (a transient one as the
+    /// newest block, a person-needed one as its paint); no fixture of a row
+    /// that says false is read that way, which is why it keeps the ungated
+    /// send.
+    #[test]
+    fn a_shapes_screen_grammar_flag_is_held_by_its_fixtures() {
+        for backend in crate::backends::Backend::ALL {
+            for m in backend.recovery_shapes() {
+                let read = |text: &str| {
+                    newest_shape(backend.name(), text) == Some(m.shape) || backend.person_paint(text).is_some_and(|(s, _)| s == m.shape)
+                };
+                let whole = FIXTURES.iter().filter(|f| f.0 == backend.name() && f.1 == m.shape).any(|f| read(f.3));
+                assert_eq!(whole, m.screen_grammar, "{} {}: screen_grammar says {}", backend.name(), m.shape, m.screen_grammar);
+            }
+        }
+        // The legacy kiro screens with the old box composer are read by no grammar.
+        for text in [REAL, REAL_WRAPPED, MODEL_ERR] {
+            assert_eq!(newest_shape("kiro", text), None);
+        }
+    }
+
+    /// Reviewer P1-A: kiro's hard-wrapped turn line is furniture only in its
+    /// measured forms; anything else in the continuation's place means the
+    /// pane moved on, and the error, still detected, is not the newest block.
+    #[test]
+    fn a_wrapped_turn_line_is_furniture_and_nothing_else_in_its_place_is() {
+        for screen in [KIRO_234_CONN_WRAPPED_TURN, KIRO_234_CONN_LIVE_SCREEN_COMPOSED] {
+            assert_eq!(newest_shape("kiro", screen), Some("connection_interrupted"));
+        }
+        let (cont, at) = ("  23s\n", KIRO_234_CONN_WRAPPED_TURN);
+        assert_eq!(at.matches(cont).count(), 1);
+        for (bad, why) in [
+            ("  23s\n  › continue\n", "a submitted prompt under the wrap"),
+            ("  23s\n  ╰ output:\n", "tool output under the wrap"),
+            ("  23s and more\n", "text after the duration"),
+            ("  soon\n", "not a duration"),
+            ("\n  23s\n", "a blank between the line and its wrap"),
+        ] {
+            let moved = at.replace(cont, bad);
+            assert!(reading_within("kiro", &moved, 40).is_some(), "{why}: still detected");
+            assert_eq!(newest_shape("kiro", &moved), None, "{why}");
+            assert!(!send_eligible("kiro", &moved, &["connection_interrupted"]), "{why}: nothing typed");
+        }
+    }
+
+    /// Reviewer P2-B, through `check_once`: busy (ineligible) screens decide,
+    /// spend and clear nothing. A send that got no hook keeps its ladder
+    /// through busy ticks: back on the same idle screen it waits out its
+    /// backoff instead of sending attempt 1 again. Then real progress (a
+    /// tool call) is said once as "took effect", from a busy screen.
+    #[test]
+    fn a_confirmed_incident_through_a_busy_screen_and_back_types_nothing_more() {
+        super::super::tests::use_test_store();
+        let mut scratch = crate::tmux::Scratch::new("rec-473c");
+        let session = scratch.session("s");
+        let ws = std::path::PathBuf::from(scratch.path());
+        let home = ws.join(".tmm/agents/cf");
+        std::fs::create_dir_all(&home).unwrap();
+        std::fs::write(home.join("launch.json"), serde_json::json!({ "backend": "kiro", "cmd": "kiro", "team": "" }).to_string()).unwrap();
+        let idle = ws.join("idle.txt");
+        std::fs::write(&idle, KIRO_234_CONN_SCREEN).unwrap();
+        let busy = ws.join("busy.txt");
+        std::fs::write(&busy, KIRO_234_CONN_SCREEN.replace(KIRO_IDLE_LINE, KIRO_234_WORKING)).unwrap();
+        let show = |f: &std::path::Path| format!("cat {}; cat", f.display());
+        let ok = std::process::Command::new("tmux")
+            .args(["new-session", "-d", "-x", "80", "-y", "40", "-s", &session, "-n", "cf", "-c", &ws.to_string_lossy(), &show(&idle)])
+            .status().map(|s| s.success()).unwrap_or(false);
+        if !ok {
+            eprintln!("no tmux server — skipping");
+            return;
+        }
+        super::super::adopt(&session, Some("rec-473c-test")).expect("adopt");
+        let respawn = |f: &std::path::Path| {
+            std::process::Command::new("tmux").args(["respawn-pane", "-k", "-t", &format!("{session}:cf"), &show(f)]).status().unwrap();
+            std::thread::sleep(std::time::Duration::from_millis(300));
+        };
+        let notes = || -> Vec<String> {
+            super::super::telemetry::recent_events(&session, 0).into_iter().map(|e| e.text).filter(|t| t.starts_with("auto-continue")).collect()
+        };
+        let attempts = || tracker().lock().unwrap().map.get(&(session.clone(), "cf".to_string())).map(|r| r.attempts);
+        std::thread::sleep(std::time::Duration::from_millis(300));
+        check_once();
+        assert_eq!(notes(), ["auto-continue 1/4 — connection interrupted in cf"]);
+        // No hook followed the keystrokes. The pane goes busy for two ticks.
+        respawn(&busy);
+        check_once();
+        check_once();
+        assert_eq!(attempts(), Some(1), "busy ticks keep the record and spend nothing");
+        // The same idle screen again: the same incident, inside its backoff.
+        respawn(&idle);
+        check_once();
+        std::thread::sleep(std::time::Duration::from_millis(400));
+        assert_eq!(notes().len(), 1, "no second send: attempt 2 waits out its 30 s");
+        assert_eq!(attempts(), Some(1));
+        assert!(!crate::tmux::capture_pane_plain(&format!("{session}:cf"), Some(0)).unwrap_or_default().contains("\ncontinue"), "the respawned idle pane got no key");
+        // Real progress after the send, seen from a busy screen: said once.
+        super::super::telemetry::record_tool(&session, "cf", "execute_bash", "ls");
+        respawn(&busy);
+        check_once();
+        check_once();
+        assert_eq!(notes(), ["auto-continue 1/4 — connection interrupted in cf", "auto-continue took effect — cf is working again"]);
+    }
+
+    /// The validator's row A, through `check_once` (board #473, P1-1): a
+    /// persistent outage, driven as kiro drives it — each `continue` of ours
+    /// is accepted (its prompt hook) and the resumed turn fails again with no
+    /// hook. In a 24-row pane (row A's REAL screens, the third and fourth
+    /// identical) and a 40-row one (COMPOSED from row A's own lines, the hit
+    /// count growing), the agent gets three `continue`s, one per new failure,
+    /// then "paused … needs a person" and the recovery_exhausted end; "took
+    /// effect" is never said, because nothing progressed.
+    #[test]
+    fn a_persistent_outage_reaches_needs_a_person_in_a_short_and_a_tall_pane() {
+        use super::super::telemetry as tm;
+        let first = ROWA_2.find("▸ Time: 0s\n─").unwrap();
+        let second = first + '▸'.len_utf8() + ROWA_2[first + '▸'.len_utf8()..].find("▸ Time: 0s").unwrap();
+        let unit = &ROWA_2[first..second];
+        let tall = |n: usize| format!("{}{}{}", &ROWA_2[..first], unit.repeat(n - 1), &ROWA_2[second..]);
+        assert_eq!(tall(2), ROWA_2, "the composition rebuilds the real screen");
+        for (rows, screens) in [
+            (24, vec![ROWA_1.to_string(), ROWA_2.to_string(), ROWA_3.to_string(), ROWA_3.to_string()]),
+            (40, (1..=4).map(tall).collect::<Vec<_>>()),
+        ] {
+            super::super::tests::use_test_store();
+            let mut scratch = crate::tmux::Scratch::new(&format!("rec-473o{rows}"));
+            let session = scratch.session("s");
+            let ws = std::path::PathBuf::from(scratch.path());
+            let home = ws.join(".tmm/agents/kr");
+            std::fs::create_dir_all(&home).unwrap();
+            std::fs::write(home.join("launch.json"), serde_json::json!({ "backend": "kiro", "cmd": "kiro", "team": "" }).to_string()).unwrap();
+            let file = |n: usize| {
+                let f = ws.join(format!("s{n}.txt"));
+                std::fs::write(&f, &screens[n]).unwrap();
+                format!("cat {}; cat", f.display())
+            };
+            let ok = std::process::Command::new("tmux")
+                .args(["new-session", "-d", "-x", "80", "-y", &rows.to_string(), "-s", &session, "-n", "kr", "-c", &ws.to_string_lossy(), &file(0)])
+                .status().map(|s| s.success()).unwrap_or(false);
+            if !ok {
+                eprintln!("no tmux server — skipping");
+                return;
+            }
+            super::super::adopt(&session, Some(&format!("rec-473o{rows}-test"))).expect("adopt");
+            let notes = || -> Vec<String> {
+                tm::recent_events(&session, 0).into_iter().map(|e| e.text).filter(|t| t.starts_with("auto-continue")).collect()
+            };
+            tm::record_prompt(&session, "kr", "[tmm chat 2026-10-27 17:24] human: @kr reply with the word ok");
+            std::thread::sleep(std::time::Duration::from_millis(300));
+            check_once();
+            assert_eq!(notes().len(), 1, "{rows} rows: the first failure");
+            for n in 1..4 {
+                // kiro accepts our continue; the resumed turn fails again.
+                tm::record_prompt(&session, "kr", "continue");
+                std::process::Command::new("tmux").args(["respawn-pane", "-k", "-t", &format!("{session}:kr"), &file(n)]).status().unwrap();
+                std::thread::sleep(std::time::Duration::from_millis(300));
+                check_once();
+                assert_eq!(notes().len(), n, "{rows} rows, failure {}: the moved turn settles first", n + 1);
+                check_once();
+                assert_eq!(notes().len(), n + 1, "{rows} rows, failure {}: read as a new failure", n + 1);
+            }
+            let got = notes();
+            assert_eq!(got.iter().filter(|t| t.as_str() == "auto-continue 1/4 — connection interrupted in kr").count(), 3, "{rows} rows: three sends: {got:?}");
+            assert_eq!(got[3], format!("auto-continue paused — {MAX_INCIDENTS} errors in 30 min were already continued; kr needs a person"), "{rows} rows");
+            assert!(got.iter().all(|t| !t.contains("took effect")), "{rows} rows: nothing progressed: {got:?}");
+            let st = tm::derive(&session, "kr", 0);
+            assert_eq!((st.state.as_str(), st.detail.as_str()), ("idle", EXHAUSTED), "{rows} rows: the person is told");
+            check_once();
+            check_once();
+            assert_eq!(notes().len(), 4, "{rows} rows: and nothing more");
+            tracker().lock().unwrap().retain_windows(&session, &[]);
+        }
+    }
+
+    /// Zero false sends (board #473, P1-1): a redraw or resize of the same
+    /// error, with no turn fact, is the same incident, however many errors
+    /// the new paint shows; it waits out its backoff.
+    #[test]
+    fn a_redrawn_error_with_no_turn_fact_is_the_same_incident() {
+        use super::super::telemetry as tm;
+        super::super::tests::use_test_store();
+        let mut scratch = crate::tmux::Scratch::new("rec-473r");
+        let session = scratch.session("s");
+        let ws = std::path::PathBuf::from(scratch.path());
+        let home = ws.join(".tmm/agents/kr");
+        std::fs::create_dir_all(&home).unwrap();
+        std::fs::write(home.join("launch.json"), serde_json::json!({ "backend": "kiro", "cmd": "kiro", "team": "" }).to_string()).unwrap();
+        let file = |name: &str, text: &str| {
+            let f = ws.join(name);
+            std::fs::write(&f, text).unwrap();
+            format!("cat {}; cat", f.display())
+        };
+        let ok = std::process::Command::new("tmux")
+            .args(["new-session", "-d", "-x", "80", "-y", "40", "-s", &session, "-n", "kr", "-c", &ws.to_string_lossy(), &file("a.txt", ROWA_2)])
+            .status().map(|s| s.success()).unwrap_or(false);
+        if !ok {
+            eprintln!("no tmux server — skipping");
+            return;
+        }
+        super::super::adopt(&session, Some("rec-473r-test")).expect("adopt");
+        let notes = || tm::recent_events(&session, 0).into_iter().filter(|e| e.text.starts_with("auto-continue")).count();
+        std::thread::sleep(std::time::Duration::from_millis(300));
+        check_once();
+        assert_eq!(notes(), 1);
+        for (name, text, rows) in [("b.txt", ROWA_1, "24"), ("c.txt", ROWA_3, "52"), ("d.txt", ROWA_2, "40")] {
+            std::process::Command::new("tmux").args(["resize-window", "-t", &format!("{session}:kr"), "-y", rows]).status().unwrap();
+            std::process::Command::new("tmux").args(["respawn-pane", "-k", "-t", &format!("{session}:kr"), &file(name, text)]).status().unwrap();
+            std::thread::sleep(std::time::Duration::from_millis(300));
+            check_once();
+            check_once();
+            assert_eq!(notes(), 1, "{name}: a repaint is no failure");
+        }
+        tracker().lock().unwrap().retain_windows(&session, &[]);
+    }
+
+    /// P1-2 (board #473): the resize spill is furniture only in its measured
+    /// layout; a prompt, tool output or typed text in the status region, or
+    /// a character out of its column, still means nothing is typed.
+    #[test]
+    fn a_resized_status_spill_is_furniture_and_nothing_else_there_is() {
+        for screen in [KIRO_234_NET_SPILL_ROWB, KIRO_234_NET_SPILL_R12] {
+            assert_eq!(newest_shape("kiro", screen), Some("network_error"));
+        }
+        let at = KIRO_234_NET_SPILL_R12;
+        let spill = "\n                                                   w\n";
+        assert_eq!(at.matches(spill).count(), 1);
+        for (bad, why) in [
+            ("\n                                                  w\n", "a character one column in"),
+            ("\n                                                    w\n", "a character one column out"),
+            ("\n  › continue                                       w\n", "a prompt in the spill"),
+            ("\n  ╰ output:\n                                                   w\n", "tool output in the region"),
+            ("\nxx                                                 w\n", "text before the column"),
+        ] {
+            let moved = at.replace(spill, bad);
+            assert!(reading_within("kiro", &moved, 40).is_some(), "{why}: still detected");
+            assert_eq!(newest_shape("kiro", &moved), None, "{why}");
+        }
+        assert_eq!(newest_shape("kiro", &at.replace("/tmp/kiro473/work                                  i", "/tmp/kiro473/work")), None, "a cwd line with no spilled character");
+        assert_eq!(newest_shape("kiro", &at.replace(KIRO_IDLE_LINE, "›  continue")), None, "a typed composer");
+        assert_eq!(newest_shape("kiro", &at.replace(KIRO_IDLE_LINE, KIRO_234_WORKING)), None, "a working turn");
+    }
+
+    /// Review P1-B on f6c6b048: progress is a real tool call AFTER the send,
+    /// or a VALID end the CLI sent after it, in arrival order. A person's
+    /// interrupt (stored as a `completed` end), a `failed` end, an end we
+    /// recorded from the screen, an accepted prompt, and a tool call in the
+    /// same second but before the send are none of it.
+    #[test]
+    fn progress_is_a_real_tool_or_cli_end_after_the_send_in_fact_order() {
+        use super::super::telemetry as tm;
+        super::super::tests::use_test_store();
+        let session = format!("prog-{}", uuid::Uuid::new_v4());
+        tm::record_prompt(&session, "w", "go");
+        tm::record_tool(&session, "w", "execute_bash", "before the send");
+        let sent = tm::turn_version(&session, "w");
+        assert!(!tm::progress_since(&session, "w", sent), "a tool call before the send, the same second");
+        tm::record_prompt(&session, "w", "continue");
+        assert!(!tm::progress_since(&session, "w", sent), "our continue accepted");
+        tm::record_interrupt(&session, "w");
+        assert!(!tm::progress_since(&session, "w", sent), "a person's Escape");
+        tm::record_notification_with(&session, "w", "failed", crate::backends::EndQuality::Said);
+        assert!(!tm::progress_since(&session, "w", sent), "a failed end");
+        tm::record_prompt(&session, "w", "again");
+        let open = tm::turn_version(&session, "w");
+        assert_eq!(tm::record_missed_end_at(&session, "w", EXHAUSTED, tm::Identity::Incident, open, now_secs()), tm::Missed::Ended);
+        assert!(!tm::progress_since(&session, "w", sent), "our own missed end");
+        tm::record_tool(&session, "w", "execute_bash", "after the send");
+        assert!(tm::progress_since(&session, "w", sent), "a tool call after the send");
+        let later = tm::turn_version(&session, "w");
+        assert!(!tm::progress_since(&session, "w", later));
+        tm::record_notification_with(&session, "w", "completed", crate::backends::EndQuality::Said);
+        assert!(tm::progress_since(&session, "w", later), "a CLI-sent end after the send");
+    }
+
+    /// Review P2-C on f6c6b048: a moved prompt settles only over two
+    /// CONSECUTIVE eligible ticks; an ineligible tick between drops the
+    /// candidate, never the incident or its budget.
+    #[test]
+    fn a_settling_prompt_needs_two_eligible_ticks_in_a_row() {
+        let mut t = Tracker::default();
+        assert_eq!(t.bind("s", "w", 1, None, |_| false), Some("turn:1".to_string()));
+        assert_eq!(t.decide("s", "w", 100, "turn:1", |_| false), Decision::Send { attempt: 1 });
+        t.remember_newest("s", "w", None);
+        assert_eq!(t.bind("s", "w", 2, None, |_| false), None, "seen once");
+        t.unsettle("s", "w");
+        assert_eq!(t.bind("s", "w", 2, None, |_| false), None, "the busy tick broke the run: seen once again");
+        assert_eq!(t.bind("s", "w", 2, None, |_| false), Some("turn:2".to_string()), "twice in a row");
+        assert_eq!(t.send_mark("s", "w", "turn:1").attempts_for_test(), 1, "the incident kept its budget");
+    }
+
+    /// Review P1-A on f6c6b048, through `check_once`: a gated incident whose
+    /// four sends got no answer gives up, records its turn end (which moves
+    /// the all-facts version, never the prompt), and then stays silent: no
+    /// new ladder, tick after tick.
+    #[test]
+    fn an_exhausted_gated_incident_stays_silent_after_its_end() {
+        use super::super::telemetry as tm;
+        super::super::tests::use_test_store();
+        let mut scratch = crate::tmux::Scratch::new("rec-473x");
+        let session = scratch.session("s");
+        let ws = std::path::PathBuf::from(scratch.path());
+        let home = ws.join(".tmm/agents/kx");
+        std::fs::create_dir_all(&home).unwrap();
+        std::fs::write(home.join("launch.json"), serde_json::json!({ "backend": "kiro", "cmd": "kiro", "team": "" }).to_string()).unwrap();
+        let idle = ws.join("idle.txt");
+        std::fs::write(&idle, KIRO_234_CONN_SCREEN).unwrap();
+        let ok = std::process::Command::new("tmux")
+            .args(["new-session", "-d", "-x", "80", "-y", "40", "-s", &session, "-n", "kx", "-c", &ws.to_string_lossy(), &format!("cat {}; cat", idle.display())])
+            .status().map(|s| s.success()).unwrap_or(false);
+        if !ok {
+            eprintln!("no tmux server — skipping");
+            return;
+        }
+        super::super::adopt(&session, Some("rec-473x-test")).expect("adopt");
+        tm::record_prompt(&session, "kx", "[tmm chat 2026-10-27 17:24] human: @kx go");
+        let key = format!("turn:{}", tm::prompt_seq(&session, "kx"));
+        // Four unanswered sends, long ago (the tracker's clock is injected).
+        let t0 = now_secs() - 10_000;
+        for (n, at) in [(1, t0), (2, t0 + 30), (3, t0 + 90), (4, t0 + 210)] {
+            assert_eq!(tracker().lock().unwrap().decide(&session, "kx", at, &key, |_| false), Decision::Send { attempt: n });
+        }
+        let ends = || tm::recent_events(&session, 0).into_iter().filter(|e| e.kind == "notif" && e.text == "failed").count();
+        let notes = || tm::recent_events(&session, 0).into_iter().filter(|e| e.text.starts_with("auto-continue")).map(|e| e.text).collect::<Vec<_>>();
+        std::thread::sleep(std::time::Duration::from_millis(300));
+        let before = tm::turn_version(&session, "kx");
+        check_once();
+        assert_eq!(ends(), 1, "the give-up records its end");
+        assert!(tm::turn_version(&session, "kx") > before, "which moves the all-facts version");
+        assert_eq!(notes(), ["auto-continue gave up after 4 attempts — kx needs a person"]);
+        for _ in 0..4 {
+            check_once();
+        }
+        assert_eq!(notes().len(), 1, "no new ladder: {:?}", notes());
+        assert_eq!(ends(), 1);
+        assert!(!crate::tmux::capture_pane_plain(&format!("{session}:kx"), Some(0)).unwrap_or_default().contains("\ncontinue"), "nothing typed");
+        tracker().lock().unwrap().retain_windows(&session, &[]);
+    }
+
+    /// Review P1-A on f6c6b048, the return leg through `check_once`: our
+    /// `continue` is accepted and the agent PROGRESSES (a tool call), the pane
+    /// is busy, and then the same old error screen is idle again. The
+    /// confirmed incident stays confirmed: nothing is typed, nothing more is
+    /// said.
+    #[test]
+    fn a_progressed_incident_through_busy_and_back_types_nothing() {
+        use super::super::telemetry as tm;
+        super::super::tests::use_test_store();
+        let mut scratch = crate::tmux::Scratch::new("rec-473p");
+        let session = scratch.session("s");
+        let ws = std::path::PathBuf::from(scratch.path());
+        let home = ws.join(".tmm/agents/kp");
+        std::fs::create_dir_all(&home).unwrap();
+        std::fs::write(home.join("launch.json"), serde_json::json!({ "backend": "kiro", "cmd": "kiro", "team": "" }).to_string()).unwrap();
+        let idle = ws.join("idle.txt");
+        std::fs::write(&idle, KIRO_234_CONN_SCREEN).unwrap();
+        let busy = ws.join("busy.txt");
+        std::fs::write(&busy, KIRO_234_CONN_SCREEN.replace(KIRO_IDLE_LINE, KIRO_234_WORKING)).unwrap();
+        let show = |f: &std::path::Path| format!("cat {}; cat", f.display());
+        let ok = std::process::Command::new("tmux")
+            .args(["new-session", "-d", "-x", "80", "-y", "40", "-s", &session, "-n", "kp", "-c", &ws.to_string_lossy(), &show(&idle)])
+            .status().map(|s| s.success()).unwrap_or(false);
+        if !ok {
+            eprintln!("no tmux server — skipping");
+            return;
+        }
+        super::super::adopt(&session, Some("rec-473p-test")).expect("adopt");
+        let respawn = |f: &std::path::Path| {
+            std::process::Command::new("tmux").args(["respawn-pane", "-k", "-t", &format!("{session}:kp"), &show(f)]).status().unwrap();
+            std::thread::sleep(std::time::Duration::from_millis(300));
+        };
+        let notes = || tm::recent_events(&session, 0).into_iter().filter(|e| e.text.starts_with("auto-continue")).map(|e| e.text).collect::<Vec<_>>();
+        std::thread::sleep(std::time::Duration::from_millis(300));
+        check_once();
+        assert_eq!(notes(), ["auto-continue 1/4 — connection interrupted in kp"]);
+        tm::record_prompt(&session, "kp", "continue");
+        tm::record_tool(&session, "kp", "execute_bash", "ls");
+        respawn(&busy);
+        check_once();
+        assert_eq!(notes().len(), 2, "took effect, from the busy screen");
+        respawn(&idle);
+        for _ in 0..3 {
+            check_once();
+        }
+        std::thread::sleep(std::time::Duration::from_millis(400));
+        assert_eq!(notes(), ["auto-continue 1/4 — connection interrupted in kp", "auto-continue took effect — kp is working again"], "nothing more");
+        assert_eq!(incident_confirmed_for_test(&session, "kp"), Some(true), "the confirmed record kept");
+        assert!(!crate::tmux::capture_pane_plain(&format!("{session}:kp"), Some(0)).unwrap_or_default().contains("\ncontinue"), "nothing typed");
+        tracker().lock().unwrap().retain_windows(&session, &[]);
+    }
+
+    /// Review P2-D on f6c6b048: the spill is read by its TEXT too. The same
+    /// geometry whose rejoined line is not a status line, or whose cwd is not
+    /// a path, is not furniture.
+    #[test]
+    fn a_resized_spill_must_rejoin_to_a_status_line() {
+        let at = KIRO_234_NET_SPILL_R12;
+        assert_eq!(newest_shape("kiro", at), Some("network_error"));
+        let w = "\n                                                   w\n";
+        assert_eq!(at.matches(w).count(), 1);
+        for (bad, why) in [
+            (at.replace(w, "\n                                                   q\n"), "rejoins to `Midqay: expired`"),
+            (at.replace("/tmp/kiro473/work", "xtmp/kiro473/work"), "a cwd that is not a path"),
+            (at.replace("kn · claude-haiku-5.5", "kn ! claude-haiku-5.5"), "segments that are not kiro's"),
+            (at.replace("◔ 1%", "◔ 1x"), "no context gauge"),
+        ] {
+            assert!(reading_within("kiro", &bad, 40).is_some(), "{why}: still detected");
+            assert_eq!(newest_shape("kiro", &bad), None, "{why}");
+        }
+    }
+
+    /// COMPOSED from R2 and R9 (board #473): R2's screen as a 44-column pane
+    /// shows it, its last paragraph re-wrapped greedily at 44 columns under
+    /// kiro's two-space indent and R9's 44-column furniture under the error.
+    fn reflow_44(screen: &str) -> String {
+        let start = screen.find("  If accumulation and ablation").expect("R2's last paragraph");
+        let end = screen.find("\n\n• Your connection").expect("R2's error");
+        let mut out = String::new();
+        let mut line = String::from(" ");
+        for word in screen[start..end].split_whitespace() {
+            if line.chars().count() + 1 + word.chars().count() > 44 {
+                out.push_str(&line);
+                out.push('\n');
+                line = String::from(" ");
+            }
+            line.push(' ');
+            line.push_str(word);
+        }
+        out.push_str(&line);
+        let tail = &KIRO_234_CONN_NARROW[KIRO_234_CONN_NARROW.find("\n▸ Time").expect("R9's furniture")..];
+        format!("{}{}\n\n• Your connection was interrupted. Please\n  try again in a moment.\n{}", &screen[..start], out, tail)
+    }
+
+    /// Review P1 on a2c33e52 and its 19:30 check points, through
+    /// `check_once`: once our `continue` is accepted and the agent
+    /// PROGRESSES, the same old error idle again with only the display
+    /// changed (the Midway segment, the context gauge, a reflow to 44
+    /// columns) and NO progress since the confirmation, tick after tick, is
+    /// the same confirmed incident: one send in all. The resumed turn working
+    /// on and dying again (the orchestrator's rulings 19:29 and 20:02) and a
+    /// later prompt's failure are new incidents, one send each.
+    #[test]
+    fn a_confirmed_incident_survives_display_only_changes_and_a_new_failure_is_its_own() {
+        use super::super::telemetry as tm;
+        super::super::tests::use_test_store();
+        let mut scratch = crate::tmux::Scratch::new("rec-473d");
+        let session = scratch.session("s");
+        let ws = std::path::PathBuf::from(scratch.path());
+        let home = ws.join(".tmm/agents/kd");
+        std::fs::create_dir_all(&home).unwrap();
+        std::fs::write(home.join("launch.json"), serde_json::json!({ "backend": "kiro", "cmd": "kiro", "team": "" }).to_string()).unwrap();
+        let file = |name: &str, text: &str| {
+            let f = ws.join(name);
+            std::fs::write(&f, text).unwrap();
+            format!("cat {}; cat", f.display())
+        };
+        let ok = std::process::Command::new("tmux")
+            .args(["new-session", "-d", "-x", "80", "-y", "40", "-s", &session, "-n", "kd", "-c", &ws.to_string_lossy(), &file("idle.txt", KIRO_234_CONN_SCREEN)])
+            .status().map(|s| s.success()).unwrap_or(false);
+        if !ok {
+            eprintln!("no tmux server — skipping");
+            return;
+        }
+        super::super::adopt(&session, Some("rec-473d-test")).expect("adopt");
+        let respawn = |cmd: String| {
+            std::process::Command::new("tmux").args(["respawn-pane", "-k", "-t", &format!("{session}:kd"), &cmd]).status().unwrap();
+            std::thread::sleep(std::time::Duration::from_millis(300));
+        };
+        let sends = || tm::recent_events(&session, 0).into_iter().filter(|e| e.text.starts_with("auto-continue 1/4")).count();
+        let said = || tm::recent_events(&session, 0).into_iter().filter(|e| e.text.contains("took effect")).count();
+        std::thread::sleep(std::time::Duration::from_millis(300));
+        tm::record_prompt(&session, "kd", "[tmm chat 2026-10-27 13:00] human: @kd go");
+        check_once();
+        assert_eq!(sends(), 1);
+        // Accepted, and the agent works: progress after the send.
+        tm::record_prompt(&session, "kd", "continue");
+        tm::record_tool(&session, "kd", "execute_bash", "ls");
+        respawn(file("busy.txt", &KIRO_234_CONN_SCREEN.replace(KIRO_IDLE_LINE, KIRO_234_WORKING)));
+        check_once();
+        assert_eq!(said(), 1);
+        for (name, text, what) in [
+            ("midway.txt", KIRO_234_CONN_SCREEN.replace("Midway: expired", "Midway: 3h 2m"), "the Midway segment"),
+            ("gauge.txt", KIRO_234_CONN_SCREEN.replace("◔ 3%", "◔ 5%"), "the context gauge"),
+            ("reflow.txt", reflow_44(KIRO_234_CONN_SCREEN), "the same screen reflowed to 44 columns"),
+        ] {
+            respawn(file(name, &text));
+            let r = reading_within("kiro", &text, 400).unwrap();
+            assert!(send_eligible("kiro", &text, &r.shapes), "{what}: an eligible screen, so the rule is what holds the send");
+            for _ in 0..3 {
+                check_once();
+            }
+            assert_eq!(sends(), 1, "{what}: no send");
+            assert_eq!(incident_confirmed_for_test(&session, "kd"), Some(true), "{what}: still confirmed");
+        }
+        // The resumed turn works on (a later tool call) and dies again,
+        // under the prompt of the continue that worked (the orchestrator's
+        // rulings 19:29 and 20:02): progress after the confirmation and an
+        // error the newest block is a new failure, one new incident and one
+        // send.
+        tm::record_tool(&session, "kd", "execute_bash", "cargo test");
+        let same_turn = under_error(KIRO_234_CONN_SCREEN, "• Shell ls\n\n• Your connection was interrupted. Please try again in a moment.\n \n");
+        respawn(file("same-turn.txt", &same_turn));
+        check_once();
+        assert_eq!(sends(), 1, "settling");
+        check_once();
+        assert_eq!(sends(), 2, "the second failure is its own incident");
+        for _ in 0..3 {
+            check_once();
+        }
+        assert_eq!(sends(), 2, "and gets one send");
+        // A person's prompt and a third error under it: a new incident too.
+        tm::record_prompt(&session, "kd", "[tmm chat 2026-10-27 13:10] human: @kd next");
+        respawn(file("again.txt", &under_error(&same_turn, "  › next\n\n• Your connection was interrupted. Please try again in a moment.\n \n")));
+        check_once();
+        assert_eq!(sends(), 2, "settling");
+        check_once();
+        assert_eq!(sends(), 3, "a new failure is its own incident");
+        tracker().lock().unwrap().retain_windows(&session, &[]);
+    }
+
+    /// Review P2 on e2ba9948, a REAL taller window through `check_once`: the
+    /// pane is resized, tmux pulls history back into the visible screen, and
+    /// the capture `check_once` reads really shows an OLDER error and its
+    /// Request ID above the confirmed one. With no progress since the
+    /// confirmation it is the same incident: zero further sends.
+    #[test]
+    fn a_taller_window_re_exposing_an_older_error_is_no_new_failure() {
+        use super::super::telemetry as tm;
+        super::super::tests::use_test_store();
+        let mut scratch = crate::tmux::Scratch::new("rec-473g");
+        let session = scratch.session("s");
+        let ws = std::path::PathBuf::from(scratch.path());
+        let home = ws.join(".tmm/agents/kg");
+        std::fs::create_dir_all(&home).unwrap();
+        std::fs::write(home.join("launch.json"), serde_json::json!({ "backend": "kiro", "cmd": "kiro", "team": "" }).to_string()).unwrap();
+        // An older high-traffic error with its Request ID, then the R2 screen.
+        let f = ws.join("screen.txt");
+        std::fs::write(&f, format!("{KIRO_228_WIDE}\n{KIRO_234_CONN_SCREEN}")).unwrap();
+        let ok = std::process::Command::new("tmux")
+            // No echo: our `continue` must not repaint the screen, so the same
+            // old error stays the newest block once the window grows.
+            .args(["new-session", "-d", "-x", "80", "-y", "30", "-s", &session, "-n", "kg", "-c", &ws.to_string_lossy(), &format!("stty -echo; cat {}; sleep 100000", f.display())])
+            .status().map(|s| s.success()).unwrap_or(false);
+        if !ok {
+            eprintln!("no tmux server — skipping");
+            return;
+        }
+        super::super::adopt(&session, Some("rec-473g-test")).expect("adopt");
+        let target = format!("{session}:kg");
+        let visible = || crate::tmux::capture_pane_plain(&target, Some(0)).unwrap_or_default();
+        let sends = || tm::recent_events(&session, 0).into_iter().filter(|e| e.text.starts_with("auto-continue 1/4")).count();
+        std::thread::sleep(std::time::Duration::from_millis(300));
+        let older = "b9b4f1e3-b712-42d8-8fa7-c85cafbd6085";
+        assert!(!visible().contains(older), "at 30 rows the older error is above the screen");
+        tm::record_prompt(&session, "kg", "[tmm chat 2026-10-27 13:00] human: @kg go");
+        check_once();
+        assert_eq!(sends(), 1);
+        tm::record_prompt(&session, "kg", "continue");
+        tm::record_tool(&session, "kg", "execute_bash", "ls");
+        check_once();
+        assert_eq!(incident_confirmed_for_test(&session, "kg"), Some(true));
+        std::process::Command::new("tmux").args(["resize-window", "-t", &target, "-y", "60"]).status().unwrap();
+        std::thread::sleep(std::time::Duration::from_millis(400));
+        let grown = visible();
+        let reading = reading_within("kiro", &grown, 400).expect("still an error screen");
+        assert!(reading.ids.iter().any(|i| i == older), "the taller capture re-exposes the older Request ID: {:?}", reading.ids);
+        assert_eq!(reading.shapes.len(), 2, "two errors in the visible reading now");
+        assert_eq!(newest_shape("kiro", &grown), Some("connection_interrupted"), "the newest error is still the confirmed one");
+        assert_eq!(newest_request_id("kiro", &grown), None);
+        assert!(send_eligible("kiro", &grown, &reading.shapes), "eligible, so the rule is what holds the send");
+        for _ in 0..3 {
+            check_once();
+        }
+        assert_eq!(sends(), 1, "a re-exposed older error is no new failure");
+        assert_eq!(incident_confirmed_for_test(&session, "kg"), Some(true));
+        tracker().lock().unwrap().retain_windows(&session, &[]);
+    }
+
+    /// The orchestrator's ruling 20:02, at the tracker: a confirmed incident
+    /// rebinds only after progress SINCE the confirmation, and a Request ID
+    /// on both newest blocks is an extra equality check (the same ID is the
+    /// same error whatever else holds). An incident never sent to rebinds
+    /// only on another Request ID.
+    #[test]
+    fn a_confirmed_incident_rebinds_only_on_progress_since_and_never_on_its_own_id() {
+        let id = |s: &str| Some(s.to_string());
+        let confirmed = |bound: Option<String>| {
+            let mut t = Tracker::default();
+            assert_eq!(t.decide_seq("s", "w", 100, 5, "turn:1", |_| false), Decision::Send { attempt: 1 });
+            t.remember_newest("s", "w", bound);
+            t.confirm("s", "w", 9);
+            t
+        };
+        // No progress since the confirmation: the same incident, twice in a row.
+        let mut t = confirmed(None);
+        for _ in 0..2 {
+            assert_eq!(t.bind("s", "w", 2, None, |after| after < 9), Some("turn:1".to_string()));
+        }
+        // Progress after it (seq 10 > 9): a new failure, once settled.
+        let mut t = confirmed(None);
+        assert_eq!(t.bind("s", "w", 2, None, |after| after == 9), None, "settling");
+        assert_eq!(t.bind("s", "w", 2, None, |after| after == 9), Some("turn:2".to_string()));
+        // The same Request ID on both is the same error, progress or not.
+        let mut t = confirmed(id("aaaa"));
+        for _ in 0..2 {
+            assert_eq!(t.bind("s", "w", 2, id("aaaa"), |_| true), Some("turn:1".to_string()));
+        }
+        // Another ID with progress: new.
+        let mut t = confirmed(id("aaaa"));
+        assert_eq!(t.bind("s", "w", 2, id("bbbb"), |_| true), None);
+        assert_eq!(t.bind("s", "w", 2, id("bbbb"), |_| true), Some("turn:2".to_string()));
+        // Never sent to (capped): only another Request ID.
+        let mut t = Tracker::default();
+        t.decide_seq("s", "w", 100, 5, "turn:1", |_| false);
+        t.undo_send("s", "w", SendMark::default(), 100);
+        t.remember_newest("s", "w", id("aaaa"));
+        for _ in 0..2 {
+            assert_eq!(t.bind("s", "w", 2, id("aaaa"), |_| true), Some("turn:1".to_string()), "its own ID");
+            assert_eq!(t.bind("s", "w", 2, None, |_| true), Some("turn:1".to_string()), "no ID: no evidence");
+        }
+        assert_eq!(t.bind("s", "w", 2, id("bbbb"), |_| true), None);
+        assert_eq!(t.bind("s", "w", 2, id("bbbb"), |_| true), Some("turn:2".to_string()));
+    }
+
+    /// Review P2-A on 0126b589: a confirmation is bound to the progress fact
+    /// that made it, never to a later snapshot of every fact. A tool call
+    /// confirms through `note_answered` with its own number; a valid end
+    /// with no usable reply is confirmed by the tick, bound to the earliest
+    /// progress after the send even when a prompt and an ask arrived before
+    /// that tick. Progress after the binding is then still seen.
+    #[test]
+    fn a_confirmation_is_bound_to_its_progress_fact_not_a_later_snapshot() {
+        use super::super::telemetry as tm;
+        use crate::backends::EndQuality;
+        super::super::tests::use_test_store();
+        let session = format!("conf-{}", uuid::Uuid::new_v4());
+        let conf = |t: &Tracker| t.map.get(&(session.clone(), "w".to_string())).and_then(|r| r.conf_seq);
+        // The tick path.
+        tm::record_prompt(&session, "w", "go");
+        let mut t = Tracker::default();
+        assert_eq!(t.decide_seq(&session, "w", 100, tm::turn_version(&session, "w"), "turn:1", |_| false), Decision::Send { attempt: 1 });
+        tm::record_notification_with(&session, "w", "completed", EndQuality::Empty);
+        let end = tm::turn_version(&session, "w");
+        tm::record_prompt(&session, "w", "a person's next line");
+        tm::record_notification_with(&session, "w", "input_required", EndQuality::Unknown);
+        tm::record_tool(&session, "w", "execute_bash", "work before the tick");
+        assert!(tm::turn_version(&session, "w") > end, "later facts landed before the tick");
+        assert!(t.verify_pending(&session, "w", |after| tm::progress_since(&session, "w", after)));
+        t.settle_conf(&session, "w", |after| tm::progress_seq_since(&session, "w", after));
+        assert_eq!(conf(&t), Some(end), "bound to the end that confirmed it, the earliest progress after the send");
+        tm::record_tool(&session, "w", "execute_bash", "later work");
+        assert!(conf(&t).is_some_and(|c| tm::progress_since(&session, "w", c)), "later progress is seen");
+        // The note_answered path: the tool call's own number.
+        let session2 = format!("conf2-{}", uuid::Uuid::new_v4());
+        tm::record_prompt(&session2, "w", "go");
+        let sent = tm::turn_version(&session2, "w");
+        assert_eq!(tracker().lock().unwrap().decide_seq(&session2, "w", 100, sent, "turn:1", |_| false), Decision::Send { attempt: 1 });
+        tm::record_tool(&session2, "w", "execute_bash", "ls");
+        let tool = tm::turn_version(&session2, "w");
+        tm::record_prompt(&session2, "w", "a person's next line");
+        let got = tracker().lock().unwrap().map.get(&(session2.clone(), "w".to_string())).and_then(|r| r.conf_seq);
+        assert_eq!(got, Some(tool), "bound to the tool call that confirmed it");
+        tracker().lock().unwrap().retain_windows(&session2, &[]);
+    }
+
+    /// Review P2-B on 0126b589: the same Request ID on both newest blocks is
+    /// the same error in EVERY branch. An unanswered incident whose newest
+    /// error keeps its ID under a moved prompt keeps its ladder (its backoff
+    /// retries), it does not start a new one; another ID does, once settled.
+    #[test]
+    fn the_same_request_id_keeps_an_unanswered_incident_and_its_ladder() {
+        let id = |s: &str| Some(s.to_string());
+        let mut t = Tracker::default();
+        assert_eq!(t.bind("s", "w", 1, id("aaaa"), |_| false), Some("turn:1".to_string()));
+        assert_eq!(t.decide_seq("s", "w", 100, 5, "turn:1", |_| false), Decision::Send { attempt: 1 });
+        t.remember_newest("s", "w", id("aaaa"));
+        for at in [110, 120] {
+            assert_eq!(t.bind("s", "w", 2, id("aaaa"), |_| false), Some("turn:1".to_string()), "the same ID: the same incident");
+            assert_eq!(t.decide_seq("s", "w", at, 6, "turn:1", |_| false), Decision::Wait, "inside its backoff");
+        }
+        assert_eq!(t.decide_seq("s", "w", 130, 6, "turn:1", |_| false), Decision::Send { attempt: 2 }, "its own retry");
+        assert_eq!(t.bind("s", "w", 2, id("bbbb"), |_| false), None);
+        assert_eq!(t.bind("s", "w", 2, id("bbbb"), |_| false), Some("turn:2".to_string()), "another ID: a new incident");
+        // Row A, id-less, is unchanged: our unanswered send, a settled moved prompt.
+        let mut t = Tracker::default();
+        assert_eq!(t.decide_seq("s", "w", 100, 5, "turn:1", |_| false), Decision::Send { attempt: 1 });
+        t.remember_newest("s", "w", None);
+        assert_eq!(t.bind("s", "w", 2, None, |_| false), None);
+        assert_eq!(t.bind("s", "w", 2, None, |_| false), Some("turn:2".to_string()));
     }
 }

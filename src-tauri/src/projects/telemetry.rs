@@ -107,6 +107,10 @@ struct Rec {
     /// not reported by the CLI: never evidence that the model answered
     /// (board #362 review P2-1). 0 = none.
     missed_end_seq: u64,
+    /// `end_seq` of an end that was a person's INTERRUPT (`record_interrupt`
+    /// stores it as `completed`, which ends the turn): never evidence that the
+    /// agent progressed (board #473 review P1-B). 0 = none.
+    interrupt_seq: u64,
     /// A nudge was DELIVERED in the current run of empty turns. A scheduled one
     /// that was cancelled does not count — the allowance is spent by the line
     /// typed, not by the timer set — and only a turn that ends with a real reply
@@ -869,6 +873,9 @@ fn replay_turn_facts(r: &mut Rec, facts: &super::store::TurnFacts) {
             r.person_end = (r.end_seq, f.tool.clone());
             r.missed_end_seq = r.end_seq;
         }
+        if f.text == "interrupted" {
+            r.interrupt_seq = r.end_seq;
+        }
     }
 }
 
@@ -1086,6 +1093,7 @@ fn notification(session: &str, window: &str, kind: &str, at: Option<u64>, qualit
         .is_some_and(|r| r.prompt.is_some() && r.prompt_seq > r.end_seq);
     let event = ("notif", kind.to_string(), String::new(), String::new(), Vec::new());
     let kind = kind.to_string();
+    let mut fact_seq = 0;
     let (_, row) = turn_fact_held_row(&order, session, window, at, |_| false, Some(event), |r, ts, seq| match kind.as_str() {
         "permission_required" | "input_required" => {
             r.ask = Some((kind, ts));
@@ -1094,6 +1102,7 @@ fn notification(session: &str, window: &str, kind: &str, at: Option<u64>, qualit
         _ => {
             r.end = Some((kind, ts));
             r.end_seq = seq;
+            fact_seq = seq;
             r.ask = None; // a finished turn cannot still be asking
             if completed {
                 match quality {
@@ -1125,7 +1134,7 @@ fn notification(session: &str, window: &str, kind: &str, at: Option<u64>, qualit
     // recovery incident is confirmed and a capped stretch is over (board
     // #362, orchestrator's ruling on the validator's P3).
     if completed && quality == EndQuality::Said {
-        super::recovery::note_answered(session, window);
+        super::recovery::note_answered(session, window, fact_seq);
     }
     row
 }
@@ -1266,6 +1275,7 @@ pub fn record_interrupt(session: &str, window: &str) {
     turn_fact_held(&order, session, window, None, |_| false, Some(event), |r, ts, seq| {
         r.end = Some(("completed".to_string(), ts));
         r.end_seq = seq;
+        r.interrupt_seq = seq;
         r.ask = None;
     }, None);
     end_commands(session, window, turn_had_prompt);
@@ -1316,9 +1326,11 @@ pub fn record_tool(session: &str, window: &str, tool: &str, detail: &str) -> Opt
     };
     let line_for_rec = line.clone();
     let order = turn_order();
+    let mut fact_seq = 0;
     let row = turn_fact_held_row(&order, session, window, None, same_call, Some(event), |r, ts, seq| {
         r.tool = Some((line_for_rec, ts));
         r.tool_seq = seq;
+        fact_seq = seq;
     }, None)
     .1;
     drop(order);
@@ -1326,7 +1338,10 @@ pub fn record_tool(session: &str, window: &str, tool: &str, detail: &str) -> Opt
     // budget this window was burning refills (recovery rule 3) — unless its
     // restore generation refused it (H2 review P1-C residual).
     if !generation_write_failed() {
-        super::recovery::note_answered(session, window);
+        // A Post half folded into its Pre wrote no fact: the Pre's own
+        // number is the window's tool fact (`tool_seq`).
+        let seq = if fact_seq > 0 { fact_seq } else { store().lock().unwrap().get(&(session.to_string(), window.to_string())).map_or(0, |r| r.tool_seq) };
+        super::recovery::note_answered(session, window, seq);
     }
     row
 }
@@ -2330,7 +2345,7 @@ pub fn accepted_paint(session: &str, window: &str, sig: &str) -> Result<Option<i
 /// It carries NO reply: nothing is posted, nothing is returned as the
 /// agent's answer, and the requesters' edge simply closes at this end (the
 /// next turn's members start after it); they learn why from the status
-/// detail. Nor is it evidence that the model answered: `turn_fact_since`
+/// detail. Nor is it evidence that the model answered: `progress_since`
 /// does not count it (review P2-1).
 ///
 /// A turn that had ALREADY ended gets the detail on that end and no second
@@ -2443,22 +2458,46 @@ fn missed_end(session: &str, window: &str, detail: &str, identity: Identity, see
     Missed::Ended
 }
 
-/// Did this window produce any turn fact (accepted prompt, turn end, tool
-/// call) at or after `t`? `projects::recovery` asks this to verify that a
-/// typed `continue` actually became a turn: the error text stays painted on
-/// the screen long after the agent moved on, so the screen cannot answer it
-/// (owner, 2026-08-26 — the visible error re-triggered sends into a working
-/// agent). Seconds, same clock as the turn facts themselves.
-pub fn turn_fact_since(session: &str, window: &str, t: u64) -> bool {
+/// Did this window PROGRESS after the fact sequence `after` (a tool call,
+/// or a VALID turn end the CLI itself sent)? `projects::recovery` asks this
+/// to verify that a typed `continue` actually got the agent working again:
+/// the error text stays painted on the screen long after the agent moved on,
+/// so the screen cannot answer it (owner, 2026-08-26 — the visible error
+/// re-triggered sends into a working agent). Board #473: an accepted PROMPT
+/// is not progress (the validator's row A: kiro v3 accepts our `continue`,
+/// the resumed turn fails again with no hook); nor is a person's interrupt
+/// (stored as a `completed` end), a `failed` end, or an end we recorded
+/// from the screen (board #362 review P2-1). `after` is the window's
+/// `turn_version` when the `continue` was decided, so the order is the
+/// facts' arrival order, never whole seconds: a tool call in the same second
+/// but BEFORE the send is not after it.
+pub fn progress_since(session: &str, window: &str, after: u64) -> bool {
+    progress_seq_since(session, window, after).is_some()
+}
+
+/// The arrival number of the earliest progress fact this window still holds
+/// after `after` (`progress_since`), or `None` (board #473 review P2-A on
+/// 0126b589): what a recovery confirmation is bound to, never a later
+/// snapshot of every fact.
+pub fn progress_seq_since(session: &str, window: &str, after: u64) -> Option<u64> {
     let map = store().lock().unwrap();
-    map.get(&(session.to_string(), window.to_string())).is_some_and(|r| {
-        r.prompt.is_some_and(|p| p >= t)
-            // An end WE recorded from the screen (`record_missed_end`) is our
-            // own bookkeeping, not the CLI answering: it never proves that a
-            // `continue` took effect (board #362 review P2-1).
-            || r.end.as_ref().is_some_and(|(_, ts)| *ts >= t) && r.end_seq != r.missed_end_seq
-            || r.tool.as_ref().is_some_and(|(_, ts)| *ts >= t)
-    })
+    let r = map.get(&(session.to_string(), window.to_string()))?;
+    let tool = (r.tool_seq > after).then_some(r.tool_seq);
+    let end = (r.end_seq > after
+        && r.end.as_ref().is_some_and(|(kind, _)| kind == "completed")
+        && r.end_seq != r.missed_end_seq
+        && r.end_seq != r.interrupt_seq)
+        .then_some(r.end_seq);
+    tool.into_iter().chain(end).min()
+}
+
+/// The arrival number of the window's newest accepted PROMPT, 0 for none
+/// (board #473): the turn identity a gated recovery incident is bound to. A
+/// new failure needs a new prompt; a tool call, an end (ours included), an
+/// ask or an interrupt never moves it.
+pub fn prompt_seq(session: &str, window: &str) -> u64 {
+    recovery_mark(session);
+    store().lock().unwrap().get(&(session.to_string(), window.to_string())).map_or(0, |r| r.prompt_seq)
 }
 
 /// Drop records for windows that no longer exist (called opportunistically

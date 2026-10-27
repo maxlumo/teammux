@@ -506,9 +506,11 @@ pub(crate) fn transient_shape(_glued: &str, spaced: &str) -> Option<&'static str
 
 /// The Claude Code version each shape above was MEASURED on (board #362):
 /// `bedrock_5xx` on 2.1.284 (#280). Raise it only with a new capture as its
-/// fixture (`recovery::tests::FIXTURES`).
+/// fixture (`recovery::tests::FIXTURES`). No screen grammar was measured for
+/// Claude Code (`Backend::newest_block` is `None`), so its 5xx keeps the
+/// ungated send (board #473).
 pub(crate) const RECOVERY_SHAPES: &[super::Measured] = &[
-    super::Measured { shape: "bedrock_5xx", version: "2.1.284", at_most: false },
+    super::Measured { shape: "bedrock_5xx", version: "2.1.284", at_most: false, screen_grammar: false, words: "Bedrock 5xx" },
 ];
 
 /// The program whose `--version` names the Claude Code a pane runs.

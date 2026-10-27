@@ -359,7 +359,16 @@ The process half of the incident is in
   is the agent's own work (board #169): its `UserPromptSubmit` is a `Subagent`
   tool row, its `SubagentStop` is not a turn end — see agent-status.md.
 - Kiro CLI: `stop` maps to completed. Current Kiro hooks do not expose a
-  permission-wait event with the same precision as Claude or Codex.
+  permission-wait event with the same precision as Claude or Codex. An
+  ERRORED v3 turn ends with no hook (board #473, kiro-cli 2.34.0): kiro
+  records `displayError` and `turn_end {stopReason: "error"}` in its session
+  file and fires no Stop. A Stop fired in 0 of 1089 errored turns across this
+  host's session files on 2026-10-27 (high traffic, rate limits, image
+  refusals, connection resets, network errors) and in 0 of 5 rig failures.
+  So no hook closes the turn: it stays open in telemetry until a later hook
+  fact (the next prompt opens a new turn) or the recovery's missed-end
+  record (`recovery_exhausted`) ends it, and the ladder reads the painted
+  error instead (agent-status.md).
 - Grok 1.0.5 (camelCase `hookEventName`; `stop` counts only with reason
   `end_turn`, `stop_failure` is failed) and OMP (our own telemetry extension
   emits claude-shaped `Stop`) are read the same way.
