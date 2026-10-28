@@ -1,5 +1,6 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
+import { readFileSync } from 'node:fs';
 import { pathRef, resolvePathRef, handlePathLinkClick, installPathLinkHandler, pathLinkParts } from './path-links.ts';
 import { findPaths } from './path-grammar.ts';
 import { encodeHref } from './markedSafeUrl.ts';
@@ -118,4 +119,42 @@ test('a link\u2019s href goes through the room\u2019s path decoder to the path i
     const link = pathLinkParts(line).find((p) => p.href);
     assert.equal(link ? pathRef(link.href) : '', expected, line);
   }
+});
+
+// Board #477 (review of #475): a path may hold a LITERAL percent triplet. `/tmp/a%20b.md` is a file whose name
+// has the characters %20 in it. The href is encodeHref(raw, 'path'), which writes the `%` as `%25`, so pathRef's
+// ONE decode gives the literal name back. An href that skipped the encoding (the raw path) would be decoded into
+// `/tmp/a b.md` or `/tmp/a/b.md`, a different file.
+test('a path holding a literal %XX keeps its name through href and decoder (#477)', () => {
+  for (const [line, href, expected] of [
+    ['/tmp/a%20b.md', '/tmp/a%2520b.md', '/tmp/a%20b.md'],
+    ['/tmp/a%2Fb.md', '/tmp/a%252Fb.md', '/tmp/a%2Fb.md'],
+    ['/tmp/a%23b.md', '/tmp/a%2523b.md', '/tmp/a%23b.md'],
+    ['read /tmp/a%20b.md && wc -l /tmp/a%2Fb.md', '/tmp/a%2520b.md', '/tmp/a%20b.md'],
+  ] as const) {
+    const link = pathLinkParts(line).find((p) => p.href);
+    assert.equal(link?.href, href, `the written href: ${line}`);
+    assert.equal(pathRef(link?.href), expected, `the decoded path: ${line}`);
+    assert.notEqual(pathRef(link?.text), expected, 'the raw text as an href would name a DIFFERENT file');
+  }
+  const two = pathLinkParts('read /tmp/a%20b.md && wc -l /tmp/a%2Fb.md').filter((p) => p.href);
+  assert.deepEqual(two.map((p) => pathRef(p.href)), ['/tmp/a%20b.md', '/tmp/a%2Fb.md'], 'every link on a line, not only the first');
+});
+
+// The shared case table is the list of every path shape the matcher yields: for each of them the link's href must
+// decode to the path the matcher named, whatever characters it holds (percent, colon, tilde, dot segments).
+test('every path in the shared case table round-trips through its link href to the matched path (#477)', () => {
+  type Row = { input: string; paths: { raw: string; path: string }[] };
+  const rows: Row[] = JSON.parse(readFileSync(new URL('./path-grammar.cases.json', import.meta.url), 'utf8'));
+  let checked = 0;
+  for (const { input, paths } of rows) {
+    const links = pathLinkParts(input).filter((p) => p.href);
+    assert.equal(links.length, paths.length, `one link per matched path: ${input}`);
+    links.forEach((link, i) => {
+      assert.equal(pathRef(link.href), paths[i]!.path, `${input} \u2192 ${link.href}`);
+      checked++;
+    });
+  }
+  assert.equal(checked, rows.reduce((n, r) => n + r.paths.length, 0), 'every matched path of the table was checked');
+  assert.ok(checked > 0, 'and the table was read');
 });
