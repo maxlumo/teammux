@@ -1865,3 +1865,20 @@ test('a file chosen before the cwd answer is never taken back by the wake: slow 
     assert.equal(at(app as App), 'preview Downloads', 'Downloads stays (its header is the view\'s name)');
   } finally { answer.resolve({ path: '/fixture' }); stat?.resolve(); read?.resolve(); await app.close(); }
 });
+
+test('a session switch back wakes on that project\'s parked file, as a remount does (#479, KEEP ruling)', async context => {
+  const app = await (await remount).mount(context, {
+    props: { visible: true, session: 'fixture', singlePane: true, shown: true },
+    modules: [dirRpc({ fsCwd: async (session: string) => ({ path: session === 'other' ? '/fixture/other' : '/fixture' }) })],
+  });
+  try {
+    await settle(app as App);
+    row(app as App, 'next.md'); await settle(app as App);
+    assert.equal(at(app as App), 'preview next.md');
+    await app.setProps({ session: 'other' }); await settle(app as App);
+    assert.equal(at(app as App), 'list other.md', 'the other project shows its own directory');
+    await app.setProps({ session: 'fixture' }); await settle(app as App);
+    assert.equal(at(app as App), 'preview next.md', 'back on the project: its directory and its file');
+    assert.equal(shownPath(app), '/fixture/next.md');
+  } finally { await app.close(); }
+});
