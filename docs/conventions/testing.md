@@ -526,6 +526,22 @@ no port), and the mount tier builds without serving.
 appears nowhere else under `src/` or `scripts/`. Proof: two concurrent
 `npm test` runs on the fix are both green with 24678 never bound; with
 `ws: false` removed the guard fails and a single render test binds the port.
+The same holds for the Rust suite (board #476, 2026-10-28): two agents' Rust
+gates ran at once and `tests/setup_cli.rs`'s gateway, told to listen on the
+fixed port 19977, failed in the second with "Address already in use". A test
+takes a free port from the OS (`std::net::TcpListener::bind("127.0.0.1:0")`,
+then `local_addr()`), as every other integration test already did. That is
+probe-then-release, not a lease held until the child binds: it removes the
+certain collision of a fixed port; another process could still take the port
+in between (two and three concurrent runs passed on the fix; two on main
+reproduced the collision). `scripts/test-rust.test.ts` is a CONVENTION guard
+for that shape, not a proof about every Rust spelling: it fails on two literal
+forms — a loopback `host:N` (N of 1–5 digits, not 0) in a file under
+`src-tauri/tests/`, and `bind("host:N")` / `bind(("host", N))` with a literal
+N > 0 in any Rust source — and a self-test pins what its matcher catches and
+lets through. A port passed through a constant or a variable, or written with
+digit separators, is not seen; parsed or compared port values outside the
+tests (fixtures) are not binds and are left alone.
 
 ### 3. Client Behavior: `<Component>.mount.test.ts`
 

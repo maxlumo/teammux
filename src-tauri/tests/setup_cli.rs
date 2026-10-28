@@ -129,12 +129,17 @@ fn paths_answered_relative_are_absolute_for_the_service() {
         .current_dir(&w.root).output().unwrap();
     assert!(ok.status.success(), "openssl: {}", String::from_utf8_lossy(&ok.stderr));
     let tmm = env!("CARGO_BIN_EXE_tmm");
+    // A FREE port, never a fixed one (board #476): two agents' Rust gates on
+    // one host ran this test at once and the second gateway failed with
+    // 'Address already in use'. The OS hands out a port nobody holds; it is
+    // released at once for the gateway to take.
+    let port = std::net::TcpListener::bind("127.0.0.1:0").unwrap().local_addr().unwrap().port();
     // `tmm setup` from the scratch dir with relative answers …
     let mut c = w.cmd("script");
     c.args(["-qec", &format!("{tmm} setup"), "/dev/null"]).stdin(std::process::Stdio::piped()).stdout(std::process::Stdio::piped());
     let mut child = c.spawn().unwrap();
     use std::io::Write;
-    child.stdin.take().unwrap().write_all(b"19977\n127.0.0.1\nsock\nc.pem\nk.pem\n").unwrap();
+    child.stdin.take().unwrap().write_all(format!("{port}\n127.0.0.1\nsock\nc.pem\nk.pem\n").as_bytes()).unwrap();
     let out = child.wait_with_output().unwrap();
     assert!(out.status.success(), "{}", String::from_utf8_lossy(&out.stdout));
     // … and the service's view (config.toml alone) from ANOTHER cwd names the same files.
@@ -150,5 +155,5 @@ fn paths_answered_relative_are_absolute_for_the_service() {
     let _ = srv.kill();
     let out = srv.wait_with_output().unwrap();
     let log = format!("{}{}", String::from_utf8_lossy(&out.stdout), String::from_utf8_lossy(&out.stderr));
-    assert!(log.contains("listening on wss://127.0.0.1:19977"), "the service started from / found its TLS files: {log}");
+    assert!(log.contains(&format!("listening on wss://127.0.0.1:{port}")), "the service started from / found its TLS files: {log}");
 }
