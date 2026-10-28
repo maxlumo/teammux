@@ -73,13 +73,14 @@ test('Hub keeps the Drawer mount gate, durable state and navigation authority (#
   // #174: the Drawer stays mounted while its track shrinks (drawerShown =
   // open OR closing) — the gate is that, and still desktop-only.
   assert.match(source, /\{#if drawerShown && !compact\}\s*<!--[^]*?-->\s*<div class="track drawer-track" id=\{drawerId\} bind:this=\{drawerTrackEl\}>\s*<Drawer/u);
-  assert.match(source, /bind:drawerFilesDir onpick=\{pickWindow\} onclose=\{closeDrawer\}/u);
+  assert.match(source, /bind:drawerFilesDir bind:drawerFilesPath onpick=\{pickWindow\} onclose=\{closeDrawer\}/u);
   assert.match(source, /onfilesback=\{\(back\) => \{ drawerFilesBack = back; \}\}/u);
   assert.match(source, /onexpand=\{\(\) => \(winsExpanded = !winsExpanded\)\}/u);
   assert.match(source, /termTarget = ''; winsExpanded = false;/u);
   assert.match(source, /onterminal=\{\(\) => \{ const m = [^]*?if \(m\) openTerminal\(selected, termTarget\); \}\}/u);
-  // #181: maximize hands the parked position, else the project's declared path.
-  assert.match(source, /onfiles=\{\(\) => openFilesTab\?\.\(selected, drawerFilesDir \|\| projectPath\)\}/u);
+  // #181: maximize hands the parked position, else the project's declared
+  // path; #479: and the file on screen, so the tab keeps the preview.
+  assert.match(source, /onfiles=\{\(\) => openFilesTab\?\.\(selected, drawerFilesDir \|\| projectPath, drawerFilesPath \|\| undefined\)\}/u);
   assert.match(source, /onboard=\{\(\) => openBoardTab\?\.\(selected\)\}/u);
   assert.match(source, /drawerBoardNew = \{ n: \(drawerBoardNew\?\.n \?\? 0\) \+ 1 \}/u);
   assert.doesNotMatch(source, /<Terminal |<Files |<Board |function pillInfo|const winPills/u);

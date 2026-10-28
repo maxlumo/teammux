@@ -17,7 +17,7 @@
     drawerFilesReq = null, drawerIssueReq = null, drawerBoardNew = null,
     agents = [], panes = [], winsExpanded = false,
     stateLabel = (state) => state, detailLabel = (detail) => detail, stateTone = () => undefined,
-    drawerFilesDir = $bindable(''),
+    drawerFilesDir = $bindable(''), drawerFilesPath = $bindable(''),
     onpick: pickWindow = () => {}, onclose: closeDrawer = () => {},
     onexpand = () => {}, onterminal = () => {}, onfiles = () => {},
     onboard = () => {}, onnewissue = () => {}, onfilesback = null,
@@ -98,7 +98,7 @@
     <!-- Per-project cwd is Files' own parked-position map (module-scoped,
          keyed by session), so each project wakes up where you left it. -->
     <div class="files-body appear">
-      <Files session={selected} root={projectPath} guardPage="hub" visible={visible} {fontSize} singlePane jumped onGoBack={onfilesback} navRequest={drawerFilesReq} bind:currentDir={drawerFilesDir} />
+      <Files session={selected} root={projectPath} guardPage="hub" visible={visible} {fontSize} singlePane jumped onGoBack={onfilesback} navRequest={drawerFilesReq} bind:currentDir={drawerFilesDir} bind:currentPath={drawerFilesPath} />
     </div>
   {/if}
   {#if drawerView === 'board'}

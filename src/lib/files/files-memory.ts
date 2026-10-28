@@ -40,11 +40,14 @@ export interface PartWriter {
   owner: unknown;
 }
 
-/** A browse position: where this session was last read, and the directory a
- * preview came from. */
+/** A browse position: where this session was last read, the directory a
+ * preview came from, and the file on screen then (#479). `file` is a PATH
+ * only, '' or absent for a listing: a restore re-reads and re-signs it
+ * through the ordinary open, never reuses bytes, URLs or an edit buffer. */
 export interface BrowsePosition {
   cwd: string;
   sourceDir: string;
+  file?: string;
 }
 
 export interface FilesMemory {
@@ -54,6 +57,13 @@ export interface FilesMemory {
    * dies with the drawer, and a position written only at the next session
    * switch would never be written at all. */
   park(session: string, at: BrowsePosition): void;
+  /** Has a Files instance of this server already taken this navigation
+   * request? A request is one-shot across instances (#479): the drawer
+   * remounts with the request its previous instance consumed, and replaying
+   * it would override the file browsed since. Identity, not `n`: the page and
+   * the drawer number their requests independently. */
+  consumed(request: object): boolean;
+  consume(request: object): void;
   /** The attempt already writing this part, if any. */
   writerOf(partId: string): PartWriter | undefined;
   claim(partId: string, writer: PartWriter): void;
@@ -91,6 +101,7 @@ export interface FilesMemory {
 
 export function createFilesMemory(): FilesMemory {
   const browsed = new Map<string, BrowsePosition>();
+  const taken = new WeakSet<object>();
   const inFlight = new Map<string, PartWriter>();
   const cancels = new Map<string, AbortController>();
   const settles = new Map<string, Promise<void>>();
@@ -100,6 +111,8 @@ export function createFilesMemory(): FilesMemory {
   return {
     position: (session) => browsed.get(session),
     park: (session, at) => { browsed.set(session, at); },
+    consumed: (request) => taken.has(request),
+    consume: (request) => { taken.add(request); },
     writerOf: (partId) => inFlight.get(partId),
     claim: (partId, writer) => { inFlight.set(partId, writer); },
     release: (partId) => { inFlight.delete(partId); },

@@ -296,6 +296,7 @@
   }
   let drawerBoardNew = $state(null); // the drawer head's + (board #23): new issue, requested into the embedded Board
   let drawerFilesDir = $state(''); // where the drawer's Files is — the jump hands it over
+  let drawerFilesPath = $state(''); // the file it shows ('' on a listing) — handed over with it (#479)
   let termTarget = $state('');
   // The switcher bar folds non-agent windows (board #92: "只 filter 出当前有效
   // 的 agent window，其他 window 可以帮我折叠起来"): shells and other windows
@@ -2716,10 +2717,10 @@
     <Drawer {compact} {visible} {fontSize} {selected} {projectPath} {termTarget}
       {drawerView} {drawerFilesReq} {drawerIssueReq} {drawerBoardNew}
       {agents} {panes} {winsExpanded} {stateLabel} {detailLabel} {stateTone}
-      bind:drawerFilesDir onpick={pickWindow} onclose={closeDrawer}
+      bind:drawerFilesDir bind:drawerFilesPath onpick={pickWindow} onclose={closeDrawer}
       onexpand={() => (winsExpanded = !winsExpanded)}
       onterminal={() => { const m = /^(.+):(\d+)\.(\d+)$/.exec(termTarget); if (m) openTerminal(selected, termTarget); }}
-      onfiles={() => openFilesTab?.(selected, drawerFilesDir || projectPath)}
+      onfiles={() => openFilesTab?.(selected, drawerFilesDir || projectPath, drawerFilesPath || undefined)}
       onboard={() => openBoardTab?.(selected)}
       onnewissue={() => (drawerBoardNew = { n: (drawerBoardNew?.n ?? 0) + 1 })}
       onfilesback={(back) => { drawerFilesBack = back; }} />

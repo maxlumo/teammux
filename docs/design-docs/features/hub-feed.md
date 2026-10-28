@@ -415,7 +415,43 @@ SAME OFFSET (row 3, 30 px in → scrollTop 390), not merely "not the tail"
 is the evidence that the stub's shape — rows grow, the offset holds — is
 reality's. `Feed.source.test.ts` pins the single handler for both signals.
 
-**The drawer has TWO partitions** (owner, 2026-08-28: "右侧边栏，可以展开文件浏览器的分区，类似展示 terminal 面板一样的逻辑"): `drawerView = 'term' | 'files'`, one width handle, a header toggle per partition (on the phone the files toggle JUMPS to the Files tab instead — the same translation the terminal toggle makes to the Terminal tab). The files partition embeds the REAL `Files` component (`session={selected}`, per-project cwd via its module-scoped parked map) in `singlePane` mode — the drawer is 320–900px of a WIDE window, so Files' window-width split heuristic lies there (owner, 2026-08-28: "类似手机的单页模式，不用做成左右分屏") — and its head carries a maximize button that hands the drawer's cwd to the Files PAGE (`openFilesTab` → App sets `filesSession` + a `{path, n}` `navRequest` the page instance consumes; `loadDir` got a `seq` guard so the newest navigation always wins); the terminal body hides under `visibility: hidden`, never `display: none` — a re-laid-out terminal would resize the pane and make the agent repaint (the `.keep-rows` lesson) — and an Esc originating inside `.files-body` passes through (closing would unmount an open editor mid-edit), the same territory rule as `.xterm`.
+**The drawer has TWO partitions** (owner, 2026-08-28: "右侧边栏，可以展开文件浏览器的分区，类似展示 terminal 面板一样的逻辑"): `drawerView = 'term' | 'files'`, one width handle, a header toggle per partition (on the phone the files toggle JUMPS to the Files tab instead — the same translation the terminal toggle makes to the Terminal tab). The files partition embeds the REAL `Files` component (`session={selected}`, per-project cwd via its module-scoped parked map) in `singlePane` mode — the drawer is 320–900px of a WIDE window, so Files' window-width split heuristic lies there (owner, 2026-08-28: "类似手机的单页模式，不用做成左右分屏") — and its head carries a maximize button that hands the drawer's cwd, and the file it shows (#479), to the Files PAGE (`openFilesTab` → App sets `filesSession` + a `{path, file, n}` `navRequest` the page instance consumes; `loadDir` got a `seq` guard so the newest navigation always wins); the terminal body hides under `visibility: hidden`, never `display: none` — a re-laid-out terminal would resize the pane and make the agent repaint (the `.keep-rows` lesson) — and an Esc originating inside `.files-body` passes through (closing would unmount an open editor mid-edit), the same territory rule as `.xterm`.
+
+### The drawer hands over the file it shows (#479, 2026-10-28)
+
+The owner pressed the drawer head's maximize ("Open in Files tab") on a
+playing video and the Files tab opened on the list: Hub passed
+`drawerFilesDir` only, so the page's `navRequest` took its directory branch.
+Files now exports `currentPath` beside `currentDir`, a read-only projection of
+its own view (the file of a preview, editor or info card; '' in a listing and
+the git/local views), and `onfiles` passes it as `openFilesTab`'s third
+argument into the existing file branch (`openFileRef`). The player's own full
+screen was not the cause: in headless Chromium 153 against main 3a10184b it
+kept the preview on the page and in the drawer, leaving by the Exit button and
+by `document.exitFullscreen()`, and across a 1920x1080 resize while in it. Not
+measured: a real Escape (a synthetic one did not leave full screen there), the
+Mac app, a real window full screen.
+
+The same field rides Files' parked position, so a drawer that dies under a
+760px window wakes on its file. The park is a PATH: the wake re-opens it
+through `openFileRef` (stat, a fresh signature, no autoplay, never an edit
+buffer), only after the follow rule kept the parked cwd and its listing
+landed, and only if no navigation happened since: the wake holds the fileNav
+generation taken right after the instance's own listing starts, and any
+intent (a file, a link, a directory step, Back, a request) moves it. A choice
+still waiting for its stat or content, or one that failed, is therefore never
+taken back by the older park (review P1: checking only the view and cwd let
+the wake reopen A over a B whose stat was in flight). A request is taken once
+per server's Files record (`memory.consume`, by identity), not per instance:
+the remounted drawer receives the `drawerFilesReq` its previous instance
+already took, and replaying it overrode the file browsed since. So every
+request is a new object; changing `n` on the same object asks nothing new. A
+missing file shows the existing miss once. A session switch inside one Files
+wakes the same way, so a project returns to its preview as well as its
+directory: the park restores what it keeps, the cwd already comes back on a
+switch, and dropping the file there would be a second rule (orchestrator
+ruling, 2026-10-28). `Files.mount.test.ts` (remount cases)
+and `Hub.mount.test.ts` (the real maximize) pin it.
 
 ### Drawer widths are bounded requests (#158, parent #154, 2026-09-10)
 

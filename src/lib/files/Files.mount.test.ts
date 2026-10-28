@@ -1653,3 +1653,215 @@ test('a hidden or unfocused Files retires its viewer on the edge and a return do
     assert.equal(app.document.querySelector('.lb'), null);
   } finally { await app.close(); }
 });
+
+// Board #479: the Hub's drawer Files dies under a 760px window and a new one
+// is born in the same server's Files record. It wakes on the file the dead
+// one showed, through the ordinary open, unless something newer was chosen.
+const remount = compileMount(new URL('./Files.remount.test.svelte', import.meta.url), [new URL('../core/ws.ts', import.meta.url)], { serverScope: true });
+type Remount = Awaited<ReturnType<Awaited<typeof remount>['mount']>>;
+const shownPath = (app: Remount) => app.document.querySelector('.current-path')?.textContent ?? '';
+async function cycle(app: Remount, patch: Record<string, unknown> = {}) {
+  await app.setProps({ shown: false }); await settle(app as App);
+  await app.setProps({ ...patch, shown: true }); await settle(app as App);
+}
+
+test('a remounted Files wakes on the file it showed, never on the request it already took (#479)', async context => {
+  const request = { file: '/fixture/AGENTS.md', n: 1 };
+  const app = await (await remount).mount(context, {
+    props: { visible: true, session: 'fixture', singlePane: true, shown: true, navRequest: request },
+    modules: [dirRpc()],
+  });
+  try {
+    await settle(app as App);
+    assert.equal(at(app as App), 'preview AGENTS.md');
+    assert.equal(shownPath(app), '/fixture/AGENTS.md', 'the embedder reads the file on screen');
+    link(app as App, 'next.md'); await settle(app as App);
+    assert.equal(at(app as App), 'preview next.md');
+    await cycle(app);
+    assert.equal(at(app as App), 'preview next.md', 'the file browsed since, not a replay of the request');
+    assert.equal(shownPath(app), '/fixture/next.md');
+    await back(app as App);
+    assert.equal(at(app as App), ROOT, 'Back from the woken preview is its listing');
+    assert.equal(shownPath(app), '', 'a listing shows no file');
+    await cycle(app);
+    assert.equal(at(app as App), ROOT, 'left on the list, it wakes on the list');
+  } finally { await app.close(); }
+});
+
+test('a new request and a moved project cwd each outrank the parked file (#479)', async context => {
+  let cwd = '/fixture';
+  const app = await (await remount).mount(context, {
+    props: { visible: true, session: 'fixture', singlePane: true, shown: true, navRequest: null },
+    modules: [dirRpc({ fsCwd: async () => ({ path: cwd }) })],
+  });
+  try {
+    await settle(app as App);
+    row(app as App, 'next.md'); await settle(app as App);
+    assert.equal(at(app as App), 'preview next.md');
+    await cycle(app, { navRequest: { file: '/fixture/sub/inside.md', n: 1 } });
+    assert.equal(at(app as App), 'preview inside.md', 'the request that mounts the instance wins');
+    cwd = '/fixture/other';
+    await cycle(app);
+    assert.equal(at(app as App), 'list other.md', 'the project moved: the follow rule wins');
+    assert.equal(shownPath(app), '');
+  } finally { await app.close(); }
+});
+
+test('a parked file that is gone says so once and stays on its listing (#479)', async context => {
+  let gone = false;
+  let asked = 0;
+  const base = dirRpc();
+  const app = await (await remount).mount(context, {
+    props: { visible: true, session: 'fixture', singlePane: true, shown: true },
+    modules: [dirRpc({ fsStat: async (path: string) => {
+      if (path === '/fixture/next.md') { asked++; if (gone) throw new Error('No such file or directory (os error 2)'); }
+      return base.fsStat(path);
+    } })],
+  });
+  try {
+    await settle(app as App);
+    row(app as App, 'next.md'); await settle(app as App);
+    assert.equal(at(app as App), 'preview next.md');
+    gone = true; asked = 0;
+    await cycle(app);
+    assert.equal(at(app as App), ROOT);
+    assert.match(app.document.querySelector('.error')?.textContent ?? '', /File not found: \/fixture\/next\.md/u);
+    await app.setProps({ visible: false }); await settle(app as App);
+    await app.setProps({ visible: true }); await settle(app as App);
+    assert.equal(asked, 1, 'one attempt: the wake is not retried');
+  } finally { await app.close(); }
+});
+
+test('the wake yields to what happens before it: a request, browsing, a cwd that moved here (#479)', async context => {
+  let cwd = '/fixture';
+  let answer = deferred<{ path: string }>();
+  let stat = deferred<void>();
+  const base = dirRpc();
+  const app = await (await remount).mount(context, {
+    props: { visible: true, session: 'fixture', singlePane: true, shown: true, navRequest: null },
+    modules: [dirRpc({
+      fsCwd: () => answer.promise,
+      fsStat: async (path: string) => { if (path.endsWith('inside.md')) await stat.promise; return base.fsStat(path); },
+    })],
+  });
+  try {
+    answer.resolve({ path: cwd }); await settle(app as App);
+    row(app as App, 'next.md'); await settle(app as App);
+    assert.equal(at(app as App), 'preview next.md');
+    // A request lands while the remounted instance still waits for the
+    // project's cwd, and its stat is slower than that answer.
+    answer = deferred();
+    await cycle(app);
+    await app.setProps({ navRequest: { file: '/fixture/sub/inside.md', n: 1 } }); await settle(app as App);
+    answer.resolve({ path: cwd }); await settle(app as App);
+    stat.resolve(); await settle(app as App);
+    assert.equal(at(app as App), 'preview inside.md', 'the request, not the parked next.md');
+    // Browsing before the answer: the wake does not pull the reader back.
+    await back(app as App);
+    row(app as App, 'next.md'); await settle(app as App);
+    answer = deferred();
+    await cycle(app);
+    row(app as App, 'AGENTS.md'); await settle(app as App);
+    answer.resolve({ path: cwd }); await settle(app as App);
+    assert.equal(at(app as App), 'preview AGENTS.md', 'still what the reader opened');
+    // The project's cwd moved to exactly the parked directory: the follow
+    // rule lists it; the parked file does not open over that move.
+    await app.setProps({ navRequest: { path: '/fixture/sub', n: 2 } }); await settle(app as App);
+    row(app as App, 'inside.md'); await settle(app as App);
+    assert.equal(at(app as App), 'preview inside.md');
+    cwd = '/fixture/sub'; // the parked cwd, spelled the same
+    answer = deferred();
+    await cycle(app);
+    answer.resolve({ path: cwd }); await settle(app as App);
+    assert.equal(at(app as App), SUB, 'followed, on the list');
+    // No answer at all: the wake is dropped, not left for a later answer.
+    row(app as App, 'inside.md'); await settle(app as App);
+    answer = deferred();
+    await cycle(app);
+    answer.reject(new Error('no pane')); await settle(app as App);
+    answer = deferred();
+    await app.setProps({ visible: false }); await settle(app as App);
+    await app.setProps({ visible: true }); await settle(app as App);
+    answer.resolve({ path: cwd }); await settle(app as App);
+    assert.equal(at(app as App), SUB, 'a later answer opens nothing');
+  } finally { answer.resolve({ path: cwd }); stat.resolve(); await app.close(); }
+});
+
+test('a session switch shows no file while the next listing loads (#479)', async context => {
+  let held: ReturnType<typeof deferred<void>> | null = null;
+  const base = dirRpc();
+  const app = await (await remount).mount(context, {
+    props: { visible: true, session: 'fixture', singlePane: true, shown: true },
+    modules: [dirRpc({ fsList: async (path: string) => { if (held) await held.promise; return (base.fsList as (at: string) => Promise<unknown>)(path); } })],
+  });
+  try {
+    await settle(app as App);
+    row(app as App, 'next.md'); await settle(app as App);
+    assert.equal(shownPath(app), '/fixture/next.md');
+    held = deferred();
+    await app.setProps({ session: 'other' }); await settle(app as App);
+    assert.equal(shownPath(app), '', 'the old session\'s file is not handed over meanwhile');
+    held.resolve(); held = null; await settle(app as App);
+    assert.equal(at(app as App), ROOT);
+  } finally { held?.resolve(); await app.close(); }
+});
+
+test('a file chosen before the cwd answer is never taken back by the wake: slow stat, slow read, failed (#479 review P1)', async context => {
+  let answer = deferred<{ path: string }>();
+  let stat: ReturnType<typeof deferred<void>> | null = null;
+  let read: ReturnType<typeof deferred<void>> | null = null;
+  let fail = false;
+  const base = dirRpc();
+  const app = await (await remount).mount(context, {
+    props: { visible: true, session: 'fixture', singlePane: true, shown: true },
+    modules: [dirRpc({
+      fsCwd: () => answer.promise,
+      fsStat: async (path: string) => {
+        if (path.endsWith('AGENTS.md')) { if (stat) await stat.promise; if (fail) throw new Error('permission denied'); }
+        return base.fsStat(path);
+      },
+      fsRead: async (path: string) => { if (path.endsWith('AGENTS.md') && read) await read.promise; return base.fsRead(path); },
+    })],
+  });
+  /** Park next.md, remount, let the listing land, choose AGENTS.md while the
+   * project's cwd is still unanswered, then answer: the wake is ready. */
+  async function chooseBeforeTheAnswer() {
+    if (at(app as App) !== 'preview next.md') {
+      if (at(app as App) !== ROOT) await back(app as App);
+      row(app as App, 'next.md'); await settle(app as App);
+    }
+    assert.equal(at(app as App), 'preview next.md');
+    answer = deferred();
+    await cycle(app);
+    assert.equal(at(app as App), ROOT, 'the listing landed; the answer has not');
+    row(app as App, 'AGENTS.md'); await app.flush();
+    answer.resolve({ path: '/fixture' }); await settle(app as App);
+  }
+  try {
+    answer.resolve({ path: '/fixture' }); await settle(app as App);
+    stat = deferred();
+    await chooseBeforeTheAnswer();
+    assert.equal(at(app as App), ROOT, 'still waiting for its stat, and next.md did not open');
+    stat.resolve(); stat = null; await settle(app as App);
+    assert.equal(at(app as App), 'preview AGENTS.md', 'the slow stat lands as the choice');
+
+    read = deferred();
+    await chooseBeforeTheAnswer();
+    read.resolve(); read = null; await settle(app as App);
+    assert.equal(at(app as App), 'preview AGENTS.md', 'the slow read lands as the choice');
+
+    fail = true;
+    await chooseBeforeTheAnswer();
+    assert.equal(at(app as App), ROOT, 'a failed choice stays on its listing');
+    assert.match(app.document.querySelector('.error')?.textContent ?? '', /permission denied/u);
+
+    // A view that is not a navigation (Downloads) is not opened over either.
+    fail = false;
+    row(app as App, 'next.md'); await settle(app as App);
+    answer = deferred();
+    await cycle(app);
+    button(app as App, 'Downloads').click(); await settle(app as App);
+    answer.resolve({ path: '/fixture' }); await settle(app as App);
+    assert.equal(at(app as App), 'preview Downloads', 'Downloads stays (its header is the view\'s name)');
+  } finally { answer.resolve({ path: '/fixture' }); stat?.resolve(); read?.resolve(); await app.close(); }
+});

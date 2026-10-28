@@ -109,7 +109,7 @@
   // follow the pane cwd, the pre-#181 rule. The Session-directory tool
   // (goSessionDir) keeps offering the pane cwd explicitly either way.
 
-  let { session = '', root = '', guardPage = '', onGoBack = null, onimmersive = null, visible = false, fontSize = 14, singlePane = false, navRequest = null, jumped = false, currentDir = $bindable(''),
+  let { session = '', root = '', guardPage = '', onGoBack = null, onimmersive = null, visible = false, fontSize = 14, singlePane = false, navRequest = null, jumped = false, currentDir = $bindable(''), currentPath = $bindable(''),
     // The server door (board #358, owner 2026-10-13: "在 File 页面…能很快速、
     // 方便地切换不同的 server 连接"): App's ONE server popover, the same the
     // rail and Settings open — the host hands the toggle (null = no door: a
@@ -831,24 +831,41 @@
   const parked0 = memory.position(session);
   let lastSourceDir = parked0?.sourceDir ?? '';
   if (parked0?.cwd) cwd = parked0.cwd;
+  // The parked FILE wakes too (#479: the drawer remounts after a <760px
+  // window and used to come back on the list). Only once the follow rule has
+  // answered and kept this cwd, and only while nothing newer was chosen. The
+  // wake holds a fileNav generation, taken right after this instance's own
+  // listing starts: every navigation intent since (a file or link opened, a
+  // directory step, Back, a request) moves the generation, so a choice still
+  // waiting for its stat or content, or one that failed, is never taken back.
+  let wake = $state.raw(wakeAt(parked0));
+  function wakeAt(parked) {
+    return parked?.file ? { file: parked.file } : null;
+  }
+  /** The file this instance is showing, by path: '' in a listing (and in the
+   * git and local views). An editor or info card shows its file too. */
+  function shownFile() {
+    return view === 'preview' || view === 'edit' || view === 'info' ? currentFile?.path ?? '' : '';
+  }
   // Park on unmount too — the drawer instance dies with the drawer, and a
   // position recorded only at the next session switch would never be written.
-  $effect(() => () => { memory.park(prevSession, { cwd, sourceDir: lastSourceDir }); });
+  $effect(() => () => { memory.park(prevSession, { cwd, sourceDir: lastSourceDir, file: shownFile() }); });
   $effect(() => {
     if (!visible) { void session; return; }
     if (session !== prevSession) {
       fileNav.nextFile();
       fileNav.resetFiles();
       // cwd still holds the OLD session's position — nothing else resets it.
-      memory.park(prevSession, { cwd, sourceDir: lastSourceDir });
+      memory.park(prevSession, { cwd, sourceDir: lastSourceDir, file: shownFile() });
       prevSession = session;
+      wake = null; // the session left behind wakes nothing here
       const parked = memory.position(session);
       lastSourceDir = parked?.sourceDir ?? '';
       resetDirectories(); // a session switch is a new entry point, not a step
       if (parked?.cwd) {
         // An unsaved editor holds the switch behind the discard dialog
         // (leaveEditor); the parked position is a hint, the text is not.
-        leaveEditor(() => { cwd = parked.cwd; view = 'list'; loadDir(parked.cwd); });
+        leaveEditor(() => { wake = wakeAt(parked); cwd = parked.cwd; view = 'list'; loadDir(parked.cwd); });
       }
     }
     // Restored park: list it ONCE. The guard is loadSeq (non-reactive on
@@ -856,12 +873,14 @@
     // directory re-armed the branch on its own completion and re-listed
     // itself forever (board #93's investigation).
     if (cwd && !entries.length && !loading && !loadSeq) loadDir(cwd);
+    // The wake's generation: after the listing above, before any reader act.
+    untrack(() => { if (wake && wake.gen === undefined) wake = { ...wake, gen: fileNav.nextFile() }; });
     // session may be '' when Files is opened before any terminal pane exists —
     // the server then reports the user's home directory. Once a terminal/team
     // session appears, its cwd differs from home and we follow it.
     const sourceSession = session;
     const sourceRequest = navRequest;
-    const handoff = !!sourceRequest && sourceRequest.n !== lastNav;
+    const handoff = !!sourceRequest && !memory.consumed(sourceRequest);
     // Declaration over pane accident: a declared root IS the source; only a
     // session without one asks tmux where its active pane is.
     const source = root ? Promise.resolve({ path: root }) : fsCwd(sourceSession);
@@ -873,6 +892,8 @@
       const step = cwdFollowStep(r.path, lastSourceDir, untrack(() => ({ view, edited: isEdited })),
         handoff || (!!sourceRequest && !lastSourceDir));
       lastSourceDir = step.lastSourceDir;
+      // Answered: the wake may open (a follow that moved stepped the generation).
+      if (wake && !wake.ready) wake = { ...wake, ready: true };
       if (step.move === 'none') return;
       leaveEditor(() => {
         cwd = r.path;
@@ -881,6 +902,7 @@
         loadDir(r.path);
       });
     }).catch(() => {
+      if (session === sourceSession && navRequest === sourceRequest) wake = null; // no answer, no wake: never retried
       if (session === sourceSession && !navRequest && !lastSourceDir) { lastSourceDir = '/'; cwd = '/'; loadDir('/'); }
     });
   });
@@ -890,16 +912,31 @@
     if (visible && view === 'preview') reloadPreview();
   });
 
-  // The embedder can read where this instance is (the drawer's maximize
-  // button hands its cwd to the Files PAGE instance).
-  $effect(() => { currentDir = cwd; });
-
-  // An imperative "go there" from outside. Same shape as AgentsPage's
-  // editRequest: a bumped `n` re-fires an identical path.
-  let lastNav = 0;
+  // A kept cwd lets the parked file open, once its listing has landed: the
+  // ordinary open (stat, a fresh signature), and Back is that listing. Not
+  // over a newer navigation (the generation), nor over the git or local view.
   $effect(() => {
-    if (!navRequest || navRequest.n === lastNav) return;
-    lastNav = navRequest.n;
+    const w = wake;
+    if (!w?.ready || loading) return;
+    wake = null;
+    if (fileNav.isCurrentFile(w.gen) && untrack(() => view === 'list')) void openFileRef(w.file);
+  });
+
+  // The embedder can read where this instance is (the drawer's maximize
+  // button hands its cwd AND the file on screen to the Files PAGE instance,
+  // #479). Read-only projections of this instance's own state.
+  $effect(() => { currentDir = cwd; });
+  $effect(() => { currentPath = shownFile(); });
+
+  // An imperative "go there" from outside. Every request is a NEW object
+  // (its `n` counts up with it, so an identical path can be asked again), and
+  // each is taken ONCE per server's Files record, by identity, not per
+  // instance and not by `n` (#479): a remounted drawer gets the request its
+  // previous instance already took. Changing `n` on the same object asks
+  // nothing new. Its open moves the fileNav generation, which drops a wake.
+  $effect(() => {
+    if (!navRequest || memory.consumed(navRequest)) return;
+    memory.consume(navRequest);
     if (navRequest.file) {
       // A FILE request (board #99: a chat path reference): the list lands in
       // the file's parent — so back and the crumbs mean something — and the

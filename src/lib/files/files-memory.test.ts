@@ -27,6 +27,21 @@ test('two servers park the same session name separately', () => {
   assert.deepEqual(b.position('app'), { cwd: '/srv/b/app', sourceDir: '/srv/b' });
 });
 
+test('a navigation request is taken once per server record, and a switch does not forget it (#479)', () => {
+  const a = createFilesMemory();
+  const b = createFilesMemory();
+  const request = { file: '/srv/app/A.md', n: 1 };
+  assert.equal(a.consumed(request), false);
+  a.consume(request);
+  assert.equal(a.consumed(request), true, 'a remounted instance sees it taken');
+  assert.equal(a.consumed({ ...request }), false, 'by identity: an equal new request is new');
+  assert.equal(b.consumed(request), false, 'another server never took it');
+  a.reset();
+  assert.equal(a.consumed(request), true, 'dropping positions does not replay a taken request');
+  a.park('app', { cwd: '/srv/app', sourceDir: '/srv', file: '/srv/app/B.md' });
+  assert.deepEqual(a.position('app'), { cwd: '/srv/app', sourceDir: '/srv', file: '/srv/app/B.md' }, 'the file is a path in the position');
+});
+
 test('the one-writer rule holds across instances of one server, not across two', () => {
   // Board #305: the page and the drawer write the same part folder, so one
   // part has one writer. On two servers the same path yields the same part id

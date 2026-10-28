@@ -69,8 +69,8 @@ test('Drawer is the real three-partition view with the original lifetimes (#136)
   assert.match(source, /\{#if termTarget\}\s*\{#key termTarget\}\s*<Terminal/u);
   assert.match(source, /active=\{visible && drawerView === 'term'\} visible=\{visible && drawerView === 'term'\}/u);
   assert.match(source, /\.term-body\.off \{ visibility: hidden; position: absolute; inset: 0; \}/u);
-  assert.match(source, /drawerFilesDir = \$bindable\(''\)/u);
-  assert.match(source, /<Files [^>]*singlePane jumped onGoBack=\{onfilesback\} navRequest=\{drawerFilesReq\} bind:currentDir=\{drawerFilesDir\}/u);
+  assert.match(source, /drawerFilesDir = \$bindable\(''\), drawerFilesPath = \$bindable\(''\)/u);
+  assert.match(source, /<Files [^>]*singlePane jumped onGoBack=\{onfilesback\} navRequest=\{drawerFilesReq\} bind:currentDir=\{drawerFilesDir\} bind:currentPath=\{drawerFilesPath\}/u);
   assert.match(source, /<Board [^>]*embedded issueRequest=\{drawerIssueReq\} createRequest=\{drawerBoardNew\}/u);
   assert.doesNotMatch(/<Board[^>]*>/u.exec(source)?.[0] ?? '', /onGoBack/u);
   assert.doesNotMatch(source, /\$state\(|core\/ws|hubPrefs|addEventListener|popstate/u,

@@ -2598,6 +2598,41 @@ test('Chat header commands report drawer state and preserve compact navigation (
   }
 });
 
+test('the drawer maximize hands the Files tab the file on screen, and a listing hands only its directory (#479)', { timeout: 60000 }, async context => {
+  const { rpc } = roomFixture();
+  const routes: unknown[][] = [];
+  const app = await (await compiledHub()).mount(context, {
+    props: { visible: true, mobile: false, openFilesTab: (...args: unknown[]) => routes.push(args) },
+    setup(window) { window.Element.prototype.getAnimations = () => []; },
+    modules: [{
+      ...rpc, fsCwd: async () => ({ path: '/fixture' }),
+      fsList: async (path: string) => ({ path, entries: [{ name: 'notes.md', path: '/fixture/notes.md', type: 'file', size: 10 }] }),
+      fsStat: async (path: string) => ({ path, type: 'file', is_text: true, writable: true, readable: true, size: 10, mime_hint: 'text/markdown' }),
+      // The project holds the file, so the preview reads its review cards (#434).
+      fsRead: async () => ({ content: '# Notes', revision: 'r1' }),
+      reviewList: async (target: object) => ({ ...target, revision: 'r1', annotations: [] }),
+      getPrefs: async () => ({}), setPref: async () => ({}), getBookmarks: async () => ({ bookmarks: [] }),
+      gitCmd: async () => ({ code: 1 }),
+    }],
+  });
+  const until = async (ok: () => unknown) => { for (let i = 0; i < 30 && !ok(); i++) await app.flush(); };
+  const maximize = () => app.document.querySelector<HTMLButtonElement>('.drawer-head [aria-label="Open in Files tab"]')!;
+  try {
+    await until(() => app.document.querySelector('.h1-text')?.textContent);
+    app.document.querySelector<HTMLButtonElement>('.page-head [aria-label="Files"]')!.click();
+    await until(() => app.document.querySelector('.drawer .file-list .file-main'));
+    app.document.querySelector<HTMLButtonElement>('.drawer .file-list .file-main')!.click();
+    await until(() => app.document.querySelector('.drawer .preview-name'));
+    assert.equal(app.document.querySelector('.drawer .preview-name')?.textContent, 'notes.md');
+    maximize().click(); await app.flush();
+    assert.deepEqual(routes.at(-1), ['fixture', '/fixture', '/fixture/notes.md'], 'the tab opens on the previewed file');
+    app.document.querySelector<HTMLButtonElement>('.drawer button[aria-label="Back"]')!.click();
+    await until(() => !app.document.querySelector('.drawer .preview-name'));
+    maximize().click(); await app.flush();
+    assert.deepEqual(routes.at(-1), ['fixture', '/fixture', undefined], 'back on the list: the directory, no old file');
+  } finally { await app.close(); }
+});
+
 test('Chat picker commands retain choice, disabled start and the original spawn intent (#166)', { timeout: 60000 }, async context => {
   const { rpc } = roomFixture();
   const spawned: unknown[] = [];

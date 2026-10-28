@@ -355,7 +355,8 @@ completion).
   window currently on screen always keeps its pill. Esc inside `.xterm` goes
   to the pane.
 - **Files**: the real Files component in single-pane mode, per-project
-  parked cwd, maximize hands off to the Files tab. Esc inside is the
+  parked cwd and previewed file, maximize hands off the directory and
+  the file on screen to the Files tab. Esc inside is the
   browser's own.
 - On the phone/compact: terminal and files toggles JUMP to their tabs.
 - The open partition is remembered PER PROJECT (board #23: "切换不同的
