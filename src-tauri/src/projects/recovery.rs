@@ -663,6 +663,12 @@ impl Tracker {
     pub fn confirm(&mut self, session: &str, window: &str, seq: u64) {
         let key = (session.to_string(), window.to_string());
         if let Some(rec) = self.map.get_mut(&key) {
+            // A fact that ARRIVED before our send answers nothing we typed
+            // (board #473, review P2 on fd866766): a Post half folded into its
+            // Pre carries the Pre's number, which can predate the send.
+            if rec.attempts > 0 && seq <= rec.sent_seq {
+                return;
+            }
             // A send of ours that this progress answers is said once, by the
             // tick (board #473): telemetry is recording here, not narrating.
             rec.effect_unsaid |= rec.attempts > 0 && !rec.confirmed;
@@ -2264,7 +2270,7 @@ mod tests {
         // SURVIVES: erasing it here re-opened the incident on the next tick
         // (the error is still painted) and re-sent `continue` into a working
         // agent — the owner's repeat-send report (2026-08-26).
-        t.confirm("s", "w1", 0);
+        t.confirm("s", "w1", 1);
         // Said once, by the tick (board #473), then silent.
         assert_eq!(t.decide("s", "w1", t0 + 60, "1|a", silent), Decision::Confirmed { first: true });
         assert_eq!(
@@ -3003,7 +3009,7 @@ mod tests {
         }
         assert_eq!(rows, 1, "cap reached, 5 more fresh incidents: exactly one row");
         // The agent works again (a tool call): the stretch is over; the next cap is said.
-        t.confirm("s", "w", 0);
+        t.confirm("s", "w", 1);
         assert_eq!(t.decide("s", "w", t0 + 200, "1|y", silent), Decision::Capped { first: true });
         assert_eq!(t.decide("s", "w", t0 + 220, "1|z", silent), Decision::Capped { first: false });
         // The window frees: a ladder starts; capped again later, it is said again.
@@ -3249,22 +3255,22 @@ mod tests {
         // through whichever path it takes; and when the record clears unsaid.
         let mut t = Tracker::default();
         assert_eq!(t.decide("s", "w", 100, "turn:1", |_| false), Decision::Send { attempt: 1 });
-        t.confirm("s", "w", 0);
+        t.confirm("s", "w", 1);
         assert_eq!(t.decide("s", "w", 120, "turn:1", |_| false), Decision::Confirmed { first: true });
         assert_eq!(t.decide("s", "w", 140, "turn:1", |_| false), Decision::Confirmed { first: false });
         assert!(!t.verify_pending("s", "w", |_| true), "already said");
         let mut t = Tracker::default();
         assert_eq!(t.decide("s", "w", 100, "turn:1", |_| false), Decision::Send { attempt: 1 });
-        t.confirm("s", "w", 0);
+        t.confirm("s", "w", 1);
         assert!(t.verify_pending("s", "w", |_| false), "the busy screen says it");
         assert!(!t.clear("s", "w"), "said already");
         let mut t = Tracker::default();
         assert_eq!(t.decide("s", "w", 100, "turn:1", |_| false), Decision::Send { attempt: 1 });
-        t.confirm("s", "w", 0);
+        t.confirm("s", "w", 1);
         assert!(t.clear("s", "w"), "the error left the screen before any tick said it");
         // A progress with no send of ours to answer is nothing to say.
         let mut t = Tracker::default();
-        t.confirm("s", "w", 0);
+        t.confirm("s", "w", 1);
         assert!(!t.clear("s", "w"), "no send, no effect");
     }
 
@@ -4063,5 +4069,75 @@ mod tests {
         t.remember_newest("s", "w", None);
         assert_eq!(t.bind("s", "w", 2, None, |_| false), None);
         assert_eq!(t.bind("s", "w", 2, None, |_| false), Some("turn:2".to_string()));
+    }
+
+    /// Review P2 on fd866766: a fact that arrived BEFORE our send confirms
+    /// nothing. kiro's Pre tool hook lands, we type `continue`, and the
+    /// same call's Post half is folded into the Pre (no fact of its own), so
+    /// `note_answered` carries the Pre's number: the incident stays
+    /// unconfirmed. A later real tool call confirms it.
+    #[test]
+    fn a_post_half_folded_into_a_pre_from_before_the_send_confirms_nothing() {
+        use super::super::telemetry as tm;
+        super::super::tests::use_test_store();
+        let session = format!("fold-{}", uuid::Uuid::new_v4());
+        tm::record_prompt(&session, "w", "go");
+        tm::record_tool(&session, "w", "execute_bash", "sleep 15");
+        let sent = tm::turn_version(&session, "w");
+        assert_eq!(tracker().lock().unwrap().decide_seq(&session, "w", 100, sent, "turn:1", |_| false), Decision::Send { attempt: 1 });
+        tm::record_tool(&session, "w", "execute_bash", "sleep 15");
+        assert_eq!(tm::turn_version(&session, "w"), sent, "the Post half was folded: no fact of its own");
+        assert_eq!(incident_confirmed_for_test(&session, "w"), Some(false), "the Pre predates the send");
+        tm::record_tool(&session, "w", "execute_bash", "echo done");
+        assert_eq!(incident_confirmed_for_test(&session, "w"), Some(true), "a tool call after the send confirms it");
+        tracker().lock().unwrap().retain_windows(&session, &[]);
+    }
+
+    /// The same through `check_once` (board #473, review P2 on fd866766): a
+    /// tool call whose Pre hook landed before our `continue` and whose Post
+    /// half is folded in after it confirms nothing, so no "took effect" is
+    /// said; a tool call after the send confirms it, said once.
+    #[test]
+    fn a_pre_send_tool_fact_confirms_nothing_through_check_once() {
+        use super::super::telemetry as tm;
+        super::super::tests::use_test_store();
+        let mut scratch = crate::tmux::Scratch::new("rec-473f");
+        let session = scratch.session("s");
+        let ws = std::path::PathBuf::from(scratch.path());
+        let home = ws.join(".tmm/agents/kf");
+        std::fs::create_dir_all(&home).unwrap();
+        std::fs::write(home.join("launch.json"), serde_json::json!({ "backend": "kiro", "cmd": "kiro", "team": "" }).to_string()).unwrap();
+        let idle = ws.join("idle.txt");
+        std::fs::write(&idle, KIRO_234_CONN_SCREEN).unwrap();
+        let ok = std::process::Command::new("tmux")
+            .args(["new-session", "-d", "-x", "80", "-y", "40", "-s", &session, "-n", "kf", "-c", &ws.to_string_lossy(), &format!("cat {}; cat", idle.display())])
+            .status().map(|s| s.success()).unwrap_or(false);
+        if !ok {
+            eprintln!("no tmux server — skipping");
+            return;
+        }
+        super::super::adopt(&session, Some("rec-473f-test")).expect("adopt");
+        let notes = || tm::recent_events(&session, 0).into_iter().filter(|e| e.text.starts_with("auto-continue")).map(|e| e.text).collect::<Vec<_>>();
+        std::thread::sleep(std::time::Duration::from_millis(300));
+        tm::record_prompt(&session, "kf", "[tmm chat 2026-10-28 15:00] human: @kf go");
+        tm::record_tool(&session, "kf", "execute_bash", "sleep 15");
+        check_once();
+        assert_eq!(notes(), ["auto-continue 1/4 — connection interrupted in kf"]);
+        // The same call's Post half, after the send: folded into the Pre.
+        let before = tm::turn_version(&session, "kf");
+        tm::record_tool(&session, "kf", "execute_bash", "sleep 15");
+        assert_eq!(tm::turn_version(&session, "kf"), before, "folded: no fact of its own");
+        for _ in 0..2 {
+            check_once();
+        }
+        assert_eq!(incident_confirmed_for_test(&session, "kf"), Some(false), "a pre-send fact confirms nothing");
+        assert_eq!(notes().len(), 1, "no took effect");
+        // A tool call after the send.
+        tm::record_tool(&session, "kf", "execute_bash", "echo done");
+        check_once();
+        check_once();
+        assert_eq!(incident_confirmed_for_test(&session, "kf"), Some(true));
+        assert_eq!(notes(), ["auto-continue 1/4 — connection interrupted in kf", "auto-continue took effect — kf is working again"], "said once");
+        tracker().lock().unwrap().retain_windows(&session, &[]);
     }
 }
