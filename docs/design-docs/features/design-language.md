@@ -1024,6 +1024,22 @@ showing hover paints there is harmless and keeps a synthetic-hover test rig hone
   #211, owner 2026-09-20: "停止按钮就不用加背景了，就红色方块我直接点就行"); a
   toolbar's icon commands stay in the wash family.
 
+**A prose link is accent at rest and underlined only on hover (board #478, 2026-10-28).** Owner: "这里链接，不要高亮
+下划线显示了，只是鼠标放上去才有下划线，减少注意力分散". The browser's default underline on every path and URL in a
+message, a skill doc, a file preview and a tool row was a second mark on top of the colour, repeated in every line
+that held one. ONE pair of rules in app.css carries the look for all four surfaces: `.md a`, `.md-render a`,
+`.step .st-text a` and the Show-the-rest control `.m-unfold` are `--accent` with `text-decoration: none`, and their
+`:hover` arm adds `text-decoration: underline` at `text-underline-offset: 2px`. The hover guard (above) wraps that
+arm in the PRIMARY input's capability, `(hover: hover), (pointer: none)`. What was measured is the pure-touch
+profile (`hover: none`, `pointer: coarse`, Chromium touch emulation at 390): no underline at rest and none after a
+tap, so the colour alone says "link" there, and the tool row's path is already a 44px box (#475). The stated limit
+of the rule above applies unchanged: on a touch laptop (`hover: hover`) a tap can leave the underline until the mouse
+moves, and a phone with a mouse attached gets no underline from the mouse. A component declares no link colour
+or underline of its own: a new prose surface joins the two lists in app.css, and `.m-unfold` keeps only its layout
+and font. No new token, no new tempo, no layout. Pinned by `controls.source.test.ts` (both rules and their
+members, their order, the real guard, and no per-surface link paint in FilePreview, Feed or AgentsPage). Not
+covered: a link that is a control with its own paint (Settings' About link), which is a command, not prose.
+
 ## 5 · Menus & popovers
 
 - **Trigger-anchored scroll ownership (#180, 2026-09-12).** A ContextMenu

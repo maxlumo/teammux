@@ -207,8 +207,6 @@
   .md-render :global(pre code) { background: none; padding: 0; font-size: var(--fs-ui); line-height: 1.5; }
   .md-render :global(strong) { color: var(--text); }
   .md-render :global(em) { color: var(--text2); }
-  .md-render :global(a) { color: var(--accent); text-decoration: none; }
-  .md-render :global(a:hover) { text-decoration: underline; }
   .md-render :global(ul), .md-render :global(ol) { padding-left: 20px; margin: 6px 0; }
   .md-render :global(li) { margin: 3px 0; }
   .md-render :global(blockquote) { border-left: 3px solid var(--accent); margin: 8px 0; padding: 4px 12px; color: var(--text2); }

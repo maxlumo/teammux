@@ -1287,9 +1287,8 @@
   .m-unfold {
     display: inline-flex; align-items: center; gap: 4px; margin-top: 4px;
     background: none; border: none; padding: 2px 0; cursor: pointer;
-    color: var(--accent); font-family: inherit; font-size: var(--fs-sub);
+    font-family: inherit; font-size: var(--fs-sub); /* its colour and hover underline are app.css's prose-link rule (#478) */
   }
-  .m-unfold:hover { text-decoration: underline; text-underline-offset: 2px; }
   .m-unfold :global(svg) { flex: none; }
   .m-state { display: inline-flex; opacity: 0.55; }
   .m-state.ok { color: var(--status-ok); opacity: 1; }
@@ -1521,8 +1520,8 @@
      one-row-per-call and the 10-row cap, whose height is single-line math. */
   .step .st-text { display: inline-block; white-space: nowrap; color: var(--text2); }
   /* A path in the argument is the message body's path link (board #475): the same recogniser, the
-     same href, the same router, so the same colour as `.md a`. The words around it stay as they were. */
-  .step .st-text a { color: var(--accent); }
+     same href, the same router. Its colour and hover underline are app.css's one prose-link rule (#478),
+     not a copy here; the words around it stay as they were. */
   /* On touch a path link is a --control-height target (44px; design-language touch rule), and the
      ROW carries it, a local layout change accepted for that target (reviewer ruling, board #475):
      the row takes the target height, its argument cell fills it, and the link is an in-flow box of

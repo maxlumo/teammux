@@ -1,6 +1,8 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import { readFile } from 'node:fs/promises';
+import postcss from 'postcss';
+import { hoverGuard } from '../../../scripts/hover-guard.mjs';
 
 const css = await readFile(new URL('../../app.css', import.meta.url), 'utf8');
 
@@ -190,4 +192,37 @@ test('a dense tool group on the phone keeps its paint but sits on a 32px pitch (
   for (const group of ['toolbar', 'bc-path-row', 'file-actions', 'preview-header']) {
     assert.match(files, new RegExp(`class="${group} compact-tools"`, 'u'), `${group} is a dense tool group`);
   }
+});
+
+// Board #478 (owner, 2026-10-28: "不要高亮下划线显示了，只是鼠标放上去才有下划线，减少注意力分散"): the app's prose
+// links are the accent colour with no underline at rest and an underline on hover. ONE pair of rules in app.css
+// holds it; a surface that wants the look joins its lists and never declares a link rule of its own.
+test('prose links share one rule: accent at rest, underline on hover only (#478)', async () => {
+  const rest = css.match(/^([^{}\n]*)\{\s*color: var\(--accent\); text-decoration: none; \}/mu);
+  assert.ok(rest, 'one resting rule: colour, no underline');
+  assert.deepEqual(rest![1]!.split(',').map((x) => x.trim()), ['.md a', '.md-render a', '.step .st-text a', '.m-unfold'],
+    'message bodies and skill docs, the file preview, a tool row\u2019s paths, the Show-the-rest control');
+  const hover = css.match(/^([^{}\n]*:hover[^{}\n]*)\{\s*text-decoration: underline; text-underline-offset: 2px; \}/mu);
+  assert.ok(hover, 'one hover rule: underline, at the offset the Show-the-rest control uses');
+  assert.deepEqual(hover![1]!.split(',').map((x) => x.trim()), ['.md a:hover', '.md-render a:hover', '.step .st-text a:hover', '.m-unfold:hover']);
+  assert.ok(css.indexOf(hover![0]) > css.indexOf(rest![0]), 'the hover arm comes after the resting arm it overrides');
+  assert.doesNotMatch(rest![0] + hover![0], /--accent-ink|var\(--t-|transition|font-|padding|margin/u, 'no new token, no new tempo, no size or spacing: the underline is the only thing that appears');
+  // no surface keeps a copy: a link rule in a component would be a fourth species of link
+  for (const file of ['../files/FilePreview.svelte', '../hub/Feed.svelte', '../hub/AgentsPage.svelte']) {
+    const src = await readFile(new URL(file, import.meta.url), 'utf8');
+    assert.doesNotMatch(src, /(?:^|[\s,}])(?:[.\w-]+ )*(?::global\()?a(?::hover|\))?[^{}\n]*\{[^}]*text-decoration/mu, `${file}: no text-decoration on an anchor`);
+    assert.doesNotMatch(src, /\.(?:md|md-render|step \.st-text)(?: :global\(a(?::hover)?\)| a(?::hover)?) \{[^}]*(?:color|text-decoration)/u, `${file}: no per-surface link paint`);
+  }
+  // Show-the-rest keeps only its layout and font: its colour and underline are the shared rule's
+  const feed = await readFile(new URL('../hub/Feed.svelte', import.meta.url), 'utf8');
+  const unfold = feed.match(/\n  \.m-unfold \{([^}]*)\}/u)?.[1] ?? '';
+  assert.match(unfold, /display: inline-flex/u, 'the control\u2019s own block is there');
+  assert.doesNotMatch(unfold, /(?:^|[\s;])(?:color|text-decoration)\s*:/u, 'and holds no colour or underline of its own');
+  assert.doesNotMatch(feed, /\.m-unfold:hover/u, 'nor a hover of its own');
+  // the guard wraps the hover arm in the PRIMARY input's capability (design-language.md section 4 states the mixed-device limit)
+  const guarded = (await postcss([hoverGuard()]).process(rest![0] + '\n' + hover![0], { from: undefined })).css;
+  const [before, after] = guarded.split('@media');
+  assert.match(before!, /text-decoration: none/u, 'the resting rule stays outside any media query: a link reads as one on every pointer');
+  assert.match(after ?? '', /^\s*\(hover: hover\), \(pointer: none\)[\s\S]*text-decoration: underline/u,
+    'the hover guard wraps the underline arm in (hover: hover), (pointer: none), the primary input\u2019s capability');
 });

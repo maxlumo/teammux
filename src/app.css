@@ -1284,7 +1284,16 @@ button.side-win:hover { background: var(--surface2); color: var(--text); }
 /* The inner <code> must not tint again on top of the block. */
 .md pre code { background: none; padding: 0; border-radius: 0; font-size: inherit; }
 .md blockquote { border-left: 3px solid var(--border); padding-left: 10px; color: var(--text2); }
-.md a { color: var(--accent); }
+/* ONE link rule for the app's prose links (board #478; owner 2026-10-28: "不要高亮下划线显示了，只是鼠标放上去才有
+   下划线，减少注意力分散"): message bodies and skill docs (`.md`), the file preview (`.md-render`), a tool row's
+   paths (`.step .st-text`) and the Show-the-rest control (`.m-unfold`) are the accent colour with NO underline at
+   rest; the underline appears on hover only, at the offset `.m-unfold` already used. The hover guard wraps the
+   second rule in the PRIMARY input's capability, `(hover: hover), (pointer: none)`, so on a pure touch device
+   (`hover: none`, `pointer: coarse`: the profile measured) there is no underline and the colour alone says "link";
+   design-language.md section 4 states the mixed-device limit (a touch laptop, a phone with a mouse). A link in
+   a new prose surface joins these lists; it does not get a rule of its own. */
+.md a, .md-render a, .step .st-text a, .m-unfold { color: var(--accent); text-decoration: none; }
+.md a:hover, .md-render a:hover, .step .st-text a:hover, .m-unfold:hover { text-decoration: underline; text-underline-offset: 2px; }
 .md table { border-collapse: collapse; font-size: 0.9em; }
 .md th, .md td { border: 1px solid var(--border); padding: 3px 8px; }
 .md hr { border: none; border-top: 1px solid var(--border); margin: 0.6em 0; }

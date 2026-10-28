@@ -505,8 +505,8 @@ for nothing itself (pinned in `Feed.source.test.ts`).
   rule; a corpus row's optional `code` field pins it, and Rust's
   `code_span_path` reads the same rows, so Files mode lists the directory the
   bubble links (`message-paths.cases.json`). A linked
-  code span already wears the link colour and underline (`.md a`, measured
-  in the running Hub, #443). Fenced blocks are never linked, and neither is anything in
+  code span already wears the link colour (`.md a`, measured in the running
+  Hub, #443; the underline appears on hover only since #478). Fenced blocks are never linked, and neither is anything in
   a link's or an image's text: the decision is made at the token stage while
   marked still knows it is inside `[…](…)`, `[…][ref]` or `![…](…)`, so there
   is never a nested anchor (#431 review P1-B). At a URL the URL wins: the
@@ -553,8 +553,8 @@ for nothing itself (pinned in `Feed.source.test.ts`).
   URL, a word with a space in it. The collapsed head is a button, so its
   one-line peek stays plain text; no anchor lives inside it. On a fine
   pointer the lane is exactly what it was: one line per call, the argument
-  cell the only scroller, `white-space: nowrap`, and a link has the colour of
-  `.md a` and no layout of its own. On touch (`any-pointer: coarse`, the
+  cell the only scroller, `white-space: nowrap`, and a link has no layout of its
+  own; its colour and its hover-only underline are app.css's one prose-link rule (#478). On touch (`any-pointer: coarse`, the
   capability query, not a 760px width) the rows change locally, accepted for
   the 44px touch target (design-language rule; reviewer ruling, 2026-10-28):
   the row takes `--control-height`, its argument cell fills it, and the

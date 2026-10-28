@@ -608,8 +608,9 @@ test('a tool row\u2019s paths use the one recogniser and the one route, and only
   assert.match(source, /<div class="steps" class:open\s+onclick=\{\(e\) => \{ if \(openPathRef\(e\)\) return; if \(attached\) e\.stopPropagation\(\); \}\}\s+onauxclick=\{openPathRef\}>/u,
     'the lane hands a path click to the bubble\u2019s own route BEFORE it stops the click');
   assert.equal([...source.matchAll(/handlePathLinkClick\(/gu)].length, 1, 'and there is one call to the decoder, inside openPathRef');
-  assert.match(source, /\.step \.st-text a \{ color: var\(--accent\); \}/u, 'the colour of `.md a`');
-  assert.doesNotMatch(rule('.step .st-text a'), /px|display|white-space|overflow/u, 'no layout from the link');
+  assert.doesNotMatch(source, /\.step \.st-text a(?::hover)?\s*\{[^}]*(?:color|text-decoration)/u,
+    'the link\u2019s colour and hover underline are app.css\u2019s one prose-link rule, not a copy here (#478)');
+  assert.doesNotMatch(source, /\.m-unfold:hover/u, 'and so is the Show-the-rest underline');
   assert.match(rule('.step .st-text'), /white-space: nowrap/u, 'the row stays one line');
 });
 
@@ -627,7 +628,7 @@ test('on touch a tool row is a --control-height target and its path links fill i
   assert.match(coarse![2]!, /\.step \.st-text a \{ display: inline-flex; align-items: center; min-width: var\(--control-height\); min-height: var\(--control-height\); \}/u,
     'the anchor ITSELF is the target, in flow: a short path still gets the full width, without overlapping its neighbour');
   assert.doesNotMatch(coarse![0], /position:\s*absolute|::before|::after|\b44px\b/u, 'no overhang, no literal');
-  assert.ok(source.indexOf(coarse![0]) > source.indexOf('.step .st-text a { color: var(--accent); }'),
+  assert.ok(source.indexOf(coarse![0]) > source.indexOf('.step .st-text { display: inline-block;'),
     'the coarse override comes AFTER the desktop defaults it overrides (same specificity: the later rule wins)');
   assert.match(rule('.s-body'), /--step-row: calc\(1\.5em \+ 2px\)/u, 'the desktop pitch is the default');
   assert.match(rule('.s-body.capped'), /max-height: calc\(var\(--steps-rows\) \* var\(--step-row\) \+ 11px\)/u,
