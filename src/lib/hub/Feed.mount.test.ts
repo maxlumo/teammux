@@ -34,6 +34,89 @@ test('clicks inside a reply\u2019s run never reach the bubble; the bubble itself
   } finally { await app.close(); }
 });
 
+// Board #475 (owner 2026-10-28: "在工具调用栏里出现的路径，也支持直接点击预览"): a path in a tool call's
+// argument is a path link of the SAME kind as one in a message: one recogniser, one href, one route.
+test('a path in a tool row opens the Files preview through the same route as a path in a message (#475)', async (context) => {
+  const tool = (ts: number, text: string) => ({ id: ts, ts, window: 'dev', kind: 'tool' as const, tool: 'Read', text });
+  const blocks = feedBlocks([{ id: 'r', ts: 100, from: 'dev', body: 'see /a/b/notes.md when you can' }],
+    [tool(10, '/a/b/notes.md'), tool(11, 'cd /a/b && wc -l w/uki.js 2>/dev/null'), tool(12, 'echo hi'), tool(13, 'curl https://example.com/x/y.js')], 'tools', (n) => n);
+  const asked: string[] = [];
+  const app = await (await compiled).mount(context, {
+    props: { selected: 'fixture', roomReady: true, visible: true, blocks, managedNames: ['dev'], stepsRows: 8, onpath: (p: string) => asked.push(p),
+      agents: [{ name: 'dev', window: 0, managed: true, agent: 'kiro', state: 'idle' }] },
+    setup(window) { window.Element.prototype.getAnimations = () => []; window.HTMLCanvasElement.prototype.getContext = () => null; },
+    modules: [],
+  });
+  try {
+    const q = (s: string) => app.document.querySelector<HTMLElement>(s);
+    const qa = (s: string) => [...app.document.querySelectorAll<HTMLAnchorElement>(s)];
+    for (let i = 0; i < 4; i++) await app.flush();
+    q('.bubble .steps .s-head')!.click(); await app.flush();
+    assert.ok(q('.bubble .steps.open'), 'the run is open');
+    const rows = qa('.bubble .steps .step');
+    assert.equal(rows.length, 4);
+
+    // the words stay words: a command, a redirect, a URL
+    assert.deepEqual(qa('.bubble .steps .st-text a').map((a) => a.textContent), ['/a/b/notes.md', '/a/b', 'w/uki.js'], 'only the paths are links; 2>/dev/null and the URL are not');
+    assert.equal(rows[2]!.querySelector('a'), null, 'a line with no path has no link');
+    assert.equal(rows[3]!.querySelector('a'), null, 'a URL is not read as a path');
+    assert.equal(rows[1]!.querySelector('.st-text')!.textContent, 'cd /a/b && wc -l w/uki.js 2>/dev/null', 'the row\u2019s text is unchanged');
+    for (const a of qa('.bubble .steps .st-text a')) assert.ok(a.tabIndex >= 0, 'reachable from the keyboard');
+
+    // a path in the message body, then the same path in a tool row: the same payload to the same router
+    q('.bubble .m-body a')!.click(); await app.flush();
+    qa('.bubble .steps .st-text a')[0]!.click(); await app.flush();
+    assert.deepEqual(asked, ['/a/b/notes.md', '/a/b/notes.md'], 'the row routes exactly like the body');
+    qa('.bubble .steps .st-text a')[1]!.click(); qa('.bubble .steps .st-text a')[2]!.click(); await app.flush();
+    assert.deepEqual(asked.slice(2), ['/a/b', 'w/uki.js'], 'a directory and a workspace file, as written');
+
+    // the click was the path\u2019s, not the message\u2019s: no action row opened, and a click on plain words does nothing new
+    assert.equal(app.document.querySelectorAll('.m-acts').length, 0, 'a path in a row is not a tap on the message');
+    rows[2]!.click(); await app.flush();
+    assert.equal(asked.length, 4);
+    assert.equal(app.document.querySelectorAll('.m-acts').length, 0);
+
+    // a middle click routes too, as it does in a message
+    qa('.bubble .steps .st-text a')[0]!.dispatchEvent(new app.window.MouseEvent('auxclick', { bubbles: true, cancelable: true, button: 1 }));
+    await app.flush();
+    assert.equal(asked.length, 5);
+  } finally { await app.close(); }
+});
+
+// A standalone tool group has no message bubble around it, so the lane's own listeners are the ONLY door: this is
+// the row that fails when the lane drops its auxclick (the attached run above is caught by the bubble's listener).
+test('a path in a standalone tool group routes on click and on middle click, once each, and prevents the default (#475)', async (context) => {
+  const tool = (ts: number, text: string) => ({ id: ts, ts, window: 'dev', kind: 'tool' as const, tool: 'Read', text });
+  const blocks = feedBlocks([], [tool(10, '/a/b/notes.md'), tool(11, 'cd /a/b && wc -l w/uki.js')], 'tools', (n) => n);
+  const asked: string[] = [];
+  const app = await (await compiled).mount(context, {
+    props: { selected: 'fixture', roomReady: true, visible: true, blocks, managedNames: ['dev'], stepsRows: 8, onpath: (p: string) => asked.push(p),
+      agents: [{ name: 'dev', window: 0, managed: true, agent: 'kiro', state: 'idle' }] },
+    setup(window) { window.Element.prototype.getAnimations = () => []; window.HTMLCanvasElement.prototype.getContext = () => null; },
+    modules: [],
+  });
+  try {
+    const q = (s: string) => app.document.querySelector<HTMLElement>(s);
+    const links = () => [...app.document.querySelectorAll<HTMLAnchorElement>('.steps .st-text a')];
+    for (let i = 0; i < 4; i++) await app.flush();
+    q('.steps .s-head')!.click(); await app.flush();
+    assert.ok(q('.msg > .bubble > .steps.open'), 'a bubble of its own, open');
+    assert.ok(!q('.bubble.md'), 'no message bubble (and so no message-level listener) around the lane');
+    assert.equal(links().length, 3);
+
+    links()[0]!.click(); await app.flush();
+    assert.deepEqual(asked, ['/a/b/notes.md'], 'one click, one route');
+    const mid = new app.window.MouseEvent('auxclick', { bubbles: true, cancelable: true, button: 1 });
+    links()[1]!.dispatchEvent(mid); await app.flush();
+    assert.deepEqual(asked, ['/a/b/notes.md', '/a/b'], 'one middle click, one route');
+    assert.equal(mid.defaultPrevented, true, 'and the browser\u2019s own middle-click default is cancelled');
+    const right = new app.window.MouseEvent('auxclick', { bubbles: true, cancelable: true, button: 2 });
+    links()[2]!.dispatchEvent(right); await app.flush();
+    assert.equal(asked.length, 2, 'only the middle button, as in a message');
+    assert.equal(right.defaultPrevented, false);
+  } finally { await app.close(); }
+});
+
 // Board #304 (owner 2026-10-03: "双击钉住的用户消息 可以跳到那个消息的位置"):
 // a HELD user bubble, double-clicked (mouse) or double-tapped (touch, the
 // terminal's createDoubleTapDetector), jumps the feed to the message's natural

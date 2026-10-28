@@ -181,7 +181,7 @@ test('the argument is wrapped in its own scroller, beside the name and the time'
   // The markup IS the guarantee: text inside .st-scroll, name and time outside it.
   assert.match(
     source,
-    /<span class="st-scroll"[^>]*><span class="st-text">\{ep\.text\}<\/span><\/span>\s*<span class="st-ts">/u,
+    /<span class="st-scroll"[^>]*><span class="st-text">\{#each pathLinkParts\(ep\.text\) as part\}[\s\S]*?\{\/each\}<\/span><\/span>\s*<span class="st-ts">/u,
     'st-text must live inside st-scroll, with st-ts a sibling after it',
   );
   assert.match(source, /class="tname"[^>]*>\{ep\.tool\}<\/span>\{\/if\}\s*(?:<!--[\s\S]*?-->\s*)?<span class="st-scroll"/u,
@@ -536,7 +536,8 @@ test('a tool run has ONE markup, worn standalone or inside its reply, folded the
     'a choice, keyed by the group, wins; otherwise only a RUNNING run of its own is open (#298)');
   // No click inside an attached run reaches the bubble (validator P1): the
   // head, the rows and "show all" are all stopped once, at the lane.
-  assert.match(source, /<div class="steps" class:open\n\s*onclick=\{\(e\) => \{ if \(attached\) e\.stopPropagation\(\); \}\}>/u, 'unfolding or reading a run is not a tap on the message');
+  assert.match(source, /<div class="steps" class:open\n\s*onclick=\{\(e\) => \{ if \(openPathRef\(e\)\) return; if \(attached\) e\.stopPropagation\(\); \}\}\n\s*onauxclick=\{openPathRef\}>/u,
+    'unfolding or reading a run is not a tap on the message, and a path in a row is the path\u2019s click (board #475)');
 });
 
 test('a run of its own wears its reply\u2019s shape, only without words (board #298)', () => {
@@ -594,4 +595,42 @@ test('a bare path reaches the feed only through renderMarkdown: no second path m
   assert.doesNotMatch(source, /path-grammar|findPaths|matchPath|firstPathAt/u, 'the feed does not scan for paths itself');
   assert.match(source, /import \{ renderMarkdown \} from '\.\.\/core\/markdown\.ts';/u);
   assert.match(source, /handlePathLinkClick\(e, routePathRef\)/u, 'and routes every path anchor through the one decoder');
+});
+
+// Board #475: a path in a tool row is a path link of the message body's kind. One recogniser (path-links.ts
+// wraps core/path-grammar's findPaths), one href, one route; the row's layout is the lane's, unchanged.
+test('a tool row\u2019s paths use the one recogniser and the one route, and only in the argument (#475)', () => {
+  assert.match(source, /import \{ handlePathLinkClick, pathLinkParts \} from '\.\.\/core\/path-links\.ts';/u);
+  assert.equal([...source.matchAll(/pathLinkParts\(/gu)].length, 1, 'one place builds the row\u2019s links');
+  assert.match(source, /<span class="st-text">\{#each pathLinkParts\(ep\.text\) as part\}\{#if part\.href\}<a href=\{part\.href\}>\{part\.text\}<\/a>\{:else\}\{part\.text\}\{\/if\}\{\/each\}<\/span>/u,
+    'the argument cell, as plain text and anchors; never {@html}');
+  assert.doesNotMatch(source, /pathLinkParts\(lp\.text\)/u, 'the collapsed head is a button: no anchor inside it');
+  assert.match(source, /<div class="steps" class:open\s+onclick=\{\(e\) => \{ if \(openPathRef\(e\)\) return; if \(attached\) e\.stopPropagation\(\); \}\}\s+onauxclick=\{openPathRef\}>/u,
+    'the lane hands a path click to the bubble\u2019s own route BEFORE it stops the click');
+  assert.equal([...source.matchAll(/handlePathLinkClick\(/gu)].length, 1, 'and there is one call to the decoder, inside openPathRef');
+  assert.match(source, /\.step \.st-text a \{ color: var\(--accent\); \}/u, 'the colour of `.md a`');
+  assert.doesNotMatch(rule('.step .st-text a'), /px|display|white-space|overflow/u, 'no layout from the link');
+  assert.match(rule('.step .st-text'), /white-space: nowrap/u, 'the row stays one line');
+});
+
+// Board #475, orchestrator ruling: on touch a path link is a 44px target (design-language touch rule) and the ROW
+// carries it. The link's padding stays inside the scroller (a pseudo-element overhang would be clipped by
+// `.st-scroll`'s overflow), and the "N rows, then scroll" cap counts rows in the same unit, so taller rows
+// do not turn "ten rows" into four.
+test('on touch a tool row is a --control-height target and its path links fill it; the cap still counts rows (#475)', () => {
+  const coarse = source.match(/@media \(any-pointer: coarse\) \{\s*\.s-body \{ --step-row: ([^;]+); \}([^@]*?)\n  \}/u);
+  assert.ok(coarse, 'one coarse block carries the row height, after the desktop rules');
+  assert.equal(coarse![1], 'calc(var(--control-height) + 2px)', 'the target height + the 2px gap, from the app token');
+  assert.match(coarse![2]!, /\.step \{ align-items: center; min-height: var\(--control-height\); \}/u);
+  assert.match(coarse![2]!, /\.step \.st-scroll \{ align-self: stretch; display: flex; align-items: center; \}/u,
+    'the scroller fills the row, so the link box is not clipped');
+  assert.match(coarse![2]!, /\.step \.st-text a \{ display: inline-flex; align-items: center; min-width: var\(--control-height\); min-height: var\(--control-height\); \}/u,
+    'the anchor ITSELF is the target, in flow: a short path still gets the full width, without overlapping its neighbour');
+  assert.doesNotMatch(coarse![0], /position:\s*absolute|::before|::after|\b44px\b/u, 'no overhang, no literal');
+  assert.ok(source.indexOf(coarse![0]) > source.indexOf('.step .st-text a { color: var(--accent); }'),
+    'the coarse override comes AFTER the desktop defaults it overrides (same specificity: the later rule wins)');
+  assert.match(rule('.s-body'), /--step-row: calc\(1\.5em \+ 2px\)/u, 'the desktop pitch is the default');
+  assert.match(rule('.s-body.capped'), /max-height: calc\(var\(--steps-rows\) \* var\(--step-row\) \+ 11px\)/u,
+    'the cap multiplies rows by the pitch variable, not a literal');
+  assert.doesNotMatch(source.replace(coarse![0], ''), /min-height: var\(--control-height\)|min-width: var\(--control-height\)/u, 'fine-pointer rows carry none of it');
 });

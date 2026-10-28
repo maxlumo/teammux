@@ -1,6 +1,8 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { pathRef, resolvePathRef, handlePathLinkClick, installPathLinkHandler } from './path-links.ts';
+import { pathRef, resolvePathRef, handlePathLinkClick, installPathLinkHandler, pathLinkParts } from './path-links.ts';
+import { findPaths } from './path-grammar.ts';
+import { encodeHref } from './markedSafeUrl.ts';
 import { installExternalLinkHandler } from './external-links.ts';
 
 test('file references share one decoder across chat and previews (#99, #106)', () => {
@@ -79,4 +81,41 @@ test('capture external handler cannot open a path before its router, including i
   assert.deepEqual(calls, ['notes.md', 'notes.md']);
   disposeExternal();
   disposePath();
+});
+
+// Board #475 (owner 2026-10-28: "在工具调用栏里出现的路径，也支持直接点击预览"): a tool call's argument is
+// scanned with the message body's recogniser and linked with the message body's href.
+test('a tool row\u2019s argument splits into words and path links, with the body\u2019s recogniser and href (#475)', () => {
+  const lines: Array<[string, string[]]> = [
+    ['/local/home/cfu/work/projects/lab/out/shK2.jpg', ['/local/home/cfu/work/projects/lab/out/shK2.jpg']],
+    // the command from the owner's screenshot: a directory after cd, a workspace file, and `2>/dev/null`, whose path
+    // starts after a `>` (no path may start there) and so stays text; the path ends at the space before `|`
+    ['cd /local/home/cfu/work/projects/lab/three && wc -l worlds/uki.js worlds/b.js 2>/dev/null | tail -1',
+      ['/local/home/cfu/work/projects/lab/three', 'worlds/uki.js', 'worlds/b.js']],
+    ['/local/home/cfu/work/projects/lab/out/stills/t27.00.png', ['/local/home/cfu/work/projects/lab/out/stills/t27.00.png']],
+    ['src/lib/hub/Feed.svelte:118', ['src/lib/hub/Feed.svelte:118']],
+    ['grep -rn foo --manifest-path=src-tauri/Cargo.toml ~/notes/a.md', ['src-tauri/Cargo.toml', '~/notes/a.md']],
+    ['curl https://example.com/a/b.js?p=src/a.rs', []],
+    ['echo done', []],
+    ['', []],
+  ];
+  for (const [line, links] of lines) {
+    const parts = pathLinkParts(line);
+    assert.equal(parts.map((p) => p.text).join(''), line, `lossless: ${line}`);
+    assert.deepEqual(parts.filter((p) => p.href).map((p) => p.text), links, line);
+    assert.deepEqual(parts.filter((p) => p.href).map((p) => p.text), findPaths(line).map((h) => h.raw), 'the same paths the message body finds');
+    for (const p of parts.filter((x) => x.href)) assert.equal(p.href, encodeHref(p.text, 'path'), 'the same href the body writes');
+  }
+});
+
+test('a link\u2019s href goes through the room\u2019s path decoder to the path it names (#475)', () => {
+  for (const [line, expected] of [
+    ['read /a/my notes.md', '/a/my'], // a space ends a path (spaces are not supported, on purpose); what is before it is one
+    ['/local/x/y.jpg', '/local/x/y.jpg'],
+    ['src/hub.ts:12:5', 'src/hub.ts'],
+    ['./docs/fonts.md', './docs/fonts.md'],
+  ] as const) {
+    const link = pathLinkParts(line).find((p) => p.href);
+    assert.equal(link ? pathRef(link.href) : '', expected, line);
+  }
 });

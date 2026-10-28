@@ -1,3 +1,6 @@
+import { findPaths } from './path-grammar.ts';
+import { encodeHref } from './markedSafeUrl.ts';
+
 /** A file reference, not an external URL or an in-document fragment. */
 export function pathRef(href: string | null | undefined): string {
   const raw = href?.trim() ?? '';
@@ -39,4 +42,27 @@ export function installPathLinkHandler(root: Document | HTMLElement | null, open
     root.removeEventListener('click', activate, true);
     root.removeEventListener('auxclick', activate, true);
   };
+}
+
+/** One piece of a line of plain text: words, or a path with the `href` a path link carries. */
+export interface LinkPart { text: string; href?: string }
+
+/** Split a line of PLAIN text (a tool call's argument, board #475) into words and path links.
+ * It is the message body's recogniser and the message body's href, not a second one: the paths
+ * are `findPaths` (core/path-grammar.ts, the case table's grammar) and the href is what
+ * `markedSafeUrl`'s `pathRef` token writes (`encodeHref(raw, 'path')`), so a click lands in
+ * `handlePathLinkClick` and the room's one router exactly like a path in a message. Shape, not
+ * existence: the preview says when the file is missing. The parts always join back to `text`. */
+export function pathLinkParts(text: string): LinkPart[] {
+  const parts: LinkPart[] = [];
+  let at = 0;
+  for (const hit of findPaths(text)) {
+    const href = encodeHref(hit.raw, 'path');
+    if (href === null) continue;
+    if (hit.start > at) parts.push({ text: text.slice(at, hit.start) });
+    parts.push({ text: hit.raw, href });
+    at = hit.end;
+  }
+  if (at < text.length) parts.push({ text: text.slice(at) });
+  return parts;
 }

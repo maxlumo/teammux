@@ -539,6 +539,44 @@ for nothing itself (pinned in `Feed.source.test.ts`).
   a late stat, and a late listing after Back.
 - The same anchor appears in every markdown renderer (Files' markdown
   preview, skill previews), because they share `renderMarkdown`.
+- **A tool call's argument shares the door (board #475, 2026-10-28).** The
+  owner: "在工具调用栏里出现的路径，也支持直接点击预览". In the open run's rows
+  (`read_file <path>`, `execute_bash cd <dir> && wc -l a/b.js`), the argument is
+  scanned with the body's recogniser, `findPaths`, and each path becomes the
+  same `<a href>` (`encodeHref(raw, 'path')`) the body writes. `pathLinkParts`
+  in `core/path-links.ts` is that one wrapper; the feed holds no second
+  recogniser, and a click goes through the lane's `openPathRef`, the bubble's
+  one route, to `routePathRef`, so a row's path opens the same Files preview
+  with the same payload as a path in a message, a directory its listing, `:12`
+  dropped. Shape, not existence (the preview says when the file is missing).
+  What is NOT a path stays text: `2>/dev/null` (no path starts after `>`), a
+  URL, a word with a space in it. The collapsed head is a button, so its
+  one-line peek stays plain text; no anchor lives inside it. On a fine
+  pointer the lane is exactly what it was: one line per call, the argument
+  cell the only scroller, `white-space: nowrap`, and a link has the colour of
+  `.md a` and no layout of its own. On touch (`any-pointer: coarse`, the
+  capability query, not a 760px width) the rows change locally, accepted for
+  the 44px touch target (design-language rule; reviewer ruling, 2026-10-28):
+  the row takes `--control-height`, its argument cell fills it, and the
+  anchor ITSELF is an in-flow box of that height and at least that width, so a
+  short path (`/a/b`) is still a 44px target, neighbouring links never overlap
+  and the extra width stays inside the argument scroller (a short path leaves
+  a gap after it; an absolute overhang is not used: the scroller would clip it
+  and it would cover the next row). The "N rows, then scroll" cap counts rows
+  in one variable, `--step-row` (the row height plus its 2px gap), so taller
+  rows do not turn "ten rows" into four. The tool name and the time stay
+  outside the scroller, so focusing a link scrolls only the argument cell;
+  a pan that starts on a link pans and does not open it. The lane hands a path
+  click and a middle click to `openPathRef` BEFORE it stops the click for an
+  attached run, so a path is the path's click and any other tap in the run is
+  still not a tap on the message (no action row). A standalone tool group has
+  no message bubble around it, so the lane's listeners are its only door.
+  **A relative path is resolved against the project root, as in a message, and
+  not against a `cd` earlier in the same command**: in `cd /other && wc -l
+  worlds/uki.js` the second path opens `<project>/worlds/uki.js`, which may
+  not be the file the command read. An absolute path is exact. No shell is
+  interpreted and there is no second router; spaces, non-ASCII and redirect
+  boundaries keep the message grammar's existing limits.
 
 ### A `#<id>` in a bubble is a door to that issue (board #340, 2026-10-15)
 
