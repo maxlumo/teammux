@@ -759,8 +759,8 @@ test('an upload reports each file, counts it uploaded only when the server answe
       window.HTMLInputElement.prototype.click = function (this: HTMLInputElement) {
         if (this.type !== 'file') return click.call(this);
         const files = [new window.File(['abc'], 'one.txt'), new window.File(['defg'], 'two.txt')];
-        Object.defineProperty(this, 'files', { value: files });
-        this.onchange?.(new window.Event('change'));
+        Object.defineProperty(this, 'files', { value: files, configurable: true });
+        this.dispatchEvent(new window.Event('change', { bubbles: true }));
       };
     },
   });
@@ -795,8 +795,8 @@ test('a clean upload batch ends in a success line that names the file (board #21
     setup(window) {
       window.localStorage.setItem('tmux_layout_mode', 'desktop');
       window.HTMLInputElement.prototype.click = function (this: HTMLInputElement) {
-        Object.defineProperty(this, 'files', { value: [new window.File(['abc'], 'one.txt')] });
-        this.onchange?.(new window.Event('change'));
+        Object.defineProperty(this, 'files', { value: [new window.File(['abc'], 'one.txt')], configurable: true });
+        this.dispatchEvent(new window.Event('change', { bubbles: true }));
       };
     },
   });

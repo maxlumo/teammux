@@ -144,8 +144,8 @@ test('an OS drag onto the listing uploads into the CURRENT directory (board #22)
   // page-layer twin, because bare checkVisibility() does NOT check the
   // visibility property (visibilityProperty defaults FALSE — review of
   // 82da1c9) and .page-layer.hidden is exactly visibility:hidden.
-  assert.match(source, /if \(!isTauri \|\| !visible\) return;[\s\S]{0,700}?onDragDropEvent/u,
-    'the webview listener mounts only while visible, and unmounts with it');
+  assert.match(source, /if \(!isTauriDesktop \|\| !visible\) return;[\s\S]{0,700}?onDragDropEvent/u,
+    'the webview listener mounts only while visible (and only in the desktop app, #474), and unmounts with it');
   assert.match(source, /checkVisibility\(\{ visibilityProperty: true, checkVisibilityCSS: true \}\)/u,
     'the defense-in-depth check names the option — a bare call ignores visibility:hidden');
   assert.match(source, /getComputedStyle\(el\)\.visibility !== 'hidden'/u,
@@ -154,7 +154,7 @@ test('an OS drag onto the listing uploads into the CURRENT directory (board #22)
   // A missed drop must not navigate the tab away (that tears down the app):
   // stray drags are neutralized at the window while Files is visible, browser
   // only — and removed when it is not.
-  assert.match(source, /if \(!visible \|\| isTauri\) return;/u, 'the guard is visible-gated and browser-only');
+  assert.match(source, /if \(!visible \|\| isTauriDesktop\) return;/u, 'the guard is visible-gated and off only in the desktop app (the Android app\'s drops are the HTML5 ones, #474)');
   assert.match(source, /window\.removeEventListener\('drop', block\);/u, 'and it cleans up after itself');
 });
 
@@ -414,4 +414,22 @@ test('the door wears tokens: a control-height box that never shrinks, the pill a
   assert.match(rule, /flex: none/u, 'pinned: a long path scrolls in its strip, never pushes the door');
   assert.ok(!/font-size|\d+px|#[0-9a-f]{3,8}\b/iu.test(rule), 'tokens only');
   assert.match(css, /\.server-door:hover :global\(\.server-tag\), \.server-door\.open :global\(\.server-tag\) \{ background: var\(--control-hover\); color: var\(--text\); \}/u, 'hover/open lift the pill');
+});
+
+test('upload and drop ask isAndroid BEFORE isTauri: only the desktop app picks paths through the dialog plugin or the native drop (#474)', () => {
+  const upload = source.slice(source.indexOf('async function handleUpload()'), source.indexOf('function pickBlobFiles()'));
+  assert.match(upload, /^async function handleUpload\(\) \{\s*if \(isAndroid\) \{ pickBlobFiles\(\); return; \}\s*if \(isTauri\) \{/u,
+    'Android first, to the WebView picker; the plugin only after it');
+  assert.ok(upload.indexOf('isAndroid') < upload.indexOf('tauriDialog'), 'the plugin is never reached on Android');
+  assert.match(source, /if \(!isTauriDesktop \|\| !visible\) return;\s*let unlisten = null, dead = false;/u, 'the native drop listener is the desktop app\'s only (platform.ts\' one isTauriDesktop flag)');
+  assert.match(source, /if \(!visible \|\| isTauriDesktop\) return;\s*const block = /u, 'the Android app guards stray HTML5 drops as a browser does');
+});
+
+test('the browser picker is ONE hidden input in the markup, reused, its value cleared before each pick and after each read (#474 review P2-A)', () => {
+  assert.match(source, /<input type="file" multiple hidden bind:this=\{uploadInput\} onchange=\{onUploadPicked\} \/>/u, 'one input, declared once');
+  assert.doesNotMatch(source, /createElement\('input'\)/u, 'no input made per pick: a cancelled chooser fires nothing, so one was never removed');
+  const pick = source.slice(source.indexOf('function pickBlobFiles()'), source.indexOf('async function onUploadPicked()'));
+  assert.match(pick, /uploadInput\.value = '';\s*uploadInput\.click\(\);/u, 'cleared BEFORE the pick, so the same file again is a change');
+  const read = source.slice(source.indexOf('async function onUploadPicked()'));
+  assert.match(read, /const files = Array\.from\(uploadInput\?\.files \|\| \[\]\);\s*if \(uploadInput\) uploadInput\.value = '';\s*if \(files\.length\) await uploadBlobFiles\(files\);/u, 'read, cleared, then uploaded');
 });

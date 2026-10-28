@@ -558,11 +558,15 @@ component, not in a general mock framework.
   deferred. Attempting to use them fails explicitly. Never modify production
   components to make a fixture cheaper.
 - A fixture may REPLACE a heavy package with a stand-in of its own, named by
-  exact specifier (`compileMount(..., { standIns })`). The real package is
+  exact specifier (`compileMount(..., { standIns })`), for a static and a
+  lazy `import()` alike (`test/tauri-stand-in.ts` records Files' Tauri plugin
+  calls, board #474). The real package is
   still never bundled, and the stand-in paints nothing: it records calls.
-  `Terminal.isolation.mount.test.ts` (#335 ③a) is the one user — two real
-  runtimes, a real Terminal bound to each, and `test/xterm-stand-in.ts`
-  recording which terminal each frame reached.
+  Two kinds of user: the Terminal fixtures (`Terminal.isolation.mount.test.ts`,
+  #335 ③a, and their siblings: two real runtimes, a real Terminal bound to
+  each, and `test/xterm-stand-in.ts` recording which terminal each frame
+  reached) and `Files.upload.mount.test.ts` (#474: which upload path a
+  gesture took, through `test/tauri-stand-in.ts`).
 
 The initial proof is one `Hub.mount.test.ts` characterization: actual card
 clicks select the recipient, defer its menu until 260ms, cancel a pending

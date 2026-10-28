@@ -107,7 +107,7 @@ directory, or the server's home directory when no session is open yet.
   not a parent walk); below it a tab visit climbs parent directories to `/`
   and then stays (board #47 — the terminal is not below Files). Only a visit
   jumped from the chat returns to the conversation instead.
-- Upload button → file picker (Tauri on desktop/Android, `<input>` in browser)
+- Upload button → file picker (Tauri's dialog in the desktop app; `<input>` in the browser and in the Android app, which asks `isAndroid` first: the dialog's `content://` URIs carry no file name, so uploads lost name and extension until board #474)
 - Download button → save file locally
 
 ## API Calls

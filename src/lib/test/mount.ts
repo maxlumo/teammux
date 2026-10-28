@@ -37,8 +37,10 @@ interface CompileOptions {
   serverScope?: boolean;
   /** A heavy package this fixture REPLACES with a stand-in of its own, by
    * exact specifier (board #335 ③a: Terminal's stream, which needs an
-   * `@xterm/xterm` that records writes). The real package is still never
-   * bundled; every heavy package not named here still fails when used. */
+   * `@xterm/xterm` that records writes), for a static and a lazy `import()`
+   * alike (board #474: Files loads the Tauri plugins lazily). The real
+   * package is still never bundled; every heavy package not named here
+   * still fails when used. */
   standIns?: Record<string, URL>;
 }
 
@@ -75,6 +77,10 @@ export async function compileMount(component: URL, mockedModules: readonly URL[]
           // Keep lazy renderer/platform packages lazy: this tier cannot paint
           // them, and inlining them changed cold compilation from seconds to 20s.
           resolveDynamicImport(source) {
+            // A stand-in replaces its package for lazy imports too (board
+            // #474: Files loads the Tauri plugins with `import()`).
+            const standIn = typeof source === 'string' ? compileOptions.standIns?.[source] : undefined;
+            if (standIn) return fileURLToPath(standIn);
             if (typeof source === 'string' && !source.startsWith('.') && !source.startsWith('/')) {
               return { id: source, external: true };
             }

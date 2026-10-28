@@ -22,7 +22,7 @@
   import FilePreview from './FilePreview.svelte';
   import FileReview from './FileReview.svelte';
   import { createPreviewRenderers, defaultWrapForMime, highlightCode, isPreviewable, mimeCategory, streamsInline } from './file-preview.ts';
-  import { isAndroid, isTauri, tauriReady } from '../core/platform.ts';
+  import { isAndroid, isTauri, isTauriDesktop, tauriReady } from '../core/platform.ts';
   import { invokeNative } from '../core/native.ts';
   import { bytesToB64 } from './download.ts';
   import { saveServerFile, realmReady } from './save-file.ts';
@@ -1528,7 +1528,14 @@
     })), dir);
   }
 
+  // isAndroid FIRST (board #474; conventions/frontend.md rule 3). The Android
+  // app's dialog plugin (tauri-plugin-dialog 2.7.1) returns content:// URIs,
+  // whose last segment is an opaque document id: named from it, every upload
+  // lost its name and extension. The WebView's own file chooser resolves each
+  // pick's DISPLAY_NAME (Chromium's GetDisplayNameTask), so File.name is the
+  // user's. Only the desktop app picks real paths through the plugin.
   async function handleUpload() {
+    if (isAndroid) { pickBlobFiles(); return; }
     if (isTauri) {
       await tauriPlugins;
       const selected = await tauriDialog.open({ multiple: true });
@@ -1536,22 +1543,29 @@
       await uploadTauriPaths(Array.isArray(selected) ? selected : [selected]);
       return;
     }
-    // Browser fallback
-    const input = document.createElement('input');
-    input.type = 'file';
-    input.multiple = true;
-    document.body.appendChild(input);
-    input.onchange = async () => {
-      await uploadBlobFiles(Array.from(input.files || []));
-      document.body.removeChild(input);
-    };
-    input.click();
+    pickBlobFiles();
+  }
+  // The browser's picker (the browser, the PWA, the Android app's WebView):
+  // ONE hidden input in this instance's markup, as the composer has (#474
+  // review P2-A). A chooser the person cancels fires nothing, so an input
+  // made per pick was never removed; this one is never added, and its value
+  // is cleared before each pick so the same file can be picked again.
+  let uploadInput = $state(null);
+  function pickBlobFiles() {
+    if (!uploadInput) return;
+    uploadInput.value = '';
+    uploadInput.click();
+  }
+  async function onUploadPicked() {
+    const files = Array.from(uploadInput?.files || []);
+    if (uploadInput) uploadInput.value = '';
+    if (files.length) await uploadBlobFiles(files);
   }
 
   // ── Drag a file in from OUTSIDE, drop it on the listing, it uploads to the
   //    current directory (board #22). Two transports for one gesture:
   //    · Browser: the HTML5 events on the listing itself.
-  //    · Compiled app: the webview INTERCEPTS native drags (Tauri's default
+  //    · The desktop app: the webview INTERCEPTS native drags (Tauri's default
   //      dragDropEnabled), so DataTransfer never carries files there — the
   //      drop arrives as the webview's own drag-drop event with fs PATHS, and
   //      a hit-test against the listing's rect stands in for event targeting.
@@ -1584,7 +1598,9 @@
   // drags over the window are neutralized; the listing's own handlers still
   // run first in the bubble.
   $effect(() => {
-    if (!visible || isTauri) return;
+    // Only the desktop app takes drops natively (#474): the Android app's
+    // drops are the HTML5 ones, so it guards stray drops as a browser does.
+    if (!visible || isTauriDesktop) return;
     const block = (e) => { if (dragHasFiles(e)) e.preventDefault(); };
     window.addEventListener('dragover', block);
     window.addEventListener('drop', block);
@@ -1594,7 +1610,7 @@
     };
   });
 
-  // The compiled app's half: the listener EXISTS only while this instance is
+  // The desktop app's half: the listener EXISTS only while this instance is
   // visible — that is the real gate against the parked page-layer twin (App's
   // hidden layer keeps LAYOUT under visibility:hidden, and bare
   // checkVisibility() does NOT check the visibility property — its
@@ -1616,7 +1632,9 @@
     return x >= r.left && x <= r.right && y >= r.top && y <= r.bottom;
   }
   $effect(() => {
-    if (!isTauri || !visible) return;
+    // The DESKTOP app only (#474): wry 0.54.2 has no Android drop handler, and
+    // its paths there would be content:// URIs named like the picker's were.
+    if (!isTauriDesktop || !visible) return;
     let unlisten = null, dead = false;
     (async () => {
       await tauriPlugins;
@@ -1839,7 +1857,7 @@
     {/if}
 
     <!-- File list. Also the drop target for OS files (board #22): the browser
-         path via the HTML5 events here, the compiled app via the webview's
+         path via the HTML5 events here, the desktop app via the webview's
          drag-drop event hit-testing this element's rect. -->
     <!-- svelte-ignore a11y_no_static_element_interactions -->
     <div class="file-list" class:panel-open={showBookmarks || showRecent} class:drop-hot={dragOver} class:busy={loading} class:reveal={!!revealDir}
@@ -2147,6 +2165,7 @@
         ondismiss={uploadFeedback?.kind === 'error' ? uploadLifetime.clear : undefined} />
     </div>
   {/if}
+  <input type="file" multiple hidden bind:this={uploadInput} onchange={onUploadPicked} />
 </div>
 
 {#if imageView}

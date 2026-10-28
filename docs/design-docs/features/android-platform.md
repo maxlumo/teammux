@@ -27,6 +27,7 @@ Use custom `@JavascriptInterface` in `MainActivity.kt` for file opening instead 
 
 ## Lessons Learned
 - NEVER use `tauriOpener.openPath()` on Android — always use `AndroidFileOpener`
+- NEVER name a file from a path the Android dialog plugin returns (board #474, owner 2026-10-27: uploads lost their names and extensions). tauri-plugin-dialog 2.7.1 hands back `content://` URIs (`uri.toString()`, DialogPlugin.kt); their last segment is an opaque document id. Files' upload asks `isAndroid` first and takes the WebView's own `<input type="file">`: Chromium resolves each pick's `OpenableColumns.DISPLAY_NAME` (`GetDisplayNameTask`, android_webview, read in Chromium main 2026-10-27, not the owner's WebView version), so `File.name` is the provider's display name. A provider without one, or a virtual document exported under another type, is the provider's to name; we no longer invent a name from the id. The native drop listener is the desktop app's only (wry 0.54.2 has no Android drop handler). `Files.upload.mount.test.ts`; not verified on a device.
 - Always check `isAndroid` before falling back to generic Tauri APIs
 
 ## Element fullscreen (board #454, 2026-10-25)
