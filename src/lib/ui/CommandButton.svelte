@@ -31,6 +31,12 @@
      * accessible name and the hover card's title. The label stays the visible text. */
     title?: string;
     disabled?: boolean;
+    /** Unavailable as a COMMAND but still a focusable menu entry (board #482:
+     * All while the reading filter locks the target keeps its context menu
+     * for the keyboard and on every engine). Says so to assistive tech; the
+     * command's own writer refuses the activation. Native `disabled` stays
+     * for a command with nothing behind it at all. */
+    ariaDisabled?: boolean;
     destructiveConfirm?: boolean;
     onclick?: (event: MouseEvent) => void;
     element?: HTMLButtonElement | null;
@@ -38,7 +44,7 @@
   let {
     label, icon = '', variant = 'secondary', iconOnly = false,
     pressed, expanded, inside = false, bare = false, round = false, controls, hasPopup, title,
-    disabled = false, pending = false, destructiveConfirm = false,
+    disabled = false, ariaDisabled = false, pending = false, destructiveConfirm = false,
     onclick = () => {}, element = $bindable(null),
   }: Props = $props();
   const compact = $derived(iconOnly || variant === 'icon');
@@ -53,7 +59,7 @@
 <button type="button" class="command-button"
   class:primary={solid} class:secondary={variant === 'secondary'}
   class:danger={variant === 'danger'} class:icon-only={compact} class:solid class:bare={bare && !solid} class:round class:pending class:engaged
-  disabled={disabled || pending} aria-label={title ?? label} aria-busy={pending || undefined}
+  disabled={disabled || pending} aria-disabled={ariaDisabled || undefined} aria-label={title ?? label} aria-busy={pending || undefined}
   aria-pressed={pressed} aria-expanded={expanded} aria-controls={controls} aria-haspopup={hasPopup}
   bind:this={element}
   use:hoverInfo={() => compact ? { title: title ?? label } : title ? { title } : null}

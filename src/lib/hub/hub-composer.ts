@@ -28,6 +28,30 @@ export function targetMembers(target: string, agents: readonly TargetAgent[]): s
   return [...names];
 }
 
+/** The reading-filter lock (#482, owner 2026-10-30: "如果我选了show only后，要选中
+ * 这个agent不能选其他agent不然经常发错消息"). While the filter shows one agent
+ * (`shown`, '' when off or on "Only mine"), the ONE target it allows is that
+ * agent while it runs, and nobody ('' — nothing is deliverable) while it is
+ * stopped. Every other target — another agent, everyone, a team — is refused,
+ * whoever asks (a card, a menu, an automatic pick). Off, everything goes. */
+export function canAddress(target: string, shown: string, live = true): boolean {
+  return !shown || target === (live ? shown : '');
+}
+
+/** Why a send is refused while the filter shows `shown`, or null when it may
+ * go: the shown agent stopped (it cannot receive), the target is not it, or
+ * the text itself names someone else. `reached` is every address the payload
+ * carries as sent (a message's tokens after its attachments are expanded; a
+ * slash command's own target), NOT only names on this client's roster: the
+ * server may know an agent the roster has not shown yet. */
+export function lockedSend(shown: string, live: boolean, target: string, reached: readonly string[]):
+  { kind: 'unreachable' } | { kind: 'beyond'; names: string[] } | null {
+  if (!shown) return null;
+  if (!live || target !== shown) return { kind: 'unreachable' };
+  const names = [...new Set(reached.filter((n) => n && n !== shown))];
+  return names.length ? { kind: 'beyond', names } : null;
+}
+
 /** Boxes are measured by the browser in textarea-local CSS pixels. A tall
  * touch target can hit the preceding line even when the final line is short. */
 export function signatureLayout({

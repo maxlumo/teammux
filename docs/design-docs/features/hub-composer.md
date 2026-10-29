@@ -1022,6 +1022,72 @@ description below omits broadcast; this dated rule corrects that omission.
 
 `pickLead()` (pure, client) = remembered choice while present → the only managed agent → lowest window (the `can_hire` seat was retired 2026-09-26); choosing a recipient IS choosing the project lead, so it persists per session — and the ROOM is a choice too: `hubPrefs.lead` has three states (a name, `""` = the user chose "no recipient, record only", `null` = nobody chose), `pickLead` keeps an explicit `""`, and only `null` seats a lead; before, `""` was stored as an absent key and the next 5 s roster poll re-seated a lead the user had just dismissed (review C, 2026-09-03; `hub-prefs.test.ts` + `pickLead` tests pin it) — and `addressed()` ALWAYS prefixes the chip's `@name` (owner, 2026-08-26: "前边的永远保留，后边的at如果存在某人的话也会发送过去" — an `@` in the body used to stand the chip down, so an email address or quoted @all silently defeated the chosen recipient); body @mentions deliver TOO because `deliver_mentions` scans the whole body, and only a body already leading with the same recipient skips the prefix (empty recipient = the whole room). **The chip SAYS so, live** (review, 2026-09-03: it read `to: alice` while `@bob` in the body was delivered as well, with no hint): `chipExtras(text, recipient, managedNames)` (pure + tested, on the same `mentionTokens` tokenizer as `mentionsAgent` and the feed's room-note verdict — never a second parser) appends `+@bob` for every managed agent the body addresses beyond the recipient, in roster order; an `@all` in the body collapses to `+@all` rather than listing the roster, `@all` as the recipient appends nothing (already everyone), and a name that resolves to nobody on the roster — an email address, a removed agent, a direct window — is not shown because it is not delivered. The extras wear the accent even on the grey room-note chip, because that part IS a delivery, and the chip's tooltip switches to name them. An empty room shows a preset start (one agent, or several as a team) rather than a composer with nobody to talk to — but "empty" is a VERDICT, not a default: switching projects parks the leaving room in an in-memory per-session cache (`roomCache`: feed, activity, roster, cursors) and restores it instantly on return, and a room without a cache entry renders NOTHING until its first `hub_log` answers (`roomReady`); judging emptiness from the cleared arrays made every switch flash the "add an agent" panel in front of rooms full of history (owner, 2026-08-25: "先看到添加 agent 一个 agent list那个页面闪了一下，然后再出来消息"). The pollers merge on top of the restored state (cached `lastTs` makes the refresh incremental), a cached roster seats the recipient immediately via the same `pickLead`, and entering a room always lands at its tail. The verdict rule swept the other pages too (owner, 2026-08-25: "不同页面切换会不会有类似的这种问题"): the Terminal sidebar says "No sessions" only after its first refresh answered (`listReady`) and renders the untracked group only after Projects reported `onTracked` once (`trackedReady` — before that every tracked session flashed as untracked and migrated; `Projects.load` now reports on its failure path too, so the gate cannot stay shut), and the Agents page keeps last-known defs/skills/MCP on a failed reload instead of wiping them. Files (`!entries.length && !loading`) and Team (`loading` gate) were already correct. DirPicker navigates the same way (owner, 2026-08-28: "每次点击一个路径…先清空再重新刷新…要交互更流畅"): a tap KEEPS the current list and swaps it atomically when `fs_list` answers (`seq` makes the newest tap win; scrollTop resets on the swap because a new directory starts at its top); the `…` placeholder shows only before the FIRST answer, a failed listing keeps the old rows with the error line above, and the busy cue is a 150ms-delayed opacity dim so a fast local listing never blinks.
 
+### The reading filter locks the target (board #482, 2026-10-30)
+
+The owner kept sending to the wrong agent while reading one ("如果我选了show
+only后，要选中这个agent不能选其他agent不然经常发错消息"). The reading filter
+(`filterAgent`) and the target (`recipient`) were two states under one paint.
+The strip dimmed every other card, @all and the team names, and the person read
+that as "I am talking to X". But every dimmed control still worked. The phone's
+way in, the card menu's "Only its messages", never touched the target, and a
+filtered agent that stopped let the next roster answer seat another lead.
+
+While the filter shows one agent, that agent is the only target:
+
+- `canAddress(target, shown)` (`hub-composer.ts`) is the one predicate.
+  `setRecipient`, the one target writer, asks it first. So a card, a menu's
+  Message / Message everyone / Message team / Record only, @all, a team name,
+  and the spawn, restart and reply auto-picks are all refused by the same line.
+  No path needs its own gate.
+- The controls derive their state from the same predicate, which makes the
+  dimming true. The cards' select, the team names and the @all command are
+  `aria-disabled`, never natively `disabled`: each stays focusable, so its menu
+  keeps a keyboard and context entry on every engine (review P2-C; the first
+  cut disabled @all natively and relied on Chromium passing contextmenu to its
+  wrapper). A click or keyboard activation reaches `setRecipient` and is
+  refused there; a double-click on a refused card does nothing. The refused
+  menu items are disabled. `CommandButton` gained `ariaDisabled` for this.
+- Only target choice is locked. Watch, configure, restart, stop and switching
+  the view ("Only its messages" on another card) stay. Leaving the filter is
+  its own act (the card's "Show everything", its double-click, the search
+  token's x, Back), and the target stays X afterwards.
+- Showing a live agent selects it, through the same writer. "Only mine" is not
+  an agent and locks nothing.
+- The send checks the payload as it will be sent, at the one entry, before
+  anything is cleared or sent: a message's address tokens (`mentionTokens`)
+  after its attachments are expanded (`attachmentBody`; an uploaded file's
+  name can carry one), and a slash command's own target (`slashCommand`).
+  Every token counts, not only names on this client's roster (the first cut
+  used `chipExtras`, which drops names the roster has not shown yet, though
+  the server may already deliver to them; review P1-A). If any is not X, the
+  draft, the attachments and the reply all stay, and the composer says
+  "Showing only X. To send to @Y, leave that view first." Nothing is stripped,
+  and the filter is not cleared for the person. Typing `@Y` is explicit, but
+  while reading only X it is the same slip.
+- A stopped X receives nothing, and the lock's one target is then nobody
+  (`canAddress(target, X, live=false)` admits only ''). Filtering an
+  already-stopped X reaches the same state a running X reaches when it stops:
+  the previous target is dropped, not kept (review P1-B: filtering a stopped
+  bob left alice as the target, and bob's return was then refused as
+  "stopped"). The roster seats no other lead while X is shown (the direct
+  writes in `loadAgents` and the review-block auto-recipient ask too). The
+  composer says that X is stopped and cannot receive, and nothing is
+  sendable. When X runs again, the roster's answer selects X. Leaving the
+  filter while X is stopped keeps the target as shown: nobody.
+
+Considered and rejected (#482 design round): the filter FOLLOWING the target,
+where a tap on another agent moves both and @all or a team ends the filter.
+That has no disabled control, but a mis-tap on @all or a spawn's auto-pick
+still sends to the wrong place while both states agree. It is a different
+product from the one the owner asked for.
+
+`hub-composer.test.ts` pins the predicate and the send check.
+`Hub.mount.test.ts` pins the actual posts and commands: the menu filter, a
+disabled card, @all and its menu, a team, the menus, a restart's pick, the
+body, unknown-name, attachment and slash addresses (draft, attachment and
+reply kept), a stopped X both ways in, and leaving the filter. `Hub.source.test.ts` pins that
+the lock sits in the writer and before the send clears anything.
+
 ### Three ways a message lands, and they are not shades of one thing
 
 a name (the default lead) types into ONE agent's input; `@all` types into EVERY managed agent's input, so every agent starts a turn at once; no recipient records it in the room and interrupts NOBODY (agents see it at their next `tmm log`). A line is never typed back into the pane of the agent that sent it, except a fired wake and a post from a script that agent left running (board #285, tmm-cli.md § Self-wake). The third was once labelled "everyone", which was exactly backwards — it is the one that reaches nobody live.

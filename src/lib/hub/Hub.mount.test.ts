@@ -861,7 +861,7 @@ test('a confirmation consumes Escape without also closing the earlier-mounted Hu
   } finally { await app.close(); }
 });
 
-test('Roster ContextMenu filters without selecting and a stopped surface never resumes on tap', { timeout: 60000 }, async (context) => {
+test('Roster ContextMenu filter selects its agent and a stopped surface never resumes on tap (#482)', { timeout: 60000 }, async (context) => {
   const fixture = await compiledHub();
   const started = performance.now();
   const { rpc } = roomFixture();
@@ -911,7 +911,7 @@ test('Roster ContextMenu filters without selecting and a stopped surface never r
     const bob = [...app.document.querySelectorAll<HTMLElement>('.acard')]
       .find((card) => card.querySelector('.a-name')?.textContent === 'bob')!;
     assert.ok(bob);
-    const recipientBeforeFilter = selectedCard(app.document);
+    assert.notEqual(selectedCard(app.document), 'bob', 'bob is not the target before the filter');
     for (const shouldFilter of [true, false]) {
       bob.querySelector('.agent-select')!.dispatchEvent(new app.window.MouseEvent('contextmenu', { bubbles: true }));
       await app.flush();
@@ -921,7 +921,9 @@ test('Roster ContextMenu filters without selecting and a stopped surface never r
       filter.click();
       await app.flush();
       assert.equal(!!app.document.querySelector('.cards.filtering'), shouldFilter);
-      assert.equal(selectedCard(app.document), recipientBeforeFilter, 'filtering never changes delivery');
+      // #482 reversed "filtering never changes delivery" (owner 2026-10-30):
+      // showing only bob is talking to bob, and leaving the view keeps bob.
+      assert.equal(selectedCard(app.document), 'bob', shouldFilter ? 'the menu filter selects its agent' : 'leaving the filter keeps the target');
     }
   } finally {
     await app.close();
@@ -1625,7 +1627,7 @@ test('a /command to All that one pane refused in copy-mode succeeds for the rest
   } finally { await app.close(); }
 });
 
-test('stopped-card double-click only filters and closes its click menu (#173)', { timeout: 60000 }, async (context) => {
+test('stopped-card double-click filters, closes its click menu and leaves nobody targeted (#173, #482)', { timeout: 60000 }, async (context) => {
   const app = await composerFixture(context, {
     projectList: async () => ({ projects: [{
       project: { id: 'fixture', name: 'fixture', session: 'fixture', path: '/fixture' },
@@ -1640,7 +1642,9 @@ test('stopped-card double-click only filters and closes its click menu (#173)', 
     button.dispatchEvent(new app.window.MouseEvent('click', { detail: 2, bubbles: true }));
     button.dispatchEvent(new app.window.MouseEvent('dblclick', { detail: 2, bubbles: true }));
     await app.flush();
-    assert.equal(selectedCard(app.document), 'alice');
+    // #482 review P1-B: showing a stopped agent locks the target to nobody,
+    // as when a shown agent stops; alice is no longer addressed behind it.
+    assert.equal(selectedCard(app.document), '');
     assert.equal(app.document.querySelector('.ctx'), null);
     assert.ok(app.document.querySelector('.cards.filtering'));
     assert.ok(stripCard(app.document, 'paused').classList.contains('filtered'));
@@ -5579,5 +5583,252 @@ test('a keystroke touches the composer only: no DOM write outside its row and no
     assert.ok(inside > 0, 'the measurement did run on every key (inside the row)');
     assert.equal(rowWrites, 0, 'the height holds: the row is not written');
     assert.deepEqual(outside, [], 'nothing outside the composer row changes: the feed, the rail and the roster are untouched');
+  } finally { await app.close(); }
+});
+
+// Board #482, owner 2026-10-30: "如果我选了show only后，要选中这个agent不能选其他agent
+// 不然经常发错消息". While the reading filter shows one agent, that agent is the
+// only target: every other one is refused by one predicate, the controls say
+// so (disabled / aria-disabled), and the send checks what the text reaches.
+const lockAgents = [
+  { name: 'alice', window: 0, managed: true, agent: 'kiro', state: 'idle', team: 'squad' },
+  { name: 'bob', window: 1, managed: true, agent: 'codex', state: 'idle' },
+  { name: 'carol', window: 2, managed: true, agent: 'kiro', state: 'idle', team: 'squad' },
+];
+async function lockFixture(context: TestContext, extra: Record<string, (...args: any[]) => unknown> = {}, bobAtStart = true) {
+  const posts: string[] = [], commands: string[] = [], restarts: string[] = [];
+  let bobLive = bobAtStart;
+  const app = await composerFixture(context, {
+    hubAgents: async () => ({ agents: lockAgents.filter((a) => bobLive || a.name !== 'bob') }),
+    // bob's slot keeps a stopped bob on the strip (a stopped identity keeps its filter, #241).
+    projectList: async () => ({ projects: [{
+      project: { id: 'fixture', name: 'fixture', session: 'fixture', path: '/fixture' },
+      live: true, slots: [{ window_name: 'bob', kind: 'agent', command: 'codex' }],
+    }] }),
+    hubPost: async (_s: string, body: string) => { posts.push(body); return {}; },
+    hubCommand: async (_s: string, name: string, command: string) => { commands.push(`${name}:${command}`); return {}; },
+    hubAgentRestart: async (_s: string, name: string) => { restarts.push(name); return {}; },
+    fsUpload: async () => ({}),
+    ...extra,
+  });
+  const menu = async (name: string) => {
+    stripCard(app.document, name).querySelector('.agent-select')!.dispatchEvent(new app.window.MouseEvent('contextmenu', { bubbles: true, cancelable: true }));
+    await app.flush();
+    return [...app.document.querySelectorAll<HTMLButtonElement>('.ctx button')];
+  };
+  const item = (items: HTMLButtonElement[], label: string) => items.find((b) => b.textContent?.trim() === label);
+  const closeMenu = async () => { app.window.dispatchEvent(new app.window.KeyboardEvent('keydown', { key: 'Escape', bubbles: true })); await app.flush(); };
+  const showOnly = async (name: string) => {
+    const items = await menu(name);
+    item(items, 'Only its messages')!.click();
+    await app.flush();
+  };
+  const feedback = () => app.document.querySelector('.operation-feedback')?.textContent ?? '';
+  return { app, posts, commands, restarts, menu, item, closeMenu, showOnly, feedback, setBobLive: (on: boolean) => { bobLive = on; } };
+}
+
+test('the reading filter selects its agent, and every other target is refused while it is on (#482)', { timeout: 60000 }, async (context) => {
+  const f = await lockFixture(context);
+  const { app } = f;
+  try {
+    assert.equal(selectedCard(app.document), 'alice');
+    // The phone's way in: the card menu's "Only its messages" — it used to leave the target on alice.
+    await f.showOnly('bob');
+    assert.ok(app.document.querySelector('.cards.filtering'));
+    assert.equal(selectedCard(app.document), 'bob', 'showing only bob is talking to bob');
+
+    // Another card: disabled for real, and a click (a keyboard activation is one) or a double-click picks nothing.
+    const alice = stripCard(app.document, 'alice').querySelector<HTMLButtonElement>('.agent-select')!;
+    assert.equal(alice.getAttribute('aria-disabled'), 'true');
+    assert.equal(stripCard(app.document, 'bob').querySelector('.agent-select')!.getAttribute('aria-disabled'), null);
+    alice.click(); await app.flush();
+    for (const [type, detail] of [['click', 1], ['click', 2], ['dblclick', 2]] as const) {
+      alice.dispatchEvent(new app.window.MouseEvent(type, { detail, bubbles: true, cancelable: true }));
+      await app.flush();
+    }
+    assert.equal(selectedCard(app.document), 'bob', 'a disabled card takes no target, nor the filter');
+    assert.ok(stripCard(app.document, 'bob').classList.contains('filtered'));
+
+    // @all and the team: disabled; the team's name still opens its menu.
+    // @all: aria-disabled, still focusable, so its menu keeps a keyboard and
+    // context entry on every engine (review P2-C); a click takes nothing.
+    const all = app.document.querySelector<HTMLButtonElement>('.all-choice button')!;
+    assert.equal(all.getAttribute('aria-disabled'), 'true', '@all is unavailable as a target');
+    assert.equal(all.disabled, false, 'and not natively disabled');
+    all.click(); await app.flush();
+    assert.equal(selectedCard(app.document), 'bob', '@all is not taken');
+    app.document.querySelector('.all-choice')!.dispatchEvent(new app.window.MouseEvent('contextmenu', { bubbles: true, cancelable: true }));
+    await app.flush();
+    const allItems = [...app.document.querySelectorAll<HTMLButtonElement>('.ctx button')];
+    assert.equal(allItems.find((b) => b.textContent?.trim() === 'Message everyone')!.disabled, true, 'the All menu opens; its target item is refused');
+    assert.ok(allItems.some((b) => !b.disabled), 'its other verbs stay');
+    app.window.dispatchEvent(new app.window.KeyboardEvent('keydown', { key: 'Escape', bubbles: true }));
+    await app.flush();
+    const team = app.document.querySelector<HTMLButtonElement>('.team-label')!;
+    assert.equal(team.getAttribute('aria-disabled'), 'true');
+    team.click(); await app.flush();
+    assert.equal(selectedCard(app.document), 'bob', 'the team is not taken');
+
+    // The menus: every target verb refused, the rest available.
+    let items = await f.menu('alice');
+    assert.equal(f.item(items, 'Message')!.disabled, true, "another card's Message");
+    assert.equal(f.item(items, 'Restart')!.disabled, false, 'a verb that picks no target stays');
+    assert.equal(f.item(items, 'Only its messages')!.disabled, false, 'switching the view is an explicit act');
+    f.item(items, 'Message')!.click(); await app.flush();
+    assert.equal(selectedCard(app.document), 'bob');
+    await f.closeMenu();
+    items = await f.menu('bob');
+    assert.equal(f.item(items, 'Record only')!.disabled, true, "the shown agent's Record only");
+    await f.closeMenu();
+
+    // An automatic pick: a restart seats the restarted agent as the target. Not now.
+    items = await f.menu('alice');
+    f.item(items, 'Restart')!.click();
+    for (let i = 0; i < 12 && !f.restarts.length; i++) await app.flush();
+    for (let i = 0; i < 6; i++) await app.flush();
+    assert.deepEqual(f.restarts, ['alice']);
+    assert.equal(selectedCard(app.document), 'bob', 'the restart pick is refused');
+
+    // Sending reaches bob alone.
+    await app.text('hello');
+    app.send.click();
+    for (let i = 0; i < 8 && !f.posts.length; i++) await app.flush();
+    assert.deepEqual(f.posts, ['@bob hello']);
+
+    // Leaving the filter is its own act, and the target stays bob.
+    items = await f.menu('bob');
+    f.item(items, 'Show everything')!.click(); await app.flush();
+    assert.equal(app.document.querySelector('.cards.filtering'), null);
+    assert.equal(selectedCard(app.document), 'bob', 'leaving the view keeps the target');
+    assert.equal(alice.getAttribute('aria-disabled'), null);
+    assert.equal(all.getAttribute('aria-disabled'), null);
+    alice.click(); await app.flush();
+    assert.equal(selectedCard(app.document), 'alice', 'and every target is open again');
+  } finally { await app.close(); }
+});
+
+test('a send whose text reaches anyone but the shown agent is refused, the draft kept (#482)', { timeout: 60000 }, async (context) => {
+  const f = await lockFixture(context, {
+    hubLog: async () => ({ messages: [{ id: 'm1', seq: 1, ts: 100, from: 'bob', body: 'done' }], has_more: false }),
+  });
+  const { app } = f;
+  try {
+    await f.showOnly('bob');
+    // carl is not on this client's roster (the server may know him already),
+    // so the check reads every address token, not the roster's names.
+    for (const draft of ['hello @alice', '@all heads up', 'ask @carl too', '@alice /compact', '@ghost /compact']) {
+      await app.text(draft);
+      assert.equal(await app.key('Enter'), true, `Enter is taken (${draft})`);
+      for (let i = 0; i < 4; i++) await app.flush();
+      assert.deepEqual(f.posts, [], `nothing posted (${draft})`);
+      assert.deepEqual(f.commands, [], `nothing run (${draft})`);
+      assert.equal(app.input.value, draft, 'the draft stays as typed');
+      assert.match(f.feedback(), /Showing only bob\. To send to @(alice|all|carl|ghost), leave that view first\./u);
+    }
+    // An address only the attachment brings: the draft names nobody, the
+    // uploaded file's name does, and the server would read it once expanded.
+    for (let i = 0; i < 12 && !app.document.querySelector('.msg:not(.me) .bubble'); i++) await app.flush();
+    app.document.querySelector<HTMLElement>('.msg:not(.me) .bubble')!.click();
+    await app.flush();
+    app.document.querySelector<HTMLButtonElement>('.m-acts button[aria-label="Reply"]')!.click();
+    await app.flush();
+    assert.ok(app.document.querySelector('.pend-chip.reply'), 'replying to bob');
+    await app.text('see this');
+    await app.paste([new app.window.File(['x'], 'notes (@alice).txt', { type: 'text/plain' })]);
+    await app.wait(() => app.input.value.includes('[file:1]'));
+    const draft = app.input.value;
+    await app.key('Enter');
+    for (let i = 0; i < 4; i++) await app.flush();
+    assert.deepEqual(f.posts, [], 'the expanded payload reaches alice: nothing posted');
+    assert.equal(app.input.value, draft, 'the draft stays');
+    assert.ok(app.document.querySelector('.pend-chip:not(.reply):not(.err)'), 'the attachment stays');
+    assert.ok(app.document.querySelector('.pend-chip.reply'), 'the reply stays');
+    assert.match(f.feedback(), /To send to @alice, leave that view first/u);
+    app.document.querySelector<HTMLElement>('.pend-chip:not(.reply) .pend-x')!.click();
+    await app.flush();
+    assert.ok(app.document.querySelector('.cards.filtering'), 'the filter is not cleared for the person');
+    // bob itself, by name or by command, goes.
+    await app.text('@bob /compact');
+    await app.key('Enter');
+    for (let i = 0; i < 8 && !f.commands.length; i++) await app.flush();
+    assert.deepEqual(f.commands, ['bob:/compact']);
+    await app.text('thanks @bob');
+    await app.key('Enter');
+    for (let i = 0; i < 8 && !f.posts.length; i++) await app.flush();
+    assert.deepEqual(f.posts, ['@bob thanks @bob']);
+  } finally { await app.close(); }
+});
+
+test('the shown agent stopping leaves nothing sendable and seats no other lead; running again it is the target (#482)', { timeout: 60000 }, async (context) => {
+  const f = await lockFixture(context);
+  const { app } = f;
+  const restartAlice = async () => {
+    const before = f.restarts.length;
+    const items = await f.menu('alice');
+    f.item(items, 'Restart')!.click();
+    for (let i = 0; i < 12 && f.restarts.length === before; i++) await app.flush();
+    for (let i = 0; i < 8; i++) await app.flush();
+  };
+  try {
+    await f.showOnly('bob');
+    assert.equal(selectedCard(app.document), 'bob');
+    f.setBobLive(false);
+    await restartAlice(); // any roster answer: bob is gone from it
+    assert.ok(app.document.querySelector('.acard.off[data-agent="bob"].filtered'), 'bob is a stopped card, still the one shown');
+    assert.equal(selectedCard(app.document), '', 'no other lead is seated (alice was just restarted and is live)');
+    assert.match(app.input.getAttribute('placeholder') ?? '', /Showing only bob, who is stopped and cannot receive/u);
+    await app.text('anyone there?');
+    assert.equal(app.send.disabled, true, 'Send is unavailable');
+    await app.key('Enter');
+    for (let i = 0; i < 4; i++) await app.flush();
+    assert.deepEqual(f.posts, [], 'Enter sends nothing either');
+    assert.equal(app.input.value, 'anyone there?');
+    f.setBobLive(true);
+    await restartAlice();
+    assert.equal(selectedCard(app.document), 'bob', 'bob runs again: the target again');
+    app.send.click();
+    for (let i = 0; i < 8 && !f.posts.length; i++) await app.flush();
+    assert.deepEqual(f.posts, ['@bob anyone there?']);
+  } finally { await app.close(); }
+});
+
+test('filtering an already stopped agent locks the same way, and its return selects it (#482 review P1-B)', { timeout: 60000 }, async (context) => {
+  const f = await lockFixture(context, {}, false);
+  const { app } = f;
+  const restartAlice = async () => {
+    const before = f.restarts.length;
+    const items = await f.menu('alice');
+    f.item(items, 'Restart')!.click();
+    for (let i = 0; i < 12 && f.restarts.length === before; i++) await app.flush();
+    for (let i = 0; i < 8; i++) await app.flush();
+  };
+  const filterStoppedBob = async () => {
+    const off = app.document.querySelector<HTMLButtonElement>('.acard.off[data-agent="bob"] .agent-select')!;
+    off.click(); await app.flush();
+    f.item([...app.document.querySelectorAll<HTMLButtonElement>('.ctx button')], 'Only its messages')!.click();
+    await app.flush();
+  };
+  try {
+    assert.equal(selectedCard(app.document), 'alice', 'alice is the target, bob is a stopped card');
+    await filterStoppedBob();
+    assert.ok(app.document.querySelector('.acard.off[data-agent="bob"].filtered'));
+    assert.equal(selectedCard(app.document), '', 'alice is no longer the target: nothing is deliverable');
+    assert.match(app.input.getAttribute('placeholder') ?? '', /Showing only bob, who is stopped/u);
+    assert.equal(stripCard(app.document, 'alice').querySelector('.agent-select')!.getAttribute('aria-disabled'), 'true');
+    // Leaving the view while bob is stopped keeps that target: the room, not alice again.
+    app.document.querySelector<HTMLButtonElement>('.acard.off[data-agent="bob"] .agent-select')!.click(); await app.flush();
+    f.item([...app.document.querySelectorAll<HTMLButtonElement>('.ctx button')], 'Show everything')!.click(); await app.flush();
+    assert.equal(app.document.querySelector('.cards.filtering'), null);
+    assert.equal(selectedCard(app.document), '', 'leaving keeps the target as shown: nobody');
+    // Again, and this time bob comes back while shown: the same rule selects him.
+    await filterStoppedBob();
+    f.setBobLive(true);
+    await restartAlice();
+    assert.deepEqual(f.restarts, ['alice']);
+    assert.equal(selectedCard(app.document), 'bob', 'bob runs again: the target');
+    await app.text('welcome back');
+    app.send.click();
+    for (let i = 0; i < 8 && !f.posts.length; i++) await app.flush();
+    assert.deepEqual(f.posts, ['@bob welcome back'], 'to bob only');
   } finally { await app.close(); }
 });

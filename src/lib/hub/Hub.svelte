@@ -42,12 +42,12 @@
   import { alertOf } from './notify-centre.svelte.ts';
   import HubSearch from './HubSearch.svelte';
   import { createHubSearch } from './hub-search.svelte.ts';
-  import { HUMAN, agentHue, quotePreview, stateDotColor, mergeMessages, mergeEvents, backendColor as colorOf, feedBlocks, filterBlocks, mergeStates, pickLead, pickDrawerAgent, addressed, addressedTeam, mentionedAgents, unreadSenders, stoppedAgents, slashCommand, inputModeSwitch, issueSpans, systemLine } from './hub.ts';
+  import { HUMAN, agentHue, quotePreview, stateDotColor, mergeMessages, mergeEvents, backendColor as colorOf, feedBlocks, filterBlocks, mergeStates, pickLead, pickDrawerAgent, addressed, addressedTeam, mentionTokens, mentionedAgents, unreadSenders, stoppedAgents, slashCommand, inputModeSwitch, issueSpans, systemLine } from './hub.ts';
   import { issueRef } from './board.ts';
   import { AGENT_TEAM, lacksCap } from '../core/login-caps.ts';
   import { resolvePathRef } from '../core/path-links.ts';
   import { createStager } from './attachments.svelte.ts';
-  import { ALL_TARGET, attachmentBody, busyTargetsFor, targetMembers, targetTeam, teamRoot, teamTarget } from './hub-composer.ts';
+  import { ALL_TARGET, attachmentBody, busyTargetsFor, canAddress, lockedSend, targetMembers, targetTeam, teamRoot, teamTarget } from './hub-composer.ts';
   import { walkFeedGap } from './hub-history.ts';
   import { createHubBackRegistry } from './hub-back.ts';
   import { notifyNews, isAway, roomProjectName, playCue, systemNotify, notifyEnabled, notifyLevel, excerpt } from './notifications.ts';
@@ -699,7 +699,13 @@
       if (emptyTeam) { recipient = ''; hubPrefs.setLead(selected, ''); }
       else if (recipient && recipient !== ALL_TARGET && !targetTeam(recipient)
         && !agents.some((a) => a.managed && a.name === recipient)) recipient = '';
-      if (!recipient && !emptyTeam) recipient = pickLead(agents, hubPrefs.lead(selected));
+      // Not while one agent is shown (#482): seating another lead would address
+      // someone off screen. A stopped shown agent leaves the send refused; once
+      // it runs again it is the target again.
+      if (!recipient && !emptyTeam) {
+        if (!shownAgent()) recipient = pickLead(agents, hubPrefs.lead(selected));
+        else if (shownLive()) recipient = shownAgent();
+      }
       // The answered roster is the one judge of a stored team: kept while it
       // has members, forgotten once it has none.
       const storedLead = hubPrefs.lead(selected) ?? '';
@@ -1136,6 +1142,23 @@
     // message that quietly left without the file it showed is the failure
     // mode this exists to prevent (review, 2026-09-03).
     if (failed) return;
+    // The reading-filter lock at the ONE send entry (#482): what the payload
+    // itself reaches is checked too, as it will be sent — a message's address
+    // tokens after its attachments are expanded (a file name may carry one),
+    // a command's own target — before anything is cleared or sent. The draft,
+    // the attachments and the reply stay; the person leaves the filter first.
+    // Nothing is stripped and the filter stays.
+    const cmdFirst = slashCommand(raw);
+    const lock = lockedSend(shownAgent(), shownLive(), recipient,
+      cmdFirst ? [cmdFirst.to] : mentionTokens(attachmentBody(raw, pending)));
+    if (lock) {
+      const token = commandFeedbackLifetime.begin();
+      commandFeedbackAnchor = composer?.feedbackAnchor() ?? null;
+      commandFeedbackLifetime.update(token, { kind: 'error', message: lock.kind === 'beyond'
+        ? t('hubFilterLockedSend').replace('{name}', shownAgent()).replace('{names}', lock.names.map((n) => `@${n}`).join(', '))
+        : t('hubFilterUnreachable').replace('{name}', shownAgent()) });
+      return;
+    }
     const team = targetTeam(recipient);
     const members = team ? targetMembers(recipient, agents) : [];
     const cmd = slashCommand(raw);
@@ -1241,7 +1264,11 @@
   // while one is staged nothing sends (send() and the button agree, the same
   // two-gate rule as `attaching`) — the user removes it or re-attaches.
   const failed = $derived(stager.failed);
-  const sendable = $derived(stager.sendable(composerText));
+  /** The shown agent stopped (#482): it cannot receive, and the lock admits
+   * no other target, so the composer says so and nothing is sendable. */
+  const sendBlocked = $derived(filterAgent && filterAgent !== HUMAN && !managedAgents.some((a) => a.name === filterAgent)
+    ? t('hubFilterUnreachable').replace('{name}', filterAgent) : '');
+  const sendable = $derived(stager.sendable(composerText) && !sendBlocked);
   const stageFiles = (files) => stager.stage(files);
   const removeAttachment = (i) => stager.remove(i);
   const clearAttachments = () => stager.clear();
@@ -1263,7 +1290,7 @@
     session: () => selected,
     append(block, auto) {
       composerText = appendDraft(composerText, block);
-      if (!auto || managedNames.includes(recipient)) return;
+      if (!auto || managedNames.includes(recipient) || shownAgent()) return; // the lock holds (#482)
       const last = [...feed].reverse().find((m) => m.from && managedNames.includes(m.from));
       if (last) recipient = last.from;
     },
@@ -1297,8 +1324,19 @@
     filterAgent = next;
     if (source !== 'user' && source.jump && source.jump === ownedJump) search.adoptAgent(next);
     else search.setAgent(next);
+    // Showing one agent is talking to it (#482): the target follows, through
+    // the one writer — the agent while it runs, nobody while it is stopped
+    // (the same state a running one reaches when it stops). Clearing the
+    // filter leaves the target as it is.
+    if (shownAgent()) setRecipient(shownLive() ? next : '');
   }
-  /** Filtering is a ContextMenu verb, independent of the delivery recipient.
+  /** The agent the reading filter shows, '' when off or on "Only mine": the
+   * lock `canAddress` holds every target choice to (#482). */
+  const shownAgent = () => (filterAgent && filterAgent !== HUMAN ? filterAgent : '');
+  const shownLive = () => managedAgents.some((a) => a.name === filterAgent);
+  /** The one predicate every target control and writer asks (#482). */
+  const targetable = (target) => canAddress(target, shownAgent(), shownLive());
+  /** Filtering is a ContextMenu verb; setting it selects that agent (#482).
    * The card's double-click, its menu, the search token's x and Back all end here. */
   function toggleFilter(name) {
     setFilter(filterAgent === name ? '' : name, 'user');
@@ -1324,6 +1362,10 @@
    * keeps it — before, '' was "unset" and the next roster poll re-seated a lead
    * the user had just dismissed (review C, 2026-09-03). */
   function setRecipient(name) {
+    // The reading-filter lock (#482): while one agent is shown, no other target
+    // is taken, whoever asks — a card, a menu, @all, a team, Record only, or an
+    // automatic pick after a spawn or restart. Leaving the filter is its own act.
+    if (!targetable(name)) return;
     if (recipient !== name) commandFeedbackLifetime.clear();
     // Every explicit choice counts, the same value again and the empty
     // record-only one included: a late automatic pick asks whether one
@@ -2096,8 +2138,8 @@
     const current = () => selected === session && ctxAt?.allMenuId === menuId;
     return [
       recipient === ALL_TARGET
-        ? { label: t('hubRecordOnly'), icon: 'chat', onselect: () => { if (current() && recipient === ALL_TARGET) setRecipient(''); } }
-        : { label: t('hubTalkToAll'), icon: 'chat', onselect: () => { if (current()) setRecipient(ALL_TARGET); } },
+        ? { label: t('hubRecordOnly'), icon: 'chat', disabled: !targetable(''), onselect: () => { if (current() && recipient === ALL_TARGET) setRecipient(''); } }
+        : { label: t('hubTalkToAll'), icon: 'chat', disabled: !targetable(ALL_TARGET), onselect: () => { if (current()) setRecipient(ALL_TARGET); } },
       ...groupItems(ALL_TARGET, 'all', t('hubEveryone'), session).map((item) => ({
         ...item, onselect: () => { if (current()) return item.onselect(); },
       })),
@@ -2126,8 +2168,8 @@
     // talk row, only Start and its configuration.
     const talk = !targetMembers(target, agents).length ? [] : [
       recipient === target
-        ? { label: t('hubRecordOnly'), icon: 'chat', onselect: () => { if (current() && recipient === target) setRecipient(''); } }
-        : { label: t('hubTalkToTeam'), icon: 'chat', onselect: () => { if (current()) setRecipient(target); } },
+        ? { label: t('hubRecordOnly'), icon: 'chat', disabled: !targetable(''), onselect: () => { if (current() && recipient === target) setRecipient(''); } }
+        : { label: t('hubTalkToTeam'), icon: 'chat', disabled: !targetable(target), onselect: () => { if (current()) setRecipient(target); } },
     ];
     return [
       ...talk,
@@ -2245,8 +2287,8 @@
       // The current recipient's card offers to stop addressing it (Record
       // only leads, as for All); any other card offers to talk to it (#196).
       recipient === name
-        ? { label: t('hubRecordOnly'), icon: 'chat', onselect: () => { if (recipient === name) setRecipient(''); } }
-        : { label: t('hubTalkTo'), icon: 'chat', onselect: () => setRecipient(name) },
+        ? { label: t('hubRecordOnly'), icon: 'chat', disabled: !targetable(''), onselect: () => { if (recipient === name) setRecipient(''); } }
+        : { label: t('hubTalkTo'), icon: 'chat', disabled: !targetable(name), onselect: () => setRecipient(name) },
       { label: t('hubWatch'), icon: 'terminal', onselect: () => { if (a) watchAgent(a); } },
       filterItem(name),
       ...config,
@@ -2679,7 +2721,7 @@
         expanded={rosterExpanded} onexpand={toggleRoster}
         allMenuOpen={!!ctxAt?.allSession && ctxAt.allSession === selected} onall={activateAll}
         onallcontext={openAllMenu} onteamcontext={openTeamMenu}
-        {stateLabel} {detailLabel} {stateTone} onselect={setRecipient} oninterrupt={interrupt}
+        {stateLabel} {detailLabel} {stateTone} onselect={setRecipient} {targetable} oninterrupt={interrupt}
         onfilter={(name) => { closeCtx(); toggleFilter(name); }}
         onadd={() => openPicker('add')}
         {moveScope} onmove={(name, team, scope) => moveAgent(name, team, scope.session)}
@@ -2692,7 +2734,7 @@
           <CommandButton variant="secondary" label={t('hubJumpFilterRestore')} onclick={restoreFilter} /></div>
       {/if}
       <Composer bind:this={composer} bind:composerText {selected} {compact} {recipient}
-        {roomReady}
+        {roomReady} blocked={sendBlocked}
         {agents} {pending} {attaching} {failed} {sendable} {interruptible} {replyTo}
         issues={roomIssues} onissues={(s) => loadIssues(s)}
         onclearreply={() => { replyTo = null; composer?.focus(); }}

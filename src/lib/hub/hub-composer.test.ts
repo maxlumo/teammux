@@ -1,6 +1,6 @@
 import assert from 'node:assert/strict';
 import test from 'node:test';
-import { ALL_TARGET, attachmentBody, attachToken, busyTargetsFor, paletteBackendFor, signatureLayout, targetMembers, targetTeam, teamRoot, teamTarget } from './hub-composer.ts';
+import { ALL_TARGET, attachmentBody, attachToken, busyTargetsFor, canAddress, lockedSend, paletteBackendFor, signatureLayout, targetMembers, targetTeam, teamRoot, teamTarget } from './hub-composer.ts';
 import { addressed, commandPalette } from './hub.ts';
 
 const roster = [
@@ -216,4 +216,21 @@ test('interpolation preserves String.replace replacement-string semantics', () =
   // A replacement callback would change dollar expansion in existing paths.
   assert.equal(attachmentBody('[file:2]', [{ ...file, path: '/work/$&.txt' }]),
     '/work/[file:2].txt');
+});
+
+test('the reading-filter lock admits the shown agent alone, and checks what a send reaches (#482)', () => {
+  // Off ('' — no filter, or "Only mine"): every target goes.
+  for (const target of ['bob', ALL_TARGET, teamTarget('squad'), '']) assert.equal(canAddress(target, ''), true, target);
+  // On bob: bob alone, whoever asks.
+  assert.equal(canAddress('bob', 'bob'), true);
+  for (const target of ['alice', ALL_TARGET, teamTarget('squad'), '']) assert.equal(canAddress(target, 'bob'), false, target);
+  // On a stopped bob: nobody — the one state live→stopped also reaches (review P1-B).
+  assert.equal(canAddress('', 'bob', false), true);
+  for (const target of ['bob', 'alice', ALL_TARGET, teamTarget('squad')]) assert.equal(canAddress(target, 'bob', false), false, `${target} while bob is stopped`);
+  assert.equal(lockedSend('', true, 'alice', ['carol']), null, 'no filter, no check');
+  assert.equal(lockedSend('bob', true, 'bob', []), null);
+  assert.equal(lockedSend('bob', true, 'bob', ['bob', '']), null, 'bob by name, or an empty slash target');
+  assert.deepEqual(lockedSend('bob', true, 'bob', ['alice', 'all', 'alice']), { kind: 'beyond', names: ['alice', 'all'] });
+  assert.deepEqual(lockedSend('bob', false, '', []), { kind: 'unreachable' }, 'a stopped bob receives nothing');
+  assert.deepEqual(lockedSend('bob', true, 'alice', []), { kind: 'unreachable' }, 'a target that is not bob is never sent to');
 });

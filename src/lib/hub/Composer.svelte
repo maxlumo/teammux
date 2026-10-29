@@ -15,6 +15,9 @@
     roomReady = false,
     agents = [], interruptible = false,
     pending = [], attaching = false, failed = false, sendable = false,
+    /** Why nothing can be sent now, said where the destination is (#482: the
+     * one agent the filter shows has stopped). Hub also withholds `sendable`. */
+    blocked = '',
     onsend: send = () => {},
     onstage: stageFiles = async () => {}, onremove: removeAttachment = () => {},
     onmodels: modelsList = async () => ({ models: [] }), oninterrupt = async (_target) => {},
@@ -207,9 +210,9 @@
     const c = slashCommand(composerText.trim());
     return !!(c && (c.to || recipient));
   });
-  const composerLabel = $derived(recipient === ALL_TARGET ? t('hubComposerAll')
+  const composerLabel = $derived(blocked || (recipient === ALL_TARGET ? t('hubComposerAll')
     : targetTeam(recipient) ? t('hubComposerTeam').replace('{name}', targetTeam(recipient))
-    : recipient ? t('hubComposerDm').replace('{name}', recipient) : t('hubComposerRoom'));
+    : recipient ? t('hubComposerDm').replace('{name}', recipient) : t('hubComposerRoom')));
 
   // Slash completion retains its backend cache and command/argument stages.
   let cmdModels = $state({});

@@ -24,6 +24,9 @@
     composerText = '', managedNames = [], busyNames = [], interrupting = [],
     stateLabel = (state) => state, detailLabel = (detail) => detail, stateTone = () => undefined,
     onselect: setRecipient = () => {}, oninterrupt: interrupt = () => {}, onfilter = () => {},
+    /** Hub's one target predicate (#482: the reading-filter lock). A control
+     * that would pick a target it refuses is disabled — the dimming made true. */
+    targetable = (_target) => true,
     expanded: expandPref = false, onexpand = () => {}, onadd = () => {}, oncontext = () => {},
     allMenuOpen = false, onall = (_event) => {},
     onallcontext = (_at) => {}, onteamcontext = (_at, _team) => {},
@@ -275,6 +278,9 @@
   function focusAgent(event, name, stopped = false) {
     if (coarsePointer() || event.detail < 2) return;
     event.preventDefault();
+    // A disabled card's double-click is no filter switch either (#482); its
+    // single click is refused by Hub's target writer.
+    if (!stopped && !targetable(name)) return;
     if (!stopped && recipient !== name) setRecipient(name);
     onfilter(name);
   }
@@ -389,7 +395,7 @@
         <CommandButton variant="icon" icon="bots" label={t('hubEveryone')} pressed={recipient === ALL_TARGET} bare
           hasPopup={recipient === ALL_TARGET ? 'menu' : undefined}
           expanded={recipient === ALL_TARGET ? allMenuOpen : undefined}
-          disabled={!selected || !roomReady} onclick={onall} />
+          disabled={!selected || !roomReady} ariaDisabled={!targetable(ALL_TARGET)} onclick={onall} />
       </span>
       {#each groups as group (group.key)}
       {@const named = namedGroup(group)}
@@ -400,6 +406,7 @@
         {#if named}
           <button type="button" class="team-label"
             aria-pressed={recipient === teamTarget(group.team)}
+            aria-disabled={targetable(teamTarget(group.team)) ? undefined : 'true'}
             aria-label={t('hubToTeamLong').replace('{name}', group.team)}
             aria-haspopup="menu"
             use:hoverInfo={() => ({ title: group.team })}
@@ -420,6 +427,7 @@
           onfocusin={() => arm(a.name)} onfocusout={(e) => { if (!e.currentTarget.contains(e.relatedTarget)) disarm(a.name); }}>
           <button type="button" class="agent-select"
             aria-pressed={isAddressed(a.name)}
+            aria-disabled={targetable(a.name) ? undefined : 'true'}
             aria-label={[`${a.name} · ${stateLabel(a.state)}`, a.team, detailLabel(a.detail), vitalsLine(a.vitals), unread.has(a.name) ? t('hubUnread') : '', mentioned ? t('hubToAlsoHint').replace('{names}', `@${a.name}`) : '', filterAgent === a.name ? t('hubFilterItem') : ''].filter(Boolean).join(' · ')}
             use:hoverInfo={() => cardInfo(a)}
             onclick={(e) => clickAgent(e, a.name)} ondblclick={(e) => focusAgent(e, a.name)}

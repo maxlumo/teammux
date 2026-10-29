@@ -168,7 +168,7 @@ test('Hub owns one strip above Composer; ContextMenu replaces the delayed menu (
   const start = source.indexOf('<Roster ');
   const roster = source.slice(start, source.indexOf('/>', start));
   assert.match(roster, /\{composerText\} \{managedNames\} \{busyNames\} \{interrupting\}/u);
-  assert.match(roster, /onselect=\{setRecipient\} oninterrupt=\{interrupt\}/u);
+  assert.match(roster, /onselect=\{setRecipient\} \{targetable\} oninterrupt=\{interrupt\}/u);
   assert.match(roster, /oncontext=\{\(at, name, info\) => openCtx\(at, name, agentItems\(name\), info\)\}/u);
   assert.equal([...source.matchAll(/<Roster /g)].length, 1);
   assert.ok(source.indexOf('<Feed ') < start && start < source.indexOf('<Composer '));
@@ -716,12 +716,12 @@ test('a failed attachment is a chip that blocks send, never a console line', () 
   assert.match(sendFn, /if \(failed\) return;/u, 'send() refuses while a failed chip stands');
   assert.match(pipeline, /sendable\(text: string\) \{ return !!text\.trim\(\) \|\| pending\.some\(\(a\) => !a\.error\); \}/u,
     'a failed chip alone is not content');
-  assert.match(source, /const sendable = \$derived\(stager\.sendable\(composerText\)\);/u);
+  assert.match(source, /const sendable = \$derived\(stager\.sendable\(composerText\) && !sendBlocked\);/u);
 });
 
 test('composer calculations use the pure helpers without moving send or its gates (#117)', () => {
   // teamRoot joined for the picker's running teams (board #382).
-  assert.match(source, /import \{ ALL_TARGET, attachmentBody, busyTargetsFor, targetMembers, targetTeam, teamRoot, teamTarget \} from '\.\/hub-composer\.ts';/u);
+  assert.match(source, /import \{ ALL_TARGET, attachmentBody, busyTargetsFor, canAddress, lockedSend, targetMembers, targetTeam, teamRoot, teamTarget \} from '\.\/hub-composer\.ts';/u);
   const send = /async function send\(\) \{[\s\S]*?\n  \}/u.exec(source)?.[0] ?? '';
   const interpolation = send.indexOf('const body = attachmentBody(raw, atts);');
   assert.ok(interpolation > send.indexOf('if (attaching) return;'));
@@ -893,4 +893,24 @@ test('the Start-a-team picker is three columns and its action never wraps (board
   assert.doesNotMatch(source, /\.agent-pick :global\(svg\)/u, 'a descendant rule would push the avatar\u2019s glyph to the edge');
   assert.equal([...source.matchAll(/<span class="ava tava"><Icon name="bots" size=\{12\} \/><\/span>/gu)].length, 2, 'both team avatars (the picker and the empty room) use the drawn team glyph');
   assert.doesNotMatch(source, /name="collab"/u, 'collab was never drawn');
+});
+
+test('the reading-filter lock lives in the one target writer and the one send entry (#482)', () => {
+  // The writer refuses first, so every caller — card, menu, @all, team, spawn,
+  // restart, reply — is held by one predicate instead of a gate per path.
+  assert.match(source, /function setRecipient\(name\) \{[\s\S]{0,400}?if \(!targetable\(name\)\) return;\s*if \(recipient !== name\)/u);
+  assert.match(source, /const targetable = \(target\) => canAddress\(target, shownAgent\(\), shownLive\(\)\);/u);
+  // Showing one agent selects it (or nobody, if it is stopped) through that writer.
+  assert.match(source, /search\.setAgent\(next\);[\s\S]{0,400}?if \(shownAgent\(\)\) setRecipient\(shownLive\(\) \? next : ''\);/u);
+  // The send reads the payload as sent, not the roster-filtered chip view.
+  assert.match(source, /cmdFirst \? \[cmdFirst\.to\] : mentionTokens\(attachmentBody\(raw, pending\)\)\);/u);
+  assert.doesNotMatch(source, /chipExtras\(raw, shownAgent/u);
+  // The send checks what the text reaches BEFORE anything is cleared or sent.
+  const send = source.slice(source.indexOf('async function send() {'));
+  const gate = send.indexOf('const lock = lockedSend(');
+  assert.ok(gate > 0 && gate < send.indexOf("composerText = ''"), 'the lock is checked before the draft is cleared');
+  assert.ok(gate < send.indexOf('hubCommand('), 'and before any command or post goes out');
+  // The automatic writes that bypass the writer do not seat anyone else.
+  assert.match(source, /if \(!shownAgent\(\)\) recipient = pickLead\(agents, hubPrefs\.lead\(selected\)\);\s*else if \(shownLive\(\)\) recipient = shownAgent\(\);/u);
+  assert.match(source, /if \(!auto \|\| managedNames\.includes\(recipient\) \|\| shownAgent\(\)\) return;/u);
 });

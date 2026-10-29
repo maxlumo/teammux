@@ -132,7 +132,8 @@ completion).
   bottom edge line), and a context menu reached from the card itself or from
   right-click/long-press — no dedicated dots control taking roster space
   (Message / Watch / Only its messages — the one-agent feed filter, also a
-  double-click on the card / configure agent / **Fork** (running agents only,
+  double-click on the card; while it shows one agent that agent is the only
+  target, and a send reaching anyone else is refused, #482 / configure agent / **Fork** (running agents only,
   board #383: one tap, no dialog — a NEW agent with this one's definition, a
   fresh conversation, named `<name>-2`; zh 复制一个; on a server too old to
   have it, "update the server", not the method name) / Interrupt / Move to team /
