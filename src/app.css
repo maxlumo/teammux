@@ -1284,6 +1284,16 @@ button.side-win:hover { background: var(--surface2); color: var(--text); }
 /* The inner <code> must not tint again on top of the block. */
 .md pre code { background: none; padding: 0; border-radius: 0; font-size: inherit; }
 .md blockquote { border-left: 3px solid var(--border); padding-left: 10px; color: var(--text2); }
+/* ONE backdrop for transparent art (board #481): a picture whose pixels can be see-through (an SVG, a PNG or a WebP
+   with alpha) is painted on this checker, so near-black ink on the dark surface and white art on the light one both
+   stay readable. It is the IMG's own background, so it shows only where the art is transparent and an opaque photo
+   is unchanged. Two tones from the existing text tokens, close to each other so it reads as a backdrop and not a
+   pattern; no raw colour. Worn by the Files preview's image and the Lightbox's. */
+.alpha-checker {
+  --alpha-a: color-mix(in srgb, var(--text2) 40%, var(--text3));
+  --alpha-b: color-mix(in srgb, var(--text2) 60%, var(--text3));
+  background: repeating-conic-gradient(var(--alpha-a) 0% 25%, var(--alpha-b) 0% 50%) 0 0 / calc(var(--ui-gap) * 4) calc(var(--ui-gap) * 4);
+}
 /* ONE link rule for the app's prose links (board #478; owner 2026-10-28: "不要高亮下划线显示了，只是鼠标放上去才有
    下划线，减少注意力分散"): message bodies and skill docs (`.md`), the file preview (`.md-render`), a tool row's
    paths (`.step .st-text`) and the Show-the-rest control (`.m-unfold`) are the accent colour with NO underline at

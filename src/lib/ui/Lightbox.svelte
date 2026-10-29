@@ -143,7 +143,7 @@
     onpointerdown={onPointerDown} onpointermove={onPointerMove}
     onpointerup={onPointerUp} onpointercancel={onPointerUp}
     onclick={onBackdrop} onwheel={onWheel}>
-    <img class="lb-img" class:settle {src} {alt} draggable="false"
+    <img class="lb-img alpha-checker" class:settle {src} {alt} draggable="false"
       style:transform={`translate(${tx}px, ${ty}px) scale(${scale * (1 - 0.18 * dismissP)})`} />
   </div>
   <div class="lb-bar">

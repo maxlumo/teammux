@@ -15,7 +15,7 @@ test('every gesture lives on the stage; the bar and the status are siblings outs
   for (const handler of ['onpointerdown', 'onpointermove', 'onpointerup', 'onpointercancel', 'onclick', 'onwheel']) {
     assert.match(stage, new RegExp(`${handler}=`, 'u'), `the stage owns ${handler}`);
   }
-  assert.match(stage, /<img class="lb-img"/u);
+  assert.match(stage, /<img class="lb-img alpha-checker"/u); // the shared see-through backdrop joined the class (#481)
   const afterStage = markup.slice(markup.indexOf('</div>', markup.indexOf('<div class="lb-stage"')));
   assert.match(afterStage, /<div class="lb-bar">/u, 'the bar follows the stage, outside it');
   assert.match(afterStage, /<div class="lb-status">/u, 'and so does the status');

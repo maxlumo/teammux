@@ -114,3 +114,33 @@ test('every showing mints its own base: a reload and a return each ask again', a
   await app.flush();
   assert.ok(app.document.querySelector('iframe')!.getAttribute('srcdoc')!.includes(scope('three')));
 });
+
+// Board #481: an SVG that has only a viewBox has an aspect ratio and no width, so the button that wrapped it was 0
+// wide and the picture 0 x 0 in the preview. jsdom cannot lay anything out, so what is pinned here is the contract the
+// layout rule keys on: a vector's button carries `vector` (and the CSS gives it a containing box), a bitmap's does
+// not, and both pictures wear the one checker atom.
+const picture = (mime: string, name: string) => ({ path: `/p/${name}`, name, stat: { mime_hint: mime }, dataUrl: `data:${mime};base64,eA==` });
+
+test('a vector picture gets the sizing button, a bitmap keeps its natural size; both wear the checker (#481)', async context => {
+  for (const [mime, name, vector] of [['image/svg+xml', 'logo.svg', true], ['image/png', 'logo.png', false], ['image/webp', 'logo.webp', false], ['image/svg', 'odd.svg', true]] as const) {
+    const app = await mount(context, picture(mime, name), {});
+    try {
+      const button = app.document.querySelector<HTMLButtonElement>('.image-preview .image-open')!;
+      assert.ok(button, `${mime}: the picture is the one button into the viewer`);
+      assert.equal(button.classList.contains('vector'), vector, `${mime}: vector class only for an SVG`);
+      assert.equal(button.getAttribute('aria-label'), name);
+      const img = button.querySelector('img')!;
+      assert.ok(img.classList.contains('alpha-checker'), `${mime}: the picture wears the shared checker`);
+      assert.equal(img.getAttribute('src'), `data:${mime};base64,eA==`);
+    } finally { await app.close(); }
+  }
+});
+
+test('the picture opens the viewer once, whatever it is (#481)', async context => {
+  const asked: string[] = [];
+  for (const [mime, name] of [['image/svg+xml', 'logo.svg'], ['image/png', 'logo.png']] as const) {
+    const app = await mount(context, picture(mime, name), { onview: (src: string) => asked.push(src) });
+    try { app.document.querySelector<HTMLButtonElement>('.image-open')!.click(); } finally { await app.close(); }
+  }
+  assert.deepEqual(asked, ['data:image/svg+xml;base64,eA==', 'data:image/png;base64,eA=='], 'one call per activation, with the picture\u2019s own data URL');
+});

@@ -171,3 +171,16 @@ test('a second finger, and a cancelled gesture, are not taps; the next single pr
     assert.equal(closed(), 1, 'and old state never makes the viewer unclosable, nor does a cancel pair with the next tap');
   } finally { await app.close(); }
 });
+
+// Board #481: a see-through picture (an SVG, a PNG or WebP with alpha) is shown on the one checker atom, so near-black
+// art on the dark surface and white art on the light one stay readable. It is the image's own background, so an
+// opaque picture is unchanged; the Files preview wears the same class.
+test('the viewer\u2019s picture wears the shared checker backdrop (#481)', async context => {
+  const app = await (await compiled).mount(context, { props: { src: 'data:image/svg+xml;base64,eA==', alt: 'logo' }, modules: [] });
+  try {
+    const img = app.document.querySelector<HTMLImageElement>('.lb-stage .lb-img')!;
+    assert.ok(img, 'the picture is on the stage');
+    assert.ok(img.classList.contains('alpha-checker'), 'it wears the one checker atom');
+    assert.equal(img.getAttribute('alt'), 'logo');
+  } finally { await app.close(); }
+});

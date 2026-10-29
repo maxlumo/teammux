@@ -109,15 +109,19 @@
   {:else if mimeCategory(currentFile.stat?.mime_hint) === 'pdf'}
     <div class="pdf-container" bind:this={pdfContainer} style="margin: -12px; padding: 0;"></div>
   {:else if mimeCategory(currentFile.stat?.mime_hint) === 'image'}
+    <!-- Board #481: a vector picture (an SVG with only a viewBox) has an aspect ratio and no width of its own, so
+         the button that shrink-wraps it was 0 wide and the picture 0 x 0. For vectors the button fills the pane
+         to give it a containing width; only the picture takes the pointer, as a bitmap does. -->
+    {@const vector = (currentFile.stat?.mime_hint ?? '').startsWith('image/svg')}
     <!-- Board #188 (owner: "点击图片全屏放大…触摸板两指放大手势，不是把整个页面
          放大"): the picture is a BUTTON into the one Lightbox, as a chat image
          is (ChatImage .ci-link); and a trackpad pinch — ctrl+wheel in every
          browser — is taken by the image (non-passive, so the page keeps its
          zoom) and answered with the viewer, where pinch/wheel zoom the image. -->
     <div class="image-preview">
-      <button class="image-open" aria-label={currentFile.name} onclick={() => onview(currentFile.dataUrl ?? '')}
+      <button class="image-open" class:vector aria-label={currentFile.name} onclick={() => onview(currentFile.dataUrl ?? '')}
         use:pinchOpens={() => onview(currentFile.dataUrl ?? '')}>
-        <img src={currentFile.dataUrl} alt={currentFile.name} />
+        <img class="alpha-checker" src={currentFile.dataUrl} alt={currentFile.name} />
       </button>
     </div>
   {:else if mimeCategory(currentFile.stat?.mime_hint) === 'video'}
@@ -196,6 +200,12 @@
   .image-preview img { max-width: 100%; max-height: 100%; object-fit: contain; border-radius: 4px; }
   .media-preview { align-items: stretch; }
   .image-open { display: block; max-width: 100%; max-height: 100%; padding: 0; margin: 0; border: 0; background: none; cursor: zoom-in; touch-action: none; }
+  /* A vector picture: the button gives it a containing box (see the markup); the empty margin is inert and the
+     focus ring hugs the picture, so an SVG behaves like a bitmap to a pointer and a keyboard (board #481). */
+  .image-open.vector { width: 100%; height: 100%; display: flex; align-items: center; justify-content: center; pointer-events: none; }
+  .image-open.vector img { pointer-events: auto; }
+  .image-open.vector:focus-visible { outline: none; }
+  .image-open.vector:focus-visible img { outline: 2px solid var(--accent); outline-offset: 2px; }
   .md-render { font-size: var(--file-font-size, 14px); line-height: 1.6; color: var(--text); overflow-wrap: break-word; }
   .md-render :global(h1) { font-size: 1.55em; margin: 16px 0 8px; color: var(--accent); border-bottom: 1px solid var(--border); padding-bottom: 6px; }
   .md-render :global(h2) { font-size: 1.28em; margin: 14px 0 6px; color: var(--accent); }

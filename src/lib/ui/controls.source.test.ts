@@ -226,3 +226,41 @@ test('prose links share one rule: accent at rest, underline on hover only (#478)
   assert.match(after ?? '', /^\s*\(hover: hover\), \(pointer: none\)[\s\S]*text-decoration: underline/u,
     'the hover guard wraps the underline arm in (hover: hover), (pointer: none), the primary input\u2019s capability');
 });
+
+// Board #481 (owner, 2026-10-29: an SVG logo "没正确显示出来"): a transparent picture is painted on ONE checker atom, the
+// IMG's own background, from two existing text tokens that are close to each other, with no raw colour. The Files
+// preview and the Lightbox wear it; nothing else defines a second one.
+test('transparent pictures share one checker atom from existing tokens, on the img itself (#481)', async () => {
+  const atom = css.match(/\n\.alpha-checker \{([^}]*)\}/u)?.[1] ?? '';
+  assert.ok(atom, 'one atom, in app.css');
+  assert.match(atom, /--alpha-a: color-mix\(in srgb, var\(--text2\) 40%, var\(--text3\)\);/u, 'tone A: from the text tokens');
+  assert.match(atom, /--alpha-b: color-mix\(in srgb, var\(--text2\) 60%, var\(--text3\)\);/u, 'tone B: the same two, mixed the other way: close to A');
+  assert.match(atom, /background: repeating-conic-gradient\(var\(--alpha-a\) 0% 25%, var\(--alpha-b\) 0% 50%\) 0 0 \/ calc\(var\(--ui-gap\) \* 4\) calc\(var\(--ui-gap\) \* 4\);/u,
+    'a checker from the two tones, its cell from the spacing token');
+  assert.doesNotMatch(atom, /#[0-9a-f]{3,8}\b|rgba?\(|hsla?\(|\b\d+px\b/iu, 'no raw colour and no raw pixel value');
+  assert.equal((css.match(/\.alpha-checker\s*\{/gu) ?? []).length, 1, 'one definition');
+  assert.equal((css.match(/repeating-conic-gradient/gu) ?? []).length, 1, 'and no second checker anywhere in app.css');
+  // both surfaces wear it on the IMG (so an opaque picture is unchanged), and neither paints a backdrop of its own
+  const preview = await readFile(new URL('../files/FilePreview.svelte', import.meta.url), 'utf8');
+  const box = await readFile(new URL('./Lightbox.svelte', import.meta.url), 'utf8');
+  assert.match(preview, /<img class="alpha-checker" src=\{currentFile\.dataUrl\}/u, 'the Files preview picture');
+  assert.match(box, /<img class="lb-img alpha-checker"/u, 'the Lightbox picture');
+  for (const [name, src] of [['FilePreview', preview], ['Lightbox', box]] as const)
+    assert.doesNotMatch(src, /repeating-conic-gradient|conic-gradient|linear-gradient\([^)]*\) *0 0 *\//u, `${name}: no checker of its own`);
+});
+
+// Board #481: a viewBox-only SVG has a ratio and no width, so the shrink-wrapping button made it 0 x 0. The rule
+// that fixed it is for vectors ONLY, and keeps a vector exactly as clickable and focusable as a bitmap.
+test('a vector picture\u2019s button fills the pane, its margin is inert and its ring hugs the picture (#481)', async () => {
+  const preview = await readFile(new URL('../files/FilePreview.svelte', import.meta.url), 'utf8');
+  assert.match(preview, /\{@const vector = \(currentFile\.stat\?\.mime_hint \?\? ''\)\.startsWith\('image\/svg'\)\}/u, 'known from the mime, not guessed from pixels');
+  assert.match(preview, /<button class="image-open" class:vector /u);
+  const rule = (sel: string) => preview.match(new RegExp(`\\n  ${sel.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')} \\{([^}]*)\\}`, 'u'))?.[1] ?? '';
+  assert.match(rule('.image-open.vector'), /width: 100%; height: 100%; display: flex; align-items: center; justify-content: center; pointer-events: none;/u,
+    'the button gives the picture a containing box and ignores the pointer');
+  assert.match(rule('.image-open.vector img'), /pointer-events: auto;/u, 'only the picture takes it, as a bitmap does');
+  assert.match(rule('.image-open.vector:focus-visible'), /outline: none;/u);
+  assert.match(rule('.image-open.vector:focus-visible img'), /outline: 2px solid var\(--accent\); outline-offset: 2px;/u, 'the global ring, drawn on the picture');
+  assert.doesNotMatch(rule('.image-open'), /(?<![-\w])(?:width|height): 100%/u, 'a bitmap keeps its natural size: only max-width / max-height cap it');
+  assert.doesNotMatch(preview.replace(/\n  \.image-open\.vector[^\n]*/gu, ''), /\.vector/u, 'the vector class is used by these rules only');
+});

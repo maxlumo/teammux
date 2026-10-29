@@ -314,6 +314,30 @@ defaultPrevented and opens the viewer.
 
 **A tap closes by its gesture, not by the scale its click finds (board #449, 2026-10-22).** The click arrives AFTER pointerup, so a double-tap that has just zoomed back out used to look, at click time, like a clean tap on an unzoomed backdrop and closed the viewer (measured in Chromium at main 7842c7ae; the image has `pointer-events: none`, so a tap on the picture lands on the stage and counts as the backdrop). The close is now decided from a per-gesture record, `tapCloses` in `Lightbox.svelte`: a first finger on an unzoomed picture sets it at pointerdown, and anything that changes the zoom during the gesture clears it (a second finger, a double-tap in or out, a wheel step with the button held; they all pass through `zoomAt` or the double-tap zoom-out), as does `pointercancel`, which is also not half of a double-tap. `onBackdrop` no longer reads `scale`. The next single-finger press takes its own qualification afresh, so old state can never leave the viewer unclosable. No timer or second gesture mechanism was added. NOT fixed here, filed as #450: because the first tap of an unzoomed double-tap closes the viewer at its click, double-tap-to-zoom-IN from scale 1 is unreachable (only pinch and wheel zoom in); making it reachable means delaying the close by the 300 ms double-tap window, which is the owner's call. Pinned by `Lightbox.mount.test.ts` (full pointerdown/up/click sequences on a test-owned clock: unzoomed tap closes; zoomed double-tap does not and the next tap does; zoomed tap and pan do not; a tap whose own gesture zooms in does not; a wheel step while held does not; two fingers and a cancel are not taps) and `Lightbox.source.test.ts` (the click handler does not read the scale).
 
+**A vector picture has a size, and a see-through picture has a backdrop (board #481, 2026-10-29).** Owner: an SVG
+logo (`maxlumo-wordmark-ink.svg`) previewed wrong. Two causes, measured in Chromium 152 with the real `FilePreview`.
+(1) SIZE: the file has only a `viewBox`, so it has an aspect ratio and no width; the `.image-open` button that
+shrink-wraps the picture was 0 wide (0 x 19) and the picture 0 x 0, in both themes at 1280 and 390, while a bitmap
+beside it was fine (400 x 100). The data URL, the mime and the Lightbox were not at fault (the Lightbox renders it
+1280 x 293). (2) INK: forced to a size, the near-black art had contrast 1.00 against the dark surface, and its
+`-white` and `-paper` siblings are 1.09 and 1.13 against the light one, so the page's own theme-following surface
+cannot serve this set of black and white artwork; the checker is chosen to mark the canvas as transparent, not
+because every fixed neutral grey would fail. The fix is
+two small mechanisms. For `image/svg*` only, the button carries `vector`: it fills the pane to give the picture a
+containing width (the diagnostic measured 1232 x 282 at 1280, 342 x 78 at 390), the empty margin takes no pointer
+(`pointer-events: none`, the picture `auto`) and the keyboard ring is drawn on the picture, so an SVG is as
+clickable and as focusable as a bitmap; a bitmap keeps its natural size. And ONE checker atom, `.alpha-checker`
+(app.css), is the background of the `<img>` in the Files preview and in the Lightbox: two tones mixed from the
+existing `--text2` and `--text3` (40% and 60%, about 1.2 apart so it reads as a backdrop and not a pattern), the
+cell from `--ui-gap`, no raw colour. Because it is the img's own background it shows only where the art is
+transparent, so an opaque photo is unchanged; the worst contrast over the two tones is 5.4 for the ink and 2.5 for
+paper in dark, 4.9 and 2.7 in light. Not done: chat-bubble thumbnails of transparent images. They sit on the bubble surface, but
+`ChatImage`'s scoped `.ci` sets its own `background: var(--surface2)`, which is more specific than the atom and would
+cover it, so adding the class alone is NOT enough; that component needs its own check (and a server scope to
+mount), so it is left for its own card. Pinned by `FilePreview.mount.test.ts` and `Lightbox.mount.test.ts` (the markup contract
+jsdom can see) and `controls.source.test.ts` (the atom, its tokens, its single definition, the vector rules); the
+sizes are measured, not tested, because jsdom lays nothing out.
+
 ### The viewer saves the file it shows (board #447, 2026-10-22)
 
 Owner: "我在图片消息里，点开预览放大图片的时候，应该有可以直接下载的按钮". `ui/Lightbox` has one more control beside ✕ when its host can save the picture's FILE (`ondownload`); without a handler it is exactly what it was. Three hosts open it (Hub for chat images, Board, Files); all go through the same two modules.
