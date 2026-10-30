@@ -1032,7 +1032,13 @@ that as "I am talking to X". But every dimmed control still worked. The phone's
 way in, the card menu's "Only its messages", never touched the target, and a
 filtered agent that stopped let the next roster answer seat another lead.
 
-While the filter shows one agent, that agent is the only target:
+While the filter shows one agent, that agent is the only target. The lock is
+on target changes WITHOUT a filter change: showing another agent (its
+double-click, its menu's "Only its messages") is an explicit filter change and
+retargets with it (#483). The #482 ruling said "refuses every other target"
+and never named that one retargeting act, so the first cut refused it too,
+pinned it as intended, and both checks passed against the ruling.
+
 
 - `canAddress(target, shown)` (`hub-composer.ts`) is the one predicate.
   `setRecipient`, the one target writer, asks it first. So a card, a menu's
@@ -1045,7 +1051,13 @@ While the filter shows one agent, that agent is the only target:
   keeps a keyboard and context entry on every engine (review P2-C; the first
   cut disabled @all natively and relied on Chromium passing contextmenu to its
   wrapper). A click or keyboard activation reaches `setRecipient` and is
-  refused there; a double-click on a refused card does nothing. The refused
+  refused there. A double-click on a refused card, like its menu's "Only its
+  messages", is the explicit act of showing that agent instead: the filter
+  moves first and then selects it through the writer, which compares against
+  the NEW shown agent (#483, owner 2026-10-30: "双击选中了一个 Agent 只看它的时候
+  我再双击旁边的 Agent 好像没办法切换过去"; #482 had refused it too, and pinned
+  that as intended). Only a target change that comes with no filter change is
+  refused. The refused
   menu items are disabled. `CommandButton` gained `ariaDisabled` for this.
 - Only target choice is locked. Watch, configure, restart, stop and switching
   the view ("Only its messages" on another card) stay. Leaving the filter is

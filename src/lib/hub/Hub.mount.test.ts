@@ -5637,15 +5637,12 @@ test('the reading filter selects its agent, and every other target is refused wh
     assert.ok(app.document.querySelector('.cards.filtering'));
     assert.equal(selectedCard(app.document), 'bob', 'showing only bob is talking to bob');
 
-    // Another card: disabled for real, and a click (a keyboard activation is one) or a double-click picks nothing.
+    // Another card: disabled for real, and a click (a keyboard activation is
+    // one) picks nothing. Its double-click is the explicit filter switch (#483).
     const alice = stripCard(app.document, 'alice').querySelector<HTMLButtonElement>('.agent-select')!;
     assert.equal(alice.getAttribute('aria-disabled'), 'true');
     assert.equal(stripCard(app.document, 'bob').querySelector('.agent-select')!.getAttribute('aria-disabled'), null);
     alice.click(); await app.flush();
-    for (const [type, detail] of [['click', 1], ['click', 2], ['dblclick', 2]] as const) {
-      alice.dispatchEvent(new app.window.MouseEvent(type, { detail, bubbles: true, cancelable: true }));
-      await app.flush();
-    }
     assert.equal(selectedCard(app.document), 'bob', 'a disabled card takes no target, nor the filter');
     assert.ok(stripCard(app.document, 'bob').classList.contains('filtered'));
 
@@ -5830,5 +5827,93 @@ test('filtering an already stopped agent locks the same way, and its return sele
     app.send.click();
     for (let i = 0; i < 8 && !f.posts.length; i++) await app.flush();
     assert.deepEqual(f.posts, ['@bob welcome back'], 'to bob only');
+  } finally { await app.close(); }
+});
+
+// Board #483 (owner 2026-10-30 14:36: "双击选中了一个 Agent 只看它的时候 我再双击旁边的
+// Agent 好像没办法切换过去"): showing another agent is an explicit filter change,
+// and it retargets: the filter moves first and the writer selects the new one.
+// Only a target change with no filter change stays refused. #482 refused the
+// double-click too and this file pinned that as intended.
+test('while one agent is shown, showing another moves filter and target together; only a bare target change is refused (#483)', { timeout: 60000 }, async (context) => {
+  const f = await lockFixture(context);
+  const { app } = f;
+  const shown = () => app.document.querySelector<HTMLElement>('.acard.filtered')?.dataset.agent ?? '';
+  const card = (name: string) => app.document.querySelector<HTMLButtonElement>(`.acard[data-agent="${name}"] .agent-select`)!;
+  const send = async (line: string) => {
+    const before = f.posts.length;
+    await app.text(line);
+    app.send.click();
+    for (let i = 0; i < 8 && f.posts.length === before; i++) await app.flush();
+    return f.posts.slice(before);
+  };
+  const restartCarol = async () => {
+    const before = f.restarts.length;
+    f.item(await f.menu('carol'), 'Restart')!.click();
+    for (let i = 0; i < 12 && f.restarts.length === before; i++) await app.flush();
+    for (let i = 0; i < 8; i++) await app.flush();
+  };
+  try {
+    await f.showOnly('bob');
+    assert.deepEqual([shown(), selectedCard(app.document)], ['bob', 'bob']);
+
+    // Desktop double-click on alice. Its two single clicks come first and must
+    // neither retarget early nor end the filter (review point).
+    const a = card('alice');
+    for (const detail of [1, 2]) {
+      a.dispatchEvent(new app.window.MouseEvent('click', { detail, bubbles: true, cancelable: true }));
+      await app.flush();
+      assert.deepEqual([shown(), selectedCard(app.document)], ['bob', 'bob'], `after click ${detail}: nothing moved yet`);
+    }
+    a.dispatchEvent(new app.window.MouseEvent('dblclick', { detail: 2, bubbles: true, cancelable: true }));
+    await app.flush();
+    assert.deepEqual([shown(), selectedCard(app.document)], ['alice', 'alice'], 'the double-click shows alice and selects her');
+    assert.deepEqual(await send('one'), ['@alice one'], 'and the line goes to alice alone');
+    assert.equal(card('bob').getAttribute('aria-disabled'), 'true', 'the lock now holds on alice');
+
+    // The phone's way: the card menu's "Only its messages", clicked.
+    f.item(await f.menu('bob'), 'Only its messages')!.click();
+    await app.flush();
+    assert.deepEqual([shown(), selectedCard(app.document)], ['bob', 'bob'], 'the menu switches both');
+    assert.deepEqual(await send('two'), ['@bob two']);
+
+    // A bare target change is still refused: a single click, the Message item.
+    card('alice').click(); await app.flush();
+    f.item(await f.menu('alice'), 'Message')!.click(); await app.flush();
+    assert.deepEqual([shown(), selectedCard(app.document)], ['bob', 'bob'], 'no filter change, no target change');
+
+    // The shown agent stopped: the target is nobody; a double-click on a live
+    // card still switches, and selects it.
+    f.setBobLive(false);
+    await restartCarol();
+    assert.deepEqual([shown(), selectedCard(app.document)], ['bob', ''], 'bob stopped while shown');
+    for (const [type, detail] of [['click', 1], ['click', 2], ['dblclick', 2]] as const) {
+      card('carol').dispatchEvent(new app.window.MouseEvent(type, { detail, bubbles: true, cancelable: true }));
+      await app.flush();
+    }
+    assert.deepEqual([shown(), selectedCard(app.document)], ['carol', 'carol'], 'from a stopped bob to carol');
+    assert.deepEqual(await send('three'), ['@carol three']);
+
+    // A double-click on the shown agent itself still leaves the view, and the target stays.
+    const c = card('carol');
+    for (const [type, detail] of [['click', 1], ['click', 2], ['dblclick', 2]] as const) {
+      c.dispatchEvent(new app.window.MouseEvent(type, { detail, bubbles: true, cancelable: true }));
+      await app.flush();
+    }
+    await f.closeMenu();
+    assert.equal(app.document.querySelector('.cards.filtering'), null, 'the filter is off');
+    assert.equal(selectedCard(app.document), 'carol', 'the target stays');
+
+    // Showing a STOPPED agent from a live one: the filter moves, and the
+    // target is nobody, as when a shown agent stops (#482 review P1-B).
+    await f.showOnly('carol');
+    const off = app.document.querySelector<HTMLButtonElement>('.acard.off[data-agent="bob"] .agent-select')!;
+    for (const [type, detail] of [['click', 1], ['click', 2], ['dblclick', 2]] as const) {
+      off.dispatchEvent(new app.window.MouseEvent(type, { detail, bubbles: true, cancelable: true }));
+      await app.flush();
+    }
+    await f.closeMenu();
+    assert.deepEqual([shown(), selectedCard(app.document)], ['bob', ''], 'stopped bob shown, nobody targeted');
+    assert.match(app.input.getAttribute('placeholder') ?? '', /Showing only bob, who is stopped/u);
   } finally { await app.close(); }
 });

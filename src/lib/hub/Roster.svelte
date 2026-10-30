@@ -278,9 +278,9 @@
   function focusAgent(event, name, stopped = false) {
     if (coarsePointer() || event.detail < 2) return;
     event.preventDefault();
-    // A disabled card's double-click is no filter switch either (#482); its
-    // single click is refused by Hub's target writer.
-    if (!stopped && !targetable(name)) return;
+    // On a card the reading filter has made unavailable as a target, this is
+    // still the explicit "show only this one" (#483): the filter moves first
+    // and selects it. Only the target half is refused by Hub's writer.
     if (!stopped && recipient !== name) setRecipient(name);
     onfilter(name);
   }
