@@ -1164,6 +1164,21 @@ covered: a link that is a control with its own paint (Settings' About link), whi
   trailing check, so a menu and a dropdown say "you are here" in one glyph;
   `hint` is Select's secondary text. Pass the opener as `at.trigger` so its
   click toggles instead of closing-and-reopening.
+- Double-click and a finger's double-tap are ONE gesture too (board #484):
+  `ui/double-tap` holds the app's one pair rule (`createDoubleTapDetector`:
+  two clean taps within `DOUBLE_TAP_MS` 300 and `DOUBLE_TAP_SLOP_PX` 40;
+  the terminal and the Feed's held bubble use it) and a `doubletap` action
+  for an element that also has a `dblclick`. A tap is a press released
+  within longpress's `SLOP_PX` 10 and before its `HOLD_MS` 500, so one timing
+  vocabulary covers hold and double-tap. The action is FINGER-only: a mouse
+  and a pen keep `dblclick`, since a pen also drags cards (`ui/press-drag`
+  starts at 6px). The second tap's compatibility click is swallowed once, and
+  the next press or key clears that guard. A pair is one person's two taps
+  on one thing in one context (review): a press elsewhere, a second finger
+  anywhere and a scroll of the page or an ancestor break it (window capture
+  listeners, removed on teardown), and the action's `scope` (the Roster
+  passes its room) retires a pending tap when it changes, even if the element
+  survives.
 - Right-click and long-press are ONE gesture (`ui/ContextMenu` +
   `ui/longpress`), offering the verbs the surface already has elsewhere.
   **They anchor differently** (board #196, owner 2026-09-13: "手机上展开选项卡不是

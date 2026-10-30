@@ -496,3 +496,12 @@ test('a card is dragged onto a team by the ONE press-drag, in the existing token
     assert.doesNotMatch(css, /#[0-9a-f]{3,8}\b|rgba?\(|\b(?!1px)\d+px/iu, 'no literal colour or raw px');
   }
 });
+
+test('a card\u2019s double-tap and double-click are one act through showOnly (#484)', () => {
+  assert.match(source, /import \{ doubletap \} from '\.\.\/ui\/double-tap\.ts';/u, 'the one recogniser, beside longpress');
+  assert.match(source, /ondblclick=\{\(e\) => focusAgent\(e, a\.name\)\}\s*use:doubletap=\{\{ scope: selected, ondoubletap: \(\) => showOnly\(a\.name\) \}\}/u, 'a live card');
+  assert.match(source, /ondblclick=\{\(e\) => focusAgent\(e, name, true\)\}\s*use:doubletap=\{\{ scope: selected, ondoubletap: \(\) => showOnly\(name, true\) \}\}/u, 'a stopped card');
+  assert.match(source, /function focusAgent\(event, name, stopped = false\) \{[\s\S]{0,200}?if \(coarsePointer\(\) \|\| event\.detail < 2\) return;[\s\S]{0,80}?showOnly\(name, stopped\);/u,
+    'the mouse path ends in the same function, and leaves a touch device to the double-tap');
+  assert.doesNotMatch(source, /createDoubleTapDetector/u, 'no second recogniser in the Roster');
+});

@@ -266,7 +266,7 @@ system IME close can leave the textarea focused. This documents the current
 focus-gated implementation; it does not claim a new Android verification.
 
 ### Key Rules
-1. **Two ways to open the keyboard, both through `unlockKeyboard()`: the toggle button and a double-tap on the terminal.** A single tap never opens or closes it. The double-tap is detected on `touchend` by `createDoubleTapDetector` (`terminal-keyboard.ts`) and fed ONLY from the clean-tap (`down`) branch — a scroll, scrollbar drag, long-press or handle drag between two taps resets the pair, and a tap that cancels a selection is spent on the cancel. (Until 2026-09-03 the docs promised this gesture while the toggle was the only caller; `Terminal.source.test.ts` now pins both callers.)
+1. **Two ways to open the keyboard, both through `unlockKeyboard()`: the toggle button and a double-tap on the terminal.** A single tap never opens or closes it. The double-tap is detected on `touchend` by `createDoubleTapDetector` (`ui/double-tap.ts` since board #484, re-exported by `terminal-keyboard.ts`; the app's one pair rule) and fed ONLY from the clean-tap (`down`) branch — a scroll, scrollbar drag, long-press or handle drag between two taps resets the pair, and a tap that cancels a selection is spent on the cancel. (Until 2026-09-03 the docs promised this gesture while the toggle was the only caller; `Terminal.source.test.ts` now pins both callers.)
 2. **`endTouchScroll` does NOT change `kbLocked`** (was causing race conditions with delayed timers).
 3. **`endTouchScroll` is a no-op while a selection exists** — releasing `touchScrolling=false` would let writeToXterm clear+rewrite, wiping xterm's native highlight.
 4. **keyboard-shift kbH=0** locks only on the open→close falling edge.

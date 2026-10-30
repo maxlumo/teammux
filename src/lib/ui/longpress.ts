@@ -11,11 +11,11 @@
  * ~500ms; matching it makes ours feel native rather than sluggish or trigger-happy. */
 import { anchorOf, type AnchorRect } from './placement.ts';
 
-const HOLD_MS = 500;
+export const HOLD_MS = 500;
 /** Movement that means "this is a scroll, not a press". The same 10px the app's
  * other gesture code uses as its slop, and it is the whole reason a list can still
  * be flicked while its rows are long-pressable. */
-const SLOP_PX = 10;
+export const SLOP_PX = 10;
 
 /** What a completed hold hands its menu: the ELEMENT held — its rect, read
  * for the dropdown (left-aligned) and kept clear of the menu — plus the

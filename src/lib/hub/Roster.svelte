@@ -8,6 +8,7 @@
   import { backendColor as colorOf, stateDotColor, stateIsLive, chipExtras, ctxColor, fmtElapsed, wakeLine, modelLabel, runtimeLabel, agentHue, namedGroup, rosterGroups, rosterMarker, sortAgentsForRoster, stoppedGroups } from './hub.ts';
   import { hoverInfo } from '../ui/hover.ts';
   import { longpress } from '../ui/longpress.ts';
+  import { doubletap } from '../ui/double-tap.ts';
   import { anchorOf } from '../ui/placement.ts';
   import { flip } from 'svelte/animate';
   import { moveMs } from '../ui/motion.ts';
@@ -275,14 +276,20 @@
     }
     selectTarget(name);
   }
-  function focusAgent(event, name, stopped = false) {
-    if (coarsePointer() || event.detail < 2) return;
-    event.preventDefault();
-    // On a card the reading filter has made unavailable as a target, this is
-    // still the explicit "show only this one" (#483): the filter moves first
-    // and selects it. Only the target half is refused by Hub's writer.
+  /** "Show only this one", the card's double gesture: a mouse's double-click
+   * (`focusAgent`) and a finger's double-tap (`ui/double-tap`, #484) are one
+   * act. On a card the reading filter has made unavailable as a target it is
+   * still the explicit switch (#483): the filter moves first and selects it;
+   * only the target half is refused by Hub's writer. */
+  function showOnly(name, stopped = false) {
     if (!stopped && recipient !== name) setRecipient(name);
     onfilter(name);
+  }
+  function focusAgent(event, name, stopped = false) {
+    // A touch device's own dblclick is left to the double-tap action.
+    if (coarsePointer() || event.detail < 2) return;
+    event.preventDefault();
+    showOnly(name, stopped);
   }
   function stoppedMenu(event, name) {
     if (!coarsePointer() && event.detail > 1) return;
@@ -431,6 +438,7 @@
             aria-label={[`${a.name} · ${stateLabel(a.state)}`, a.team, detailLabel(a.detail), vitalsLine(a.vitals), unread.has(a.name) ? t('hubUnread') : '', mentioned ? t('hubToAlsoHint').replace('{names}', `@${a.name}`) : '', filterAgent === a.name ? t('hubFilterItem') : ''].filter(Boolean).join(' · ')}
             use:hoverInfo={() => cardInfo(a)}
             onclick={(e) => clickAgent(e, a.name)} ondblclick={(e) => focusAgent(e, a.name)}
+            use:doubletap={{ scope: selected, ondoubletap: () => showOnly(a.name) }}
             onpointerdown={(e) => cardDrags.down(e, { name: a.name, scope: moveScope })}
             onpointerup={() => cardDrags.up()} onpointercancel={() => cardDrags.cancel()}
             oncontextmenu={(e) => { e.preventDefault(); oncontext(pointOf(e), a.name, touchInfo(() => cardInfo(a))); }}
@@ -523,6 +531,7 @@
             aria-label={[name, t('hubStopped'), filterAgent === name ? t('hubFilterItem') : ''].filter(Boolean).join(' · ')} aria-haspopup="menu"
             use:hoverInfo={() => offCardInfo(name)}
             onclick={(e) => stoppedMenu(e, name)} ondblclick={(e) => focusAgent(e, name, true)}
+            use:doubletap={{ scope: selected, ondoubletap: () => showOnly(name, true) }}
             oncontextmenu={(e) => { e.preventDefault(); oncontext(pointOf(e), name, touchInfo(() => offCardInfo(name))); }}
             use:longpress={{ onlongpress: (at) => oncontext(at, name, touchInfo(() => offCardInfo(name))) }}>
             <span class="avatar-slot">

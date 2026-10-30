@@ -86,45 +86,12 @@ export function encodeTerminalShortcut(event: KeyboardEvent): string {
 //
 // Two CLEAN taps (the gesture machine classified both as `down` → release, not
 // scroll / long-press / handle drag) within a short delay and a small distance
-// open the keyboard. Anything that is not a clean tap breaks the pair, so a
-// tap that lands right after a scroll cannot complete one.
+// open the keyboard. The pair rule is the app's ONE double-tap detector; it
+// lives in ui/double-tap.ts beside longpress since board #484 (the Roster card
+// uses it too) and is re-exported here for the terminal's own callers.
 
-export const DOUBLE_TAP_MS = 300;
-export const DOUBLE_TAP_SLOP_PX = 40;
-
-export interface TapPoint {
-  x: number;
-  y: number;
-  /** Timestamp in ms (any monotonic clock, compared only to the previous tap). */
-  t: number;
-}
-
-export interface DoubleTapDetector {
-  /** Feed one clean tap. True when it completes a pair (the pair is then consumed). */
-  tap(p: TapPoint): boolean;
-  /** Forget the pending first tap — call for every non-tap gesture end. */
-  reset(): void;
-}
-
-export function createDoubleTapDetector(
-  maxDelayMs: number = DOUBLE_TAP_MS,
-  maxDistancePx: number = DOUBLE_TAP_SLOP_PX,
-): DoubleTapDetector {
-  let last: TapPoint | null = null;
-  return {
-    tap(p) {
-      if (last && p.t - last.t <= maxDelayMs && Math.hypot(p.x - last.x, p.y - last.y) <= maxDistancePx) {
-        last = null;
-        return true;
-      }
-      last = p;
-      return false;
-    },
-    reset() {
-      last = null;
-    },
-  };
-}
+export { DOUBLE_TAP_MS, DOUBLE_TAP_SLOP_PX, createDoubleTapDetector } from '../ui/double-tap.ts';
+export type { TapPoint, DoubleTapDetector } from '../ui/double-tap.ts';
 
 // --- Ctrl one-shot (terminal-keyboard.md "The Ctrl one-shot expires") -------
 //

@@ -5917,3 +5917,154 @@ test('while one agent is shown, showing another moves filter and target together
     assert.match(app.input.getAttribute('placeholder') ?? '', /Showing only bob, who is stopped/u);
   } finally { await app.close(); }
 });
+
+// Board #484 (owner 2026-10-30 17:17: "双击 Agent 的卡片显示或不显示 在手机上也要支持
+// 现在手机上只能长按 然后在菜单里选择"): a finger's double-tap on a card is the
+// desktop double-click — the SAME showOnly path, so #483's rule holds. Sent as
+// a phone sends it: pointer events, then a click per tap, and maybe a dblclick.
+test('a double-tap on a card shows only it on a touch device, as a double-click does (#484)', { timeout: 60000 }, async (context) => {
+  const f = await lockFixture(context);
+  const { app } = f;
+  // A phone: any-pointer is coarse (Roster.coarsePointer).
+  const media = app.window.matchMedia;
+  app.window.matchMedia = (query: string) => Object.assign(media(query), { matches: query === '(any-pointer: coarse)' });
+  const shown = () => app.document.querySelector<HTMLElement>('.acard.filtered')?.dataset.agent ?? '';
+  const menu = () => !!app.document.querySelector('.ctx');
+  const button = (name: string) => app.document.querySelector<HTMLButtonElement>(`.acard[data-agent="${name}"] .agent-select`)!;
+  let clock = 10_000;
+  const pointer = (el: Element, type: string, props: Record<string, unknown>) => {
+    const e = new app.window.MouseEvent(type, { bubbles: true, cancelable: true, clientX: 30, clientY: 12 });
+    for (const [k, v] of Object.entries({ pointerType: 'touch', isPrimary: true, ...props })) Object.defineProperty(e, k, { value: v });
+    el.dispatchEvent(e);
+  };
+  /** One finger tap as Chromium sends it: pointerdown, pointerup, click(detail). */
+  const tap = async (name: string, detail: number, o: { gap?: number; moveX?: number; type?: string } = {}) => {
+    clock += o.gap ?? 120;
+    const el = button(name);
+    pointer(el, 'pointerdown', { timeStamp: clock, pointerType: o.type ?? 'touch' });
+    if (o.moveX) pointer(el, 'pointermove', { timeStamp: clock + 5, clientX: 30 + o.moveX, pointerType: o.type ?? 'touch' });
+    pointer(el, 'pointerup', { timeStamp: clock + 60, clientX: 30 + (o.moveX ?? 0), pointerType: o.type ?? 'touch' });
+    el.dispatchEvent(new app.window.MouseEvent('click', { detail, bubbles: true, cancelable: true }));
+    await app.flush();
+  };
+  const dblclick = async (name: string) => {
+    button(name).dispatchEvent(new app.window.MouseEvent('dblclick', { detail: 2, bubbles: true, cancelable: true }));
+    await app.flush();
+  };
+  const send = async (line: string) => {
+    const before = f.posts.length;
+    await app.text(line);
+    app.send.click();
+    for (let i = 0; i < 8 && f.posts.length === before; i++) await app.flush();
+    return f.posts.slice(before);
+  };
+  try {
+    assert.deepEqual([shown(), selectedCard(app.document)], ['', 'alice']);
+    // No filter: tap 1 selects bob (its single-tap meaning), tap 2 shows only bob.
+    await tap('bob', 1);
+    assert.deepEqual([shown(), selectedCard(app.document), menu()], ['', 'bob', false], 'tap 1 is a tap');
+    await tap('bob', 2);
+    await dblclick('bob'); // Chromium also sends one; it must not toggle again
+    assert.deepEqual([shown(), selectedCard(app.document), menu()], ['bob', 'bob', false], 'the pair shows only bob; the second tap opened no menu');
+    assert.deepEqual(await send('one'), ['@bob one']);
+
+    // Filtering bob, a double-tap on alice: tap 1 refused, the pair switches (#483).
+    await tap('alice', 1);
+    assert.deepEqual([shown(), selectedCard(app.document)], ['bob', 'bob'], 'tap 1 is refused while bob is shown');
+    await tap('alice', 2); // and this time no dblclick at all
+    assert.deepEqual([shown(), selectedCard(app.document), menu()], ['alice', 'alice', false]);
+    assert.deepEqual(await send('two'), ['@alice two']);
+
+    // A double-tap on the shown alice: tap 1 opens her menu (her single-tap
+    // meaning), the pair leaves the view and closes it; the target stays.
+    await tap('alice', 1);
+    assert.equal(menu(), true, 'tap 1 on the target opens its menu, as before');
+    await tap('alice', 2);
+    await dblclick('alice');
+    assert.deepEqual([shown(), selectedCard(app.document), menu()], ['', 'alice', false], 'filter off, target kept, menu closed');
+
+    // Not a pair: two slow taps, and a swipe (the strip scrolls under a finger).
+    await tap('carol', 1);
+    assert.equal(selectedCard(app.document), 'carol');
+    await tap('carol', 1, { gap: 450 });
+    if (menu()) { app.window.dispatchEvent(new app.window.KeyboardEvent('keydown', { key: 'Escape', bubbles: true })); await app.flush(); }
+    assert.equal(shown(), '', 'two slow taps are two taps');
+    await tap('carol', 1, { gap: 400 });
+    if (menu()) { app.window.dispatchEvent(new app.window.KeyboardEvent('keydown', { key: 'Escape', bubbles: true })); await app.flush(); }
+    await tap('carol', 2, { moveX: 12 });
+    if (menu()) { app.window.dispatchEvent(new app.window.KeyboardEvent('keydown', { key: 'Escape', bubbles: true })); await app.flush(); }
+    assert.equal(shown(), '', 'a swipe on the second press does not pair');
+    // A pen keeps its own double-click path (#484 review P1-A).
+    await tap('bob', 1, { gap: 400, type: 'pen' });
+    await tap('bob', 2, { type: 'pen' });
+    if (menu()) { app.window.dispatchEvent(new app.window.KeyboardEvent('keydown', { key: 'Escape', bubbles: true })); await app.flush(); }
+    assert.equal(shown(), '', 'a pen pair is not a finger double-tap');
+  } finally { await app.close(); }
+});
+
+// #484 review P1-A/P1-B, in one real DOM: the pair breaks on what happens
+// outside its card, and it never completes across a room switch.
+test('a card double-tap breaks on another card, a second finger, a strip scroll, and a room switch (#484 review)', { timeout: 60000 }, async (context) => {
+  const app = await composerFixture(context);
+  const media = app.window.matchMedia;
+  app.window.matchMedia = (query: string) => Object.assign(media(query), { matches: query === '(any-pointer: coarse)' });
+  const shown = () => app.document.querySelector<HTMLElement>('.acard.filtered')?.dataset.agent ?? '';
+  const button = (name: string) => app.document.querySelector<HTMLButtonElement>(`.acard[data-agent="${name}"] .agent-select`)!;
+  const closeMenu = async () => { if (app.document.querySelector('.ctx')) { app.window.dispatchEvent(new app.window.KeyboardEvent('keydown', { key: 'Escape', bubbles: true })); await app.flush(); } };
+  let clock = 50_000;
+  const pointer = (el: Element, type: string, props: Record<string, unknown> = {}) => {
+    const e = new app.window.MouseEvent(type, { bubbles: true, cancelable: true, clientX: 30, clientY: 12 });
+    for (const [k, v] of Object.entries({ pointerType: 'touch', isPrimary: true, timeStamp: clock, ...props })) Object.defineProperty(e, k, { value: v });
+    el.dispatchEvent(e);
+  };
+  const tap = async (el: Element, detail: number, gap = 100) => {
+    clock += gap;
+    pointer(el, 'pointerdown');
+    clock += 50;
+    pointer(el, 'pointerup');
+    el.dispatchEvent(new app.window.MouseEvent('click', { detail, bubbles: true, cancelable: true }));
+    await app.flush();
+  };
+  const cleanPair = async (name: string) => { await tap(button(name), 1, 1000); await tap(button(name), 2); await closeMenu(); };
+  try {
+    // A, B, A within the window: alice's taps are not a pair across bob's.
+    await tap(button('alice'), 1, 1000);
+    await tap(button('bob'), 1, 60);
+    await tap(button('alice'), 1, 60);
+    await closeMenu();
+    assert.equal(shown(), '', 'A-B-A does not pair');
+    // A second finger on another card while alice's second press is held.
+    await tap(button('alice'), 1, 1000);
+    // Separate native events, so the app settles between them as in a browser.
+    clock += 100; pointer(button('alice'), 'pointerdown'); await app.flush();
+    pointer(button('bob'), 'pointerdown', { isPrimary: false }); await app.flush();
+    clock += 50; pointer(button('alice'), 'pointerup');
+    button('alice').dispatchEvent(new app.window.MouseEvent('click', { detail: 2, bubbles: true, cancelable: true }));
+    await app.flush(); await closeMenu();
+    assert.equal(shown(), '', 'a second finger elsewhere breaks the pair');
+    // The strip scrolls between the taps.
+    await tap(button('alice'), 1, 1000);
+    app.document.querySelector('.cards')!.dispatchEvent(new app.window.Event('scroll'));
+    await app.flush(); // a separate native event: the app settles first, as in a browser
+    await tap(button('alice'), 2);
+    await closeMenu();
+    assert.equal(shown(), '', 'a strip scroll breaks the pair');
+    // After every break, a clean pair still works.
+    await cleanPair('bob');
+    assert.equal(shown(), 'bob', 'a clean pair after the breaks');
+    await cleanPair('bob');
+    assert.equal(shown(), '', 'and again leaves the view');
+
+    // A room switch between the taps: the pair does not survive it. Here the
+    // switch rebuilds the card; the case where the SAME node serves the new
+    // room is double-tap.test.ts's (one action, its scope updated).
+    await tap(button('bob'), 1, 1000);
+    await closeMenu();
+    await app.room('other');
+    await tap(button('bob'), 2, 80);
+    await closeMenu();
+    assert.equal(shown(), '', 'no pair across the switch');
+    await cleanPair('bob');
+    assert.equal(shown(), 'bob', 'a clean pair in the new room fires');
+  } finally { await app.close(); }
+});
