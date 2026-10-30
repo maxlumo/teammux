@@ -153,3 +153,36 @@ test('a pair completes only in the scope its first tap had (#484 review P1-B)', 
   r.send('pointerup', { pointerType: 'touch', isPrimary: true, clientX: 50, clientY: 20, timeStamp: 1160 });
   assert.deepEqual(r.fired, [], 'the held press of the old room does not pair');
 });
+
+test('destroy removes the window capture listeners it added (#484 review P2-C, #485)', () => {
+  // A window that keeps a ledger of live registrations by type, function and
+  // capture, the triple removeEventListener must match. A retained listener
+  // only resets state and never calls back, so counting callbacks proves
+  // nothing; the ledger does.
+  const live = new Map<string, number>();
+  const fns = new Map<unknown, number>();
+  const key = (type: string, fn: unknown, options?: boolean | AddEventListenerOptions) => {
+    const capture = typeof options === 'boolean' ? options : !!options?.capture;
+    if (!fns.has(fn)) fns.set(fn, fns.size);
+    return `${type}|${fns.get(fn)}|${capture}`;
+  };
+  const win = {
+    addEventListener: (type: string, fn: unknown, options?: boolean | AddEventListenerOptions) => {
+      const k = key(type, fn, options); live.set(k, (live.get(k) ?? 0) + 1);
+    },
+    removeEventListener: (type: string, fn: unknown, options?: boolean | AddEventListenerOptions) => {
+      const k = key(type, fn, options); const n = live.get(k) ?? 0;
+      if (n <= 1) live.delete(k); else live.set(k, n - 1);
+    },
+  };
+  const node: EventTarget & { contains?: (t: unknown) => boolean; ownerDocument?: unknown } = new EventTarget();
+  node.contains = (t) => t === node;
+  node.ownerDocument = { defaultView: win };
+  const action = doubletap(node as unknown as HTMLElement, { scope: 'room-a', ondoubletap: () => {} });
+  const types = () => [...live.keys()].map((k) => k.split('|')).map(([type, , capture]) => `${type}:${capture}`).sort();
+  assert.deepEqual(types(), ['pointerdown:true', 'scroll:true'], 'the action watches the window in capture for presses and scrolls');
+  action.update({ scope: 'room-b', ondoubletap: () => {} });
+  assert.deepEqual(types(), ['pointerdown:true', 'scroll:true'], 'an update adds no second set');
+  action.destroy();
+  assert.deepEqual([...live.keys()], [], 'destroy removes both, by the same function and capture flag');
+});
