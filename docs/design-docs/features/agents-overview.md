@@ -451,12 +451,40 @@ was touched.
   the config. The model still lives in CONFIG, never on the launch line.
 - **The engine door is one app-wide key**: `kiro_engine = "v2" | "v3"` in
   `config.toml` (`KIRO_ENGINE` overrides; default v2; anything else is v2 with
-  a note). `render_kiro` appends ` --agent-engine v3` to the launch line only
-  when the door is open — v2 is byte-for-byte what it was — and `refresh`
-  reconciles the recorded `launch.json` at every start (`reconcile_engine_in`:
-  add / replace / drop the segment), so an agent takes the new engine at its
-  NEXT restart and one scratch agent can be flipped by restarting it alone. No
-  per-agent field: that would be a schema and editor change nobody asked for.
+  a note). `render_kiro` appends ` --agent-engine v3 --trust-workspace` to the
+  launch line only when the door is open — v2 is byte-for-byte what it was —
+  and `refresh` reconciles the recorded `launch.json` at every start
+  (`reconcile_engine_in`: add / replace / drop the segment), so an agent takes
+  the new engine at its NEXT restart and one scratch agent can be flipped by
+  restarting it alone. No per-agent field: that would be a schema and editor
+  change nobody asked for.
+- **The v3 trust menu is answered on the launch line** (board #487, owner
+  2026-11-01: "好多session重启遇到问题了"). kiro-cli 2.34.0's v3 engine opens
+  with "Trust this workspace? ❯ Trust, continue / Don't trust, exit" whenever
+  the isolated `KIRO_HOME` has no `workspace-roots/<hash>/permissions.yaml`
+  with `workspaceTrusted`, so a restored or relaunched agent whose home had
+  never answered it sat on the menu until a human pressed Enter (the
+  validator here, kiro-3 in sound-factory). Same class as #183 (Midway y/N)
+  and #184 (codex's trust screen), and the same answer: the CLI's documented
+  door, `--trust-workspace` ("Skip the Trust this workspace? prompt for this
+  launch only (V3 only)"), rides in the engine segment, so it is on every v3
+  line and never on a v2 one. The same reconcile brings it into a v3
+  `launch.json` written before #487 at that agent's next start, right after
+  the engine value; on a backfilled line the whole engine segment sits before
+  the trailing `kick` (`… --agent-engine v3 --trust-workspace kick`), the one
+  order every generated shape uses. That is order unification, not a parsing
+  fix: 2.34.0 also skips the menu with the flags after `kick`, and `kick` is
+  still the first input either way (validator, real panes). The fix depends on
+  `chat.disableTrustAllConfirmation=true` staying in `kiro_cli_settings`:
+  without it, a fresh home gets past the trust menu and stops on a second
+  screen, "Warning: Kiro is running in trust all tools mode" (default
+  `❯ No, exit`). A managed home has the setting from spawn, and
+  `ensure_kiro_settings` restores it at every start. We do not
+  seed `permissions.yaml`: the hash and the file are kiro's. Measured on 2.34.0, real panes, fresh homes
+  with no `workspace-roots`: without the flag the menu; with it, the prompt
+  `›  ask a question or describe a task`, and no `permissions.yaml` trust
+  record (`workspaceTrusted`) was written, so the choice applies to that
+  launch only. Other writes to the home were not part of the measurement.
 - **v3 finds the agent through the WORKSPACE, not `KIRO_HOME`** — the finding
   that changed the plan. With a private home, the same profile was "agent
   … not found, using default" under any other name and from any other cwd,

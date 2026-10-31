@@ -2287,6 +2287,15 @@ mod tests {
         assert_eq!(settings.get("chat.enableAutoAgentUpgrade").and_then(|m| m.as_bool()), Some(true));
         // The engine door is closed by default: the launch line is what it was.
         assert!(!r.cmd.contains("--agent-engine"), "v2 default leaves no trace: {}", r.cmd);
+        // Board #487 (kiro-cli 2.34.0): the v3 engine's launch-time "Trust this
+        // workspace?" menu parked an unattended relaunch. The flag that skips
+        // it is v3-only, so it rides with the engine: never on the v2 line, on
+        // the v3 line, and reconciled into a v3 recipe written before #487.
+        assert!(!r.cmd.contains("--trust-workspace"), "v2 line untouched: {}", r.cmd);
+        let v3 = crate::backends::kiro::reconcile_engine_in(&r.cmd, " --agent-engine v3 --trust-workspace").unwrap();
+        assert!(v3.ends_with(" --agent-engine v3 --trust-workspace"), "{v3}");
+        let pre487 = format!("{} --agent-engine v3", r.cmd);
+        assert_eq!(crate::backends::kiro::reconcile_engine_in(&pre487, " --agent-engine v3 --trust-workspace").as_deref(), Some(v3.as_str()), "an old v3 recipe is upgraded");
         let prompt = conf.get("prompt").and_then(|p| p.as_str()).unwrap();
         assert!(prompt.contains("tmm send"), "the tmm paragraph IS the integration");
         assert!(!prompt.contains("fix the bug"), "brief is delivered as the first user message");

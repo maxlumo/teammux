@@ -454,24 +454,40 @@ fn profile_model(config: &Path) -> String {
         .unwrap_or_default()
 }
 
-/// ` --agent-engine v3` when the app-wide engine door is open, else nothing
-/// — the v2 launch line is byte-for-byte what it was, so flipping the door
-/// back leaves no trace (board #207). The door is `kiro_engine` in
-/// config.toml (`KIRO_ENGINE` overrides), read at spawn and at refresh: an
-/// agent takes the new engine at its next restart, so one scratch agent can be
-/// flipped alone before the owner restarts the real ones.
+/// The v3 engine's answer to its launch-time "Trust this workspace?" menu
+/// (board #487, kiro-cli 2.34.0: "Skip the prompt for this launch only (V3
+/// only)"). A managed pane is unattended, so the menu parked every relaunched
+/// agent whose isolated home had never answered it.
+pub(crate) const TRUST_WORKSPACE: &str = "--trust-workspace";
+
+/// ` --agent-engine v3 --trust-workspace` when the app-wide engine door is
+/// open, else nothing — the v2 launch line is byte-for-byte what it was, so
+/// flipping the door back leaves no trace (board #207). The door is
+/// `kiro_engine` in config.toml (`KIRO_ENGINE` overrides), read at spawn and at
+/// refresh: an agent takes the new engine at its next restart, so one scratch
+/// agent can be flipped alone before the owner restarts the real ones. The
+/// trust flag rides with the engine because the prompt it answers is the v3
+/// engine's (board #487).
 #[cfg(not(any(target_os = "android", target_os = "ios")))]
 pub(crate) fn engine_flag() -> String {
-    match crate::config::kiro_engine().as_str() {
-        "v3" => " --agent-engine v3".into(),
+    engine_segment(&crate::config::kiro_engine())
+}
+
+/// The pure half of `engine_flag`: the launch-line segment for an engine name.
+pub(crate) fn engine_segment(engine: &str) -> String {
+    match engine {
+        "v3" => format!(" --agent-engine v3 {TRUST_WORKSPACE}"),
         _ => String::new(),
     }
 }
 
-/// Bring a launch recipe's engine segment in line with the door: add
-/// ` --agent-engine v3` after `--trust-all-tools` when the door is open and
-/// the line lacks it, drop any ` --agent-engine <x>` when it is closed. Exact
-/// token surgery on the recorded line, like `migrate_launch_model`.
+/// Bring a launch recipe's engine segment in line with the door: when it is
+/// open, the line gets ` --agent-engine v3` (at the end when absent, or just
+/// before a trailing `kick`; the value replaced when another engine is named) and `--trust-workspace` right after
+/// the engine value when missing — so a recipe written before board #487
+/// gains the trust flag at its next start; when the door is closed, any
+/// ` --agent-engine <x>` and `--trust-workspace` go. Exact token surgery on
+/// the recorded line, like `migrate_launch_model`.
 #[cfg(not(any(target_os = "android", target_os = "ios")))]
 pub(crate) fn reconcile_recipe_engine(home: &Path) -> Result<bool, String> {
     // Through the recipe's one door (board #384): the read is inside the
@@ -488,28 +504,41 @@ pub(crate) fn reconcile_recipe_engine(home: &Path) -> Result<bool, String> {
 
 /// The pure half: `Some(new line)` when the engine segment has to change.
 pub(crate) fn reconcile_engine_in(cmd: &str, flag: &str) -> Option<String> {
-    let mut tokens: Vec<&str> = cmd.split_whitespace().collect();
-    let has = tokens.iter().position(|t| *t == "--agent-engine");
+    let before: Vec<&str> = cmd.split_whitespace().collect();
+    let mut tokens = before.clone();
     let want: Vec<&str> = flag.split_whitespace().collect();
-    match (has, want.is_empty()) {
-        (Some(at), true) => {
+    let engine = want.windows(2).find(|w| w[0] == "--agent-engine").map(|w| w[1]);
+    let trust = want.contains(&TRUST_WORKSPACE);
+    // The engine pair.
+    match (tokens.iter().position(|t| *t == "--agent-engine"), engine) {
+        (Some(at), None) => {
             tokens.drain(at..(at + 2).min(tokens.len()));
-            Some(tokens.join(" "))
         }
-        (Some(at), false) => {
-            if tokens.get(at + 1) == want.get(1) {
-                return None;
-            }
+        (Some(at), Some(e)) => {
             if at + 1 < tokens.len() {
-                tokens[at + 1] = want[1];
+                tokens[at + 1] = e;
             } else {
-                tokens.push(want[1]);
+                tokens.push(e);
             }
-            Some(tokens.join(" "))
         }
-        (None, true) => None,
-        (None, false) => Some(format!("{cmd}{flag}")),
+        // Before a trailing `kick` (the backfill's first input), so every
+        // generated shape keeps its flags ahead of the positional (#487 P2-A).
+        (None, Some(e)) => {
+            let at = if tokens.last() == Some(&"kick") { tokens.len() - 1 } else { tokens.len() };
+            tokens.splice(at..at, ["--agent-engine", e]);
+        }
+        (None, None) => {}
     }
+    // The trust flag, right after the engine value (board #487).
+    match (tokens.iter().position(|t| *t == TRUST_WORKSPACE), trust) {
+        (Some(_), false) => tokens.retain(|t| *t != TRUST_WORKSPACE),
+        (None, true) => {
+            let at = tokens.iter().position(|t| *t == "--agent-engine").map_or(tokens.len(), |a| (a + 2).min(tokens.len()));
+            tokens.insert(at, TRUST_WORKSPACE);
+        }
+        _ => {}
+    }
+    (tokens != before).then(|| tokens.join(" "))
 }
 
 /// The v3 engine's Stop payload carries no reply text; the final response of
@@ -1998,6 +2027,25 @@ mod tests {
         let kick = "command kiro-cli chat --agent dev --trust-all-tools --agent-engine v3 kick";
         assert_eq!(reconcile_engine_in(kick, "").as_deref(), Some("command kiro-cli chat --agent dev --trust-all-tools kick"));
         assert_eq!(reconcile_engine_in("x --agent-engine v2", " --agent-engine v3").as_deref(), Some("x --agent-engine v3"));
+        // Board #487: the open door carries --trust-workspace right after the
+        // engine value; a recipe written before #487 gains it, kick and all.
+        let v3t = &engine_segment("v3");
+        assert_eq!(v3t, " --agent-engine v3 --trust-workspace", "the open door's segment");
+        assert_eq!(engine_segment("v2"), "", "the closed door's: nothing");
+        assert_eq!(reconcile_engine_in(base, v3t).as_deref(), Some("command kiro-cli chat --agent dev --trust-all-tools --agent-engine v3 --trust-workspace"));
+        assert_eq!(reconcile_engine_in(v3, v3t).as_deref(), Some("command kiro-cli chat --agent dev --trust-all-tools --agent-engine v3 --trust-workspace"), "an old v3 recipe is upgraded");
+        assert_eq!(reconcile_engine_in(kick, v3t).as_deref(), Some("command kiro-cli chat --agent dev --trust-all-tools --agent-engine v3 --trust-workspace kick"));
+        // P2-A: a v2 kick line (the pre-recipe backfill under v2) opened to v3
+        // keeps the flags before kick, and closing the door restores it.
+        let v2_kick = "command kiro-cli chat --agent dev --trust-all-tools kick";
+        let opened = reconcile_engine_in(v2_kick, v3t).unwrap();
+        assert_eq!(opened, "command kiro-cli chat --agent dev --trust-all-tools --agent-engine v3 --trust-workspace kick");
+        assert_eq!(reconcile_engine_in(&opened, v3t), None, "idempotent");
+        assert_eq!(reconcile_engine_in(&opened, "").as_deref(), Some(v2_kick), "and back to v2");
+        assert_eq!(reconcile_engine_in(v2_kick, " --agent-engine v3").as_deref(), Some("command kiro-cli chat --agent dev --trust-all-tools --agent-engine v3 kick"), "the engine pair alone, too");
+        let v3_trusted = "command kiro-cli chat --agent dev --trust-all-tools --agent-engine v3 --trust-workspace";
+        assert_eq!(reconcile_engine_in(v3_trusted, v3t), None, "already trusted: idempotent");
+        assert_eq!(reconcile_engine_in(v3_trusted, "").as_deref(), Some(base), "door closed: both flags go, the v2 line is what it was");
     }
 
     /// Board #207: v3 keeps the reply in the global session file. Real row
