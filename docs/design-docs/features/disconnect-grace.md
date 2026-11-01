@@ -243,3 +243,14 @@ running loop. The Vite dev client's own reload-on-reconnect, which is what
 reloaded a browser tab before the app's loop ever got a say, is a separate
 mechanism, patched in `vite.config.js` (see
 [development.md § The dev server](../../conventions/development.md#the-dev-server-what-it-watches-and-a-lost-hmr-socket-393)).
+
+**An Aggregate member's give-up is not the end of it** (board #493). The same
+window ends a background member's loop, which has no connect card: its row
+reads "Not answering". That state is re-armed passively — one fresh window,
+the same loop — when the app becomes visible, on `online`, on a network
+change and on a 60 s tick that runs only while the page is visible; never
+while hidden, never while the person's Disconnect holds (until a connect
+succeeds), and never for a member
+the server refused or the person must decide about. The rule and its
+measurement are in
+[websocket-client.md § A member that gave up on reachability is re-armed passively](websocket-client.md).

@@ -1225,11 +1225,13 @@ never takes the focus back), Disconnect (the person asked to be offline),
 a Single switch, a mode change, the entry excluded or edited in its details
 (and removed: the drain finds the entry gone), the member reaching another known machine or being absorbed, an
 orphan, the shell's end. An excluded row picked is included first, and the
-include's answer belongs to that pick only. **Only a pick starts a retry
-budget** (`aggregate.ask`): a member whose first join is in flight or whose
+include's answer belongs to that pick only. **A pick is the one explicit retry
+door** (`aggregate.ask`): a member whose first join is in flight or whose
 own loop runs gets nothing new — no second dial, the watchdog untouched; one
 whose loop stopped gets exactly one fresh loop; a refusal the app keeps
-(storage, another known machine, an orphan) is not dialled past. **A token
+(storage, another known machine, an orphan) is not dialled past. (Until #493
+it was the ONLY door that started a budget; a member that gave up on
+reachability is now also re-armed passively, below.) **A token
 refusal is terminal for that door** (validator V1 on d18cd450: the client
 called it "Not answering", so each pick re-dialled with the same bad token
 and three picks tripped the server's lockout, #440, for this host's IP).
@@ -1342,7 +1344,7 @@ reload; B connects through route 2 and the pick moves the focus there. Pinned by
 the pick then up; A→B→A; B then C; removed, excluded, mode, edited;
 connected but the window busy; excluded then included, superseded; a union
 move; another known machine; a failed commit; a given-up member and 200 s
-of no pick; a wrong route refused while the right one is compared; a walk-held
+of no pick with the re-arm tick left out (#493); a wrong route refused while the right one is compared; a walk-held
 reconnect whose token changes; a token edited right after the loop's last
 check; an unreadable record reset) and `server-members.test.ts` (`ask`, the
 set's verdict for a member's status), `reconnect.test.ts` (the set
@@ -1358,6 +1360,115 @@ re-picks while it ran started no second loop, and after the next give-up
 0 dials in 60 s with the choice still held. Not changed: Single
 (dial first, its failure panel), the reconnect policy itself, and how a
 token refusal is worded (#459).
+
+**A member that gave up on reachability is re-armed passively** (board #493,
+2026-11-02). Owner, 2026-11-01 23:44: "all included 模式有一台服务器提示连不上，重试失败；选只连这一台可以；再切回 all included 两台都能连". Measured on the
+three-gateway Docker rig (Chromium through agent-browser, gw-b reached
+through a proxy in front of its primary address, plus its direct address as
+the alternate), each row the member's own dials from a WebSocket log:
+S1, the primary made silent (handshake answered, then no bytes) while the
+member was up — its loop's probe chose the silent primary, that dial timed out
+after 5 s, the next dialled the direct address: recovered in 5.5 s (one
+measurement, not a per-round cost); S2, the silent primary plus gw-b frozen
+(`docker pause`) for 45 s — the loop alternated the two addresses and was up
+right after the unpause; S3, gw-b unreachable for 200 s (primary refusing,
+gw-b paused) — the member's loop gave up at its 180 s watchdog and the row
+read "Not answering"; with the network back it dialled NOTHING for the next
+60 s, nor on `visibilitychange` to visible, nor on `online`; one pick brought
+it up at once. The cause is S3's: after the
+watchdog's give-up nothing ever dialled that member again except a pick, and
+App's resume handler restarts only the BOUND runtime's loop. S3's pick
+succeeded, so the owner's "Retry also failed" is not reproduced, and neither
+is an Android timer suspension. Two code readings were measured and left as
+they are: **H1**, the loop's parallel handshake probe (`findBestAddress`)
+can choose a silent address, and its round-robin then skips addresses ws.ts
+remembers as unreachable when a viable one is left (so not every address is
+tried every round) — real, but it recovered by itself in S1 and S2; an
+ordered full-auth walk for members is #495. **H2**, `start()` is a no-op
+while a loop runs, so `ask` answers 'trying' — true, and no wedged loop was
+seen; #458's policy is kept.
+
+The rule: **one member-side entry, `members.rearm()`**, gives one fresh
+loop (`deps.retry`, the same loop a pick starts) to every member that is
+held, alive, not an orphan, still wanted (Aggregate, included, not the
+focus), whose status is exactly `failed`/`unreachable`, with no join in
+flight and no loop running (`deps.trying`), whose candidate set is decided
+`ok` and whose storage gate is open — all re-checked when it runs. Never
+re-armed: `auth`, `unknown`, `elsewhere`, `storage`, an orphan, an excluded
+or removed entry, Single mode. App calls it from ONE effect, on four passive
+edges: the page becoming visible (app resume), `online`, a
+`navigator.connection` `change` (ws.ts already clears its unreachable memory
+on these two), and one 60 s tick (`MEMBER_REARM_MS`) that exists only while
+the page is visible. Every edge is skipped unless the page is visible, the
+mode is Aggregate, the person has not chosen to stay offline
+(`heldOffline`), the app is not blocked on storage (`migrationBlocked`), the
+shell has not ended, and the Disconnect fact below does not hold. Hidden
+means no NEW budget from these edges; a loop already running is not
+cancelled. Becoming visible re-arms once and restarts the tick; it
+never replays the ticks it missed. Simultaneous edges start one loop (the
+second finds the first running). The re-arm never calls `chooseMember`,
+never writes `chosen`, never moves the focus or CURRENT; a choice that
+already exists is still completed only by `settleChosen` when the re-armed
+member comes up. The watchdog, start idempotency and activation staleness
+are the loop's and unchanged. Pinned by `server-members.test.ts` (#493
+rows: published and unpublished re-armed once, repeated calls start
+nothing; auth, unknown, storage, elsewhere, orphan, unwanted, dead and
+gate-blocked untouched; a join in flight; a late answer after a leave or a
+handover), `App.shell.mount.test.ts` (the tick alone with the server back
+by itself; resume, `online` and a network change each alone with the tick
+left out; all at once → one dial; hidden → nothing for 300 s, then one on
+return; a re-arm makes no choice and an existing choice still completes;
+the Disconnect rows below)
+and `App.source.test.ts` (the guard, the listeners and their cleanup, one
+call site, no pick or focus in the effect).
+
+**A Disconnect holds every passive wake until a connect succeeds**
+(reviewer P1-D on 480bcdfc and 94c762ba; ruling (B), 2026-11-02 02:03;
+#499 closed into #493). ONE fact, `tmux_disconnected`, with one meaning for
+every consumer: Settings › Disconnect writes it; BOTH passive doors read it
+and dial nothing while it holds — the member re-arm above and the older
+resume handler that restarts the BOUND loop on becoming visible (before,
+that handler alone dialled the server and a given-up member once each after
+a plain Disconnect) — and the boot auto-connect already did. The member
+set's automatic JOIN reads it too (reviewer's read point, 02:15): App hands
+`createMembers` a read-only `autoJoin` (the same fact), asked once per
+`sync` right before it would start a join. The sync's upkeep runs first and
+either way — leaves, exclusions, an absorbed id's orphan, a dead handle let
+go, a member already published or joining kept — so a Disconnect never
+empties the declared set (`memberIds`, `syncMembers` do not read the fact)
+and destroys no kept tree or draft. A member it does not join gets no
+status. Before, a reload in Aggregate after Disconnect still joined the
+members (`dial@b` in the mount rig) while the focus stayed on the card.
+Once a connect succeeds and clears the fact, the next sync joins them as
+before. A person's pick (`ask`) is not this gate. What an in-session
+Disconnect does to members already connected is unchanged here. It is cleared
+only where it was before: the entries a SUCCESSFUL connect goes through
+(`onConnected`, `activateSwitched`, `activateConnected`, `focusServer`, a
+deep link). Opening the form, editing its address, refusing the leave and a
+connect that is accepted and then FAILS end nothing: the person asked to be
+offline and then tried B, which says nothing about reconnecting A, so
+resume, `online`, a network change, the tick and a reload all stay on the
+connect card (the "#400 … a reload keeps it gone" row and the connect-form
+handoff row pin the reload half). `!connected` is not the test: an ordinary
+drop is exactly what must recover. No third offline flag. Pinned by
+`App.shell.mount.test.ts`: a plain Disconnect in Aggregate, then 300 s of
+ticks with hidden/visible, `online` and a network change → 0 dials of the
+server and the member, then a connect through the card → the member is
+dialled again; Disconnect, then only an edited address, then a refused leave
+("keep editing") → 0 dials and the fact still held; Disconnect, then a
+connect to B that writes the mirror and fails → resume, `online`, a network
+change, ticks and a reload dial nothing, then a connect to A from its saved
+entry sends only A's address and token and clears the fact; in
+Aggregate, the same Disconnect and failed connect to B, then a reload → no
+runtime dials anything and the card shows, then a connect through the card
+that succeeds → the member joins; and, apart from any Disconnect, A
+connected while the mirror holds B's tuple → a real drop reconnects A with
+A's own tuple only. `server-members.test.ts`: a sync not allowed to join
+starts none and writes no status, while a member in hand and a join in
+flight are kept, an excluded one leaves and an absorbed id becomes an
+orphan; the next allowed sync joins. `App.source.test.ts`: both doors and
+`autoJoin` read the fact; `openCandidate`, the leave question,
+`syncMembers` and `memberIds` do not; `onConnected` clears it.
 
 **A switch replaces only its own tree** (reviewer P1-1 on 99566068). The
 switch panel sits OVER the kept trees rather than in place of them: every
@@ -2167,6 +2278,22 @@ a socket that a server's pages are using.
 - **A reconnect names its server.** `ws-reconnected` carries `serverId`, and a
   page acts only on its own server's. Each runtime has its own reconnect
   loop, told where by its own entry (reviewer P1-A on cc45d7d1).
+- **A member's give-up on reachability is not terminal** (#493). One entry,
+  `members.rearm()`, gives a fresh loop to a member that is `failed`/
+  `unreachable` with nothing running; App calls it on four passive edges
+  (visible, `online`, a network change, the visible-only 60 s tick) and only
+  while visible in Aggregate, never while a Disconnect holds
+  (`tmux_disconnected`, until a connect succeeds). It never picks or moves the focus; a pick stays
+  the one explicit door. Why: after the 180 s watchdog nothing redialled such
+  a member until a pick (S3 above), which matches the owner's report that
+  connecting to that server alone fixed it.
+- **A Disconnect holds every passive wake** (#493 P1-D). The resume handler,
+  the member re-arm and the member set's automatic join read the same
+  `tmux_disconnected` as the boot auto-connect, and dial nothing while it
+  holds; only a connect that succeeds ends it, a failed one does not. The
+  join's permission is asked after the set's upkeep, never instead of it. Why: a passive edge that redials undoes what the person asked
+  for, and before this the resume handler did, for the server and its
+  members.
 - **Nothing outlives the shell.** App's own teardown closes the candidates,
   ends every activation in flight, cancels every runtime's reconnect loop
   with its timers cleared at once (a stale claim alone would end a loop only

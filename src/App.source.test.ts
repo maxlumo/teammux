@@ -974,7 +974,8 @@ test('the boot auto-connect RECORDS the machine identity, never activates (board
   // A drop while blocked dials nothing, and is owed to Retry (orchestrator 16:12).
   // (#368 review P1-A: the socket that named the server's build is gone before any branch decides anything, so onDrop clears it first.)
   assert.match(source, /function onDrop\(\) \{\s*(?:\/\/[^\n]*\n\s*)*serverInfo = \{ \.\.\.serverInfo, build: undefined \};\s*if \(switching\) return;[^\n]*\n(?:\s*\/\/[^\n]*\n)*\s*if \(heldOffline\) return;\s*if \(migrationBlocked\) \{ owedActivation = true; return; \}/u);
-  assert.match(source, /if \(document\.visibilityState !== 'visible' \|\| switching \|\| serverSwitch\.guarding \|\| heldOffline \|\| migrationBlocked\) return;/u);
+  // (#493 P1-D: nor after the person's Disconnect.)
+  assert.match(source, /if \(document\.visibilityState !== 'visible' \|\| switching \|\| serverSwitch\.guarding \|\| heldOffline \|\| localStorage\.getItem\('tmux_disconnected'\) \|\| migrationBlocked\) return;/u);
   assert.match(source, /if \(!serverSwitch\.owns\(intent\) \|\| serverSwitch\.guarding \|\| heldOffline \|\| migrationBlocked\) return;/u, 'a probe that answers during a walk, or after a stay, moves nothing');
 });
 
@@ -1636,4 +1637,37 @@ test('a dropped connection is retried for the whole watchdog window by the clock
   assert.match(machine, /maxAttempts = Infinity,\s*watchdogMs = RECONNECT_WATCHDOG_MS,/u, 'the machine defaults to the clock');
   assert.match(machine, /Math\.min\(500 \* \(n \+ 1\), RETRY_GAP_CAP_MS\)/u, 'the backoff uses the same cap');
   assert.doesNotMatch(source, /location\.reload|window\.location\.(?:reload|assign|replace)/u, 'a lost connection never reloads the page');
+});
+
+test('a given-up member is re-armed through ONE entry, by passive edges only while visible, never through a pick (#493)', () => {
+  const effect = source.match(/\$effect\(\(\) => \{\n    const rearm = \(\) => \{[\s\S]*?\n  \}\);/u)?.[0] ?? '';
+  assert.ok(effect, 'the re-arm effect exists');
+  assert.match(effect, /if \(document\.visibilityState !== 'visible' \|\| connMode !== 'aggregate' \|\| heldOffline \|\| localStorage\.getItem\('tmux_disconnected'\) \|\| migrationBlocked \|\| windowDrain\.ended\) return;\s*aggregate\.rearm\(\);/u,
+    'visible, Aggregate, not disconnected or held offline by the person, not blocked, not ended');
+  assert.match(effect, /window\.addEventListener\('online', rearm\);/u);
+  assert.match(effect, /net\?\.addEventListener\?\.\('change', rearm\);/u);
+  assert.match(effect, /document\.addEventListener\('visibilitychange', visibility\);/u);
+  assert.match(effect, /setInterval\(rearm, MEMBER_REARM_MS\)/u);
+  assert.match(effect, /return \(\) => \{\s*clearInterval\(tick\);[\s\S]*?removeEventListener\('visibilitychange', visibility\);[\s\S]*?removeEventListener\('online', rearm\);[\s\S]*?removeEventListener\?\.\('change', rearm\);/u,
+    'every listener and the tick go with the effect');
+  assert.doesNotMatch(effect, /chooseMember|chosen|\.ask\(|deps\.retry|reconnectorOf|CURRENT|currentServerId/u, 'no pick, no choice, no focus, no direct loop start');
+  assert.equal(source.match(/aggregate\.rearm\(\)/gu)?.length, 1, 'one call site');
+  assert.match(membersSource, /export const MEMBER_REARM_MS = 60_000;/u);
+  // One Disconnect fact for every automatic dial (#493 P1-D): the older resume
+  // handler reads it too, and only a connect that SUCCEEDS ends it (the
+  // success entries; ruling 02:03) — never opening, asking or a failed attempt.
+  assert.match(source, /if \(document\.visibilityState !== 'visible' \|\| switching \|\| serverSwitch\.guarding \|\| heldOffline \|\| localStorage\.getItem\('tmux_disconnected'\) \|\| migrationBlocked\) return;\s*if \(!live\(\)\?\.isConnected\(\) && !reconnect\(\)\.isActive\(\)\) \{\s*reconnect\(\)\.start\(\);/u);
+  for (const fn of ['openCandidate', 'confirmFormLeave']) {
+    const body = source.match(new RegExp(`function ${fn}\\(\\) \\{[\\s\\S]*?\\n  \\}`, 'u'))?.[0] ?? '';
+    assert.ok(body && !/tmux_disconnected/u.test(body), `${fn} does not end the Disconnect`);
+  }
+  assert.match(source, /function onConnected\(switched = false\) \{[\s\S]*?localStorage\.removeItem\('tmux_disconnected'\);/u, 'a connect that succeeded does');
+  // And the member set's automatic join (reviewer's read point, 02:15): a
+  // read-only permission of the same fact, asked by sync before each join;
+  // the set itself (memberIds, syncMembers) does not read it.
+  assert.match(source, /autoJoin: \(\) => !localStorage\.getItem\('tmux_disconnected'\),/u);
+  const sync = source.match(/function syncMembers\(\) \{[\s\S]*?\n  \}/u)?.[0] ?? '';
+  const ids = source.match(/function memberIds\(\) \{[\s\S]*?\n  \}/u)?.[0] ?? '';
+  assert.ok(sync && ids && !/tmux_disconnected/u.test(sync + ids), 'the declared set is not emptied by a Disconnect');
+  assert.match(membersSource, /const mayJoin = deps\.autoJoin\?\.\(\) \?\? true;[\s\S]*?if \(!mayJoin\) continue;\s*void join\(entry\);/u, 'upkeep first, then the permission, right before the join');
 });

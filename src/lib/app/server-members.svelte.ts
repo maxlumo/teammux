@@ -89,6 +89,11 @@ export interface MemberDeps {
    * (`orphaned`). The host asks and then `dismiss`es. */
   detach(runtime: ServerRuntime): void;
   orphaned?(runtime: ServerRuntime, into: string): void;
+  /** May a sync START a member's join now? False while the person's
+   * Disconnect holds (#493 P1-D). Asked once per sync; leaves, exclusions
+   * and orphans are kept either way, and a person's pick (`ask`) is not
+   * asked. Absent: always. */
+  autoJoin?(): boolean;
 }
 
 export interface Members {
@@ -114,6 +119,15 @@ export interface Members {
   blocked(runtime: ServerRuntime): void;
   /** Retry: redial every published member that is not answering. */
   resume(): void;
+  /** Passive re-arm (board #493): one fresh budget for every member whose
+   * loop GAVE UP on reachability (failed/unreachable) and that is still
+   * wanted, held, alive, not an orphan, with no join in flight and no loop
+   * running, whose candidate set is decided ok and whose gate is open. The
+   * ONE entry every passive trigger calls (resume, 'online', a network
+   * change, the visible 60 s tick); it never cancels a loop, never touches a
+   * member in any other state, and never moves the focus or the pick.
+   * Returns how many loops it started. */
+  rearm(): number;
   /** The person picked this member (#458). The ONE explicit retry door: a
    * member whose own loop has stopped (it gave up, or a refusal ended it)
    * gets one fresh loop; one already trying — its first join in flight, or
@@ -148,6 +162,9 @@ export interface Members {
  * sync starts it again — it is never skipped because the handle is alive
  * (orchestrator 16:12; reviewer P1 on 97824925). */
 type Held = { runtime: ServerRuntime; published: boolean; join?: Activation; orphan?: boolean };
+
+/** How often a visible app re-arms the members that gave up (board #493). */
+export const MEMBER_REARM_MS = 60_000;
 
 export function createMembers(deps: MemberDeps): Members {
   const held = new Map<ServerId, Held>();
@@ -327,6 +344,10 @@ export function createMembers(deps: MemberDeps): Members {
       lastEntry.clear();
       for (const e of entries) lastEntry.set(e.id, e);
       const want = new Set(order);
+      // May this sync START a join? Read once, for this sync only (#493
+      // P1-D): the upkeep below — leaves, orphans, a dead handle let go —
+      // runs either way, and a member already published or joining is kept.
+      const mayJoin = deps.autoJoin?.() ?? true;
       for (const id of known()) {
         if (want.has(id)) continue;
         const h = held.get(id);
@@ -352,6 +373,10 @@ export function createMembers(deps: MemberDeps): Members {
         // `elsewhere` waits for the person (it names another known server);
         // everything else, a storage stop included, joins again.
         if (st?.kind === 'failed' && st.reason === 'elsewhere') continue;
+        // The person's Disconnect holds: no new dial, and no status for a
+        // join that did not start. A later sync (a connect that succeeded
+        // moves the registry) joins it.
+        if (!mayJoin) continue;
         void join(entry);
       }
     },
@@ -400,6 +425,24 @@ export function createMembers(deps: MemberDeps): Members {
         set(id, { kind: 'reconnecting' });
         deps.retry(h.runtime);
       }
+    },
+    rearm() {
+      let started = 0;
+      for (const [id, h] of held) {
+        const st = statuses[id];
+        // Only a loop that gave up on reachability. Everything else either
+        // is still trying, is up, or needs a person (auth, unknown, storage,
+        // elsewhere, an orphan).
+        if (st?.kind !== 'failed' || st.reason !== 'unreachable') continue;
+        if (h.orphan || !h.runtime.alive() || !deps.wanted(id)) continue;
+        if (h.join?.current() || deps.trying(h.runtime)) continue;
+        if (eligible(h.runtime.entry()) !== 'ok') continue;
+        if (deps.gate(id) === 'blocked') continue;
+        set(id, { kind: h.published ? 'reconnecting' : 'connecting' });
+        deps.retry(h.runtime);
+        started++;
+      }
+      return started;
     },
     ask(id) {
       const h = held.get(id);

@@ -42,7 +42,7 @@
   import ServerScope from './lib/app/ServerScope.svelte';
   import { createServerFleet } from './lib/app/server-fleet.ts';
   import { createServerView } from './lib/app/server-view.svelte.ts';
-  import { createMembers } from './lib/app/server-members.svelte.ts';
+  import { createMembers, MEMBER_REARM_MS } from './lib/app/server-members.svelte.ts';
   import { asideKey, createRefusedAttempts, REFUSED_KEY } from './lib/app/refused-attempts.ts';
   import { readMode, writeMode, readExcluded, setExcluded, includedServers } from './lib/app/connection-mode.ts';
   import { serverTag, shortServerTag } from './lib/app/server-tag.ts';
@@ -1383,6 +1383,10 @@
     // A block ends every attempt in flight (holdStorage's endAll), so a
     // member's dial out when it lands records nothing; `wanted` is the set.
     wanted: (id) => memberIds().includes(id),
+    // The person's Disconnect holds every automatic join (#493 P1-D): the
+    // same fact the boot, the resume and the re-arm read; a connect that
+    // succeeds clears it, and the sync that follows joins.
+    autoJoin: () => !localStorage.getItem('tmux_disconnected'),
     onUp(runtime) {
       if (!serverStates.has(runtime)) serverStates.set(runtime, freshState(runtime.id));
       if (storageHeld) runtime.setFrozen(true);
@@ -3374,8 +3378,10 @@
   $effect(() => {
     const handler = () => {
       // Not while a leave walk asks about the socket, and not after the
-      // person chose to stay offline (reviewer P2 on 085b0e70).
-      if (document.visibilityState !== 'visible' || switching || serverSwitch.guarding || heldOffline || migrationBlocked) return;
+      // person chose to stay offline (reviewer P2 on 085b0e70) or pressed
+      // Disconnect with no connect succeeding since (`tmux_disconnected`;
+      // #493 P1-D, the same fact the member re-arm and the boot read).
+      if (document.visibilityState !== 'visible' || switching || serverSwitch.guarding || heldOffline || localStorage.getItem('tmux_disconnected') || migrationBlocked) return;
       if (!live()?.isConnected() && !reconnect().isActive()) {
         reconnect().start();
       } else if (live()?.isConnected()) {
@@ -3395,6 +3401,41 @@
       }
     }, OPTIMIZE_INTERVAL_MS);
     return () => { document.removeEventListener('visibilitychange', handler); clearInterval(interval); };
+  });
+
+  // Aggregate members whose own loop gave up on reachability get one fresh
+  // budget (board #493) on a passive edge: the app coming back, 'online', a
+  // network change, or the 60 s tick. Every edge calls the member set's ONE
+  // re-arm entry, which re-checks each member itself; none of them
+  // picks, writes `chosen`, or moves the focus. Only while visible: the tick
+  // exists only then, and becoming visible is one re-arm, never a catch-up.
+  $effect(() => {
+    const rearm = () => {
+      // Not after the person's own Disconnect (`tmux_disconnected`, cleared by
+      // every explicit connect) nor their choice to stay offline: a passive
+      // edge never undoes a stop they asked for (reviewer P1-D on 480bcdfc).
+      if (document.visibilityState !== 'visible' || connMode !== 'aggregate' || heldOffline || localStorage.getItem('tmux_disconnected') || migrationBlocked || windowDrain.ended) return;
+      aggregate.rearm();
+    };
+    let tick = null;
+    const visibility = () => {
+      clearInterval(tick);
+      tick = null;
+      if (document.visibilityState !== 'visible') return;
+      tick = setInterval(rearm, MEMBER_REARM_MS);
+      rearm();
+    };
+    if (document.visibilityState === 'visible') tick = setInterval(rearm, MEMBER_REARM_MS);
+    const net = navigator.connection;
+    document.addEventListener('visibilitychange', visibility);
+    window.addEventListener('online', rearm);
+    net?.addEventListener?.('change', rearm);
+    return () => {
+      clearInterval(tick);
+      document.removeEventListener('visibilitychange', visibility);
+      window.removeEventListener('online', rearm);
+      net?.removeEventListener?.('change', rearm);
+    };
   });
 
   $effect(() => {

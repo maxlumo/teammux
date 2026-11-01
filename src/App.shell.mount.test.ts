@@ -23,11 +23,13 @@ import { qrMatrix, qrPath } from './lib/core/qr.ts';
 /** The tuple a copied link carries, or null when it is not a usable link. */
 const linkTuple = (text: string) => { const parsed = parseConnectionLink(text); return parsed.kind === 'link' ? parsed.link : null; };
 import { RECONNECT_WATCHDOG_MS } from './lib/app/reconnect.ts';
+import { MEMBER_REARM_MS } from './lib/app/server-members.svelte.ts';
 import { migrateServerState } from './lib/app/server-state-migration.ts';
 
 /** Steps of 5 s that carry the fake clock past a reconnect loop's WHOLE window (the
  * watchdog, board #393): a drop is retried quietly for that long, then gives up. */
 const GIVE_UP_STEPS = Math.ceil(RECONNECT_WATCHDOG_MS / 5_000) + 2;
+
 
 /** The harness types a mocked module as functions only, and `ADDRESS_LABELS`
  * is a constant the facade exports. Mocked modules are replaced wholesale, so
@@ -3118,12 +3120,14 @@ test('P1-A: A s reconnect authenticating while the registry write fails closes t
   assert.match(h.app.document.querySelector('.card .error')?.textContent ?? '', /could not be identified/iu);
 });
 
-test('P1-A: a failed connect to B that wrote the mirror does not hand A B s address or token', async (context) => {
+test('P1-A / #493 P1-D (c): Disconnect, then a connect to B that wrote the mirror and failed — resume, online, a network change, ticks and a reload dial nothing; an explicit connect to A then sends only A s address and token', async (context) => {
   const events: string[] = [];
+  // B refuses the candidate.
+  const gate = (url: string, n: number) => (n === 0 && url.includes('//b') ? Promise.reject(new Error('refused')) : null);
+  let network: EventTarget | null = null;
   const h = await bootApp(context, twoServers({ live: legacyNav('work:1.0'), parked: legacyNav('work:2.0') }), undefined, {
-    calls: events,
-    // B refuses the candidate.
-    gate: (url, n) => (n === 0 && url.includes('//b') ? Promise.reject(new Error('refused')) : null),
+    calls: events, gate,
+    setup(window: any) { network = new window.EventTarget(); Object.defineProperty(window.navigator, 'connection', { value: network, configurable: true }); },
   });
   const gear = [...h.app.document.querySelectorAll<HTMLButtonElement>('.tabbar button, .gear-btn, .rail-btn')]
     .find((b) => /settings/iu.test(`${b.getAttribute('aria-label') ?? ''} ${b.textContent ?? ''}`))!;
@@ -3142,16 +3146,105 @@ test('P1-A: a failed connect to B that wrote the mirror does not hand A B s addr
   await h.settle();
   [...h.app.document.querySelectorAll<HTMLButtonElement>('.card button')].find((b) => /connect/iu.test(b.textContent ?? ''))!.click();
   for (let i = 0; i < 4; i++) await h.settle();
-  assert.equal(h.app.window.localStorage.getItem('tmux_address'), 'ws://b:9899', 'the form wrote the mirror before its dial failed');
-  assert.equal(h.app.window.localStorage.getItem('tmux_token'), 'tokEvil');
-  // Coming back to the app reconnects A — from A's entry.
-  const before = dialsOf(events, 'a').length;
-  h.app.document.dispatchEvent(new h.app.window.Event('visibilitychange'));
+  const ls = h.app.window.localStorage;
+  assert.equal(ls.getItem('tmux_address'), 'ws://b:9899', 'the form wrote the mirror before its dial failed');
+  assert.equal(ls.getItem('tmux_token'), 'tokEvil');
+  assert.equal(ls.getItem('tmux_disconnected'), '1', 'a connect that failed does not end the Disconnect (ruling 02:03)');
+  // Resume, online, a network change and 60 s ticks: nothing dials, the card
+  // stays. (Single, as this row always was; the Aggregate edges after a
+  // Disconnect are the #493 P1-D rows.)
+  const card = (app: typeof h.app) => app.document.querySelector('.card .fields input[type="text"]');
+  const before = events.filter((e) => e.startsWith('dial@')).length;
+  for (let round = 0; round < 3; round++) {
+    h.app.document.dispatchEvent(new h.app.window.Event('visibilitychange'));
+    h.app.window.dispatchEvent(new h.app.window.Event('online'));
+    network!.dispatchEvent(new h.app.window.Event('change'));
+    for (let i = 0; i < 13; i++) { await h.app.advance(5_000); await h.settle(); }
+  }
+  assert.equal(events.filter((e) => e.startsWith('dial@')).length, before, 'resume, online, a network change and three ticks: no dial of A or B');
+  assert.ok(card(h.app), 'still on the connect card');
+  // A reload: the same.
+  const stored = dumpStorage(h.app);
+  await h.app.close();
+  const later: string[] = [];
+  const r = await bootApp(context, stored, undefined, { calls: later, gate });
+  for (let i = 0; i < 4; i++) { await r.app.advance(1_000); await r.settle(); }
+  assert.deepEqual(later.filter((e) => e.startsWith('dial@')), [], 'reload: no dial of A or B');
+  assert.ok(card(r.app), 'the reload shows the connect card');
+  // The person connects to A from its saved entry: what is sent is A s.
+  await r.switchTo('alpha');
+  for (let i = 0; i < 6; i++) { await r.app.advance(500); await r.settle(); }
+  const sent = later.filter((e) => e.startsWith('dial@'));
+  assert.ok(sent.length > 0, 'the explicit connect dialled');
+  assert.deepEqual([...new Set(sent)], ['dial@a:ws://a:9899|tokA'], `only A s own address and token, never the mirror s: ${sent.join(',')}`);
+  assert.equal(r.app.window.localStorage.getItem('tmux_server_current'), 'a');
+  assert.equal(r.app.window.localStorage.getItem('tmux_disconnected'), null, 'a connect that succeeded ends the Disconnect');
+});
+
+test('#493 P1-D (Aggregate reload): Disconnect, a connect to B that fails, then a reload — no runtime dials anything, the card shows; a connect through the card that succeeds lets the member join', async (context) => {
+  const events: string[] = [];
+  const state = { bDown: false };
+  const gate = (url: string) => (state.bDown && url.includes('//b') ? Promise.reject(new Error('refused')) : null);
+  const h = await bootApp(context, aggregateOn({ ...twoServers({ live: JSON.stringify({ page: 'files' }), parked: JSON.stringify({ page: 'files' }) }), tmux_layout_mode: 'desktop' }), undefined, { calls: events, gate, rpc: editorRpc });
+  for (let i = 0; i < 4; i++) { await h.app.advance(1_000); await h.settle(); }
+  assert.ok(conn(h, 'b')?.isConnected(), 'B joined as a member at boot');
+  await toConnection(h);
+  const doc = h.app.document;
+  [...doc.querySelectorAll<HTMLButtonElement>('.preferences button')].find((b) => /^disconnect$/iu.test((b.textContent ?? '').trim()))!.click();
+  for (let i = 0; i < 3; i++) await h.settle();
+  state.bDown = true;
+  const field = doc.querySelector<HTMLInputElement>('.card .fields input[type="text"]')!;
+  field.value = 'ws://b:9899';
+  field.dispatchEvent(new h.app.window.Event('input', { bubbles: true }));
+  await h.settle();
+  [...doc.querySelectorAll<HTMLButtonElement>('.card button')].find((b) => /connect/iu.test(b.textContent ?? ''))!.click();
   for (let i = 0; i < 4; i++) await h.settle();
+  const ls = h.app.window.localStorage;
+  assert.equal(ls.getItem('tmux_disconnected'), '1', 'the failed connect left the Disconnect holding');
+  // A reload, from the same storage, with every server answering again.
+  const stored = dumpStorage(h.app);
+  await h.app.close();
+  state.bDown = false;
+  const later: string[] = [];
+  const r = await bootApp(context, stored, undefined, { calls: later, gate, rpc: editorRpc });
+  for (let i = 0; i < 14; i++) { await r.app.advance(5_000); await r.settle(); }
+  assert.deepEqual(later.filter((e) => e.startsWith('dial@')), [], 'no runtime dialled: not the focus, not the member');
+  assert.ok(r.app.document.querySelector('.card .fields input[type="text"]'), 'the connect card shows');
+  // The person connects to A through the card (in Aggregate a row is a
+  // focus pick, not a connect); B joins as before.
+  const put = (selector: string, value: string) => {
+    const input = r.app.document.querySelector<HTMLInputElement>(selector)!;
+    input.value = value;
+    input.dispatchEvent(new r.app.window.Event('input', { bubbles: true }));
+  };
+  put('.card .fields input[type="text"]', 'ws://a:9899');
+  put('.card input[type="password"]', 'tokA');
+  await r.settle();
+  [...r.app.document.querySelectorAll<HTMLButtonElement>('.card button')].find((b) => /connect/iu.test(b.textContent ?? ''))!.click();
+  for (let i = 0; i < 8; i++) { await r.app.advance(500); await r.settle(); }
+  assert.equal(r.app.window.localStorage.getItem('tmux_disconnected'), null, 'the connect succeeded');
+  assert.ok(later.some((e) => e.startsWith('dial@a:')), 'A dialled');
+  assert.ok(later.some((e) => e.startsWith('dial@b:')), `and the member joined: ${later.filter((e) => e.startsWith('dial@')).join(',')}`);
+  assert.equal(r.app.window.localStorage.getItem('tmux_server_current'), 'a');
+});
+
+test('P1-A (source isolation): A connected while the mirror holds B s address and token — a real drop reconnects A, and every attempt sends only A s own tuple', async (context) => {
+  const events: string[] = [];
+  const h = await bootApp(context, twoServers({ live: legacyNav('work:1.0'), parked: legacyNav('work:2.0') }), undefined, { calls: events });
+  for (let i = 0; i < 4; i++) await h.settle();
+  const ls = h.app.window.localStorage;
+  assert.equal(ls.getItem('tmux_server_current'), 'a');
+  // What a failed form attempt leaves behind: B s tuple in the mirror.
+  ls.setItem('tmux_address', 'ws://b:9899');
+  ls.setItem('tmux_token', 'tokEvil');
+  const before = dialsOf(events, 'a').length;
+  h.net.drop();
+  for (let i = 0; i < 6; i++) { await h.app.advance(1_000); await h.settle(); }
   const after = dialsOf(events, 'a').slice(before);
-  assert.ok(after.length > 0, 'A reconnected');
+  assert.ok(after.length > 0, 'A s own loop reconnected it');
   assert.deepEqual([...new Set(after)], ['dial@a:ws://a:9899|tokA'], `with A s own address and token, never the mirror s: ${after.join(',')}`);
-  assert.equal(h.app.window.localStorage.getItem('tmux_server_current'), 'a');
+  assert.ok(!events.some((e) => e.includes('tokEvil') || e.startsWith('dial@b:')), 'the mirror s tuple was never sent');
+  assert.equal(ls.getItem('tmux_server_current'), 'a');
 });
 
 test('P1-B: a failover that absorbs the alias brings canonical up on ITS connection, and the alias s is ended', async (context) => {
@@ -4858,7 +4951,9 @@ function holdDigests(window: any, hold: (text: string) => Promise<void> | null) 
     : ((v) => (typeof v === 'function' ? v.bind(t) : v))(Reflect.get(t, k))) });
   Object.defineProperty(window, 'crypto', { value: { subtle, getRandomValues: real.getRandomValues.bind(real), randomUUID: real.randomUUID.bind(real) }, configurable: true });
 }
-async function choiceWorld(context: TestContext, opts: { down?: string[]; refuse?: string[]; rpc?: Record<string, unknown>; page?: string; bAs?: string; seed?: Record<string, string>; holdDigest?: (text: string) => Promise<void> | null } = {}) {
+async function choiceWorld(context: TestContext, opts: { down?: string[]; refuse?: string[]; rpc?: Record<string, unknown>; page?: string; bAs?: string; seed?: Record<string, string>; holdDigest?: (text: string) => Promise<void> | null; noTick?: boolean } = {}) {
+  /** The page's `navigator.connection`, so a test can say the network changed. */
+  let network: EventTarget | null = null;
   /** What machine beta's dials answer as (another known one: `elsewhere`). */
   const answers = { b: opts.bAs ?? 'm-b' };
   /** Make the next write of CURRENT fail, as a full storage does. */
@@ -4894,6 +4989,14 @@ async function choiceWorld(context: TestContext, opts: { down?: string[]; refuse
       // Web Crypto, as a secure page has it (the refused-attempts digests).
       if (!window.crypto?.subtle) Object.defineProperty(window, 'crypto', { value: globalThis.crypto, configurable: true });
       if (opts.holdDigest) holdDigests(window, opts.holdDigest);
+      network = new window.EventTarget();
+      Object.defineProperty(window.navigator, 'connection', { value: network, configurable: true });
+      // The member re-arm's 60 s tick left out (#493), so one passive edge
+      // can be measured alone.
+      if (opts.noTick) {
+        const every = window.setInterval;
+        window.setInterval = (fn: () => void, ms: number, ...rest: unknown[]) => (ms === MEMBER_REARM_MS ? 0 : every(fn, ms, ...rest));
+      }
       const set = window.Storage.prototype.setItem;
       window.Storage.prototype.setItem = function (k: string, v: string) {
         if (storage.failCurrent && k === 'tmux_server_current') throw new Error('QuotaExceededError');
@@ -4912,7 +5015,9 @@ async function choiceWorld(context: TestContext, opts: { down?: string[]; refuse
   /** Let N's held dials go and let every later one answer. */
   const release = async (key: string) => { up.add(key); waiting[key]!.splice(0).forEach((r) => r()); for (let i = 0; i < 6; i++) { await h.app.advance(200); await h.settle(); } };
   const heldDials = (key: string) => waiting[key]!.length;
-  return { h, ls, events, bringUp, release, heldDials, down, refuse, answers, storage, current: () => ls.getItem('tmux_server_current') };
+  /** Let a member's dials answer from now on, advancing no time. */
+  const answer = (key: string) => { down.delete(key); up.add(key); };
+  return { h, ls, events, bringUp, release, heldDials, answer, down, refuse, answers, storage, network: () => network!, current: () => ls.getItem('tmux_server_current') };
 }
 
 test('#458: A→B→A — a pick of the current focus retires the pending choice; B coming up later moves nothing', async (context) => {
@@ -5057,6 +5162,72 @@ async function cardConnect(h: Awaited<ReturnType<typeof bootApp>>, address: stri
   [...h.app.document.querySelectorAll<HTMLButtonElement>('.card button')].find((b) => /^connect$/iu.test((b.textContent ?? '').trim()))!.click();
   for (let i = 0; i < 6; i++) { await h.app.advance(200); await h.settle(); }
 }
+
+test('#493 (reviewer P1-D): after the person s Disconnect no passive edge wakes anything — five ticks, resume, online and a network change, 0 dials; an explicit connect allows it again', async (context) => {
+  const w = await choiceWorld(context, { down: ['b'] });
+  await bGivesUp(w);
+  const doc = w.h.app.document;
+  [...doc.querySelectorAll<HTMLButtonElement>('.preferences button')].find((b) => /^disconnect$/iu.test((b.textContent ?? '').trim()))!.click();
+  for (let i = 0; i < 3; i++) await w.h.settle();
+  assert.equal(w.ls.getItem('tmux_disconnected'), '1', 'the real Disconnect wrote its fact');
+  const given = dialsOf(w.events, 'b').length;
+  const bound = dialsOf(w.events, 'a').length;
+  w.answer('b');                                                // B is back
+  // The ticks, becoming visible again, `online` and a network change: every
+  // passive edge, the older resume handler's included.
+  for (let i = 0; i < 30; i++) {
+    await w.h.app.advance(10_000); await w.h.settle();
+    if (i % 10 === 0) { setVisible(w.h, false); for (const fire of Object.values(passiveEdges)) fire(w); }
+  }
+  assert.equal(dialsOf(w.events, 'b').length, given, '300 s, five ticks, hidden/visible, online and a network change three times each: B is not dialled');
+  assert.equal(dialsOf(w.events, 'a').length, bound, 'nor the server it disconnected from');
+  assert.equal(w.current(), 'a');
+  // The person connects again through the card: the fact is cleared, and B s
+  // passive re-arm is ordinary again.
+  const field = doc.querySelector<HTMLInputElement>('.card .fields input[type="text"]')!;
+  field.value = 'ws://a:9899';
+  field.dispatchEvent(new w.h.app.window.Event('input', { bubbles: true }));
+  await w.h.settle();
+  [...doc.querySelectorAll<HTMLButtonElement>('.card button')].find((b) => /connect/iu.test(b.textContent ?? ''))!.click();
+  for (let i = 0; i < 6; i++) { await w.h.app.advance(500); await w.h.settle(); }
+  assert.equal(w.ls.getItem('tmux_disconnected'), null, 'the explicit connect cleared it');
+  passiveEdges.online(w);
+  for (let i = 0; i < 14 && dialsOf(w.events, 'b').length === given; i++) { await w.h.app.advance(5_000); await w.h.settle(); }
+  assert.ok(dialsOf(w.events, 'b').length > given, 'B is dialled again');
+});
+
+test('#493 (reviewer P1-D, b): after Disconnect, editing the card s address or refusing the leave is no connect — every passive edge still dials nothing', async (context) => {
+  const w = await choiceWorld(context, { down: ['b'] });
+  await bGivesUp(w);
+  const doc = w.h.app.document;
+  const draft = await dirtyEditor(w.h.app, w.h.settle);          // A s unsaved editor: a connect elsewhere asks first
+  await toConnection(w.h);
+  [...doc.querySelectorAll<HTMLButtonElement>('.preferences button')].find((b) => /^disconnect$/iu.test((b.textContent ?? '').trim()))!.click();
+  for (let i = 0; i < 3; i++) await w.h.settle();
+  w.answer('b');
+  const counts = () => [dialsOf(w.events, 'a').length, dialsOf(w.events, 'b').length];
+  const quiet = async (why: string) => {
+    const before = counts();
+    for (let i = 0; i < 14; i++) {
+      await w.h.app.advance(5_000); await w.h.settle();
+      if (i % 7 === 0) { setVisible(w.h, false); for (const fire of Object.values(passiveEdges)) fire(w); }
+    }
+    assert.deepEqual(counts(), before, `${why}: 70 s, ticks and every edge, no dial of A or B`);
+    assert.equal(w.ls.getItem('tmux_disconnected'), '1', `${why}: the Disconnect still holds`);
+  };
+  const field = doc.querySelector<HTMLInputElement>('.card .fields input[type="text"]')!;
+  field.value = 'ws://c:9899';
+  field.dispatchEvent(new w.h.app.window.Event('input', { bubbles: true }));
+  await w.h.settle();
+  await quiet('an edited address');
+  [...doc.querySelectorAll<HTMLButtonElement>('.card button')].find((b) => /connect/iu.test(b.textContent ?? ''))!.click();
+  for (let i = 0; i < 3; i++) await w.h.settle();
+  answerDialog(w.h.app, /keep editing/iu);
+  for (let i = 0; i < 3; i++) await w.h.settle();
+  assert.equal(draft.isConnected && draft.value, '# notes\n\nunsaved', 'the leave was refused: A s draft is kept');
+  await quiet('a refused leave');
+  assert.equal(w.current(), 'a');
+});
 
 test('#458 review: Disconnect ends a pending choice — the person asked to be offline, and B coming up moves nothing', async (context) => {
   const w = await choiceWorld(context);
@@ -5400,8 +5571,8 @@ test('#458 validator P2 on c23e9a7a: a second corruption is kept under the next 
   assert.match(w.h.app.document.querySelector('.preferences')?.textContent ?? '', /unreadable and have been reset/iu);
 });
 
-test('#458: only a pick starts a retry budget — a given-up member is not dialled by the choice; one pick starts one loop', async (context) => {
-  const w = await choiceWorld(context, { down: ['b'] });
+test('#458/#493: with the 60 s tick left out and no passive edge, nothing dials a given-up member; one pick starts one loop', async (context) => {
+  const w = await choiceWorld(context, { down: ['b'], noTick: true });
   // B fails until its own loop gives up.
   for (let i = 0; i < GIVE_UP_STEPS; i++) { await w.h.app.advance(5_000); await w.h.settle(); }
   const quiet = dialsOf(w.events, 'b').length;
@@ -5422,6 +5593,100 @@ test('#458: only a pick starts a retry budget — a given-up member is not diall
   for (let i = 0; i < 20; i++) { await w.h.app.advance(10_000); await w.h.settle(); }
   assert.equal(dialsOf(w.events, 'b').length, after, '200 s with the choice held and no pick: no dial');
   assert.equal(w.current(), 'a');
+});
+
+/** #493: the page becomes visible or hidden, as an app resumed or sent away. */
+function setVisible(h: Awaited<ReturnType<typeof bootApp>>, visible: boolean) {
+  const doc = h.app.document;
+  Object.defineProperty(doc, 'visibilityState', { configurable: true, get: () => (visible ? 'visible' : 'hidden') });
+  Object.defineProperty(doc, 'hidden', { configurable: true, get: () => !visible });
+  doc.dispatchEvent(new h.app.window.Event('visibilitychange'));
+}
+type ChoiceWorld = Awaited<ReturnType<typeof choiceWorld>>;
+const passiveEdges = {
+  resume: (w: ChoiceWorld) => setVisible(w.h, true),
+  online: (w: ChoiceWorld) => { w.h.app.window.dispatchEvent(new w.h.app.window.Event('online')); },
+  'network change': (w: ChoiceWorld) => { w.network().dispatchEvent(new w.h.app.window.Event('change')); },
+};
+/** B's own loop runs to its give-up. With the tick on, the moment it is given
+ * up is found (the tick re-arms it within a minute). */
+async function bGivesUp(w: ChoiceWorld) {
+  for (let i = 0; i < GIVE_UP_STEPS; i++) { await w.h.app.advance(5_000); await w.h.settle(); }
+  for (let i = 0; i < 13 && !/not answering/iu.test(rowText(w.h, 'beta')); i++) { await w.h.app.advance(5_000); await w.h.settle(); }
+  assert.match(rowText(w.h, 'beta'), /not answering/iu, 'B s loop gave up');
+}
+const bUp = (w: ChoiceWorld) => !/not answering|chosen/iu.test(rowText(w.h, 'beta')) && !!conn(w.h, 'b');
+
+test('#493: a given-up member is re-armed by the visible 60 s tick alone — its server comes back by itself, it connects; no pick, no choice, the focus stays', async (context) => {
+  const w = await choiceWorld(context, { down: ['b'] });
+  await bGivesUp(w);
+  const given = dialsOf(w.events, 'b').length;
+  w.answer('b');                                                // the server is back; nothing else happens
+  for (let i = 0; i < 14 && !bUp(w); i++) { await w.h.app.advance(5_000); await w.h.settle(); }
+  assert.ok(dialsOf(w.events, 'b').length > given, 'the tick started a fresh loop');
+  assert.ok(bUp(w), `B is connected: ${rowText(w.h, 'beta')}`);
+  assert.equal(w.current(), 'a', 'the focus did not move');
+});
+
+for (const [edge, fire] of Object.entries(passiveEdges)) test(`#493: ${edge} alone re-arms a given-up member once — it connects; no pick, no choice, the focus stays`, async (context) => {
+  const w = await choiceWorld(context, { down: ['b'], noTick: true });
+  await bGivesUp(w);
+  const given = dialsOf(w.events, 'b').length;
+  for (let i = 0; i < 12; i++) { await w.h.app.advance(10_000); await w.h.settle(); }
+  assert.equal(dialsOf(w.events, 'b').length, given, 'without the edge nothing dials B');
+  w.answer('b');
+  fire(w);
+  for (let i = 0; i < 4; i++) { await w.h.app.advance(500); await w.h.settle(); }
+  assert.equal(dialsOf(w.events, 'b').length - given, 1, 'one dial, and it answered');
+  assert.ok(bUp(w), `B is connected: ${rowText(w.h, 'beta')}`);
+  assert.equal(w.current(), 'a', 'the focus did not move');
+});
+
+test('#493: every passive edge at once starts ONE loop', async (context) => {
+  const w = await choiceWorld(context, { down: ['b'], noTick: true });
+  await bGivesUp(w);
+  const given = dialsOf(w.events, 'b').length;
+  w.answer('b');
+  for (const fire of Object.values(passiveEdges)) fire(w);
+  for (const fire of Object.values(passiveEdges)) fire(w);
+  for (let i = 0; i < 4; i++) { await w.h.app.advance(500); await w.h.settle(); }
+  assert.equal(dialsOf(w.events, 'b').length - given, 1, 'one dial for six edges');
+  assert.ok(bUp(w));
+  assert.equal(w.current(), 'a');
+});
+
+test('#493: while hidden nothing re-arms — no tick, and online or a network change start nothing; becoming visible re-arms once, with no catch-up', async (context) => {
+  const w = await choiceWorld(context, { down: ['b'] });
+  await bGivesUp(w);
+  setVisible(w.h, false);
+  const given = dialsOf(w.events, 'b').length;
+  passiveEdges.online(w);
+  passiveEdges['network change'](w);
+  for (let i = 0; i < 30; i++) { await w.h.app.advance(10_000); await w.h.settle(); }
+  assert.equal(dialsOf(w.events, 'b').length, given, '300 s hidden: no dial');
+  assert.match(rowText(w.h, 'beta'), /not answering/iu);
+  w.answer('b');
+  setVisible(w.h, true);
+  for (let i = 0; i < 4; i++) { await w.h.app.advance(500); await w.h.settle(); }
+  assert.equal(dialsOf(w.events, 'b').length - given, 1, 'one re-arm on the way back, not five missed ticks');
+  assert.ok(bUp(w));
+  assert.equal(w.current(), 'a');
+});
+
+test('#493: a re-arm never makes a choice, and an existing choice is still completed by its own rule — a picked member that gave up again moves the focus when an edge brings it up', async (context) => {
+  const w = await choiceWorld(context, { down: ['b'], noTick: true });
+  await bGivesUp(w);
+  passiveEdges.online(w);
+  for (let i = 0; i < 2; i++) { await w.h.app.advance(500); await w.h.settle(); }
+  assert.doesNotMatch(rowText(w.h, 'beta'), /chosen/iu, 'the re-arm chose nothing');
+  await bGivesUp(w);
+  await pickServer(w.h, 'beta');
+  await bGivesUp(w);
+  assert.match(rowText(w.h, 'beta'), /chosen; not answering/iu);
+  w.answer('b');
+  passiveEdges['network change'](w);
+  for (let i = 0; i < 6; i++) { await w.h.app.advance(500); await w.h.settle(); }
+  assert.equal(w.current(), 'b', 'the person s pick completes when B is up');
 });
 
 test('P1-1: an Aggregate switch through Add-a-server keeps every member s tree mounted while it runs, and after', async (context) => {

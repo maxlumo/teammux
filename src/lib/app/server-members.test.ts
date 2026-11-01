@@ -19,6 +19,8 @@ function world(ids: string[], refusals?: RefusedAttempts) {
   const saved = new Set(ids);
   let gate: (id: string) => 'ok' | 'claimed' | 'blocked' = () => 'ok';
   let blocks = true;
+  /** May a sync start a join (the person's Disconnect, #493 P1-D)? */
+  let auto = true;
   /** Ids whose socket is up, and ids whose own reconnect loop is running. */
   const up = new Set<string>();
   const looping = new Set<string>();
@@ -67,10 +69,13 @@ function world(ids: string[], refusals?: RefusedAttempts) {
     hold: (rt) => log.push(`hold:${rt.id}`),
     detach: (rt) => { log.push(`detach:${rt.id}`); (rt as Fake).detach(); },
     orphaned: (rt, into) => log.push(`orphaned:${rt.id}:${into}`),
+    autoJoin: () => auto,
   });
   return { members, runtimes, log, wanted, saved, up, looping, tokens, addresses, alternates, endAll: () => activations.endAll(), setGate: (g: typeof gate) => { gate = g; }, rt: (id: string) => runtimes.get(id)!,
     /** What the host gate answers for a failed identity record. */
-    blocking: (b: boolean) => { blocks = b; } };
+    blocking: (b: boolean) => { blocks = b; },
+    /** Let syncs start joins, or not. */
+    joining: (b: boolean) => { auto = b; } };
 }
 const settle = () => new Promise((r) => setTimeout(r, 0));
 const ok = (id: string): DialResult => ({ ok: true, entry: entry(id) as never });
@@ -768,4 +773,124 @@ test('a join dials with the token its check read — the checked pair is the dia
   w.members.sync([entry('b')]);
   await settle();
   assert.deepEqual(w.rt('b').tokens, ['t-now'], 'the token it checked, handed to the dial');
+});
+
+/** Bring the given members to "their own loop gave up on reachability":
+ * `pub` ones published first, the rest still unpublished after a failed join. */
+async function gaveUpWorld(ids: string[], pub: string[] = []) {
+  const w = world(ids);
+  w.members.sync(ids.map(entry));
+  await settle();
+  for (const id of ids) w.rt(id).answer(pub.includes(id) ? ok(id) : unreachable);
+  await settle();
+  for (const id of pub) w.members.reconnecting(w.rt(id));
+  for (const id of ids) { w.looping.delete(id); w.members.gaveUp(w.rt(id)); }
+  return w;
+}
+const retries = (w: { log: string[] }, id: string) => w.log.filter((l) => l === `retry:${id}`).length;
+
+test('#493: rearm gives one fresh loop to each member whose loop gave up on reachability, published or not; a running loop gets nothing', async () => {
+  const w = await gaveUpWorld(['b', 'c'], ['c']);
+  const before = { b: retries(w, 'b'), c: retries(w, 'c') };
+  assert.deepEqual(w.members.status('b'), { kind: 'failed', reason: 'unreachable' });
+  assert.equal(w.members.rearm(), 2);
+  assert.deepEqual([retries(w, 'b') - before.b, retries(w, 'c') - before.c], [1, 1], 'one loop each');
+  assert.deepEqual(w.members.status('b'), { kind: 'connecting' }, 'never published: connecting');
+  assert.deepEqual(w.members.status('c'), { kind: 'reconnecting' });
+  // Every trigger at once: the loops already run, nothing more starts.
+  assert.equal(w.members.rearm() + w.members.rearm() + w.members.rearm(), 0);
+  assert.deepEqual([retries(w, 'b') - before.b, retries(w, 'c') - before.c], [1, 1], 'still one each');
+  // The loop's answer publishes through the same gates.
+  w.members.answered(w.rt('b'), ok('b'));
+  assert.ok(w.log.includes('up:b'));
+  assert.equal(w.members.status('b')?.kind, 'connected');
+  assert.equal(w.members.rearm(), 0, 'a connected member is not re-armed');
+});
+
+test('#493: rearm never touches a member that needs a person or is not a member any more: auth, unknown, storage, elsewhere, orphan, unwanted, dead, gate blocked', async () => {
+  const ids = ['auth', 'unk', 'sto', 'gone', 'orph', 'unw', 'dead', 'gate'];
+  const w = await gaveUpWorld(ids, ['orph']);
+  w.members.gaveUp(w.rt('auth'), 'auth');
+  w.members.gaveUp(w.rt('unk'), 'unknown');
+  w.members.blocked(w.rt('sto'));
+  w.members.answered(w.rt('gone'), { ok: false, reason: 'elsewhere', entry: entry('d') as never, machineId: 'm-d', hostname: 'd' });
+  w.members.answered(w.rt('orph'), { ok: false, reason: 'elsewhere', entry: entry('d') as never, machineId: 'm-d', hostname: 'd' });
+  w.wanted.delete('unw');                                         // excluded, Single, or removed: the app no longer wants it
+  w.rt('dead').detach();
+  w.setGate((id) => (id === 'gate' ? 'blocked' : 'ok'));
+  const before = w.log.filter((l) => l.startsWith('retry:')).length;
+  assert.equal(w.members.rearm(), 0);
+  assert.equal(w.log.filter((l) => l.startsWith('retry:')).length, before, 'no loop started');
+  assert.deepEqual(w.members.status('auth'), { kind: 'failed', reason: 'auth' });
+  assert.deepEqual(w.members.status('unk'), { kind: 'failed', reason: 'unknown' });
+  assert.deepEqual(w.members.status('sto'), { kind: 'failed', reason: 'storage' });
+  assert.equal(w.members.status('gone')?.kind, 'failed');
+  assert.equal(w.members.status('orph')?.kind, 'orphan');
+  for (const id of ['unw', 'dead', 'gate']) assert.deepEqual(w.members.status(id), { kind: 'failed', reason: 'unreachable' }, `${id} keeps its state`);
+});
+
+test('#493: a member with a join in flight, or whose loop a failed join just started, is not re-armed', async () => {
+  const w = world(['b']);
+  w.members.sync([entry('b')]);
+  await settle();
+  assert.equal(w.members.rearm(), 0, 'connecting, its join out');
+  assert.equal(w.rt('b').dials, 1);
+  w.rt('b').answer(unreachable);
+  await settle();
+  assert.deepEqual(w.members.status('b'), { kind: 'failed', reason: 'unreachable' }, 'the failed join s state, its loop already running');
+  const before = retries(w, 'b');
+  assert.equal(w.members.rearm(), 0);
+  assert.equal(retries(w, 'b'), before, 'no second loop');
+});
+
+test('#493: a re-armed loop that answers after the member was removed or taken over by the focus concludes nothing', async () => {
+  const removed = await gaveUpWorld(['b']);
+  assert.equal(removed.members.rearm(), 1);
+  removed.wanted.delete('b');
+  removed.members.leave('b');
+  removed.members.answered(removed.rt('b'), ok('b'));
+  assert.ok(!removed.log.includes('up:b'), 'nothing published');
+  assert.equal(removed.members.status('b'), null);
+  const taken = await gaveUpWorld(['c'], ['c']);
+  assert.equal(taken.members.rearm(), 1);
+  const c = taken.rt('c');
+  assert.equal(taken.members.handOver(c), true, 'the focus moved onto C');
+  taken.members.answered(c, ok('c'));
+  assert.ok(!taken.log.includes('back:c'), 'the set no longer answers for it');
+  assert.equal(taken.members.status('c'), null);
+});
+
+test('#493 P1-D: while a sync may not start joins, it starts none and writes no status — leaves, orphans and the members in hand are kept; the next sync allowed to joins', async () => {
+  const w = world(['a', 'b', 'c', 'd']);
+  w.members.sync([entry('a'), entry('b')]);
+  await settle();
+  w.rt('a').answer(ok('a'));
+  await settle();
+  assert.equal(w.members.status('a')?.kind, 'connected');
+  assert.equal(w.members.status('b')?.kind, 'connecting', 'B s join is out');
+  w.joining(false);                                               // the person disconnected
+  const dials = () => w.log.filter((l) => l.startsWith('dial:'));
+  const before = dials().length;
+  // C and D are new to the set; A is up and B is joining; nothing is excluded yet.
+  w.members.sync(['a', 'b', 'c', 'd'].map(entry));
+  await settle();
+  assert.equal(dials().length, before, 'no new join: C and D are not dialled');
+  assert.equal(w.members.status('c'), null, 'no status for a join that did not start');
+  assert.equal(w.members.status('d'), null);
+  assert.equal(w.members.status('a')?.kind, 'connected', 'A in hand, kept');
+  assert.equal(w.members.status('b')?.kind, 'connecting', 'B s join in flight, kept');
+  // Upkeep runs: B excluded leaves; A's id absorbed becomes an orphan.
+  w.wanted.delete('b');
+  w.saved.delete('a');
+  w.members.sync([entry('c'), entry('d')]);
+  await settle();
+  assert.ok(w.log.includes('release:b'), 'B left');
+  assert.equal(w.members.status('b'), null);
+  assert.equal(w.members.status('a')?.kind, 'orphan', 'A kept as an orphan, not destroyed');
+  assert.equal(dials().length, before, 'still no new dial');
+  // A connect succeeded: the next sync joins.
+  w.joining(true);
+  w.members.sync([entry('c'), entry('d')]);
+  await settle();
+  assert.deepEqual(dials().slice(before), ['dial:c', 'dial:d'], 'C and D join');
 });
