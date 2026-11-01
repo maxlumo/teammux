@@ -1467,8 +1467,6 @@
     /* One em == one step row's font size, so the cap below is expressed in ROWS
        and follows the type scale instead of a magic pixel height. */
     font-size: var(--fs-sub);
-    /* One row's pitch (its height plus the 2px gap), the unit the cap below counts in. */
-    --step-row: calc(1.5em + 2px);
     /* The ARGUMENT is the interesting half of a tool call and it is routinely
        wider than the lane — a path, a command, a heredoc. It used to be cut with
        an ellipsis, so the one thing you opened the lane to read was the one thing
@@ -1487,7 +1485,7 @@
      this: chaining only starts at the lane's edge, which is exactly the owner's
      rule ("小窗口到顶，就继续滚外部的消息框"). */
   .s-body.capped {
-    max-height: calc(var(--steps-rows) * var(--step-row) + 11px);
+    max-height: calc(var(--steps-rows) * (1.5em + 2px) + 11px);
     overflow-y: auto;
     scrollbar-width: thin;
   }
@@ -1521,21 +1519,9 @@
   .step .st-text { display: inline-block; white-space: nowrap; color: var(--text2); }
   /* A path in the argument is the message body's path link (board #475): the same recogniser, the
      same href, the same router. Its colour and hover underline are app.css's one prose-link rule (#478),
-     not a copy here; the words around it stay as they were. */
-  /* On touch a path link is a --control-height target (44px; design-language touch rule), and the
-     ROW carries it, a local layout change accepted for that target (reviewer ruling, board #475):
-     the row takes the target height, its argument cell fills it, and the link is an in-flow box of
-     that height and at least that width, so short paths do not shrink the target and neighbouring
-     links never overlap (the extra width stays inside the argument scroller; an absolute overhang
-     would be clipped by it and would cover the next row). The cap keeps counting rows with the same
-     pitch, so "ten rows, then scroll" holds. Fine-pointer rows are untouched. */
-  @media (any-pointer: coarse) {
-    .s-body { --step-row: calc(var(--control-height) + 2px); }
-    .step { align-items: center; min-height: var(--control-height); }
-    .step .st-scroll { align-self: stretch; display: flex; align-items: center; }
-    .step .st-text { flex: none; }
-    .step .st-text a { display: inline-flex; align-items: center; min-width: var(--control-height); min-height: var(--control-height); }
-  }
+     not a copy here; the words around it stay as they were. It is an INLINE TEXT link, so its target
+     is its text, on touch too, like a path in a message body (board #488; design-language.md
+     § 6 · Touch). The 44px floor is for controls; a 44px tool row read as blank lines. */
   /* The right column: a plain flex child after the scroller, always at the lane's
      right edge no matter how far the argument is panned. */
   .step .st-ts { flex: none; opacity: 0.55; }

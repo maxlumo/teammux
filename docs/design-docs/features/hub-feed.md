@@ -587,20 +587,16 @@ for nothing itself (pinned in `Feed.source.test.ts`).
   dropped. Shape, not existence (the preview says when the file is missing).
   What is NOT a path stays text: `2>/dev/null` (no path starts after `>`), a
   URL, a word with a space in it. The collapsed head is a button, so its
-  one-line peek stays plain text; no anchor lives inside it. On a fine
+  one-line peek stays plain text; no anchor lives inside it. On every
   pointer the lane is exactly what it was: one line per call, the argument
   cell the only scroller, `white-space: nowrap`, and a link has no layout of its
-  own; its colour and its hover-only underline are app.css's one prose-link rule (#478). On touch (`any-pointer: coarse`, the
-  capability query, not a 760px width) the rows change locally, accepted for
-  the 44px touch target (design-language rule; reviewer ruling, 2026-10-28):
-  the row takes `--control-height`, its argument cell fills it, and the
-  anchor ITSELF is an in-flow box of that height and at least that width, so a
-  short path (`/a/b`) is still a 44px target, neighbouring links never overlap
-  and the extra width stays inside the argument scroller (a short path leaves
-  a gap after it; an absolute overhang is not used: the scroller would clip it
-  and it would cover the next row). The "N rows, then scroll" cap counts rows
-  in one variable, `--step-row` (the row height plus its 2px gap), so taller
-  rows do not turn "ten rows" into four. The tool name and the time stay
+  own; its colour and its hover-only underline are app.css's one prose-link rule (#478).
+  The path is an INLINE TEXT link, so its touch target is its text, as in a
+  message body. #475 first gave it the 44px control target on touch, and
+  because the link sits in the row every row grew to 44px and the run read as
+  blank lines (owner, 2026-11-01). Board #488 removed that override whole,
+  with its row-pitch variable; the "N rows, then scroll" cap counts rows of
+  `1.5em + 2px` again (design-language.md § 6 · Touch). The tool name and the time stay
   outside the scroller, so focusing a link scrolls only the argument cell;
   a pan that starts on a link pans and does not open it. The lane hands a path
   click and a middle click to `openPathRef` BEFORE it stops the click for an

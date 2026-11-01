@@ -614,24 +614,15 @@ test('a tool row\u2019s paths use the one recogniser and the one route, and only
   assert.match(rule('.step .st-text'), /white-space: nowrap/u, 'the row stays one line');
 });
 
-// Board #475, orchestrator ruling: on touch a path link is a 44px target (design-language touch rule) and the ROW
-// carries it. The link's padding stays inside the scroller (a pseudo-element overhang would be clipped by
-// `.st-scroll`'s overflow), and the "N rows, then scroll" cap counts rows in the same unit, so taller rows
-// do not turn "ten rows" into four.
-test('on touch a tool row is a --control-height target and its path links fill it; the cap still counts rows (#475)', () => {
-  const coarse = source.match(/@media \(any-pointer: coarse\) \{\s*\.s-body \{ --step-row: ([^;]+); \}([^@]*?)\n  \}/u);
-  assert.ok(coarse, 'one coarse block carries the row height, after the desktop rules');
-  assert.equal(coarse![1], 'calc(var(--control-height) + 2px)', 'the target height + the 2px gap, from the app token');
-  assert.match(coarse![2]!, /\.step \{ align-items: center; min-height: var\(--control-height\); \}/u);
-  assert.match(coarse![2]!, /\.step \.st-scroll \{ align-self: stretch; display: flex; align-items: center; \}/u,
-    'the scroller fills the row, so the link box is not clipped');
-  assert.match(coarse![2]!, /\.step \.st-text a \{ display: inline-flex; align-items: center; min-width: var\(--control-height\); min-height: var\(--control-height\); \}/u,
-    'the anchor ITSELF is the target, in flow: a short path still gets the full width, without overlapping its neighbour');
-  assert.doesNotMatch(coarse![0], /position:\s*absolute|::before|::after|\b44px\b/u, 'no overhang, no literal');
-  assert.ok(source.indexOf(coarse![0]) > source.indexOf('.step .st-text { display: inline-block;'),
-    'the coarse override comes AFTER the desktop defaults it overrides (same specificity: the later rule wins)');
-  assert.match(rule('.s-body'), /--step-row: calc\(1\.5em \+ 2px\)/u, 'the desktop pitch is the default');
-  assert.match(rule('.s-body.capped'), /max-height: calc\(var\(--steps-rows\) \* var\(--step-row\) \+ 11px\)/u,
-    'the cap multiplies rows by the pitch variable, not a literal');
-  assert.doesNotMatch(source.replace(coarse![0], ''), /min-height: var\(--control-height\)|min-width: var\(--control-height\)/u, 'fine-pointer rows carry none of it');
+// Board #488 (owner, 2026-11-01: "为什么工具调用现在多了很多空行 … 链接点击和那个规则不一样，对话内容里的链接
+// 点击也没加高"). A path in a tool row is an INLINE TEXT link, like a path in a message body: its target is its
+// text. #475 gave it the 44px CONTROL target, and because the link sits in the row, every row on touch grew to
+// 44px and read as blank lines. That override is gone whole: one row pitch on every pointer.
+test('a tool row has one pitch on every pointer; its path link is an inline text link, not a 44px control (#488)', () => {
+  assert.doesNotMatch(source, /@media \(any-pointer: coarse\)[^@]*\.step\b/u, 'no coarse-pointer override of the step rows');
+  assert.doesNotMatch(source, /--step-row/u, 'no row-pitch variable left for an override to change');
+  assert.doesNotMatch(rule('.step'), /min-height/u, 'a row is as tall as its line');
+  assert.doesNotMatch(source, /\.st-text a \{[^}]*(?:min-height|min-width|inline-flex)/u, 'the link box is its text');
+  assert.match(rule('.s-body.capped'), /max-height: calc\(var\(--steps-rows\) \* \(1\.5em \+ 2px\) \+ 11px\)/u,
+    'the cap still counts rows of one line plus the 2px gap');
 });

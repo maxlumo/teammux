@@ -1032,7 +1032,8 @@ that held one. ONE pair of rules in app.css carries the look for all four surfac
 `:hover` arm adds `text-decoration: underline` at `text-underline-offset: 2px`. The hover guard (above) wraps that
 arm in the PRIMARY input's capability, `(hover: hover), (pointer: none)`. What was measured is the pure-touch
 profile (`hover: none`, `pointer: coarse`, Chromium touch emulation at 390): no underline at rest and none after a
-tap, so the colour alone says "link" there, and the tool row's path is already a 44px box (#475). The stated limit
+tap, so the colour alone says "link" there, as on every inline link (the tool row's path included; its target is
+its text, #488). The stated limit
 of the rule above applies unchanged: on a touch laptop (`hover: hover`) a tap can leave the underline until the mouse
 moves, and a phone with a mouse attached gets no underline from the mouse. A component declares no link colour
 or underline of its own: a new prose surface joins the two lists in app.css, and `.m-unfold` keeps only its layout
@@ -1211,6 +1212,15 @@ covered: a link that is a control with its own paint (Settings' About link), whi
   equivalents (Enter/Space) on anything with role=button. A scrolling
   record's back-to-tail action is always global `.to-tail` (board #49), with
   component CSS limited to placement — never a page-specific redraw.
+- **The 44px floor is for CONTROLS, not for inline text links** (board #488,
+  owner 2026-11-01: "为什么工具调用现在多了很多空行 … 链接点击和那个规则不一样，
+  对话内容里的链接点击也没加高"). Buttons, tabs, menu rows and disclosure
+  commands take `--control-height`. A link inside running text (`.md a`,
+  `.md-render a`, a path in a tool row's argument) is a word, and its target is
+  its text, on touch too: growing it grows the line it sits in. #475 gave the
+  tool row's path link the control target; because the link sits in the row,
+  every row on touch became 44px tall and the run read as blank lines. It was
+  removed whole. A tool row has one pitch on every pointer.
 - Keyboard reach: the ONE focus ring is app.css `button/input/textarea:
   focus-visible` (accent outline, 2px offset). Navigation never opts out of
   the Tab order with `tabindex="-1"`; only a container that is focused
