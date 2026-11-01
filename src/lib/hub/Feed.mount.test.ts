@@ -1,4 +1,5 @@
 import test from 'node:test';
+import type { TestContext } from 'node:test';
 import assert from 'node:assert/strict';
 import { compileMount } from '../test/mount.ts';
 import { feedBlocks } from './hub.ts';
@@ -326,5 +327,98 @@ test('a follower whose feed box shrinks re-takes the tail through the feed\u2019
     height = 400;
     await resize();
     assert.equal(feed.scrollTop, 3000, 'the follower is back at the tail, by the feed\u2019s own observer');
+  } finally { await app.close(); }
+});
+
+// Board #496 (owner 2026-11-02: "如果我引用了某一条消息…被盯住的那条消息不是会
+// 折叠吗？但引用的那个部分它没有折叠…引用的部分在折叠状态下留一行就行"). The
+// quote is behind the same fold as the body: one line of the same budget,
+// ellipsised by CSS, whole once unfolded. jsdom has no layout, so this pins
+// the CONTENT and the class; the one-line pixels are the browser's.
+const LONG_EXCERPT = `${'the quoted line runs on and on '.repeat(14)}end`;
+const quoted = (excerpt: string, body: string) => `[re alice 10:41: 「${excerpt}」] ${body}`;
+async function mountFeed(context: TestContext, msgs: { id: string; ts: number; from: string; body: string }[]) {
+  const blocks = feedBlocks(msgs, [], 'chat', (n) => n);
+  const app = await (await compiled).mount(context, {
+    props: { selected: 'fixture', roomReady: true, visible: true, blocks, managedNames: ['dev'],
+      agents: [{ name: 'dev', window: 0, managed: true, agent: 'kiro', state: 'idle' }] },
+    setup(window) { window.Element.prototype.getAnimations = () => []; window.HTMLCanvasElement.prototype.getContext = () => null; },
+    modules: [],
+  });
+  const frames = async () => { for (let i = 0; i < 4; i++) { await app.advance(20); await app.flush(); } };
+  await frames();
+  return { app, frames, q: (s: string) => app.document.querySelector<HTMLElement>(s) };
+}
+
+test('a short message under a long quote folds: the quote is one ellipsised line until Expand (#496)', async (context) => {
+  const { app, frames, q } = await mountFeed(context, [
+    { id: 'a', ts: 100, from: 'dev', body: 'earlier reply' },
+    { id: 'q', ts: 200, from: 'human', body: quoted(LONG_EXCERPT, 'ok?') },
+  ]);
+  try {
+    const quote = () => q('[data-ask] .m-quote')!;
+    assert.ok(q('[data-ask] .m-unfold'), 'a short body under a long quote is foldable');
+    assert.ok(quote().classList.contains('folded'), 'folded, the quote is the one-line form');
+    assert.ok(quote().textContent!.includes('end'), 'the text is all there; CSS cuts what does not fit');
+    q('[data-ask] .m-unfold')!.click(); await frames();
+    assert.ok(!quote().classList.contains('folded'), 'Expand shows the quote whole');
+    q('[data-ask] .m-unfold')!.click(); await frames();
+    assert.ok(quote().classList.contains('folded'), 'and folding again brings the one line back');
+  } finally { await app.close(); }
+});
+
+test('a quote takes one line of the fold budget: a body that fits alone folds under a quote (#496)', async (context) => {
+  // Find the longest body of short lines that does NOT fold on its own.
+  let fits = 0;
+  for (let n = 1; n <= 12; n++) {
+    const body = Array.from({ length: n }, (_, i) => `line ${i + 1}`).join('\n\n');
+    const { app, q } = await mountFeed(context, [{ id: 'q', ts: 200, from: 'human', body }]);
+    const folds = !!q('[data-ask] .m-unfold');
+    await app.close();
+    if (folds) break;
+    fits = n;
+  }
+  assert.ok(fits >= 2 && fits < 12, `the budget is found: ${fits} lines fit`);
+  const body = Array.from({ length: fits }, (_, i) => `line ${i + 1}`).join('\n\n');
+  const { app, q } = await mountFeed(context, [{ id: 'q', ts: 200, from: 'human', body: quoted('short', body) }]);
+  try {
+    assert.ok(q('[data-ask] .m-unfold'), `${fits} lines fit alone; under a one-line quote they fold`);
+    assert.ok(q('[data-ask] .m-quote.folded'));
+    assert.ok(!q('[data-ask] .bubble')!.textContent!.includes(`line ${fits}`), 'the body gave up its last line to the quote');
+  } finally { await app.close(); }
+});
+
+test('a folded quoted message holds the same content held and in flow (#496, #372)', async (context) => {
+  const { app, frames, q } = await mountFeed(context, [
+    { id: 'a', ts: 100, from: 'dev', body: 'earlier reply' },
+    { id: 'q', ts: 200, from: 'human', body: quoted(LONG_EXCERPT, 'ok?') },
+    { id: 'b', ts: 300, from: 'dev', body: 'later reply' },
+  ]);
+  try {
+    const feed = q('.feed')!;
+    Object.defineProperty(feed, 'scrollHeight', { get: () => 3000, configurable: true });
+    Object.defineProperty(feed, 'clientHeight', { get: () => 500, configurable: true });
+    const ask = q('[data-ask]')!;
+    Object.defineProperty(ask, 'offsetTop', { get: () => 2000, configurable: true });
+    Object.defineProperty(ask, 'offsetHeight', { get: () => 60, configurable: true });
+    const scrollTo = async (top: number) => { feed.scrollTop = top; feed.dispatchEvent(new app.window.Event('scroll')); await frames(); };
+    const content = () => q('[data-ask] .bubble')!.innerHTML;
+    const inFlow = content();
+    assert.ok(!q('[data-ask].held'));
+    await scrollTo(1200); await scrollTo(800); await scrollTo(400);
+    assert.ok(q('.msg.held'), 'now held');
+    assert.equal(content(), inFlow, 'the quote and body are the same held or in flow');
+  } finally { await app.close(); }
+});
+
+test('an agent s quoted message still renders in full (#496 scope)', async (context) => {
+  const { app, q } = await mountFeed(context, [
+    { id: 'q', ts: 200, from: 'human', body: 'ask' },
+    { id: 'r', ts: 300, from: 'dev', body: quoted(LONG_EXCERPT, 'answer') },
+  ]);
+  try {
+    const quote = [...app.document.querySelectorAll<HTMLElement>('.m-quote')].at(-1)!;
+    assert.ok(!quote.classList.contains('folded'), 'an agent message is not folded');
+    assert.equal(quote.closest('.msg')!.querySelector('.m-unfold'), null);
   } finally { await app.close(); }
 });

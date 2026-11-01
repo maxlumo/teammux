@@ -388,7 +388,7 @@ test('the fold measures its own line — perLine is never assumed (board #53 rev
   // measures BOTH halves and maps them through the one pure function.
   assert.match(source, /const heldPerLine = \$derived\(perLineOf\(heldWidth, heldGlyph\)\);/u,
     'perLine derives through the pure mapping, no inline math');
-  assert.match(source, /const foldBody = \(text\) => elideTail\(text, heldLines, heldPerLine\);/u,
+  assert.match(source, /const foldBody = \(text, quoted = false\) => elideTail\(text, heldLines - \(quoted \? 1 : 0\), heldPerLine\);/u,
     'foldBody spends the MEASURED perLine, not the default');
   // The width half: the feed content box × the --msg-max cap minus bubble
   // padding — computed with the SAME constants the CSS declares, and this
@@ -484,7 +484,7 @@ test('a font change is a layout mutation through the ONE reading transaction (bo
 test('a reply quote renders as the bubble\u2019s own blockquote; Reply sits in the one action row (#290)', () => {
   assert.match(source, /\{@const quote = parseQuote\(note \? note\.text : m\.body\)\}/u, 'the one parser');
   assert.match(source, /\{@const parts = splitImages\(quote \? quote\.text : note \? note\.text : m\.body\)\}/u, 'the token never renders as text');
-  assert.match(source, /\{#if quote && rawOpen !== key\}\s*<blockquote class="m-quote"><span class="m-quote-who">\{quote\.from\} · \{quote\.time\}<\/span> \{quote\.excerpt\}<\/blockquote>/u,
+  assert.match(source, /\{#if quote && rawOpen !== key\}\s*<blockquote class="m-quote" class:folded><span class="m-quote-who">\{quote\.from\} · \{quote\.time\}<\/span> \{quote\.excerpt\}<\/blockquote>/u,
     'the .md blockquote dialect, no new component; Raw shows the token as sent');
   const acts = source.slice(source.indexOf('<div class="m-acts appear">'), source.indexOf('</div>', source.indexOf('<div class="m-acts appear">')));
   assert.match(acts, /\{#if onreply && m\.id\}\s*<CommandButton iconOnly icon="arc-left" label=\{t\('hubReply'\)\}/u, 'Reply beside Copy and Raw');
@@ -582,7 +582,7 @@ test('a held bubble differs from the one in flow by paint only: no rule under .h
   assert.deepEqual(rules, [['.msg.held .bubble', 'box-shadow: 0 6px 20px rgba(0, 0, 0, 0.28);']], 'one held rule, a shadow');
   assert.doesNotMatch(source, /\.held[^{}]*\{[^}]*(display|height|max-height|overflow|visibility|opacity)\s*:/u);
   // A message with pictures folds like a long one, and the strip renders only unfolded.
-  assert.match(source, /foldBody\(parts\.text\) !== parts\.text \|\| parts\.images\.length > 0/u, 'a picture makes a message foldable');
+  assert.match(source, /foldBody\(parts\.text, !!quote\) !== parts\.text \|\| parts\.images\.length > 0/u, 'a picture makes a message foldable');
   assert.match(source, /\{#if parts\.images\.length && !folded\}\s*<!--[\s\S]*?-->\s*<div class="shots">/u, 'the strip is only there unfolded');
   assert.match(source, /\{#if folded && parts\.images\.length\}[\s\S]*?<div class="m-imgs">\[\{t\('hubImage'\)\}\]\{parts\.images\.length > 1 \? ` ×\$\{parts\.images\.length\}` : ''\}<\/div>/u, 'the folded marker names the picture and how many');
 });
@@ -625,4 +625,18 @@ test('a tool row has one pitch on every pointer; its path link is an inline text
   assert.doesNotMatch(source, /\.st-text a \{[^}]*(?:min-height|min-width|inline-flex)/u, 'the link box is its text');
   assert.match(rule('.s-body.capped'), /max-height: calc\(var\(--steps-rows\) \* \(1\.5em \+ 2px\) \+ 11px\)/u,
     'the cap still counts rows of one line plus the 2px gap');
+});
+
+test('a folded reply quote is one line of the fold budget (board #496)', () => {
+  // Owner 2026-11-02: "引用的部分在折叠状态下留一行就行". One fold state and one
+  // budget for the body and its quote; the quote's class follows `folded`
+  // only, never the pin (#372), and only the quote's text is cut.
+  assert.match(source, /const quoteWraps = \(q\) => \{ const line = `\$\{q\.from\} · \$\{q\.time\} \$\{q\.excerpt\}`; return elideTail\(line, 1, heldPerLine\) !== line; \};/u,
+    'the body s own estimate decides whether the quote wraps');
+  assert.match(source, /\|\| \(!!quote && quoteWraps\(quote\)\)\)\}/u, 'a wrapping quote folds the message');
+  assert.match(source, /renderMarkdown\(folded \? foldBody\(parts\.text, !!quote\) : parts\.text\)/u, 'the render spends the same reserved budget the test did');
+  assert.match(source, /\.m-quote\.folded \{ display: -webkit-box; -webkit-box-orient: vertical; overflow: hidden; -webkit-line-clamp: 1; line-clamp: 1; overflow-wrap: anywhere; \}/u,
+    'the clamp (Board s preview mechanism): nowrap would widen the bubble to the quote s full length');
+  assert.doesNotMatch(source, /\.m-quote[^{]*\{[^}]*white-space: nowrap/u);
+  assert.doesNotMatch(source, /class:folded=\{[^}]*(pinned|held|askHeld)/u, 'the quote never depends on the pin');
 });

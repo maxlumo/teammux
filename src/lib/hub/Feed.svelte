@@ -351,7 +351,13 @@
   /** The body a folded user message shows: a plain rear truncation (owner,
    * 2026-08-27: "直接后截断的形式 … 中间不要了，默认用户消息都截断"). Identity
    * when it already fits, so the common case re-renders nothing. */
-  const foldBody = (text) => elideTail(text, heldLines, heldPerLine);
+  const foldBody = (text, quoted = false) => elideTail(text, heldLines - (quoted ? 1 : 0), heldPerLine);
+  /** A reply's quote, folded, is ONE line of that budget (board #496, owner
+   * 2026-11-02: "引用的部分在折叠状态下留一行就行"): the body gives up the line
+   * (`foldBody(text, true)`), and a quote that would wrap makes the message
+   * foldable. The same estimate as the body's (elideTail at perLine), not a
+   * measured line: CSS ellipsises what is actually on screen. */
+  const quoteWraps = (q) => { const line = `${q.from} · ${q.time} ${q.excerpt}`; return elideTail(line, 1, heldPerLine) !== line; };
   /** A sent /command folds through the same budget; `null` when it fits. */
   const foldCmd = (cmd) => foldedCommandArgs(cmd, heldLines, heldPerLine);
   /** Messages the reader unfolded by hand, by key. Folding is the DEFAULT for
@@ -877,7 +883,9 @@
         <!-- Images are behind the fold too (board #372): a message with a
              picture folds like a long one and the picture opens with the same
              control, so scrolling to a message never changes its box. -->
-        {@const foldable = isAsk && (b.command ? cmdFold !== null : foldBody(parts.text) !== parts.text || parts.images.length > 0)}
+        <!-- A quote is behind the same fold (board #496): it takes one line of
+             the budget, and a quote that would wrap folds the message. -->
+        {@const foldable = isAsk && (b.command ? cmdFold !== null : foldBody(parts.text, !!quote) !== parts.text || parts.images.length > 0 || (!!quote && quoteWraps(quote)))}
         {@const folded = foldable && !expanded[key]}
         <!-- An EXPANDED message is never pinned: sticky ignores the feed's
              scrolling, so a pinned screen-tall message had an unreachable
@@ -944,7 +952,7 @@
               <!-- A reply's quote (board #290): the bubble's own markdown
                    blockquote, the sender and time over the quoted line. -->
               {#if quote && rawOpen !== key}
-                <blockquote class="m-quote"><span class="m-quote-who">{quote.from} · {quote.time}</span> {quote.excerpt}</blockquote>
+                <blockquote class="m-quote" class:folded><span class="m-quote-who">{quote.from} · {quote.time}</span> {quote.excerpt}</blockquote>
               {/if}
               {#if b.command && rawOpen !== key}
                 <!-- The command in the bubble's own atoms, as plain text (no
@@ -959,7 +967,7 @@
                   <!-- Folded: the start of the message, cut where the
                        budget runs out, …… glued to the last kept line.
                        Raw view and agent messages render in full. -->
-                  {@html markIssueRefs(markMentions(renderMarkdown(folded ? foldBody(parts.text) : parts.text), managedNames), issueSet)}
+                  {@html markIssueRefs(markMentions(renderMarkdown(folded ? foldBody(parts.text, !!quote) : parts.text), managedNames), issueSet)}
                 {/if}
               {/if}
               <!-- One unfold control for a folded command and a folded text. -->
@@ -1244,6 +1252,13 @@
   /* A reply's quote rides the bubble's own .md blockquote (board #290); its
      head is the meta ink, like the time. */
   .m-quote-who { color: var(--text3); font-size: var(--fs-meta); }
+  /* Folded, the quote is one line, ellipsised where the bubble ends (#496);
+     only the quote's text is cut, never the bubble's box. The clamp, the
+     Board card preview's mechanism, not nowrap: the quote still lays out
+     wrapped, so its width is the wrapped one and the bubble keeps the width
+     it has unfolded (measured: nowrap stretched a 390px phone's bubble to
+     2860px). */
+  .m-quote.folded { display: -webkit-box; -webkit-box-orient: vertical; overflow: hidden; -webkit-line-clamp: 1; line-clamp: 1; overflow-wrap: anywhere; }
   .m-head .m-note-state {
     display: inline-flex; align-items: center; gap: 4px;
     margin-left: auto; padding: 0 5px; border-radius: 4px;
