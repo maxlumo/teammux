@@ -5918,6 +5918,121 @@ test('while one agent is shown, showing another moves filter and target together
   } finally { await app.close(); }
 });
 
+// Board #490 (owner 2026-11-01 22:29: "我点击给哪一条消息回复的时候，agent 要给我自动切换过去，
+// 避免回复不对的情况"): a Reply addresses the message's sender. Before, the sender was
+// seated only when nobody was, and a lead nearly always is, so the line went to the
+// lead under a "Replying to X" chip. Read from what was actually posted.
+const replyMessages = [
+  { id: 'm1', seq: 1, ts: 100, from: 'alice', body: '@bob status?' },
+  { id: 'm2', seq: 2, ts: 200, from: 'bob', body: 'done @alice' },
+  { id: 'm3', seq: 3, ts: 300, from: 'human', body: '@carol hi' },
+  { id: 'm4', seq: 4, ts: 400, from: 'carol', body: 'ping @bob' },
+];
+async function replyFixture(context: TestContext, bobAtStart = true) {
+  const sent: [string, string | undefined][] = [];
+  const f = await lockFixture(context, {
+    hubLog: async () => ({ messages: replyMessages, has_more: false }),
+    hubPost: async (_s: string, body: string, _from: string, re?: string) => { sent.push([body, re]); return {}; },
+  }, bobAtStart);
+  const { app } = f;
+  for (let i = 0; i < 12 && app.document.querySelectorAll('.msg').length < 4; i++) await app.flush();
+  const reply = async (id: string) => {
+    const msg = [...app.document.querySelectorAll<HTMLElement>('.msg')]
+      .find((m) => m.querySelector('.m-body')?.textContent?.includes(replyMessages.find((r) => r.id === id)!.body.replace(/^@\w+ /u, '')));
+    assert.ok(msg, `message ${id} is on screen`);
+    msg!.querySelector<HTMLElement>('.bubble')!.click();
+    await app.flush();
+    msg!.querySelector<HTMLButtonElement>('.m-acts button[aria-label="Reply"]')!.click();
+    await app.flush();
+  };
+  const send = async (line: string) => {
+    const before = sent.length;
+    await app.text(line);
+    app.send.click();
+    for (let i = 0; i < 8 && sent.length === before; i++) await app.flush();
+    return sent.slice(before);
+  };
+  const shown = () => app.document.querySelector<HTMLElement>('.acard.filtered')?.dataset.agent ?? '';
+  const chip = () => app.document.querySelector('.pend-chip.reply')?.textContent ?? '';
+  return { ...f, sent, reply, send, shown, chip };
+}
+
+test('a Reply addresses its sender over any seated target; a reply to the human retargets nothing (#490)', { timeout: 60000 }, async (context) => {
+  const f = await replyFixture(context);
+  const { app } = f;
+  try {
+    assert.equal(selectedCard(app.document), 'alice', 'a lead is seated');
+    await f.reply('m4');
+    assert.equal(selectedCard(app.document), 'carol', 'another lead seated: the reply takes carol');
+    assert.match(f.chip(), /Replying to carol/u);
+    assert.deepEqual(await f.send('ok'), [['@carol ok', 'm4']], 'the line goes to carol, with the quote');
+    assert.equal(f.shown(), '', 'a Reply opens no filter');
+
+    app.document.querySelector<HTMLButtonElement>('.all-choice button')!.click();
+    await app.flush();
+    assert.equal(selectedCard(app.document), 'all');
+    await f.reply('m2');
+    assert.equal(selectedCard(app.document), 'bob', '@all is replaced by the sender');
+    // Dropping the quote does not bring the old target back.
+    app.input.dispatchEvent(new app.window.KeyboardEvent('keydown', { key: 'Escape', bubbles: true }));
+    for (let i = 0; i < 5 && f.chip(); i++) await app.flush();
+    assert.equal(f.chip(), '');
+    assert.equal(selectedCard(app.document), 'bob', 'the target stays the sender');
+
+    await f.reply('m3');
+    assert.match(f.chip(), /Replying to (you|human)/u, 'the human\u2019s own message is quoted');
+    assert.equal(selectedCard(app.document), 'bob', 'and retargets nothing');
+    assert.deepEqual(await f.send('noted'), [['@bob noted', 'm3']]);
+  } finally { await app.close(); }
+});
+
+test('while one agent is shown, a Reply to another moves filter and target to it; to the shown one it stays (#490)', { timeout: 60000 }, async (context) => {
+  const f = await replyFixture(context);
+  const { app } = f;
+  try {
+    await f.showOnly('bob');
+    assert.deepEqual([f.shown(), selectedCard(app.document)], ['bob', 'bob']);
+    await f.reply('m1');   // alice's message, on screen because it addresses bob
+    assert.deepEqual([f.shown(), selectedCard(app.document)], ['alice', 'alice'], 'the explicit switch of #483');
+    assert.deepEqual(await f.send('on it'), [['@alice on it', 'm1']], 'and the line goes to alice alone');
+    await f.reply('m1');
+    assert.deepEqual([f.shown(), selectedCard(app.document)], ['alice', 'alice'], 'a reply to the shown agent keeps the view (no toggle)');
+    // A draft that still names the old agent is refused after the switch, draft and quote kept.
+    app.input.dispatchEvent(new app.window.KeyboardEvent('keydown', { key: 'Escape', bubbles: true }));
+    for (let i = 0; i < 5 && f.chip(); i++) await app.flush();
+    await app.text('@alice please look');
+    await f.reply('m2');   // bob's message, on screen because it addresses alice
+    assert.deepEqual([f.shown(), selectedCard(app.document)], ['bob', 'bob']);
+    app.send.click();
+    for (let i = 0; i < 4; i++) await app.flush();
+    assert.deepEqual(f.sent.slice(1), [], 'nothing posted');
+    assert.equal(app.input.value, '@alice please look', 'the draft stays');
+    assert.match(f.chip(), /Replying to bob/u, 'the quote stays');
+    assert.match(f.feedback(), /Showing only bob\. To send to @alice, leave that view first\./u);
+  } finally { await app.close(); }
+});
+
+test('a Reply to a declared agent that is stopped is refused: no new quote, view and target unchanged, the old lead not messaged (#490)', { timeout: 60000 }, async (context) => {
+  const f = await replyFixture(context, false);
+  const { app } = f;
+  try {
+    assert.equal(selectedCard(app.document), 'alice', 'alice is the seated lead; bob is stopped');
+    await app.text('the answer');
+    await f.reply('m2');
+    assert.equal(f.chip(), '', 'no quote of bob');
+    assert.deepEqual([f.shown(), selectedCard(app.document)], ['', 'alice'], 'no filter opened, target unchanged');
+    assert.match(f.feedback(), /bob is stopped and cannot receive a reply\./u, 'the inline error says why');
+    assert.equal(app.input.value, 'the answer', 'the draft stays');
+    // An earlier quote is kept, not cleared or replaced by the refused one.
+    await f.reply('m4');
+    assert.match(f.chip(), /Replying to carol/u);
+    await f.reply('m2');
+    assert.match(f.chip(), /Replying to carol/u, 'the earlier quote stays');
+    assert.equal(selectedCard(app.document), 'carol', 'and so does its target');
+    assert.deepEqual(f.sent, [], 'nothing was sent, to alice or anyone');
+  } finally { await app.close(); }
+});
+
 // Board #484 (owner 2026-10-30 17:17: "双击 Agent 的卡片显示或不显示 在手机上也要支持
 // 现在手机上只能长按 然后在菜单里选择"): a finger's double-tap on a card is the
 // desktop double-click — the SAME showOnly path, so #483's rule holds. Sent as

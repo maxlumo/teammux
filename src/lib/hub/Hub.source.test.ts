@@ -866,7 +866,13 @@ test('a reply sends the quoted message\u2019s id; the server builds the quote, o
   assert.match(source, /const re = replyTo\?\.id;\s*const quoteBack = replyTo;\s*composerText = '';\s*stager\.pending = \[\]; \/\/ detached, not cleared[^\n]*\n\s*replyTo = null;/u, 'taken, then cleared, before the RPC');
   assert.match(source, /await hubPost\(room, text, 'human', re\);/u);
   assert.match(source, /if \(re && !replyTo\) replyTo = quoteBack;/u, 'a failed post keeps the quote with the draft');
-  assert.match(source, /if \(!recipient && m\.from && managedAgents\.some\(\(a\) => a\.name === m\.from\)\) setRecipient\(m\.from\);/u, 'seats the quoted agent only when nobody is chosen');
+  assert.doesNotMatch(source, /if \(!recipient && m\.from/u, 'a Reply no longer seats the sender only when nobody is chosen (#490)');
+  const replyFn = /function replyToMessage\(m\) \{([\s\S]*?)\n  \}/u.exec(source)?.[1] ?? '';
+  assert.ok(replyFn.indexOf('stopped.includes(m.from)') < replyFn.indexOf('replyTo = {'),
+    'a stopped sender is refused before the quote is set (#490)');
+  assert.match(replyFn, /if \(shownAgent\(\) && shownAgent\(\) !== m\.from\) setFilter\(m\.from, 'user'\);\s*setRecipient\(m\.from\);/u,
+    'a running sender: the #483 switch under another shown agent, then the one target writer (#490)');
+  assert.doesNotMatch(replyFn, /toggleFilter/u, 'never a toggle: a Reply to the shown agent keeps the view');
   assert.match(source, /replyTo = null; \/\/ a quote belongs to the room it was taken in/u);
   assert.match(source, /backLayers\.register\('reply', \(\) => \{ if \(replyTo\) \{ replyTo = null; return true; \}/u, 'Back drops it');
   assert.doesNotMatch(source, /\[re /u, 'no second formatter in the client');

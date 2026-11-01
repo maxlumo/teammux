@@ -1303,9 +1303,30 @@
   let replyTo = $state(null);
   function replyToMessage(m) {
     if (!m?.id) return;
+    // A declared agent that is stopped cannot receive a reply: refused at the
+    // entry, BEFORE the quote, the filter or the target is touched (#490), with
+    // the send's own inline error feedback. No "Replying to B" is set over a send
+    // that would reach someone else; the draft, the attachments, an earlier
+    // quote, the filter and the target stay; nothing restarts or queues.
+    if (m.from && stopped.includes(m.from)) {
+      const token = commandFeedbackLifetime.begin();
+      commandFeedbackAnchor = composer?.feedbackAnchor() ?? null;
+      commandFeedbackLifetime.update(token, { kind: 'error', message: t('hubReplyStopped').replace('{name}', m.from) });
+      return;
+    }
     replyTo = { id: String(m.id), from: m.from ?? '', preview: quotePreview(m.body) };
-    // A reply to an agent goes to that agent unless a recipient was chosen.
-    if (!recipient && m.from && managedAgents.some((a) => a.name === m.from)) setRecipient(m.from);
+    // A reply to a running agent of the room goes to that agent, whoever was
+    // seated: another lead, @all or a team (#490, owner 2026-11-01: "我点击给哪一条
+    // 消息回复的时候，agent 要给我自动切换过去，避免回复不对的情况"). The sender is the
+    // message's `from`, judged against the roster, never parsed from the body.
+    // While another agent is shown it is the explicit switch a double-click on
+    // the sender's card is (#483): the filter moves, then the writer selects it.
+    // With no agent shown a Reply opens no filter. The human, or a window the
+    // room never declared, retargets nothing.
+    if (m.from && managedAgents.some((a) => a.name === m.from)) {
+      if (shownAgent() && shownAgent() !== m.from) setFilter(m.from, 'user');
+      setRecipient(m.from);
+    }
     composer?.focus();
   }
 

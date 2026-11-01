@@ -1043,7 +1043,8 @@ pinned it as intended, and both checks passed against the ruling.
 - `canAddress(target, shown)` (`hub-composer.ts`) is the one predicate.
   `setRecipient`, the one target writer, asks it first. So a card, a menu's
   Message / Message everyone / Message team / Record only, @all, a team name,
-  and the spawn, restart and reply auto-picks are all refused by the same line.
+  and the spawn and restart auto-picks are all refused by the same line. A
+  Reply is not an auto-pick: it is an explicit switch, below (#490).
   No path needs its own gate.
 - The controls derive their state from the same predicate, which makes the
   dimming true. The cards' select, the team names and the @all command are
@@ -1086,6 +1087,35 @@ pinned it as intended, and both checks passed against the ruling.
   composer says that X is stopped and cannot receive, and nothing is
   sendable. When X runs again, the roster's answer selects X. Leaving the
   filter while X is stopped keeps the target as shown: nobody.
+
+**A Reply addresses its sender** (board #490, owner 2026-11-01: "我点击给哪一条消息
+回复的时候，agent 要给我自动切换过去，避免回复不对的情况"). Before, the sender was seated only
+when no recipient was, and a lead nearly always is, so the line went to that lead
+under a "Replying to X" chip. The sender is the message's `from`, judged against
+the room's declared agents (running and stopped), never parsed from the body or
+the quote. `replyToMessage` has three branches, all through the existing writers:
+
+- **A running agent X.** X becomes the target over any seated one: another lead,
+  @all, a team, Record only. With no agent shown, `setRecipient(X)`, and a Reply
+  opens no filter. While another agent is shown, it is the explicit switch a
+  double-click on X's card is (#483): `setFilter(X)` (never `toggleFilter`, so a
+  Reply to the shown X keeps the view), then `setRecipient(X)`. The lock is not
+  relaxed: a draft or attachment that still names the old agent is refused at
+  the send, with the draft and the quote kept, as any other address beyond X.
+- **A declared agent that is stopped.** It cannot receive a reply, so the Reply
+  is refused at its entry, before the quote, the filter or the target is
+  touched. The composer's inline error says "{name} is stopped and cannot
+  receive a reply." No new quote is set, an earlier one stays, and the draft,
+  the attachments, the filter and the target are unchanged. Nothing restarts,
+  queues or goes to the old lead. (An agent that runs again replies normally.)
+- **The human, or a window the room never declared.** The quote only; no filter
+  or target change.
+
+Dropping the quote (×, Escape) does not bring the previous target back. "Only
+mine" is not an agent and locks nothing. `Hub.mount.test.ts` pins the actual posts:
+another lead seated, @all seated, the human's own message, a switch under the
+filter, a Reply to the shown agent, a refused stale address after the switch,
+and the stopped sender (no quote, nothing posted, an earlier quote kept).
 
 Considered and rejected (#482 design round): the filter FOLLOWING the target,
 where a tap on another agent moves both and @all or a team ends the filter.
@@ -1203,7 +1233,7 @@ Owner, 10:55: "回复时可以直接点击某一条消息，底下应该出现�
 
 - **The token, built once, by the server.** `hub_post` takes an optional `re` (a message id, or its room `seq` when all digits) and builds `[re <sender> <when>: 「<excerpt>」] ` from its OWN stored row (`<when>` is `HH:MM` for a message from today and `YYYY-MM-DD HH:MM` otherwise, the client's `localWhen` rule, `quote_when`) (`address::quote_token`), inserting it after the body's leading `@addresses`: `@builder [re lead 10:41: 「＠lead please review #289」] which P1?`. The composer and `tmm send "@name text" --re <seq|id>` both send `re` and never format the token, so there is one set of rules, the CLI is at parity by construction, and the sender and time come from the record, not the client (orchestrator 11:30). A `re` naming a message of another room, or none, is `InvalidParams` (`rooms::message_by_ref` looks inside this room only). A `--re` with `--in`/`--at` is refused: a scheduled wake carries no quote.
 - **The excerpt.** The quoted body's first non-empty line, whitespace squashed, cut to `QUOTE_CHARS` (120) characters with `…`; never multi-line. Two characters change inside it, and only there: `@` becomes the full-width `＠`, because every mention parser (`address::mention_names`, the client's `mentionTokens`) reads ASCII `@` only, so quoting "@lead please…" never delivers to lead or lights lead's card; `」` becomes `”`, so the first `」]` always ends the token (`parseQuote`). The reply's own addresses stay first and deliver as always; #283/#285's sender rules read the body as before.
-- **The composer.** `Reply` in the bubble's `.m-acts` row (beside Copy and Raw, the `arc-left` glyph) holds the message's id, sender and a preview line (`quotePreview`) as a chip in the pending row (the attachment chip's species: `Replying to <name> · <first line>` and ×). One per send; ×, Escape (a layer after the action row and the palette: one Escape peels one; the listener is installed while the chip is up, validator 12:23), Back (a layer after the filter) and a room switch drop it, and a failed post keeps it with the restored draft. Replying to a managed agent with no recipient chosen seats that agent; an explicit recipient is never overridden.
+- **The composer.** `Reply` in the bubble's `.m-acts` row (beside Copy and Raw, the `arc-left` glyph) holds the message's id, sender and a preview line (`quotePreview`) as a chip in the pending row (the attachment chip's species: `Replying to <name> · <first line>` and ×). One per send; ×, Escape (a layer after the action row and the palette: one Escape peels one; the listener is installed while the chip is up, validator 12:23), Back (a layer after the filter) and a room switch drop it, and a failed post keeps it with the restored draft. Replying addresses the message's sender (board #490, below): a running agent of the room becomes the target over any seated one; a stopped one refuses the Reply; the human or an undeclared window only quotes.
 - **The feed.** A body with the token renders it as the bubble's own `.md blockquote` (`.m-quote`: `sender · time`, then the excerpt) above the text, which is parsed without the token (`parseQuote(body).text`). Raw shows the body as sent. The token is plain text, so `tmm log`, notifications and an older client read it as written.
 - **Pinned by** the ONE case table in `address.rs` (`a_quote_token_carries_the_first_line_and_addresses_nobody`: each token addresses nobody under `mention_names`), which `hub.test.ts` reads and runs through `parseQuote` and `mentionTokens` (an `@builder` reply over each quote yields exactly `['builder']`); `a_reply_quotes_a_message_of_its_own_room_after_the_addresses` (by id and by seq; another room's message refused; the quoted `@lead` adds nobody to `to`); `Feed.source`/`Composer.source`/`Hub.source` for the wiring; the `--re` flag in `tmm`'s valued-flag test. No schema change.
 
