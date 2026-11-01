@@ -13,6 +13,10 @@ pub(crate) mod grok;
 pub(crate) mod kimi;
 pub(crate) mod kiro;
 pub(crate) mod omp;
+/// Backend readiness (board #492): the `backends_check` RPC and the
+/// `tmm readiness-probe` helper. Desktop-only, like the probe runner.
+#[cfg(not(any(target_os = "android", target_os = "ios")))]
+pub mod readiness;
 pub(crate) mod shared;
 
 /// How a completed turn ended, as far as its reply tells (board #355).
@@ -566,6 +570,32 @@ impl Backend {
             Backend::Omp => omp::known(),
             Backend::Kimi => kimi::known(),
             Backend::Dsh => dsh::known(),
+        }
+    }
+
+    /// The program a launch line starts: the first word of `known().launch`
+    /// (`kiro-cli chat` → `kiro-cli`, `dsh web` → `dsh`), what backend
+    /// readiness looks for on the managed PATH (board #492).
+    #[cfg(not(any(target_os = "android", target_os = "ios")))]
+    pub fn launch_program(self) -> &'static str {
+        let launch = self.known().launch;
+        launch.split_whitespace().next().unwrap_or(launch)
+    }
+
+    /// What deciding whether a NEW managed agent of this backend is set up
+    /// needs (board #492): read from the user's files the backend's render
+    /// carries, or asked in the readiness baseline. Each arm is the
+    /// backend's own file.
+    #[cfg(not(any(target_os = "android", target_os = "ios")))]
+    pub fn set_up_need(self) -> readiness::Need {
+        match self {
+            Backend::Kiro => readiness::Need::TestOnly,
+            Backend::Claude => readiness::Need::ClaudeAuth,
+            Backend::Codex => codex::set_up_need(),
+            Backend::Grok => grok::set_up_need(),
+            Backend::Omp => omp::set_up_need(),
+            Backend::Kimi => kimi::set_up_need(),
+            Backend::Dsh => readiness::Need::env(vec![dsh::KEY_ENV.to_string()]),
         }
     }
 

@@ -2069,7 +2069,7 @@ pub(crate) fn effort_flag(def: &RegAgent) -> String {
     }
 }
 
-fn tmm_dir() -> Option<PathBuf> {
+pub(crate) fn tmm_dir() -> Option<PathBuf> {
     std::env::current_exe().ok().and_then(|p| p.parent().map(Path::to_path_buf))
 }
 
@@ -2245,6 +2245,8 @@ mod tests {
                 let t = line.trim_start();
                 if t.starts_with("//") || !(t.contains("std::fs::write(") || t.contains("fs::copy(") || t.contains("File::create(") || t.contains("OpenOptions::new(")) { continue; }
                 if t.contains("format!(\"{current}{sep}{mark}{line}\\n\")") { continue; } // kiro's .git/info/exclude
+                // Backend readiness's bounded READER (board #492): a read-only open, no write.
+                if f.ends_with("backends/readiness.rs") && t.contains("std::fs::OpenOptions::new().read(true).custom_flags(libc::O_NONBLOCK).open(path)") { continue; }
                 // The non-Unix fallbacks of write_atomic and copy_private themselves.
                 if f.ends_with("backends/shared.rs") && (t.starts_with("std::fs::write(&tmp, text)") || t.starts_with("return std::fs::write(to, bytes)")) { continue; }
                 raw.push(format!("{}:{}: {t}", f.strip_prefix(&root).unwrap().display(), i + 1));

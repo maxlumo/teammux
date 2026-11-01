@@ -31,6 +31,12 @@ pub mod gateway;
 #[cfg(not(any(target_os = "android", target_os = "ios")))]
 pub mod system_status;
 
+/// The ONE bounded runner for a short probe of this host's CLIs (a
+/// `--version`, the backend readiness check, board #362/#492). Desktop-gated
+/// like `projects`: only a desktop server runs agent CLIs.
+#[cfg(not(any(target_os = "android", target_os = "ios")))]
+pub mod probe;
+
 #[cfg(all(desktop, feature = "gui"))]
 use config::Config;
 

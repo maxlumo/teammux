@@ -506,6 +506,39 @@ pub(crate) fn reply_fallback(payload: &serde_json::Map<String, Value>, home: &Pa
     session_reply(&home.join("kimi"), &id)
 }
 
+/// What a NEW managed kimi needs set up (board #492): the chain the carried
+/// `config.toml` names — `default_model` → its `provider` → that provider's
+/// `api_key` (present) or `api_key_env` (asked in the baseline). A broken
+/// chain is unknown, never missing.
+#[cfg(not(any(target_os = "android", target_os = "ios")))]
+pub(crate) fn set_up_need() -> super::readiness::Need {
+    set_up_need_in(&kimi_user_home())
+}
+
+/// `set_up_need` against a given kimi home.
+#[cfg(not(any(target_os = "android", target_os = "ios")))]
+pub(crate) fn set_up_need_in(home: &Path) -> super::readiness::Need {
+    use super::readiness::{read_toml, Need, SetUp};
+    let config = match read_toml(&home.join("config.toml")) {
+        Ok(Some(c)) => c,
+        Ok(None) => return Need::Found(SetUp::unknown("config_absent")),
+        Err(r) => return Need::Found(SetUp::unknown(r)),
+    };
+    let provider = config
+        .get("default_model")
+        .and_then(toml::Value::as_str)
+        .and_then(|m| config.get("models")?.get(m)?.get("provider")?.as_str())
+        .and_then(|p| config.get("providers")?.get(p)?.as_table());
+    let Some(provider) = provider else { return Need::Found(SetUp::unknown("unrecognised_provider")) };
+    if provider.get("api_key").and_then(toml::Value::as_str).is_some_and(|k| !k.trim().is_empty()) {
+        return Need::Found(SetUp::present("config api_key"));
+    }
+    match provider.get("api_key_env").and_then(toml::Value::as_str) {
+        Some(k) => Need::env(vec![k.to_string()]),
+        None => Need::Found(SetUp::unknown("unrecognised_provider")),
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

@@ -788,6 +788,60 @@ pub(crate) fn is_user_prompt_submit(payload: &Value) -> bool {
 
 }
 
+/// What a NEW managed codex needs set up (board #492), read from the files
+/// render links into its home (`config.toml`, `auth.json`, `.env`). The
+/// managed `--profile` names no provider, so the top-level `model_provider`
+/// decides (absent = openai). `codex login status` is NOT asked: it says
+/// "Not logged in" on a host whose codex runs on a custom provider (measured
+/// 2026-11-01, amazon-bedrock-runtime).
+#[cfg(not(any(target_os = "android", target_os = "ios")))]
+pub(crate) fn set_up_need() -> super::readiness::Need {
+    set_up_need_in(&codex_user_home())
+}
+
+/// `set_up_need` against a given codex home.
+#[cfg(not(any(target_os = "android", target_os = "ios")))]
+pub(crate) fn set_up_need_in(home: &std::path::Path) -> super::readiness::Need {
+    use super::readiness::{dotenv_names, read_toml, Need, SetUp};
+    let config = match read_toml(&home.join("config.toml")) {
+        Ok(c) => c,
+        Err(r) => return Need::Found(SetUp::unknown(r)),
+    };
+    let dotenv = match dotenv_names(&home.join(".env")) {
+        Ok(n) => n,
+        Err(r) => return Need::Found(SetUp::unknown(r)),
+    };
+    let key = |k: &str| {
+        if dotenv.iter().any(|n| n == k) {
+            Need::Found(SetUp::present(format!(".env {k}")))
+        } else {
+            Need::env(vec![k.to_string()])
+        }
+    };
+    let provider = config.as_ref().and_then(|c| c.get("model_provider")).and_then(toml::Value::as_str).unwrap_or("openai");
+    if provider == "openai" {
+        if home.join("auth.json").is_file() {
+            return Need::Found(SetUp::present("auth.json"));
+        }
+        return key("OPENAI_API_KEY");
+    }
+    let table = config.as_ref().and_then(|c| c.get("model_providers")).and_then(|p| p.get(provider)).and_then(toml::Value::as_table);
+    match table {
+        // The provider's id rides `via` only in a plain shape: it is the
+        // user's config text, and a reply carries words (reviewer P2-F).
+        Some(t) if t.contains_key("aws") => {
+            let plain = provider.len() <= 64 && provider.chars().all(|c| c.is_ascii_alphanumeric() || matches!(c, '.' | '_' | '-'));
+            let unknown = SetUp::unknown("aws_chain");
+            Need::Found(if plain { unknown.with_via(format!("provider {provider}")) } else { unknown })
+        }
+        Some(t) => match t.get("env_key").and_then(toml::Value::as_str) {
+            Some(k) => key(k),
+            None => Need::Found(SetUp::unknown("unrecognised_provider")),
+        },
+        None => Need::Found(SetUp::unknown("unrecognised_provider")),
+    }
+}
+
 #[cfg(test)]
 mod tests {
     /// Board #362 c, the SENTENCE alone (review P1-B: kept apart from the

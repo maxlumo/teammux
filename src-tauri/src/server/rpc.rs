@@ -213,6 +213,21 @@ fn dispatch(req: &Request, token: &str) -> Result<serde_json::Value, RpcError> {
             Ok(serde_json::json!({ "backends": crate::backends::Backend::list_json() }))
         }
 
+        // ---- backend readiness (board #492) ---------------------------------
+        // On demand, never polled: a Refresh of every backend's row, or with
+        // `test` an explicit Test of a backend that has one. Desktop-only like
+        // system_status; an older or phone-hosted server answers
+        // method-not-found and the client hides the section. Blocking up to
+        // the readiness budgets, which is what this spawn_blocking door is for.
+        #[cfg(not(any(target_os = "android", target_os = "ios")))]
+        "backends_check" => {
+            let allowed = p.is_null() || p.as_object().is_some_and(|o| o.keys().all(|k| k == "test"));
+            if !allowed || p.get("test").is_some_and(|t| !t.is_string() && !t.is_null()) {
+                return Err(RpcError::InvalidParams("backends_check takes only an optional test: <backend>".into()));
+            }
+            crate::backends::readiness::check(p.get("test").and_then(|t| t.as_str())).map_err(RpcError::InvalidParams)
+        }
+
         // ---- server system vitals (board #56) ------------------------------
         // Desktop-only like the project_* methods: the sampler is not
         // compiled for Android/iOS (a phone is a client of a desktop server),
@@ -885,6 +900,26 @@ mod tests {
             assert!(v.get(k).is_some(), "missing key {k}");
         }
         assert!(v["mem_total"].as_u64().unwrap_or(0) > 0, "memory reads on a live machine");
+    }
+
+    /// Board #492, P2-D: `backends_check` takes only an optional `test`
+    /// naming a backend that HAS a Test; anything else is INVALID_PARAMS,
+    /// refused before any probe runs.
+    #[cfg(not(any(target_os = "android", target_os = "ios")))]
+    #[test]
+    fn backends_check_takes_only_a_test_of_a_testable_backend() {
+        let call = |params: serde_json::Value| handle_request(&Request { id: Some(1), method: "backends_check".into(), params }, "");
+        for p in [
+            serde_json::json!({ "x": 1 }),
+            serde_json::json!({ "test": 3 }),
+            serde_json::json!([1]),
+            serde_json::json!({ "test": "claude" }),
+            serde_json::json!({ "test": "nope" }),
+            serde_json::json!({ "test": "kiro", "extra": true }),
+        ] {
+            let r = call(p.clone());
+            assert_eq!(r.error.as_ref().map(|e| e.code), Some(ERR_INVALID_PARAMS), "{p}");
+        }
     }
 
     fn convert(path: &str) -> Response {

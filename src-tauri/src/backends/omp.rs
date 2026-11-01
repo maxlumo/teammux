@@ -421,3 +421,20 @@ pub(crate) fn is_user_prompt_submit(payload: &Value) -> bool {
         .and_then(Value::as_str)
         .is_some_and(|e| e.eq_ignore_ascii_case("userpromptsubmit"))
 }
+
+/// What a NEW managed omp needs set up (board #492): ALWAYS unknown in phase
+/// 1. Render copies the credential store (`agent.db`), but a row in it does
+/// not prove the selected provider is set up (reviewer P2-F), so only the
+/// file's presence is said, and nothing inside it is read.
+#[cfg(not(any(target_os = "android", target_os = "ios")))]
+pub(crate) fn set_up_need() -> super::readiness::Need {
+    set_up_need_in(&omp_user_agent_dir())
+}
+
+/// `set_up_need` against a given omp agent dir.
+#[cfg(not(any(target_os = "android", target_os = "ios")))]
+pub(crate) fn set_up_need_in(dir: &Path) -> super::readiness::Need {
+    use super::readiness::{Need, SetUp};
+    let via = if dir.join("agent.db").is_file() { "credential store present" } else { "no credential store" };
+    Need::Found(SetUp::unknown("credential_store_unverified").with_via(via))
+}

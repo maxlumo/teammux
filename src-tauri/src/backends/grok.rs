@@ -380,3 +380,32 @@ pub(crate) fn is_user_prompt_submit(payload: &Value) -> bool {
         .and_then(Value::as_str)
         .is_some_and(|e| e.eq_ignore_ascii_case("user_prompt_submit"))
 }
+
+/// What a NEW managed grok needs set up (board #492): the `auth.json` render
+/// copies, else the env var the DEFAULT model's `[model.*]` entry names
+/// (`env_key`). Neither file is a logged-out agent (measured: "You are not
+/// authenticated", the render comment above), so that alone is missing.
+#[cfg(not(any(target_os = "android", target_os = "ios")))]
+pub(crate) fn set_up_need() -> super::readiness::Need {
+    set_up_need_in(&grok_user_home())
+}
+
+/// `set_up_need` against a given grok home.
+#[cfg(not(any(target_os = "android", target_os = "ios")))]
+pub(crate) fn set_up_need_in(home: &Path) -> super::readiness::Need {
+    use super::readiness::{read_toml, Need, SetUp};
+    if home.join("auth.json").is_file() {
+        return Need::Found(SetUp::present("auth.json"));
+    }
+    let config = match read_toml(&home.join("config.toml")) {
+        Ok(Some(c)) => c,
+        Ok(None) => return Need::Found(SetUp::missing(Vec::new(), "no_auth")),
+        Err(r) => return Need::Found(SetUp::unknown(r)),
+    };
+    let default = config.get("models").and_then(|m| m.get("default")).and_then(toml::Value::as_str);
+    let key = default.and_then(|id| config.get("model")?.get(id)?.get("env_key")?.as_str());
+    match key {
+        Some(k) => Need::env(vec![k.to_string()]),
+        None => Need::Found(SetUp::unknown("unrecognised_provider")),
+    }
+}

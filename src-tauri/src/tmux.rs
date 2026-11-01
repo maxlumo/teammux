@@ -71,16 +71,35 @@ pub fn get_socket() -> Option<String> {
     socket_lock().read().unwrap().clone()
 }
 
-/// 执行 tmux 命令，返回 stdout
-fn find_tmux() -> String {
-    // Try PATH first via `which`
-    if let Ok(output) = Command::new("which").arg("tmux").output() {
-        if output.status.success() {
-            let p = String::from_utf8_lossy(&output.stdout).trim().to_string();
-            if !p.is_empty() {
-                return p;
-            }
+/// The first executable file named `program` in the directories of `path`
+/// (what `which` does, without starting a process, so a caller with a
+/// deadline cannot be held by it; board #492). `Ok(None)` when no directory
+/// has it; `Err` when none has it AND some directory could not be looked at
+/// (a permission or I/O error), so "absent" is said only when it is known.
+pub(crate) fn find_on_path(program: &str, path: &std::ffi::OsStr) -> Result<Option<std::path::PathBuf>, std::io::ErrorKind> {
+    use std::os::unix::fs::PermissionsExt;
+    let mut unreadable = None;
+    for dir in std::env::split_paths(path) {
+        let candidate = dir.join(program);
+        match std::fs::metadata(&candidate) {
+            Ok(m) if m.is_file() && m.permissions().mode() & 0o111 != 0 => return Ok(Some(candidate)),
+            Ok(_) => {}
+            Err(e) if matches!(e.kind(), std::io::ErrorKind::NotFound | std::io::ErrorKind::NotADirectory) => {}
+            Err(e) => unreadable = Some(e.kind()),
         }
+    }
+    match unreadable {
+        Some(kind) => Err(kind),
+        None => Ok(None),
+    }
+}
+
+/// 执行 tmux 命令，返回 stdout
+pub(crate) fn find_tmux() -> String {
+    // PATH first, as `which` would answer, but walked here (board #492: a
+    // `which` subprocess had no deadline).
+    if let Ok(Some(p)) = find_on_path("tmux", &std::env::var_os("PATH").unwrap_or_default()) {
+        return p.to_string_lossy().into_owned();
     }
     // Fallback: common locations
     let home = std::env::var("HOME").unwrap_or_default();

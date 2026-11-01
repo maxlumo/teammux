@@ -117,6 +117,12 @@ USAGE (human or agent — self-management):
   tmm ui [--open]                     the web UI this machine's gateway serves: its URL, or
                                       why there is none (--open: the default browser)
   tmm agent list                      agents in this project and their states
+  tmm agent backends [--test kiro]    which agent CLIs a NEW agent on this server could use:
+                                      installed (on the managed PATH), set up (what its
+                                      default provider needs), answers (kiro only, on --test:
+                                      runs kiro-cli whoami + its model list, which write
+                                      kiro's own state); whether it can run a task is known
+                                      at its first run
   tmm agent interrupt <name>          cancel the turn it is running (Escape into its pane)
   tmm agent mode <name> queue|steer   switch a kiro agent's queue/steer mode for this session
                                       (its Ctrl+S; a restart returns to the configured mode)
@@ -275,6 +281,13 @@ fn init_config_root() {
 #[tokio::main(flavor = "current_thread")]
 async fn main() {
     let args: Vec<String> = std::env::args().skip(1).collect();
+    // Backend readiness's helper (board #492), run by the gateway's fixed
+    // script inside a login shell. Answered BEFORE the flag parser: its
+    // arguments are the gateway's, positional, and never a person's. Local
+    // only — it never reads the config, dials the gateway or starts an agent.
+    if args.first().map(String::as_str) == Some("readiness-probe") {
+        std::process::exit(tmux_mobile::backends::readiness::helper_main(&args[1..]));
+    }
     // `--help` is answered before anything else, even beside a flag that is refused or a value
     // that is missing: it is the one explicit exception to the unknown-flag check below.
     let help_asked = args.iter().take_while(|a| a.as_str() != "--").any(|a| a == "--help");
@@ -1045,6 +1058,22 @@ async fn main() {
                     let s = |k: &str| a.get(k).and_then(|v| v.as_str()).unwrap_or("");
                     println!("{} [{}] — {}", s("name"), s("backend"), s("system").chars().take(60).collect::<String>());
                 }
+            }
+        }
+        // Board #492: the readiness the Agents page's Backends section shows,
+        // for an agent choosing a backend before `tmm spawn`. No project:
+        // it is a fact of the server host.
+        ("agent", rest) if rest.first().map(String::as_str) == Some("backends") => {
+            let test = flags.get("test").cloned().flatten();
+            let params = match &test {
+                Some(t) => json!({ "test": t }),
+                None => json!({}),
+            };
+            let r = rpc(&ctx, "backends_check", params).await;
+            if ctx.json {
+                println!("{r}");
+            } else {
+                print!("{}", backends_text(&r));
             }
         }
         ("agent", rest) if rest.first().map(String::as_str) == Some("list") => {
@@ -2375,7 +2404,7 @@ fn file_line(f: &Value, with_room: bool) -> String {
 const VALUED: &[&str] = &["project", "agent", "server", "output", "since", "limit", "brief",
                           "name", "session", "with-agent", "backend", "model", "effort", "input-mode", "system", "skills", "mcp",
                           "ref", "source", "description", "def", "grep", "image", "body", "assignee", "team", "join", "file",
-                          "in", "at", "to", "code", "signal", "re", "as", "from", "before", "lines", "cols", "note", "args-json"];
+                          "in", "at", "to", "code", "signal", "re", "as", "from", "before", "lines", "cols", "note", "args-json", "test"];
 
 /// An argument is a flag only if it has a flag's SHAPE: `-x`, `--name`, `--name=value`, a letter
 /// first and then letters, digits, `_` or `-` (board #456). Anything else that begins with `-`
@@ -2516,6 +2545,7 @@ const VERB_FLAGS: &[VerbFlags] = &[
     VerbFlags { key: "registry delete", ctx: true, flags: &[] },
     VerbFlags { key: "agent", ctx: true, flags: &[] },
     VerbFlags { key: "agent list", ctx: true, flags: &[] },
+    VerbFlags { key: "agent backends", ctx: true, flags: &["test"] },
     VerbFlags { key: "agent stop", ctx: true, flags: &[] },
     VerbFlags { key: "agent restart", ctx: true, flags: &["team"] },
     VerbFlags { key: "agent remove", ctx: true, flags: &[] },
@@ -2809,7 +2839,7 @@ where
     ws.send(Message::Text(auth.to_string().into()))
         .await
         .map_err(|e| (EXIT_NET, format!("send failed: {e}")))?;
-    let auth_reply = read_reply(&mut ws, 1).await?;
+    let auth_reply = read_reply(&mut ws, 1, RPC_TIMEOUT).await?;
     if auth_reply.get("error").is_some() {
         return Err((EXIT_AUTH, "auth rejected — check token in config.toml or $TMM_TOKEN".into()));
     }
@@ -2837,7 +2867,7 @@ where
     ws.send(Message::Text(call.to_string().into()))
         .await
         .map_err(|e| (EXIT_NET, format!("send failed: {e}")))?;
-    let reply = read_reply(&mut ws, 2).await?;
+    let reply = read_reply(&mut ws, 2, reply_timeout(method)).await?;
     let _ = ws.close(None).await;
 
     if let Some(err) = reply.get("error") {
@@ -2855,11 +2885,23 @@ where
     Ok(reply.get("result").cloned().unwrap_or(Value::Null))
 }
 
+/// How long a method's reply may take. Ordinary calls answer within
+/// `RPC_TIMEOUT`; backend readiness runs bounded probes on the gateway host
+/// (board #492: a Refresh replies within 15 s, a Test within 30 s); this is
+/// the transport's wait, above both, never an open-ended one.
+fn reply_timeout(method: &str) -> Duration {
+    match method {
+        "backends_check" => Duration::from_secs(40),
+        _ => RPC_TIMEOUT,
+    }
+}
+
 async fn read_reply(
     ws: &mut (impl StreamExt<Item = Result<Message, tokio_tungstenite::tungstenite::Error>> + Unpin),
     want_id: u64,
+    timeout: Duration,
 ) -> Result<Value, (i32, String)> {
-    let deadline = tokio::time::Instant::now() + RPC_TIMEOUT;
+    let deadline = tokio::time::Instant::now() + timeout;
     loop {
         let msg = tokio::time::timeout_at(deadline, ws.next())
             .await
@@ -3041,6 +3083,58 @@ fn wake_shell(name: &str, to: &str, exe: &str, env: &[(String, String)]) -> Stri
 
 /// What `tmm agent list` prints after an agent's state: ` — <detail>`, and
 /// for a detail that needs a person its remedy too (board #362 c).
+/// What `tmm agent backends` prints (board #492): one line per backend, the
+/// three facts in words, then the scope. A Test's answer is its own block,
+/// with what the Test wrote.
+fn backends_text(r: &Value) -> String {
+    use tmux_mobile::backends::readiness::reason_text;
+    let s = |v: &Value, k: &str| v.get(k).and_then(|x| x.as_str()).unwrap_or("").to_string();
+    let reason = |v: &Value| v.get("reason").and_then(|x| x.as_str()).map(reason_text).unwrap_or("");
+    let set_up = |u: &Value| {
+        let via = s(u, "via");
+        match s(u, "state").as_str() {
+            "present" if s(u, "basis") == "cli" => format!("signed in per the CLI ({via})"),
+            "present" => format!("present ({via})"),
+            "missing" => {
+                let names = u.get("missing").and_then(|m| m.as_array()).map(|a| a.iter().filter_map(|n| n.as_str()).collect::<Vec<_>>().join(" or ")).unwrap_or_default();
+                if names.is_empty() { format!("missing ({})", reason(u)) } else { format!("missing {names} ({})", reason(u)) }
+            }
+            _ if via.is_empty() => format!("unknown ({})", reason(u)),
+            _ => format!("unknown ({}; {via})", reason(u)),
+        }
+    };
+    let answers = |a: &Value| match (s(a, "state").as_str(), s(a, "reason").as_str()) {
+        ("yes", _) => format!("yes ({} models)", a.get("count").and_then(|c| c.as_u64()).unwrap_or(0)),
+        ("no", _) => format!("no ({})", reason(a)),
+        (_, "test_only") => "not tested".to_string(),
+        _ => reason(a).to_string(),
+    };
+    let mut out = String::new();
+    if let Some(t) = r.get("test") {
+        out.push_str(&format!("{}  set up: {} · answers: {}\n", s(t, "name"), set_up(&t["set_up"]), answers(&t["answers"])));
+        out.push_str("This Test ran kiro-cli whoami and its model list; both write kiro's own state (~/.local/share/kiro-cli).\n");
+        return out;
+    }
+    let empty = Vec::new();
+    for b in r.get("backends").and_then(|v| v.as_array()).unwrap_or(&empty) {
+        let i = &b["installed"];
+        let installed = match (s(i, "state").as_str(), i.get("version").and_then(|v| v.as_str())) {
+            ("present", Some(v)) => format!("installed {v}"),
+            ("present", None) => format!("installed, version unknown ({})", reason(i)),
+            ("missing", _) => format!("{} not found on the managed PATH", s(b, "program")),
+            // unknown, or a field this reply lacks: never said to be absent
+            _ if reason(i).is_empty() => "install state unknown".to_string(),
+            _ => format!("install state unknown ({})", reason(i)),
+        };
+        out.push_str(&format!("{:<7} {installed} · set up: {} · answers: {}\n", s(b, "name"), set_up(&b["set_up"]), answers(&b["answers"])));
+    }
+    if let Some(why) = r.get("baseline").and_then(|v| v.as_str()) {
+        out.push_str(&format!("The login-shell check could not run: {}.\n", reason_text(why)));
+    }
+    out.push_str("Scope: a NEW agent on each CLI's default provider and model. Whether it can run a task is known at its first run.\n");
+    out
+}
+
 fn detail_tail(detail: &str) -> String {
     match (detail.is_empty(), tmux_mobile::projects::recovery::person_remedy(detail)) {
         (true, _) => String::new(),
@@ -3349,6 +3443,49 @@ mod tests {
         assert!(super::restore_text("run", &run).starts_with("✓ restore u2 accepted (new, attempt 1); it runs in the gateway's background"));
         assert_eq!(super::restore_text("abandon", &serde_json::json!({ "abandoned": true, "batch": "u2" })), "✓ restore u2 abandoned; no window was touched\n");
         assert_eq!(super::restore_text("abandon", &serde_json::json!({ "abandoned": false, "reason": "no restore is open" })), "nothing to abandon: no restore is open\n");
+    }
+
+    /// Board #492: `tmm agent backends` says each fact in words, names a
+    /// missing variable, never shows a value, and keeps the scope line.
+    #[test]
+    fn agent_backends_prints_the_three_facts_and_the_scope() {
+        let r = serde_json::json!({ "scope": "default", "baseline": null, "backends": [
+            { "name": "kiro", "program": "kiro-cli", "installed": { "state": "present", "path": "/b/kiro-cli", "version": "2.34.0", "reason": null },
+              "set_up": { "state": "unknown", "basis": "presence", "via": null, "missing": [], "reason": "test_only" },
+              "answers": { "state": "unknown", "count": null, "reason": "test_only" } },
+            { "name": "grok", "program": "grok", "installed": { "state": "present", "path": "/b/grok", "version": null, "reason": "version_timeout" },
+              "set_up": { "state": "missing", "basis": "presence", "via": null, "missing": ["AWS_BEARER_TOKEN_BEDROCK"], "reason": "env_unset" },
+              "answers": { "state": "unknown", "count": null, "reason": "first_run" } },
+            { "name": "claude", "program": "claude", "installed": { "state": "missing", "path": null, "version": null, "reason": "not_found" },
+              "set_up": { "state": "present", "basis": "cli", "via": "third_party/bedrock", "missing": [], "reason": null },
+              "answers": { "state": "unknown", "count": null, "reason": "first_run" } } ] });
+        let t = super::backends_text(&r);
+        assert!(t.contains("kiro    installed 2.34.0 · set up: unknown (only a Test can tell: tmm agent backends --test kiro) · answers: not tested\n"), "{t}");
+        assert!(t.contains("grok    installed, version unknown (its --version timed out) · set up: missing AWS_BEARER_TOKEN_BEDROCK (not set in the login shell's environment) · answers: known at its first run\n"), "{t}");
+        assert!(t.contains("claude  claude not found on the managed PATH · set up: signed in per the CLI (third_party/bedrock)"), "{t}");
+        assert!(t.ends_with("Whether it can run a task is known at its first run.\n"), "{t}");
+        // Reviewer P1-D residual: unknown is never printed as absent.
+        let unknown = |installed: serde_json::Value| {
+            let r = serde_json::json!({ "backends": [{ "name": "codex", "program": "codex", "installed": installed,
+                "set_up": { "state": "unknown", "basis": "presence", "via": null, "missing": [], "reason": "first_run" },
+                "answers": { "state": "unknown", "count": null, "reason": "first_run" } }] });
+            super::backends_text(&r).lines().next().unwrap_or("").to_string()
+        };
+        let line = unknown(serde_json::json!({ "state": "unknown", "path": null, "version": null, "reason": "path_unreadable" }));
+        assert!(line.starts_with("codex   install state unknown (a directory on the managed PATH could not be looked at) · "), "{line}");
+        let line = unknown(serde_json::json!({ "state": "unknown", "path": null, "version": null, "reason": "probe_lost" }));
+        assert!(line.starts_with("codex   install state unknown (the check stopped without an answer) · "), "{line}");
+        let line = unknown(serde_json::json!({}));
+        assert!(line.starts_with("codex   install state unknown · "), "a reply without the field: {line}");
+        for l in [unknown(serde_json::json!({ "state": "unknown", "reason": "path_unreadable" })), unknown(serde_json::json!({}))] {
+            assert!(!l.contains("not found"), "{l}");
+        }
+        let test = serde_json::json!({ "test": { "name": "kiro",
+            "set_up": { "state": "present", "basis": "cli", "via": "iam_identity_center", "missing": [], "reason": null },
+            "answers": { "state": "yes", "count": 24, "reason": null } } });
+        let t = super::backends_text(&test);
+        assert!(t.starts_with("kiro  set up: signed in per the CLI (iam_identity_center) · answers: yes (24 models)\n"), "{t}");
+        assert!(t.contains("write kiro's own state"), "the Test says what it wrote: {t}");
     }
 
     /// Board #362 c: a detail that needs a person names what to do; every

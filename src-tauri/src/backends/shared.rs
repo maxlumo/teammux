@@ -352,9 +352,16 @@ fn claude_user_env_from(path: &Path) -> Value {
     std::fs::read_to_string(path)
         .ok()
         .and_then(|s| serde_json::from_str::<Value>(&s).ok())
-        .and_then(|v| v.get("env").cloned())
-        .filter(Value::is_object)
+        .map(|v| claude_env_of(&v))
         .unwrap_or_else(|| serde_json::json!({}))
+}
+
+/// The block of parsed Claude settings that a managed home carries: `env`
+/// when it is an object, else none. One definition for the render and for
+/// backend readiness (board #492), which reads the file itself so that an
+/// unreadable one is a reason rather than an empty carry.
+pub(crate) fn claude_env_of(settings: &Value) -> Value {
+    settings.get("env").cloned().filter(Value::is_object).unwrap_or_else(|| serde_json::json!({}))
 }
 
 /// The provider channel from the user's Claude settings. Managed homes copy
