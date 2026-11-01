@@ -3,6 +3,7 @@
 // environment itself is exercised by `npm run test:e2e:docker`.
 import assert from 'node:assert/strict';
 import { readFile } from 'node:fs/promises';
+import { posix } from 'node:path';
 import test from 'node:test';
 import {
   AGENT, PORT, PROJECT, SERVICES, composeArgs, composeFile, fetchUi, hostPortOf,
@@ -40,6 +41,26 @@ test('the compose file declares the services the harness smokes, host-loopback p
   assert.doesNotMatch(yaml, /network_mode:\s*host/, 'host networking would share the owner\'s ports');
   // Not internal: published ports do not work on an internal network (measured, Docker 25).
   assert.doesNotMatch(yaml, /internal:\s*true/);
+});
+
+test('the image copies every local module the vite build loads (board #493: #472 added one and the build broke)', async () => {
+  const dockerfile = await read('docker/validator/Dockerfile');
+  const copied = dockerfile.split('\n').filter((l) => /^COPY\s/.test(l) && !/--from=/.test(l))
+    .flatMap((l) => l.trim().split(/\s+/).slice(1, -1));
+  // vite.config.js's relative imports, transitively, as the build loads them.
+  const needed: string[] = [];
+  const queue = ['vite.config.js'];
+  while (queue.length) {
+    const rel = queue.shift()!;
+    for (const m of (await read(rel)).matchAll(/from\s+['"](\.\.?\/[^'"]+)['"]/g)) {
+      const dep = posix.normalize(posix.join(posix.dirname(rel), m[1]!));
+      if (!needed.includes(dep)) { needed.push(dep); queue.push(dep); }
+    }
+  }
+  assert.ok(needed.includes('scripts/dev-ports.mjs'), `the walk found the config's imports: ${needed.join(', ')}`);
+  for (const dep of needed) {
+    assert.ok(copied.some((c) => c === dep || dep.startsWith(`${c.replace(/\/$/, '')}/`)), `the image copies ${dep} (COPY sources: ${copied.join(' ')})`);
+  }
 });
 
 test('the image builds this checkout inside the container and copies no host binary', async () => {

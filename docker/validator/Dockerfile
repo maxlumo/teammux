@@ -13,7 +13,7 @@ COPY package.json package-lock.json ./
 RUN --mount=type=cache,target=/root/.npm npm ci --ignore-scripts
 COPY index.html vite.config.js svelte.config.js tsconfig.json ./
 # vite.config.js imports the dev-port table from scripts/.
-COPY scripts/dev-ports.mjs ./scripts/
+COPY scripts/dev-ports.mjs scripts/env-names.mjs scripts/hover-guard.mjs ./scripts/
 COPY public ./public
 COPY src ./src
 # The image has no `.git` (.dockerignore keeps it out, on purpose), so the
