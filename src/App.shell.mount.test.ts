@@ -10818,3 +10818,54 @@ test('#423 (phone): the Hub header bell is bell-off while muted, and follows the
   for (let i = 0; i < 4; i++) await h.settle();
   assert.ok(!bellOff(hubBell()), 'the switch on: the plain bell');
 });
+
+// #491: a page reached by a jump out of Chat is saved as Chat, so a cold start
+// lands on Chat (owner 2026-11-01: "首次打开的时候，好像默认页面总是 terminal
+// 页面，应该是 chat 页面才对"); a page chosen directly is saved as itself (#333).
+// A same-runtime reconnect restores nothing, so it keeps the page on screen
+// (reviewer P1-B on #491).
+async function jumpedToBoard(context: TestContext, more: { gate?: DialGate } = {}) {
+  const h = await bootApp(context, {
+    ...twoServers({ live: JSON.stringify({ page: 'hub' }), parked: JSON.stringify({ page: 'hub' }) }), tmux_layout_mode: 'mobile', tmux_notify: 'off',
+  }, undefined, { ...sandbox, rpc: twoHubs(), ...more });
+  const tab = (name: RegExp) => [...h.app.document.querySelectorAll<HTMLButtonElement>('.tabbar button')]
+    .find((b) => name.test(`${b.getAttribute('aria-label') ?? ''} ${b.textContent ?? ''}`.trim()));
+  const current = () => h.app.document.querySelector('.tabbar button[aria-current="page"]')?.textContent?.trim() ?? 'none';
+  const jump = () => h.app.document.querySelector<HTMLButtonElement>('.scope-tree:not(.held) .hub-root button[aria-label="Board"]');
+  for (let i = 0; i < 30 && !jump(); i++) { await h.app.advance(500); await h.settle(); }
+  assert.ok(jump(), 'the Hub header s Board button is on screen');
+  jump()!.click();
+  for (let i = 0; i < 3; i++) { await h.app.advance(500); await h.settle(); }
+  assert.equal(current(), 'Board', 'the jump shows the Board');
+  return { ...h, tab, current };
+}
+
+test('#491: a page reached by a jump out of Chat is saved as Chat; reselecting it there saves it as itself', async (context) => {
+  const h = await jumpedToBoard(context);
+  assert.equal(h.record()?.page, 'hub', 'on the Board by a jump: a cold start would land on Chat');
+  h.tab(/^Board$/u)!.click();
+  for (let i = 0; i < 3; i++) { await h.app.advance(500); await h.settle(); }
+  assert.equal(h.current(), 'Board');
+  assert.equal(h.record()?.page, 'board', 'the person chose the Board on screen: it is saved as the Board');
+});
+
+test('#491: opening Settings after a jump is a direct choice; the page it returns to is saved as itself', async (context) => {
+  const h = await jumpedToBoard(context);
+  const gear = () => h.tab(/settings/iu);
+  gear()!.click();
+  for (let i = 0; i < 3; i++) { await h.app.advance(500); await h.settle(); }
+  assert.ok(h.app.document.querySelector('.page-layer:not(.hidden) .preferences'), 'Settings is open');
+  gear()!.click();
+  for (let i = 0; i < 3; i++) { await h.app.advance(500); await h.settle(); }
+  assert.equal(h.current(), 'Board', 'Settings closes back to the Board');
+  assert.equal(h.record()?.page, 'board', 'and no jump is left to save it as Chat');
+});
+
+test('#491 P1-B: a same-runtime reconnect keeps the jumped page on screen; the record still lands a cold start on Chat', async (context) => {
+  const h = await jumpedToBoard(context);
+  h.net.drop();
+  for (let i = 0; i < 6; i++) { await h.app.advance(1_000); await h.settle(); }
+  assert.equal(h.app.document.querySelector('.reconnect-bar'), null, 'reconnected');
+  assert.equal(h.current(), 'Board', 'the network coming back does not take the Board away');
+  assert.equal(h.record()?.page, 'hub', 'the saved landing is still Chat');
+});

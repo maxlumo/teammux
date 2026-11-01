@@ -377,8 +377,14 @@ test('Settings only offers the category when there is a bus and no Agents page',
 test('a jump from the chat returns THERE on back, and deliberate navigation clears it (2026-08-29)', () => {
   // The one-deep return slot: set by the chat's cross-page jumps, cleared by
   // any real tab switch, consumed at the target page's back FLOOR.
-  assert.match(source, /view\.jumpedFrom = null; \/\/ deliberate navigation stands the return slot down/u,
-    'switchTab clears the slot');
+  // #491 review P1-A: every direct navigation ends the jump, a reselect of the
+  // page on screen and Settings included, so a page chosen directly is saved as itself.
+  const switchFn = /function switchTab\(target\) \{([\s\S]*?)\n  \}/u.exec(source)?.[1] ?? '';
+  assert.ok(switchFn.indexOf('view.jumpedFrom = null;') >= 0 && switchFn.indexOf('view.jumpedFrom = null;') < switchFn.indexOf('if (target === curName) return;'),
+    'switchTab clears the slot BEFORE its same-page return');
+  assert.match(source, /else if \(slot === page\) \{ view\.jumpedFrom = null;/u, 'a rail reselect clears it');
+  assert.match(source, /view\.jumpedFrom = null; \/\/ opening Settings is a direct choice[^\n]*\n\s*pageBeforePrefs = page; page = 'prefs';/u, 'opening Settings clears it');
+  assert.doesNotMatch(source, /if \(page !== 'terminal'\) (\{ )?switchTab\('terminal'\)/u, 'the Terminal shortcuts always pass through switchTab');
   assert.match(source, /if \(from === 'hub'\) view\.jumpedFrom = 'hub';/u, 'opening a pane from the chat remembers');
   // ③a-4: a jump from a tree's Hub is recorded in THAT tree's view.
   assert.match(source, /switchTab\('files'\); v\.jumpedFrom = 'hub';/u, 'the files jump remembers (after the switch cleared)');
@@ -728,8 +734,8 @@ test('the content tree is bound to one server, and only the swap binds it (board
   // And nothing saves over that record until the restore for the bound
   // runtime has finished.
   assert.match(source, /if \(!connected \|\| !scopeRuntime \|\| view\.navRestored !== scopeRuntime\) return;\s*saveNav\(/u);
-  assert.match(source, /saveNav\(createServerStore\(localStorage, scopeRuntime\.id, writeGate\), \{ page, pane: view\.termPane, splitLayout: view\.splitLayout, splitCells: view\.splitCells \}\);/u,
-    'the saved state writes the refs App already holds, rather than rebuilding them');
+  assert.match(source, /saveNav\(createServerStore\(localStorage, scopeRuntime\.id, writeGate\), \{ page: landingPage\(page, view\.jumpedFrom\), pane: view\.termPane, splitLayout: view\.splitLayout, splitCells: view\.splitCells \}\);/u,
+    'the saved state writes the refs App already holds, rather than rebuilding them; a jumped page is saved as Chat (#491)');
   // Every reference is minted in ONE place per kind, from the bound server.
   // ③b-1: minted for the tree that asks, from ITS runtime; the window's
   // forms are that, for the bound tree.
@@ -1283,7 +1289,7 @@ test('the rail keeps the ONE travelling highlight; the tab bar is foreground-onl
 test('a second click on the active rail tab hands the page a reselect — the Hub expands its sidebar (board #199)', () => {
   // Owner 2026-09-14: "我应该在左侧的选项卡已经选中二次再点击的时候，也是自动帮我展开侧边栏".
   // switchTab returns when target === page; the rail used to swallow the click.
-  assert.match(source, /function railActivate\(slot\) \{[\s\S]*?if \(slot === page\) \{ \(\(storageHeld \? null : view\.pageReselect\[slot\]\) \?\? shellReselect\[slot\]\)\?\.\(\); return; \}/u);
+  assert.match(source, /function railActivate\(slot\) \{[\s\S]*?if \(slot === page\) \{ view\.jumpedFrom = null; \(\(storageHeld \? null : view\.pageReselect\[slot\]\) \?\? shellReselect\[slot\]\)\?\.\(\); return; \}/u);
   assert.match(viewSource, /pageReselect: Record<string, \(\(\) => void\) \| undefined> = \{\};/u);
   assert.match(source, /onReselect=\{\(fn\) => \{ v\.pageReselect\.hub = fn; \}\}/u, 'the Hub registers its reselect like its back chain');
 });

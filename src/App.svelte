@@ -34,7 +34,7 @@
   import { layout } from './lib/app/layout.svelte.ts';
   import { applyFontVars } from './lib/app/fonts.svelte.ts';
   import { normalizeUiZoom, stepUiZoom, UI_ZOOM_DEFAULT } from './lib/app/ui-zoom.ts';
-  import { agentsLivesInSettings, defaultPage, restoreNav, retarget } from './lib/app/nav-state.ts';
+  import { agentsLivesInSettings, defaultPage, landingPage, restoreNav, retarget } from './lib/app/nav-state.ts';
   import { RAIL_GAP, RAIL_ORDER_KEY, parseRailOrder, railDropAt, railDropIndex, railDropOffset, railOrderToStore, visibleRailSlots } from './lib/app/nav-order.ts';
   import { createReconnectMachine } from './lib/app/reconnect.ts';
   import { addressesOf, targetOf } from './lib/app/server-target.ts';
@@ -955,6 +955,7 @@
       if (prefsPushed) history.back();
       else { page = pageBeforePrefs; slidePage('slide-in-left'); }
     } else {
+      view.jumpedFrom = null; // opening Settings is a direct choice (#491 review P1-A)
       pageBeforePrefs = page; page = 'prefs'; slidePage('slide-in-right');
       prefsPushed = navPush();
     }
@@ -1239,9 +1240,10 @@
   $effect(() => {
     // Not before the restore for THIS runtime has finished: the record this
     // effect would write over is the one the restore is about to read. It
-    // writes the bound server's own slot (board #335 ②b-4).
+    // writes the bound server's own slot (board #335 ②b-4). A page reached by
+    // a jump out of Chat is saved as Chat (#491, landingPage).
     if (!connected || !scopeRuntime || view.navRestored !== scopeRuntime) return;
-    saveNav(createServerStore(localStorage, scopeRuntime.id, writeGate), { page, pane: view.termPane, splitLayout: view.splitLayout, splitCells: view.splitCells });
+    saveNav(createServerStore(localStorage, scopeRuntime.id, writeGate), { page: landingPage(page, view.jumpedFrom), pane: view.termPane, splitLayout: view.splitLayout, splitCells: view.splitCells });
   });
 
   // Reconnect UI state, mirrored from the reconnect machine
@@ -3710,7 +3712,7 @@
   function railActivate(slot) {
     if (railDrags.consumeClick()) return;
     if (slot === 'prefs') togglePrefs();
-    else if (slot === page) { ((storageHeld ? null : view.pageReselect[slot]) ?? shellReselect[slot])?.(); return; }
+    else if (slot === page) { view.jumpedFrom = null; ((storageHeld ? null : view.pageReselect[slot]) ?? shellReselect[slot])?.(); return; }
     else switchTab(slot);
   }
   // Escape abandons a drag and a resize invalidates its snapshotted rects —
@@ -3776,8 +3778,10 @@
     if (slideAnim) return;
     const t = tabs();
     const curName = page;
+    // Deliberate navigation stands the return slot down, a reselect of the page
+    // on screen included: the person has now chosen it (#491 review P1-A).
+    view.jumpedFrom = null;
     if (target === curName) return;
-    view.jumpedFrom = null; // deliberate navigation stands the return slot down
     const fromIdx = t.indexOf(curName);
     const toIdx = t.indexOf(target);
     // Apply page change immediately
@@ -3835,7 +3839,7 @@
     toggleSidebar() { toggleShellSidebar(); },
     toggleSplit() {
       if (storageHeld) return;
-      if (page !== 'terminal') switchTab('terminal');
+      switchTab('terminal'); // on Terminal already, it still ends a jump (#491)
       setLayout(view.splitLayout > 1 ? 1 : 2);
     },
     async focusComposer() {
@@ -3845,7 +3849,9 @@
     },
     async focusTerminal() {
       if (storageHeld) return;
-      if (page !== 'terminal') { switchTab('terminal'); await tick(); }
+      const from = page;
+      switchTab('terminal'); // on Terminal already, it still ends a jump (#491)
+      if (from !== 'terminal') await tick();
       // The ACTIVE pane (board 316 review): in split screen the active cell,
       // never the first terminal on the page; an empty active cell takes no
       // input at all rather than handing it to another cell.

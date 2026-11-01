@@ -1,6 +1,6 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { PAGES, agentsLivesInSettings, defaultPage, restoreNav, restorePage, retarget } from './nav-state.ts';
+import { PAGES, agentsLivesInSettings, defaultPage, landingPage, restoreNav, restorePage, retarget } from './nav-state.ts';
 
 test('a saved tab is restored, and only a known one', () => {
   for (const p of PAGES) {
@@ -61,4 +61,22 @@ test('restoreNav is restorePage everywhere else, on both devices', () => {
   // 'agents' is still a real page name — the redirect is about the DEVICE, not
   // about retiring the page (the rail needs it).
   assert.ok((PAGES as readonly string[]).includes('agents'));
+});
+
+// Board #491 (owner 2026-11-01: "每次好像重新连接之类的，或者首次打开的时候，好像默认页面总是 terminal
+// 页面，应该是 chat 页面才对"), a restore-policy adjustment: a page reached by a jump out of
+// Chat is SAVED as Chat; a page chosen directly is saved as itself (#333).
+test('a page reached by a jump out of Chat is saved as Chat; one chosen directly as itself (#491)', () => {
+  for (const p of ['terminal', 'files', 'board'] as const) {
+    assert.equal(landingPage(p, 'hub'), 'hub', `a jumped ${p} reopens on Chat`);
+    assert.equal(landingPage(p, null), p, `a ${p} chosen directly reopens there`);
+  }
+  for (const p of PAGES) {
+    if (p === 'terminal' || p === 'files' || p === 'board') continue;
+    assert.equal(landingPage(p, 'hub'), p, `${p} is never a jump target, so a stale origin cannot move it`);
+  }
+  assert.equal(landingPage('terminal', 'files'), 'terminal', 'only a jump out of Chat counts');
+  // The saved value goes through the ordinary restore, unchanged.
+  assert.equal(restorePage(landingPage('terminal', 'hub')), 'hub');
+  assert.equal(restorePage(landingPage('terminal', null)), 'terminal');
 });

@@ -29,6 +29,26 @@ export function restorePage(saved: unknown): Page {
     : defaultPage();
 }
 
+/** The pages a jump out of Chat lands on: an agent's pane (Terminal), a path
+ * link (Files), an issue (Board). */
+const JUMP_TARGETS: readonly Page[] = ['terminal', 'files', 'board'];
+
+/**
+ * The page to SAVE for the next cold start (board #491, a restore-policy
+ * adjustment; owner 2026-11-01: "每次好像重新连接之类的，或者首次打开的时候，好像
+ * 默认页面总是 terminal 页面，应该是 chat 页面才对"). A page reached by a jump out
+ * of Chat (`jumpedFrom === 'hub'`) is saved as Chat, so the app reopens where
+ * the person was working; the record keeps the pane and split beside it as
+ * always (Files browse positions are not in it: they stay the per-session
+ * in-memory park). A top-level page choice (tab, rail, shortcut, reselect,
+ * Settings) ends the jump, so that page is saved as itself, as #333 restores;
+ * changing panes inside a Terminal visit that came from Chat keeps it. Only the restore reads this:
+ * a running app, and its same-server reconnect, keep the page on screen.
+ */
+export function landingPage(page: Page, jumpedFrom: string | null): Page {
+  return jumpedFrom === 'hub' && JUMP_TARGETS.includes(page) ? 'hub' : page;
+}
+
 /**
  * Whether the agent configuration is a CATEGORY OF SETTINGS rather than a page
  * of its own — true on touch devices (owner, 2026-08-29: "手机上的 Agent 设置
