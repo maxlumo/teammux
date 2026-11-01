@@ -80,6 +80,16 @@ function tracked(): string[] {
   return execFileSync('git', ['ls-files', '-z'], { encoding: 'utf8', maxBuffer: 64 * 1024 * 1024 }).split('\0').filter(Boolean);
 }
 
+/** A wordmark split by an inline element (`tmux<span class="accent">mobile</span>`)
+ * is one word on screen, and the raw line never matches OLD: #472's sweep missed both
+ * of the old two-tone marks that way (#489). So a `.svelte`/`.html` line is ALSO read
+ * with its static tags removed, ON TOP of the raw read, which still sees attributes
+ * (`placeholder`, `alt`, `aria-label`, `title`, `href`). The scope is one source line:
+ * a mark split across lines, an entity or an expression is not a rendering this regex
+ * does; the rendered brand is pinned by App.shell.mount.test.ts. */
+const MARKUP = /\.(?:svelte|html)$/u;
+const TAG = /<\/?[A-Za-z][^<>]*>/gu;
+
 export function strays(files: string[], read: (f: string) => string | null): string[] {
   const out: string[] = [];
   for (const f of files) {
@@ -87,8 +97,11 @@ export function strays(files: string[], read: (f: string) => string | null): str
     const text = read(f);
     if (text === null) continue;
     text.split('\n').forEach((line, i) => {
-      for (const m of line.matchAll(OLD)) {
-        const word = m[0].replace(/^["']+|["']+$/gu, '');
+      const words = (from: string) => [...from.matchAll(OLD)].map((m) => m[0].replace(/^["']+|["']+$/gu, ''));
+      const raw = words(line);
+      // the tag-free reading adds only what the raw one could not see
+      const stripped = MARKUP.test(f) ? words(line.replace(TAG, '')).filter((w) => !raw.includes(w)) : [];
+      for (const word of [...raw, ...stripped]) {
         if (WORDS.some(([re]) => re.test(word))) continue;
         if (LINES.some(([file, re]) => file.test(f) && re.test(line))) continue;
         out.push(`${f}:${i + 1}: ${word}`);
@@ -126,6 +139,17 @@ test('the check sees what it should: prose, a UI string and a banner fail; an id
   assert.equal(fake('src-tauri/src/server/mod.rs', 'println!("tmux_mobile server")').length, 1);
   assert.equal(fake('src/lib/core/i18n.svelte.ts', 'Android Settings > Apps > TmuxMobile > Permissions').length, 1);
   assert.equal(fake('src-tauri/gen/android/app/src/main/res/xml/file_paths.xml', 'path="Download/TmuxMobile"').length, 0, 'the downloads folder is an identifier');
+  // a wordmark split by inline markup reads as one word on screen (#489)
+  assert.equal(fake('src/App.svelte', '<span class="brand-text">tmux<span class="brand-accent">mobile</span></span>').length, 1, 'the two-tone mark in the top bar');
+  assert.equal(fake('src/lib/app/Settings.svelte', '<h2>tmux<span class="accent">mobile</span></h2>').length, 1, 'the two-tone mark on the connect card');
+  assert.equal(fake('index.html', '<b>Tmux</b> <i>Mobile</i>').length, 1, 'tags around each half, spaced');
+  assert.equal(fake('src/App.svelte', '<span class="brand-text">Team<span class="brand-accent">mux</span></span>').length, 0, 'the new mark passes');
+  // and the raw read still sees what a tag holds (reviewer P1-A on 02c8f08a)
+  assert.equal(fake('src/lib/app/X.svelte', '<input placeholder="TmuxMobile">').length, 1, 'a placeholder');
+  assert.equal(fake('src/lib/app/X.svelte', '<img src="/a.svg" alt="TmuxMobile">').length, 1, 'an alt text');
+  assert.equal(fake('src/lib/app/X.svelte', '<button aria-label="TmuxMobile" title="TmuxMobile">').length, 2, 'an accessible name and a tooltip');
+  assert.equal(fake('index.html', '<a href="https://github.com/vokako/teammux">Teammux</a>').length, 1, 'an old href behind a right label');
+  assert.equal(fake('index.html', '<b>TmuxMobile</b>').length, 1, 'one occurrence, read either way, is reported once');
 });
 
 // The rows that must NOT move in a sweep (naming.md). A rename that "helpfully" reaches

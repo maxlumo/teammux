@@ -10,7 +10,15 @@ agents are told. The old name remains only in the places below, each for a reaso
 that is not "we have not got to it". A search for `tmux-mobile` (or `tmux_mobile`,
 `TMUX_MOBILE`, `TmuxMobile`, `tmuxmobile`) should land only on these, and `scripts/naming.test.ts` holds this table as a
 test: a new old-name string in prose, a UI string or a banner fails it until it says
-Teammux or is listed there with its reason.
+Teammux or is listed there with its reason. In `.svelte` and `.html` files the test
+reads each line twice: as written, which sees attributes (`placeholder`, `alt`,
+`aria-label`, `title`, `href`), and again with its static tags removed. The second
+reading exists because the two-tone wordmarks of the top bar and the connect card split
+the old name with an inline `<span>`, so the raw line never matched and #472's sweep
+left both on screen (owner, 2026-11-01, #489). Both now read `Team` with an accent
+`mux`. The tag-free reading covers one source line only: a name split across lines, an
+entity or a Svelte expression is not something a line regex renders. The rendered brand
+is pinned by its own test (`App.shell.mount.test.ts`).
 
 | Old string | Where | Why it stays | Planned |
 |---|---|---|---|

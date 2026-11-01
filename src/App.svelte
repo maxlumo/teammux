@@ -3886,7 +3886,7 @@
     <nav class="topbar">
       <div class="brand">
         <img class="logo" src={iconSrc} alt="" width="24" height="24" />
-        <span class="brand-text">tmux<span class="brand-accent">mobile</span></span>
+        <span class="brand-text">Team<span class="brand-accent">mux</span></span>
       </div>
       <div class="nav-right">
         <button class="gear-btn" class:active={page === 'prefs'} aria-label={t('settings')} use:hoverInfo={() => ({ title: t('settings') })} onclick={togglePrefs}><span class="tab-glyph" class:on={page === 'prefs'}><Icon name="gear" size={16} /></span></button>

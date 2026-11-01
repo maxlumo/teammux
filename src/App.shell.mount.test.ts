@@ -114,6 +114,15 @@ async function mount(context: TestContext) {
   return { ...app, calls, settle };
 }
 
+test('the brand a person meets before a server says Teammux, in the top bar and on the card (#489)', async (context) => {
+  const app = await mount(context);
+  // textContent joins the two-tone halves, which is what the eye reads.
+  const bar = app.document.querySelector('.topbar .brand-text');
+  const card = app.document.querySelector('.card .card-header h2');
+  assert.equal(bar?.textContent, 'Teammux', 'the disconnected top bar');
+  assert.equal(card?.textContent, 'Teammux', 'the Connection card header');
+});
+
 test('a fresh client sees the Connection card, and its own settings behind the gear', async (context) => {
   const app = await mount(context);
 
