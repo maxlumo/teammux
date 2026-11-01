@@ -847,12 +847,27 @@ unit-tested; the Files mount tests drive the picker with a deferred
 `fsUpload` and check the phase text, the "counted only after the answer"
 order, and the named failure.
 
-Size guard: the server refuses a WebSocket message over 80 MB
-(`WS_MAX_MESSAGE_BYTES`), and base64 grows a file by 4/3, so
-`UPLOAD_MAX_BYTES` = 60 MB is refused up front with "a single file can be at
-most 60 MB" — before, such a file sat in the 60 s request timeout and then
-took the connection down. Byte-level progress and files beyond 60 MB need a
-chunked or HTTP upload path; that is a separate issue, not this one.
+Size guard: the server refuses a WebSocket message over 80 MiB
+(`WS_MAX_MESSAGE_BYTES`, connection.rs; `file-upload.ts` holds the same
+number and a test reads the Rust file to keep them equal), and one
+`fs_upload` carries its whole file, base64, in one message. The cap is
+`maxUploadBytes(path)`: that limit less the message's JSON at the largest
+request id, serialized and priced in UTF-8 bytes for the actual destination
+path, less the 17 bytes the encrypted wire adds when it does not compress (a
+framing byte and the AES-GCM tag), then the base64 that still fits, ×3/4.
+Compression is used only when smaller, so this is the worst case for the
+plain text frame and both encrypted forms. A larger file is refused up front
+with "a single file can be at most 59.99 MiB" (MiB floored to two decimals,
+never rounded up; a path whose request alone is over the limit refuses
+every file, an empty one included); the check and the send use one captured destination, and
+a native path is checked again on the bytes it read. It was a fixed
+`UPLOAD_MAX_BYTES` = 60 MB until board #498: 60 MiB of base64 is exactly 80
+MiB before the JSON around it, so a file at the cap reached the server as
+"Message too long: 83886203 > 83886080" and the person saw "connection lost"
+(measured on #497's rig, plain and uncompressed-E2E). The cap is a property of
+this message format and this server's limit, not a promise about a proxy or
+a phone's memory. Byte-level progress and larger files need a chunked or HTTP
+upload path (#497).
 
 ### Base64 Chunking
 `btoa(String.fromCharCode(...spread))` crashes on files >100KB (JS argument limit). Use 8192-byte chunks.

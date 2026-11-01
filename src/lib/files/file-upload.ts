@@ -7,12 +7,32 @@
 
 import type { FeedbackValue } from '../ui/feedback-lifetime.ts';
 
-/** The server refuses a WebSocket message above 80 MB (`WS_MAX_MESSAGE_BYTES`,
- * connection.rs); base64 grows a file by 4/3, so ~60 MB of file is the most
- * one `fs_upload` can carry. Refusing here, up front, is a clear "too large"
- * instead of a 60 s request timeout that then tears the connection down. */
-export const UPLOAD_MAX_BYTES = 60 * 1024 * 1024;
-export const UPLOAD_MAX_MB = UPLOAD_MAX_BYTES / 1024 / 1024;
+/** The server refuses a WebSocket message above this many bytes
+ * (`WS_MAX_MESSAGE_BYTES`, connection.rs; a source test pins the two equal).
+ * One `fs_upload` carries its whole file in ONE message. */
+export const WS_MAX_MESSAGE_BYTES = 80 * 1024 * 1024;
+/** What the encrypted wire adds to a message's JSON when it is not
+ * compressed: the framing byte and the AES-GCM tag (connection.ts
+ * encodeWirePayload/encryptMsg). Compression is used only when it is
+ * smaller, so the uncompressed form is the largest a message can be, and
+ * the plain-token text frame is smaller still. */
+export const E2E_OVERHEAD_BYTES = 1 + 16;
+const MIB = 1024 * 1024;
+
+/** The largest file one `fs_upload` to `path` can carry (board #498). A
+ * fixed 60 MB cap was wrong at its own edge: 60 MiB of base64 is exactly the
+ * 80 MiB limit before the JSON around it, so a file at the cap was refused
+ * by the server as "Message too long" and the person saw "connection lost"
+ * (measured on #497's rig). The wrapper is priced by serializing it, as
+ * `call()` does, at the largest request id, in UTF-8 bytes: a path's quotes,
+ * backslashes, control characters and CJK cost what they cost on the wire. */
+/* `null` when not even an empty file fits: the wrapper alone is over the
+ * limit, which is not the same as a capacity of 0 bytes (review P2-A). */
+export function maxUploadBytes(path: string): number | null {
+  const wrapper = new TextEncoder().encode(JSON.stringify({ id: Number.MAX_SAFE_INTEGER, method: 'fs_upload', params: { path, data: '' } })).length;
+  const room = WS_MAX_MESSAGE_BYTES - wrapper - E2E_OVERHEAD_BYTES;
+  return room < 0 ? null : Math.floor(room / 4) * 3;
+}
 
 export type UploadPhase = 'reading' | 'sending';
 
@@ -70,7 +90,11 @@ export function uploadSummary(outcome: UploadOutcome, dir: string, s: UploadStri
   return { kind: 'success', message: fill(s.uploadedMany, { count: outcome.ok.length }), detail: dir };
 }
 
-/** `null` when the file may go; otherwise the reason it may not. */
-export function uploadSizeError(size: number, tooLarge: string): string | null {
-  return size > UPLOAD_MAX_BYTES ? fill(tooLarge, { mb: UPLOAD_MAX_MB }) : null;
+/** `null` when the file may go to `path`; otherwise the reason it may not.
+ * The limit is shown in MiB floored to two decimals, so it never claims more
+ * than fits (about 59.99 MiB for an ordinary path). */
+export function uploadSizeError(size: number, path: string, tooLarge: string): string | null {
+  const max = maxUploadBytes(path);
+  if (max !== null && Number.isFinite(size) && size >= 0 && size <= max) return null;
+  return fill(tooLarge, { size: `${(Math.floor(((max ?? 0) / MIB) * 100) / 100).toFixed(2)} MiB` });
 }

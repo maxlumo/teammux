@@ -1529,13 +1529,16 @@
     for (const item of items) {
       const step = item.step;
       try {
-        const tooLarge = uploadSizeError(item.size, t('uploadTooLarge'));
+        // ONE destination for the check and the send (#498): the cap is the
+        // message limit less this path's own JSON.
+        const dest = uploadDest(dir, item.name);
+        const tooLarge = uploadSizeError(item.size, dest, t('uploadTooLarge'));
         if (tooLarge) throw new Error(`${item.name}: ${tooLarge}`);
         show(step);
-        const b64 = await item.read((loaded) => { step.loaded = loaded; show(step); });
+        const b64 = await item.read(dest, (loaded) => { step.loaded = loaded; show(step); });
         step.phase = 'sending';
         show(step);
-        await fsUpload(uploadDest(dir, item.name), b64);
+        await fsUpload(dest, b64);
         outcome.ok.push(item.name);
       } catch (e) {
         outcome.failed.push({ name: item.name, error: e.message });
@@ -1551,7 +1554,7 @@
     const dir = cwd; // the batch's target, fixed at the gesture
     await runUploadBatch(files.map((file) => ({
       name: file.name, size: file.size,
-      read: (onProgress) => new Promise((resolve, reject) => {
+      read: (_dest, onProgress) => new Promise((resolve, reject) => {
         const reader = new FileReader();
         reader.onprogress = (e) => { if (e.lengthComputable) onProgress(e.loaded); };
         reader.onload = () => resolve(String(reader.result).split(',')[1]);
@@ -1569,9 +1572,9 @@
     await tauriPlugins;
     await runUploadBatch(paths.map((filePath) => ({
       name: String(filePath).split('/').pop().split('\\').pop(), size: 0,
-      read: async () => {
+      read: async (dest) => {
         const bytes = new Uint8Array(await tauriFs.readFile(filePath));
-        const tooLarge = uploadSizeError(bytes.length, t('uploadTooLarge'));
+        const tooLarge = uploadSizeError(bytes.length, dest, t('uploadTooLarge'));
         if (tooLarge) throw new Error(tooLarge);
         return bytesToB64(bytes);
       },
