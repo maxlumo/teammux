@@ -170,6 +170,11 @@ test('a fresh client sees the Connection card, and its own settings behind the g
   assert.deepEqual(app.calls, [], 'the whole walk touched no server');
 });
 
+/** #495: a reconnect walks its entry's own address first; these cases need C's
+ * reconnect to land on the alias address, as the probe used to choose it — so
+ * C's own address is in the cooldown memory, and the round dials it last. */
+const canonicalCooled = (u: string) => !u.includes('//canonical');
+
 /** The lifecycle members of a mocked transport; every OTHER function on it is
  * an RPC, answered over whichever connection it is called through. */
 const LIFECYCLE = new Set([
@@ -4298,7 +4303,7 @@ test('P1-4 (reviewer 15:06; orchestrator 16:32): an alert on a live background a
     tmux_layout_mode: 'desktop',
   }), (url) => (url.includes('//alias') && !aliasProves ? '' : 'm-a'), {
     calls: events,
-    rpc: { ...oneRoomHub({}, [{ id: '7', seq: 7, ts: 1_800_000_000_000, from: 'dev', to: ['human'], body: 'from the alias', room: 'proj:work' }]), findBestAddress: async () => 'ws://alias:9899' },
+    rpc: { ...oneRoomHub({}, [{ id: '7', seq: 7, ts: 1_800_000_000_000, from: 'dev', to: ['human'], body: 'from the alias', room: 'proj:work' }]), findBestAddress: async () => 'ws://alias:9899', isAddressViable: canonicalCooled },
     setup(window) { store.setup(window); window.Element.prototype.getAnimations = () => []; },
   });
   for (let i = 0; i < 4; i++) { await h.app.advance(1000); await h.settle(); }
@@ -5777,7 +5782,7 @@ for (const answer of ['keep', 'discard'] as const) test(`P1-5: a background alia
     'tmux_state::c': JSON.stringify({ page: 'files' }), 'tmux_state::a': JSON.stringify({ page: 'files' }),
     tmux_layout_mode: 'desktop',
   }), (url) => (url.includes('//alias') && !aliasProves ? '' : 'm-a'), {
-    calls: events, rpc: { ...editorRpc, findBestAddress: async () => 'ws://alias:9899' },
+    calls: events, rpc: { ...editorRpc, findBestAddress: async () => 'ws://alias:9899', isAddressViable: canonicalCooled },
     setup(window) { window.Element.prototype.getAnimations = () => []; },
   });
   for (let i = 0; i < 4; i++) { await h.app.advance(1000); await h.settle(); }
@@ -6354,7 +6359,7 @@ test('R1: an alias absorbed while the post-dial gate then BLOCKS — the alias s
     'tmux_state::c': JSON.stringify({ page: 'files' }), 'tmux_state::a': JSON.stringify({ page: 'files' }),
     tmux_layout_mode: 'desktop',
   }), (url) => (url.includes('//alias') && !aliasProves ? '' : 'm-a'), {
-    calls: events, rpc: { ...editorRpc, findBestAddress: async () => 'ws://alias:9899' },
+    calls: events, rpc: { ...editorRpc, findBestAddress: async () => 'ws://alias:9899', isAddressViable: canonicalCooled },
     setup(window) { store.setup(window); window.Element.prototype.getAnimations = () => []; },
   });
   for (let i = 0; i < 4; i++) { await h.app.advance(1000); await h.settle(); }
@@ -6540,7 +6545,7 @@ test('P1-A: a background canonical absorbs the FOCUSED alias — the alias s cap
   let aliasProves = false;
   const events: string[] = [];
   const h = await bootApp(context, aggregateOn(canonAndAlias('a')), (url) => (url.includes('//alias') && !aliasProves ? '' : 'm-a'), {
-    calls: events, rpc: { ...editorRpc, findBestAddress: async () => 'ws://alias:9899' },
+    calls: events, rpc: { ...editorRpc, findBestAddress: async () => 'ws://alias:9899', isAddressViable: canonicalCooled },
     setup(window) { store.setup(window); window.Element.prototype.getAnimations = () => []; },
   });
   for (let i = 0; i < 4; i++) { await h.app.advance(1000); await h.settle(); }
@@ -6595,7 +6600,7 @@ test('P1-A (blocked): the canonical absorbs the focused alias and the merge NOTE
   let aliasProves = false;
   const events: string[] = [];
   const h = await bootApp(context, aggregateOn(canonAndAlias('a')), (url) => (url.includes('//alias') && !aliasProves ? '' : 'm-a'), {
-    calls: events, rpc: { ...editorRpc, findBestAddress: async () => 'ws://alias:9899' },
+    calls: events, rpc: { ...editorRpc, findBestAddress: async () => 'ws://alias:9899', isAddressViable: canonicalCooled },
     setup(window) { store.setup(window); window.Element.prototype.getAnimations = () => []; },
   });
   for (let i = 0; i < 4; i++) { await h.app.advance(1000); await h.settle(); }
@@ -6875,7 +6880,7 @@ test('P1-A (mid-switch): a member absorbing the focus WHILE a switch to N is in 
   // polls its list (D4) — through its runtime s gated api, which is what a
   // detached runtime refuses.
   const h = await bootApp(context, aggregateOn({ ...canonAndAlias('a'), 'tmux_state::a': JSON.stringify({ page: 'hub' }) }), (url) => (url.includes('//alias') && !aliasProves ? '' : url.includes('//n') ? 'm-n' : 'm-a'), {
-    calls: events, rpc: { ...editorRpc, ...oneRoomHub(), findBestAddress: async () => 'ws://alias:9899' },
+    calls: events, rpc: { ...editorRpc, ...oneRoomHub(), findBestAddress: async () => 'ws://alias:9899', isAddressViable: canonicalCooled },
     gate: (url, n) => (url.includes('//n') && n > 0 && !nLet.let ? new Promise<void>((r) => { nLet.let = r; }) : null),
     setup(window) { window.Element.prototype.getAnimations = () => []; },
   });
@@ -6933,7 +6938,7 @@ test('P1-A (beneath a walk): the canonical absorbs the focus WHILE a switch s co
   const cLet = { let: null as (() => void) | null };
   const events: string[] = [];
   const h = await bootApp(context, aggregateOn(canonAndAlias('a')), (url) => (url.includes('//alias') && !aliasProves ? '' : url.includes('//n') ? 'm-n' : 'm-a'), {
-    calls: events, rpc: { ...editorRpc, findBestAddress: async () => 'ws://alias:9899' },
+    calls: events, rpc: { ...editorRpc, findBestAddress: async () => 'ws://alias:9899', isAddressViable: canonicalCooled },
     gate: (url) => (url.includes('//alias') && cHangs && !cLet.let ? new Promise<void>((r) => { cLet.let = r; }) : null),
     setup(window) { window.Element.prototype.getAnimations = () => []; },
   });
@@ -6980,7 +6985,7 @@ test('P1-A (owed): the canonical absorbs the focus beneath a switch s confirm wa
   const cLet = { let: null as (() => void) | null };
   const events: string[] = [];
   const h = await bootApp(context, aggregateOn(canonAndAlias('a')), (url) => (url.includes('//alias') && !aliasProves ? '' : url.includes('//n') ? 'm-n' : 'm-a'), {
-    calls: events, rpc: { ...editorRpc, findBestAddress: async () => 'ws://alias:9899' },
+    calls: events, rpc: { ...editorRpc, findBestAddress: async () => 'ws://alias:9899', isAddressViable: canonicalCooled },
     gate: (url) => (url.includes('//alias') && cHangs && !cLet.let ? new Promise<void>((r) => { cLet.let = r; }) : null),
     setup(window) { window.Element.prototype.getAnimations = () => []; },
   });
@@ -7041,7 +7046,7 @@ test('P1-A (owed, cancelled form): the canonical absorbs the focus beneath the f
   const nLet = { let: null as (() => void) | null };
   const events: string[] = [];
   const h = await bootApp(context, aggregateOn(canonAndAlias('a')), (url) => (url.includes('//alias') && !aliasProves ? '' : url.includes('//n') ? 'm-n' : 'm-a'), {
-    calls: events, rpc: { ...editorRpc, findBestAddress: async () => 'ws://alias:9899' },
+    calls: events, rpc: { ...editorRpc, findBestAddress: async () => 'ws://alias:9899', isAddressViable: canonicalCooled },
     gate: (url) => (url.includes('//alias') && cHangs && !cLet.let ? new Promise<void>((r) => { cLet.let = r; })
       : url.includes('//n') && !nLet.let ? new Promise<void>((r) => { nLet.let = r; }) : null),
     setup(window) { window.Element.prototype.getAnimations = () => []; },
@@ -7107,7 +7112,7 @@ test('P1-B (mirror fails → block): the canonical absorbs the focus and the mir
   let aliasProves = false;
   const events: string[] = [];
   const h = await bootApp(context, aggregateOn(canonAndAlias('a')), (url) => (url.includes('//alias') && !aliasProves ? '' : 'm-a'), {
-    calls: events, rpc: { ...editorRpc, fsWrite: async () => ({}), findBestAddress: async () => 'ws://alias:9899' },
+    calls: events, rpc: { ...editorRpc, fsWrite: async () => ({}), findBestAddress: async () => 'ws://alias:9899', isAddressViable: canonicalCooled },
     setup(window) { store.setup(window); window.Element.prototype.getAnimations = () => []; },
   });
   for (let i = 0; i < 4; i++) { await h.app.advance(1000); await h.settle(); }
@@ -7236,7 +7241,7 @@ async function fAbsorbUnder(context: TestContext, exit: FExit, seed: Record<stri
   const n = { let: null as (() => void) | null, fail: null as ((e: Error) => void) | null, dials: 0 };
   const events: string[] = [];
   const h = await bootApp(context, aggregateOn({ ...canonAndAlias('a'), ...seed }), (url) => (url.includes('//alias') && !aliasProves ? '' : url.includes('//n') ? 'm-n' : url.includes('//p') ? 'm-p' : 'm-a'), {
-    calls: events, rpc: { ...editorRpc, findBestAddress: async () => 'ws://alias:9899' },
+    calls: events, rpc: { ...editorRpc, findBestAddress: async () => 'ws://alias:9899', isAddressViable: canonicalCooled },
     gate: (url) => {
       if (url.includes('//alias') && cHangs && !cLet.let) return new Promise<void>((r) => { cLet.let = r; });
       if (url.includes('//n')) {
@@ -7493,7 +7498,7 @@ test('M1 F7/X1 (Retry fails again): mirror + note fail → block; Retry fails ag
   let aliasProves = false;
   const events: string[] = [];
   const h = await bootApp(context, aggregateOn(canonAndAlias('a')), (url) => (url.includes('//alias') && !aliasProves ? '' : 'm-a'), {
-    calls: events, rpc: { ...editorRpc, findBestAddress: async () => 'ws://alias:9899' },
+    calls: events, rpc: { ...editorRpc, findBestAddress: async () => 'ws://alias:9899', isAddressViable: canonicalCooled },
     setup(window) { store.setup(window); window.Element.prototype.getAnimations = () => []; },
   });
   for (let i = 0; i < 4; i++) { await h.app.advance(1000); await h.settle(); }
@@ -7548,7 +7553,7 @@ test('M1 F6 (membership op): the canonical absorbs the focus while the mode chan
   let cHangs = false;
   const cLet = { let: null as (() => void) | null };
   const h = await bootApp(context, aggregateOn(canonAndAlias('a')), (url) => (url.includes('//alias') && !aliasProves ? '' : 'm-a'), {
-    rpc: { ...editorRpc, findBestAddress: async () => 'ws://alias:9899' },
+    rpc: { ...editorRpc, findBestAddress: async () => 'ws://alias:9899', isAddressViable: canonicalCooled },
     gate: (url) => (url.includes('//alias') && cHangs && !cLet.let ? new Promise<void>((r) => { cLet.let = r; }) : null),
     setup(window) { window.Element.prototype.getAnimations = () => []; },
   });
@@ -7754,7 +7759,7 @@ test('M1 X5 (lifecycle): the App is destroyed while an orphan s ask is scheduled
   const cLet = { let: null as (() => void) | null };
   const events: string[] = [];
   const h = await bootApp(context, aggregateOn(canonAndAlias('a')), (url) => (url.includes('//alias') && !aliasProves ? '' : url.includes('//n') ? 'm-n' : 'm-a'), {
-    calls: events, rpc: { ...editorRpc, findBestAddress: async () => 'ws://alias:9899' },
+    calls: events, rpc: { ...editorRpc, findBestAddress: async () => 'ws://alias:9899', isAddressViable: canonicalCooled },
     gate: (url) => (url.includes('//alias') && cHangs && !cLet.let ? new Promise<void>((r) => { cLet.let = r; }) : null),
     setup(window) { window.Element.prototype.getAnimations = () => []; },
   });
@@ -7930,7 +7935,7 @@ test('P1-2 (publish gate): the canonical absorbs the focus alias whose v2 naviga
     ...canonAndAlias('a'),
     'tmux_state::a': JSON.stringify({ v: 2, page: 'files', pane: { kind: 'pane', serverId: 'a', session: 'work', target: 'work:1.0' } }),
   }), (url) => (url.includes('//alias') && !aliasProves ? '' : 'm-a'), {
-    calls: events, rpc: { ...editorRpc, findBestAddress: async () => 'ws://alias:9899' },
+    calls: events, rpc: { ...editorRpc, findBestAddress: async () => 'ws://alias:9899', isAddressViable: canonicalCooled },
     setup(window) {
       const set = window.Storage.prototype.setItem;
       window.Storage.prototype.setItem = function (this: Storage, k: string, v: string) {
@@ -8006,7 +8011,7 @@ for (const phase of ['timer-pending', 'drain-saw-busy', 'release-after-end'] as 
   let holdC = false;
   const events: string[] = [];
   const h = await bootApp(context, aggregateOn(canonAndAlias('a')), (url) => (url.includes('//alias') && !aliasProves ? '' : url.includes('//n') ? 'm-n' : 'm-a'), {
-    calls: events, rpc: { ...editorRpc, findBestAddress: async () => 'ws://alias:9899' },
+    calls: events, rpc: { ...editorRpc, findBestAddress: async () => 'ws://alias:9899', isAddressViable: canonicalCooled },
     // N: the candidate answers at once; N s OWN dial (the second) hangs.
     // release-after-end: C s reconnect (held, released below) and then C s
     // owned dial at the alias address (held for good) — the candidate s own
@@ -8123,7 +8128,7 @@ test('X2 (another member bound): a legitimate focus move onto another member whi
     { id: 'b', name: 'beta', address: 'ws://b:9899', token: 'tokB', machineId: 'm-b', named: true },
   ];
   const h = await bootApp(context, aggregateOn({ ...canonAndAlias('a'), tmux_servers: JSON.stringify(servers), 'tmux_state::b': JSON.stringify({ page: 'files' }) }), (url) => (url.includes('//alias') && !aliasProves ? '' : url.includes('//b') ? 'm-b' : url.includes('//n') ? 'm-n' : 'm-a'), {
-    calls: events, rpc: { ...editorRpc, findBestAddress: async () => 'ws://alias:9899' },
+    calls: events, rpc: { ...editorRpc, findBestAddress: async () => 'ws://alias:9899', isAddressViable: canonicalCooled },
     gate: (url) => (url.includes('//alias') && cHangs && !cLet.let ? new Promise<void>((r) => { cLet.let = r; }) : null),
     setup(window) { window.Element.prototype.getAnimations = () => []; },
   });
@@ -8178,7 +8183,7 @@ test('X3 (orphan canonical, P2 gap): C absorbs the focus A beneath a switch walk
     { id: 'd', name: 'delta', address: 'ws://d:9899', token: 'tokD', machineId: 'm-d', named: true },
   ];
   const h = await bootApp(context, aggregateOn({ ...canonAndAlias('a'), tmux_servers: JSON.stringify(servers) }, ['d']), (url) => (url.includes('//alias') && !aliasProves ? '' : url.includes('//d') ? 'm-d' : url.includes('//n') ? 'm-n' : cAnswersAs), {
-    calls: events, rpc: { ...editorRpc, findBestAddress: async (addrs: string[]) => (addrs.includes('ws://alias:9899') && !cLet.let ? 'ws://alias:9899' : addrs[0] ?? null) },
+    calls: events, rpc: { ...editorRpc, findBestAddress: async (addrs: string[]) => (addrs.includes('ws://alias:9899') && !cLet.let ? 'ws://alias:9899' : addrs[0] ?? null), isAddressViable: (u: string) => !!cLet.let || canonicalCooled(u) },
     gate: (url) => (url.includes('//alias') && cHangs && !cLet.let ? new Promise<void>((r) => { cLet.let = r; }) : url.includes('//n') ? new Promise<void>(() => {}) : null),
     setup(window) { window.Element.prototype.getAnimations = () => []; },
   });
@@ -8264,7 +8269,7 @@ test('P1-A (beneath an activation): the canonical absorbs the focus WHILE the fo
   let nDials = 0;
   const events: string[] = [];
   const h = await bootApp(context, aggregateOn(canonAndAlias('a')), (url) => (url.includes('//alias') && !aliasProves ? '' : url.includes('//n') ? 'm-n' : 'm-a'), {
-    calls: events, rpc: { ...editorRpc, findBestAddress: async () => 'ws://alias:9899' },
+    calls: events, rpc: { ...editorRpc, findBestAddress: async () => 'ws://alias:9899', isAddressViable: canonicalCooled },
     // Held: C s one dial at the alias address (the first alias dial once
     // `cHangs`; A s own rejoin as a member under the switch dials it too, and
     // answers), and N s second dial (its own runtime s; the first is the candidate).

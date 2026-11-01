@@ -1306,7 +1306,6 @@
       // never makes another member's attempt stale, and a window attempt
       // acting on it (the form, a switch) ends it.
       attempt: () => activations.member(runtime).claim(),
-      findBestAddress,
       isAddressViable,
       // The hard rule (#458): a member's loop never dials an (address, token)
       // its server refused, or one not decided; the soft preference above

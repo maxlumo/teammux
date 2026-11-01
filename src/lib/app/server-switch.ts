@@ -23,7 +23,7 @@
 // in its own slots, was never touched.
 
 import { activateSwitched, loadServers, observe, restoreCurrent, type ServerEntry } from './servers.ts';
-import { isReachabilityFailure } from './dial-order.ts';
+import { isReachabilityFailure, pairKey, runRound } from './dial-order.ts';
 
 type Store = Pick<Storage, 'getItem' | 'setItem' | 'removeItem'>;
 
@@ -185,28 +185,35 @@ export function createServerSwitch(d: SwitchDeps) {
     /** The address in flight; the failed panel names the last one tried. */
     let tried = order[0]!;
     try {
-      // Walk the addresses: one that cannot be reached (a timeout, a refusal,
-      // a socket closed during auth — the address that answered the probe and
-      // then stayed silent is this) hands over to the next, inside the SAME
-      // switch. An AUTH refusal stops the walk: the server answered.
-      for (let i = 0; ; i++) {
-        const address = order[i]!;
-        tried = address;
-        if (i > 0) set({ intent, from, target, address, phase: 'connecting', error: '', addresses });
-        try {
-          await d.connect(address, target.token, d.dialTimeout?.(address));
-          used = address;
-          break;
-        } catch (e) {
-          if (intent !== seq) return;
-          if (i + 1 >= order.length || !isReachabilityFailure(e)) {
-            if (isReachabilityFailure(e)) d.unreachable?.(address);
-            throw e;
-          }
-          d.unreachable?.(address);
-          d.disconnect(); // this candidate is dead: the next dial opens its own
-        }
-      }
+      // Walk the addresses (one round, dial-order.ts): one that cannot be
+      // reached (a timeout, a refusal, a socket closed during auth — the
+      // address that answered the probe and then stayed silent is this)
+      // hands over to the next, inside the SAME switch. Anything else, an
+      // AUTH refusal included, stops the walk: the server answered.
+      let dialled = 0;
+      const token = target.token;
+      const round = await runRound({
+        pick: (sent) => {
+          const address = order.find((a) => !sent.has(pairKey({ address: a, token })));
+          return address ? { kind: 'dial', pair: { address, token } } : { kind: 'exhausted' };
+        },
+        onDial: ({ address }) => {
+          tried = address;
+          if (dialled++ > 0) set({ intent, from, target, address, phase: 'connecting', error: '', addresses });
+        },
+        dial: ({ address }, timeoutMs) => d.connect(address, token, timeoutMs),
+        live: () => intent === seq,
+        failed: (_pair, e) => {
+          if (!isReachabilityFailure(e)) return 'stop';
+          if (dialled < order.length) d.disconnect(); // this candidate is dead: the next dial opens its own
+          return 'next';
+        },
+        timeoutOf: (address) => d.dialTimeout?.(address),
+        unreachable: (address) => d.unreachable?.(address),
+      });
+      if (round.kind === 'abandoned') return;
+      if (round.kind !== 'ok') throw (round.kind === 'stopped' || round.kind === 'exhausted') ? round.error : new Error(round.kind);
+      used = round.pair.address;
       if (intent !== seq) return;
       if (target.socket) await d.setSocket(target.socket).catch(() => {});
       if (intent !== seq) return;

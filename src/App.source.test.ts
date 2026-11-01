@@ -473,7 +473,9 @@ test('the in-place server switch keeps its order (board 315, replaces the #55 re
     'const intent = ++seq',
     'd.stopReconnect()',
     "set({ intent, from, target, address: order[0]!, phase: 'connecting'",
-    'await d.connect(address, target.token, d.dialTimeout?.(address))',
+    // The walk is the shared address round (#495), dialling the candidate.
+    'await runRound({',
+    'd.connect(address, token, timeoutMs)',
     'activateSwitched(d.storage',
     'd.comeUp(target, entry)',
     'restoreCurrent(d.storage, left)',
@@ -1615,10 +1617,13 @@ test('a switch walks the server\u2019s addresses, and the failed panel offers ea
   assert.match(source, /<span class="switch-addr">\{switching\.address\}<\/span>/u);
   assert.match(source, /\{#if switching\.addresses\.length > 1\}[\s\S]*?\{#each switching\.addresses as address \(address\)\}[\s\S]*?<CommandButton label=\{`\$\{ADDRESS_LABELS\[classifyAddress\(address\)\]\} · \$\{address\}`\} icon="link"\s*onclick=\{\(\) => switchAddress\(address\)\} \/>/u);
   assert.match(source, /function switchAddress\(address\) \{ void serverSwitch\.retryAt\(address\); \}/u);
-  // One policy for both loops: the reconnect machine asks the same two functions.
+  // One policy for both loops: both walk the same round (#495), which asks
+  // what a dead address looks like, and the machine asks the same timeouts.
   const reconnect = await readFile(new URL('./lib/app/reconnect.ts', import.meta.url), 'utf8');
-  assert.match(reconnect, /dialTimeoutMs\(cls\)/u);
-  assert.match(reconnect, /isReachabilityFailure\(e\)/u);
+  const order = await readFile(new URL('./lib/app/dial-order.ts', import.meta.url), 'utf8');
+  assert.match(reconnect, /dialTimeoutMs\(classifyAddress\(address\)\)/u);
+  assert.match(reconnect, /const round = await runRound\(\{/u);
+  assert.match(order, /if \(isReachabilityFailure\(error\)\) r\.unreachable\?\.\(pair\.address\);/u);
   assert.doesNotMatch(reconnect, /cls === 0 \? 2000/u, 'no second copy of the timeouts');
   assert.doesNotMatch(reconnect, /connection failed\|closed during auth/u, 'no second copy of what a dead address looks like');
 });
@@ -1635,7 +1640,8 @@ test('a dropped connection is retried for the whole watchdog window by the clock
   assert.match(machine, /export const RECONNECT_WATCHDOG_MS = 180000;/u);
   assert.doesNotMatch(machine, /RECONNECT_MAX_ATTEMPTS/u, 'no derived attempt count to round wrong (reviewer P2-1)');
   assert.match(machine, /maxAttempts = Infinity,\s*watchdogMs = RECONNECT_WATCHDOG_MS,/u, 'the machine defaults to the clock');
-  assert.match(machine, /Math\.min\(500 \* \(n \+ 1\), RETRY_GAP_CAP_MS\)/u, 'the backoff uses the same cap');
+  // (#495: by the dials sent so far, after a round.)
+  assert.match(machine, /Math\.min\(500 \* Math\.max\(dials, 1\), RETRY_GAP_CAP_MS\)/u, 'the backoff uses the same cap');
   assert.doesNotMatch(source, /location\.reload|window\.location\.(?:reload|assign|replace)/u, 'a lost connection never reloads the page');
 });
 

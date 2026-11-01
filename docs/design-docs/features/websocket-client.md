@@ -254,13 +254,14 @@ Decisions worth keeping:
   socket, which is precisely the old behaviour. Phase ② gives every server an
   explicit runtime keyed by its entry id and the slot goes away with it.
 - **`reconnect.ts` is untouched** and App still creates the one reconnect
-  machine. Retry policy, backoff and address round-robin are app-layer
+  machine. Retry policy, backoff and the address round are app-layer
   concerns; importing them into `core/` to give a Connection its own recovery
   would have inverted the layering and added a second recovery strategy.
   Phase ② composes one connection with one existing reconnect machine per
   server.
 - **Device reachability stays global, in `ws.ts`.** `probeFailedAt`,
-  `isAddressViable`, `noteAddressUnreachable`, `findBestAddress`,
+  `isAddressViable`, `noteAddressUnreachable`, `findBestAddress` (since #495
+  the connected-state optimizer's probe only; no reconnect asks it),
   `classifyAddress` and the `online` / connection-change listeners describe
   the NETWORK THE DEVICE IS ON, not a server: every connection shares the
   answer, and the invalidation is a platform event. Keeping it here is also
@@ -1263,22 +1264,22 @@ starts the member's own loop over what is left, and a loop refused at one
 address goes on to the next candidate in the same budget; only when every
 pair is refused is the member. In the loop it is a HARD rule
 (`eligible`, review P1-A on 36b2d37e), apart from the soft `isAddressViable`
-preference: only an 'ok' pair is a candidate, for the first round's
-multi-address probe and every later round alike, and the loop never falls
-back to the others. One pair's state is never the member's (ruling on
+preference: only an 'ok' pair is a candidate, in every round, and the loop
+never falls back to the others. One pair's state is never the member's (ruling on
 f20d1ea0: the post-probe recheck gave up on 'auth' with an 'ok' sibling left,
 and a refusal mid-loop gave up while a sibling was still 'pending'): the
 loop reads the WHOLE set through ONE verdict, `candidateVerdict` — any 'ok'
 → dial one; else any 'pending' → wait; else every pair refused → give up as
-'auth'; else 'unknown' — at every point it chooses again: the start of each
-attempt, after the probe's await, after the host's wait (`beforeDial`, a walk
-asking the person), and after a refusal at one address, which the loop also
+'auth'; else 'unknown' — at every point it chooses again: every pick of a
+round (since #495: the round's start, after the host's wait (`beforeDial`, a
+walk asking the person), after each failed dial), and after a refusal at one
+address, which the loop also
 keeps as its own fact for the chain so even a loop the host does not hold
 eligible never re-sends it. After the LAST await the loop reads the target's
 CURRENT declaration (ruling on 77e1185d): the target gone stops the loop; a
 changed token, or a chosen address no longer in the current set or no
 longer 'ok', is not sent — the attempt chooses again from the current set,
-so an address removed or replaced during the probe or the walk is never
+so an address removed or replaced during the walk or a dial is never
 dialled with the membership it had before. The pair checked there is the
 pair sent: the connect adapter dials in the same turn with the token the
 loop decided (`DialOptions.token`; no microtask between, no re-read of the
@@ -1286,8 +1287,8 @@ entry), and `ServerRuntime.dial` sends nothing when its attempt is not owned
 at that moment; a join likewise dials with the token its check read. Every
 await on the way, and what follows it: the join has none before its dial
 (check → dial in one turn); the loop's attempt reads the target and the set,
-takes its claim, then awaits the probe (multi-address first round) and the
-host's wait — after them, ownership, then the current declaration as above
+takes its claim, then awaits the host's wait — after it, ownership, then
+the current declaration as above
 — and the dial's own await is the handshake, whose auth refusal re-reads the
 current set; a 'pending' wait ends only at `wake()`, which starts the
 attempt over from the target. The decision to dial is the
@@ -1348,9 +1349,9 @@ of no pick with the re-arm tick left out (#493); a wrong route refused while the
 reconnect whose token changes; a token edited right after the loop's last
 check; an unreadable record reset) and `server-members.test.ts` (`ask`, the
 set's verdict for a member's status), `reconnect.test.ts` (the set
-{ok, pending, refused, unknown} at the attempt's start, after the probe,
-after the host's wait and after a refusal mid-loop; an address removed or
-replaced, or the entry removed, during the probe or the wait) and
+{ok, pending, refused, unknown} at the round's start, after the host's wait
+and after a refusal mid-round; an address removed or replaced, or the entry
+removed, during the wait) and
 `server-runtime.edit.test.ts` (the decided token sent; nothing sent unowned). Rig on the branch
 (Chromium 152, netns, phone 390 touch and desktop): B picked while its
 gateway was down reads "Chosen…", CURRENT unchanged; its gateway started,
@@ -1383,8 +1384,8 @@ is an Android timer suspension. Two code readings were measured and left as
 they are: **H1**, the loop's parallel handshake probe (`findBestAddress`)
 can choose a silent address, and its round-robin then skips addresses ws.ts
 remembers as unreachable when a viable one is left (so not every address is
-tried every round) — real, but it recovered by itself in S1 and S2; an
-ordered full-auth walk for members is #495. **H2**, `start()` is a no-op
+tried every round) — real, but it recovered by itself in S1 and S2; #495
+replaced that probe and round-robin with the switch's ordered round (below). **H2**, `start()` is a no-op
 while a loop runs, so `ask` answers 'trying' — true, and no wedged loop was
 seen; #458's policy is kept.
 
@@ -1469,6 +1470,81 @@ flight are kept, an excluded one leaves and an absorbed id becomes an
 orphan; the next allowed sync joins. `App.source.test.ts`: both doors and
 `autoJoin` read the fact; `openCandidate`, the leave question,
 `syncMembers` and `memberIds` do not; `onConnected` clears it.
+
+**A reconnect walks the server's addresses in ONE ordered round** (board
+#495, 2026-11-02; reviewer recommendation (c) on #493). Before, every
+runtime's loop (the focused server's and each member's) began with a
+parallel WebSocket-handshake probe, `findBestAddress`, which sorts by address
+class (LAN, Tailscale, internet) and takes the first to answer the
+handshake. A silent address of a better class therefore won at every new
+loop start over the entry's own address (the last one that answered), and
+later attempts were a round-robin that left the addresses in cooldown out of
+the pool while any viable one remained (#493 H1: S1 measured one 5 s timeout
+before the working address). Now the machine walks the switch's round,
+`runRound` in dial-order.ts, one round per attempt: its `pick` reads the
+target and the WHOLE current candidate set at every pick and takes the
+verdict on that set first (#458: none ok but one pending waits; every pair
+refused is 'auth'; otherwise not decidable is 'unknown' and dials nothing),
+then the first 'ok' pair of `dialOrder` the round has not sent, keyed by
+(address, token) so an edited token is a new pair. The entry's active
+address leads, then the machine's others in their stored priority, and the
+ones in cooldown are LAST but still dialled. An ok pair that just failed
+beside a pending one ends the ROUND (backoff, then that pair again), never a
+wait (reviewer P1-A on the inventory). One dial at a time, each with its
+class timeout; a reachability failure feeds the cooldown, an ERR_AUTH puts
+that pair in the chain's `refusedHere`, and any other failure (a protocol
+surprise) goes on to the next pair. The round ends on an answer, an
+exhausted set (the backoff, by the dials sent so far, then a new round),
+`wait` (parked until `wake()`), `end` (give up, saying why) or `abandoned`
+(the claim or the chain is gone: nothing is marked or published). The host's
+wait (`beforeDial`) is the round's last await before each pick, the pair
+picked is dialled in that turn, and `live` (the chain and the round's claim)
+is asked first after every dial (P1-B). The round's result reaches the chain
+one handoff later, so the chain asks its generation and the round's claim
+AGAIN before consuming any result: a stale one ends only its own chain,
+never a newer chain's watchdog or the machine's wait flags (a newer chain
+may sit in its own pending gap; reviewer P1-C residual on b99ca858), and
+reaches neither `onSuccess` nor
+`onGiveUp` (reviewer P1-C on 7a0a6d4a). A `wake()` that arrives after a
+pick answered 'pending' but before the chain parked is kept (`woken`) and
+starts one new round when the chain reads the 'wait' (P1-D): no timer, no
+new watchdog, no re-claim on a stale claim. A resolved dial's answer reaches
+`onSuccess` untouched, so the runtime's identity and storage outcomes keep
+their host gate. The attempt the person sees, the optional `maxAttempts` and
+the backoff count DIALS; the 180 s watchdog bounds the whole chain, a round
+included. The switch walks the same `runRound` with its own fixed order and
+snapshot (#402's protection unchanged) and stops on anything but a
+reachability failure, as before. `findBestAddress` stays for
+`optimizeConnection` only. What it does NOT do: a silent first address
+still costs its own one class timeout (2, 3 or 5 s); a member's first join
+is still one dial (its failure hands over to this loop); with every address
+dead a round takes the sum of their timeouts where the probe took one 3 s
+probe and a dial. Measured on the three-gateway Docker rig (Chromium through
+agent-browser, gw-a focused, gw-b a member reached through local proxies;
+each row is the member's own dials from a WebSocket log, ms after its
+socket was dropped): R1, a proven internet-class entry (127.0.0.1) with a
+silent LAN-class alternate — main probed both, dialled the silent LAN one at
+66 ms, waited its 2 s and reached the entry at 2567 ms; the branch dialled
+the entry at 33 ms and was up at 35 ms, never touching the LAN one. R2, a
+silent entry with a good alternate of the same class — main reached the
+alternate at 5612 ms (5 s timeout, then a 500 ms backoff), the branch at
+5091 ms (the next pair in the same round); both then recorded the
+alternate, and a second outage was up in 53 ms (main) and 80 ms (branch).
+R3, a dead (closing) entry — main up at 61 ms, the branch at 33 ms. One
+measurement per row, not a bound. Pinned by `dial-order.test.ts` (the round: order, one at a
+time, the cooldown mark, stop, exhausted, `live` after the wait and after a
+dial, pick after every await, the pair key), `reconnect.test.ts` (the entry
+first then the next in the SAME attempt; cooldown last and still dialled;
+ok-tried beside pending backs off; auth-refused beside pending waits and a
+repeated wake is one round; unknown never dials; a token edited mid-round;
+the next address removed mid-round; a takeover during the wait, a dial, the
+backoff and the wait on pending; cancel + start and a claim taken between a
+round's ok or end result and the chain reading it; a decision and its wake
+in the gap before the chain parks, with and without a takeover; a stale
+result consumed while a newer chain sits in its pending gap, then the wake;
+a silent first address costs its own
+timeout once; no probe in the machine) and the unchanged
+`server-switch.test.ts`.
 
 **A switch replaces only its own tree** (reviewer P1-1 on 99566068). The
 switch panel sits OVER the kept trees rather than in place of them: every
@@ -1896,7 +1972,7 @@ doc already describes. Design decisions, in the order they bit:
   1. **Leave guards** (`lib/app/leave-guards.ts`): every instance that will be destroyed registers its OWN guard (the Files page, the Hub drawer's Files, AgentsPage on the rail or inside Settings). Guards on the page the user is on ask first, without navigating; any other dirty one is revealed on its page and asks in its own dialog; a save/delete in flight finishes first. While the walk runs App HOLDS Settings mounted (`{#if page === 'prefs' || holdPages}`), so revealing Files can never unmount an Agents editor that has not answered (review P1: before the hold, that editor's draft was lost and its guard then skipped as "gone"). The walk always ends on the page it started from. Any "stay" and nothing happened. Since #335 ②b-2-3 each guard names its OWNER, the runtime handle whose subtree holds it (or null outside every subtree — Preferences' Agents editor until b3-3), and a leave names the handle it destroys: only that handle's guards and the owner-less ones are asked. By identity, never by server id, so a new handle for the same server neither answers for the old one's editors nor is asked about them. In Single mode that is every guard, as before.
   2. **One intent**: the CURRENT server's reconnect loop stops, `switching` hides the tree (so no keystroke, send or save reaches it), and every App async begun earlier (boot restore's `listSessions`, `optimizeConnection`) checks `serverSwitch.owns(intent)` before writing. The server being left is NOT stopped: its runtime, its socket and its downloads keep running (order (a), orchestrator 2026-10-11 04:04).
   3. **Nothing is parked** (since #335 ②b-4): the leaving server's state is in its own slots already, written there by its own store. Retry and Back reuse the frozen `from`; a half-switched world writes no slot of anybody's.
-  4. **Dial the target as a candidate, without touching CURRENT**: a reload mid-switch boots the server you left. The dial WALKS THE SERVER'S ADDRESSES (board #353, owner: a server with a LAN and a public address, the LAN one dead, could not be reached until "disconnect, re-pick"): the address asked for first, then the entry's own and the machine's other addresses in failover order (`addressesOf`, `server-target.ts`), the ones that just failed last (`dialOrder`, `dial-order.ts`), each with the reconnect machine's class timeout (LAN 2s, Tailscale 3s, WAN 5s; `dialTimeoutMs`). A REACHABILITY failure (timeout, refused, closed during auth: `isReachabilityFailure`) marks the address unreachable in ws.ts's cooldown memory, closes that candidate and tries the next inside the SAME switch; an AUTH refusal stops the walk, because the server answered and another address of it would answer the same. The probe cannot do this job: an address that completes the WebSocket handshake and then never authenticates (a captive LAN, a half-open middlebox) passes it, and that is exactly the address that must not decide for the server. The address that answers is the one step 5 records, so the entry says where the server last proved to be: that is a FACT (the last address that answered), not a preference, and there is no stored "preferred address" (the owner's complaint was being stuck with no way to choose; a walk that falls over plus a one-tap pick on the failed panel answers it with less state, and a sticky LAN-or-public choice would be a new issue). The scope is the Single-mode switch's walk and the failed panel's pick; the reconnect machine keeps its own walk, and the Aggregate picker (a member's include or focus) dials through its runtime's loop and is not changed here. The reconnect machine and the switch share `dialTimeoutMs`, `isReachabilityFailure` and the memory; they do not share the walk (the machine probes in parallel first and round-robins, the switch goes in order), which is deliberate: parallel probing is what a silent address fools.
+  4. **Dial the target as a candidate, without touching CURRENT**: a reload mid-switch boots the server you left. The dial WALKS THE SERVER'S ADDRESSES (board #353, owner: a server with a LAN and a public address, the LAN one dead, could not be reached until "disconnect, re-pick"): the address asked for first, then the entry's own and the machine's other addresses in failover order (`addressesOf`, `server-target.ts`), the ones that just failed last (`dialOrder`, `dial-order.ts`), each with the reconnect machine's class timeout (LAN 2s, Tailscale 3s, WAN 5s; `dialTimeoutMs`). A REACHABILITY failure (timeout, refused, closed during auth: `isReachabilityFailure`) marks the address unreachable in ws.ts's cooldown memory, closes that candidate and tries the next inside the SAME switch; an AUTH refusal stops the walk, because the server answered and another address of it would answer the same. The probe cannot do this job: an address that completes the WebSocket handshake and then never authenticates (a captive LAN, a half-open middlebox) passes it, and that is exactly the address that must not decide for the server. The address that answers is the one step 5 records, so the entry says where the server last proved to be: that is a FACT (the last address that answered), not a preference, and there is no stored "preferred address" (the owner's complaint was being stuck with no way to choose; a walk that falls over plus a one-tap pick on the failed panel answers it with less state, and a sticky LAN-or-public choice would be a new issue). The scope was the Single-mode switch's walk and the failed panel's pick. Since #495 the reconnect machine walks the SAME round (`runRound`, dial-order.ts) with its own pick and failure policy, so the two share `dialTimeoutMs`, `isReachabilityFailure`, the memory and the walk; parallel probing, which a silent address fools, is left to the connected-state optimizer only.
   5. **Only after auth**, `activateSwitched`: record by the machine id the server REPORTED (a new address of a known machine folds into its entry, a new machine gets a new one; an address never guesses a machine), add the address to that machine's failover set, move CURRENT to the canonical entry. Then `comeUp`: the candidate closes and the target's OWN runtime comes up on the one bring-up road (`activate({ replace: true, elsewhere: 'fail' })`).
   6. **Only once the target is bound** is the server left given up: the swap ends it — its downloads suspended with their parts kept (`releaseServerState`, file-handling.md), then disposed — and `resetServerMemory()` and `centreSurface.reset()` clear what named it.
 
@@ -1989,8 +2065,8 @@ doc already describes. Design decisions, in the order they bit:
   connect hands over to the reconnect machine, whose bar carries on from there.
 - **The failover set is editable: removable rows, drag priority** (board #222,
   owner 2026-09-20: "可以手动删除某个链接，并且可以设定连接的优先级上下拖动
-  排序"). The list's stored order IS the priority — the reconnect round-robin
-  walks it and `findBestAddress`'s stable class sort keeps it within a class —
+  排序"). The list's stored order IS the priority — each reconnect round
+  walks it after the entry's active address, the ones in cooldown last (#495) —
   so a drag needs no new concept, only a write. A row's × removes one
   alternate; the ACTIVE address is never removable (it is the live connection,
   and deleting it would only hide the primary while it stays primary). The
@@ -2275,6 +2351,12 @@ a socket that a server's pages are using.
   ends (`onidle`, a lease's release, a membership op's `finally`, Retry), so
   the caller whose end freed the window has committed before the queue is
   looked at (P2 on e0dafe3c). `switching` is not that definition.
+- **A reconnect walks one ordered round** (#495). Every runtime's loop and
+  the switch walk the same `runRound`: the entry's address first, cooldown
+  last but dialled, one dial at a time, the #458 verdict over the whole set
+  at every pick. Why: the parallel probe let a silent address of a better
+  class take over a proven one, and the round-robin left cooled-down
+  addresses out.
 - **A reconnect names its server.** `ws-reconnected` carries `serverId`, and a
   page acts only on its own server's. Each runtime has its own reconnect
   loop, told where by its own entry (reviewer P1-A on cc45d7d1).
@@ -2478,7 +2560,7 @@ Scan is pinned by qr-scan.test.ts (a live frame and a photo both decode the link
 
 ### The failover set's order is the priority, edited through one writer
 
-(board #222): the Connection page's address list is the machine's `tmux_machines` failover set, and its stored order is what the reconnect round-robin walks — so reordering IS setting priority, no new concept. A row's × removes an alternate (never the ACTIVE address — the live connection), and the grip drags a row to its new place (Arrow keys on the focused grip are the keyboard form); the drag reuses the rail's idiom via the generic `moveBefore`/`listDropAt` in nav-order.ts, with the grip — not the row — as the handle because the row is already the switch command and a whole-row touch drag would fight the page's scroll. Both edits go to App's `onAddressesChange`, which persists through `saveMachineAddresses` (the map's ONE writer: sanitized, deduped, an empty set drops the key) and bumps a version counter so the derived list re-reads. The hooks-management row that used to sit under the list retired in the same task — managed agents carry hooks in their isolated homes, so the global install/remove surface and its `agent_hooks_*` RPCs were deleted whole (agent-notifications.md § Hook Management).
+(board #222): the Connection page's address list is the machine's `tmux_machines` failover set, and its stored order is what each reconnect round walks (#495) — so reordering IS setting priority, no new concept. A row's × removes an alternate (never the ACTIVE address — the live connection), and the grip drags a row to its new place (Arrow keys on the focused grip are the keyboard form); the drag reuses the rail's idiom via the generic `moveBefore`/`listDropAt` in nav-order.ts, with the grip — not the row — as the handle because the row is already the switch command and a whole-row touch drag would fight the page's scroll. Both edits go to App's `onAddressesChange`, which persists through `saveMachineAddresses` (the map's ONE writer: sanitized, deduped, an empty set drops the key) and bumps a version counter so the derived list re-reads. The hooks-management row that used to sit under the list retired in the same task — managed agents carry hooks in their isolated homes, so the global install/remove surface and its `agent_hooks_*` RPCs were deleted whole (agent-notifications.md § Hook Management).
 
 ### Any saved server's addresses and token are edited from its row (board #402, 2026-10-16)
 

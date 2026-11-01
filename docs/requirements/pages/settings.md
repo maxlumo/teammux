@@ -123,8 +123,8 @@ where Agents is a page of its own, reads as one plain list):
   current address and shows a connecting cue on a tapped address until the
   switch settles. An alternate address is removable (the active one is not —
   it is the live connection), and a row's grip drag (or Arrow keys on it)
-  reorders the list; the order IS the failover priority the reconnect
-  round-robin walks (board #222)
+  reorders the list; the order IS the failover priority each reconnect
+  round walks, after the address that last answered (board #222, #495)
 - Language selector: EN / 中文 (`ui/Segmented`, the travelling pill)
 - Theme selector: Auto / Light / Dark (`ui/Segmented`)
 - Message notifications (own category): `ui/Switch`, persisted immediately to localStorage `tmux_notify`; turning it on is the user gesture that previews the cue and requests system-notification permission (Android's runtime prompt inside the app). The caption says when only sound can play. The separate test command plays the cue and attempts a notification; it cannot race an outstanding permission request. Moved here from the Hub header (board #72).

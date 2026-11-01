@@ -1132,7 +1132,6 @@ test('the default reconnect budget dials ONCE on a real refusal, marks nothing u
         await script(conn);
         return dialing;
       },
-      findBestAddress: async (addresses) => addresses[0] ?? null,
       isAddressViable: () => true,
       noteAddressUnreachable: (address) => log.unreachable.push(address),
       classifyAddress: () => 2,
