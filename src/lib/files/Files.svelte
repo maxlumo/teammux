@@ -493,6 +493,8 @@
     download: handleDownload,
     rename: (entry) => { renaming = entry.path; renameValue = entry.name; },
     remove: (path) => requestAct({ kind: 'file', path }),
+    bookmarked: (path) => isBookmarked(path),
+    bookmark: (path) => toggleBookmark(path),
   };
   const rowActions = (entry) => entryToolActions(entry, t, rowHandlers);
   const toolbarActions = $derived([
@@ -638,6 +640,12 @@
     recentsList.load().catch(e => { recentsRead.error = String(e?.message ?? e); });
   }
   function isBookmarked(path) { return bookmarks.includes(path); }
+  /** A bookmark opens through the path-link door (#494): a folder lists, a
+   * file opens its preview, a path that is gone shows the open's own error.
+   * It asks an unsaved editor first, like a row's open (review P1-A). */
+  function openBookmark(path) {
+    leaveEditor(() => { showBookmarks = false; void openFileRef(path); });
+  }
 
   function toggleBookmark(path) {
     return bookmarksList.mutate(items => (
@@ -721,8 +729,13 @@
   // Linked previews sit above the directory history: Back returns to the
   // document/list that supplied the link, including its reading position.
   let previewBodyEl = $state(null);
+  /** Where a linked open was followed from, for Back. An editor is recorded
+   * as the file's READ view: the edit buffer is not part of a location, and a
+   * linked open from the editor only runs once the person accepted leaving it,
+   * so restoring 'edit' would revive a discarded editor over another file's
+   * buffer (#494 review P1-C). Re-entering edit loads the file's own text. */
   function fileLocation() {
-    return { cwd, entries, view, currentFile, fromGit, scroll: previewBodyEl?.scrollTop ?? 0,
+    return { cwd, entries, view: view === 'edit' ? 'preview' : view, currentFile, fromGit, scroll: previewBodyEl?.scrollTop ?? 0,
       frameScroll: htmlPreviewEl?.contentDocument?.scrollingElement?.scrollTop ?? 0 };
   }
   function restoreFileLocation(previous) {
@@ -1818,7 +1831,7 @@
         {#each bookmarks as bm}
           <div class="bm-row">
             <span class="bm-icon"><Icon name="star-filled" size={13} /></span>
-            <button class="bm-path" onclick={() => { navTo(bm, 'fwd'); showBookmarks = false; }} use:scrollEnd use:hoverInfo={() => ({ text: bm })}>
+            <button class="bm-path" onclick={() => openBookmark(bm)} use:scrollEnd use:hoverInfo={() => ({ text: bm })}>
               {bm}
             </button>
             <CommandButton variant="icon" icon="x" label={`${t('filesRemoveBookmark')}: ${bm}`} onclick={() => toggleBookmark(bm)} />
@@ -1837,7 +1850,7 @@
         {#each recentFiles as rf}
           <div class="bm-row">
             <span class="bm-icon"><Icon name="clock" size={13} /></span>
-            <button class="bm-path" onclick={() => { showRecent = false; openEntry({ type: 'file', path: rf.path, name: rf.name }); }} use:scrollEnd
+            <button class="bm-path" onclick={() => leaveEditor(() => { showRecent = false; openEntry({ type: 'file', path: rf.path, name: rf.name }); })} use:scrollEnd
               use:hoverInfo={() => ({ title: rf.name, text: rf.path })}>
               <span style="color:var(--text3);font-size:var(--fs-meta)">{rf.path.replace(/\/[^/]+$/, '')}/</span>{rf.name}
             </button>
@@ -1957,6 +1970,8 @@
         {#if currentFile.stat?.is_text && currentFile.stat?.writable}
           <CommandButton variant="icon" icon="edit" label={t('edit')} onclick={startEdit} />
         {/if}
+        <CommandButton variant="icon" icon={isBookmarked(currentFile.path) ? 'star-filled' : 'star'} label={t('filesBookmarkEntry')}
+          pressed={isBookmarked(currentFile.path)} onclick={() => toggleBookmark(currentFile.path)} />
         <CommandButton variant="icon" icon="download" label={t('filesDownload')} onclick={() => handleDownload(currentFile.path)} />
         <CommandButton variant="icon" icon="refresh" label={t('filesRefresh')} onclick={() => reloadPreview(true)} />
         <CommandButton variant="icon" icon="info" label={t('filesInfo')} onclick={() => { view = 'info'; navPush(); }} />

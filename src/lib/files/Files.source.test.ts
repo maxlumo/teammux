@@ -42,7 +42,6 @@ test('back retraces the USER\u2019s steps — a history, not a parent walk (boar
     /navTo\(parent, 'back'\);/u,       // the up button
     /onclick=\{\(\) => \{ if \(!selecting\(\)\) navTo\('\/', 'back'\); \}\}/u, // the root crumb (#187: not over a text selection)
     /navTo\(bc\.path, 'back'\)/u,      // a crumb
-    /navTo\(bm, 'fwd'\);/u,            // a bookmark
   ]) assert.match(source, site, `user navigation pushes: ${site}`);
   // …back pops exactly that path FIRST; the user's own steps always outrank
   // the parent climb below them (board #47 reopened the climb — see the next
@@ -432,4 +431,19 @@ test('the browser picker is ONE hidden input in the markup, reused, its value cl
   assert.match(pick, /uploadInput\.value = '';\s*uploadInput\.click\(\);/u, 'cleared BEFORE the pick, so the same file again is a change');
   const read = source.slice(source.indexOf('async function onUploadPicked()'));
   assert.match(read, /const files = Array\.from\(uploadInput\?\.files \|\| \[\]\);\s*if \(uploadInput\) uploadInput\.value = '';\s*if \(files\.length\) await uploadBlobFiles\(files\);/u, 'read, cleared, then uploaded');
+});
+
+test('a bookmark opens through the path-link door, behind the unsaved-editor question (#494)', () => {
+  // One opener: a folder lists, a file previews, a gone path shows the open's
+  // own error. The editor is asked first, like a row's open (review P1-A).
+  assert.match(source, /function openBookmark\(path\) \{\s*leaveEditor\(\(\) => \{ showBookmarks = false; void openFileRef\(path\); \}\);\s*\}/u);
+  assert.match(source, /<button class="bm-path" onclick=\{\(\) => openBookmark\(bm\)\}/u);
+  assert.doesNotMatch(source, /navTo\(bm\b/u, 'the directory-only bookmark open is gone');
+  // A Recent row is the same panel species and asks the same way (orchestrator, #494).
+  assert.match(source, /onclick=\{\(\) => leaveEditor\(\(\) => \{ showRecent = false; openEntry\(\{ type: 'file', path: rf\.path, name: rf\.name \}\); \}\)\}/u);
+  // Its history never holds a bare editor (review P1-C).
+  assert.match(source, /function fileLocation\(\) \{\s*return \{ cwd, entries, view: view === 'edit' \? 'preview' : view, currentFile,/u);
+  // The toggles edit the list and nothing else.
+  assert.match(source, /bookmark: \(path\) => toggleBookmark\(path\),/u, 'the row menu s toggle');
+  assert.match(source, /pressed=\{isBookmarked\(currentFile\.path\)\} onclick=\{\(\) => toggleBookmark\(currentFile\.path\)\}/u, 'the preview header s star');
 });

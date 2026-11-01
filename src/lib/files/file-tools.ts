@@ -19,6 +19,9 @@ interface EntryHandlers {
   download(path: string): unknown;
   rename(entry: Entry): unknown;
   remove(path: string): unknown;
+  /** Whether the path is in the bookmarks list, and the one toggle that edits it (#494). */
+  bookmarked(path: string): boolean;
+  bookmark(path: string): unknown;
 }
 
 /** available is the toolbar's content width, in untransformed CSS pixels. */
@@ -44,6 +47,11 @@ export function entryToolActions(entry: Entry, t: (key: string) => string, handl
   return [
     { key: 'open', label: t('open'), icon: 'arrow-right', disabled: target.type === 'broken', run: () => handlers.open(target) },
     ...copyActions(target, t, handlers.copy),
+    // A file or a folder can be bookmarked from its row's menu (#494, owner
+    // 2026-11-01: "单个文件我应该也可以收藏"); a menu action, not a row tool.
+    ...(target.type !== 'broken'
+      ? [{ key: 'bookmark', label: t('filesBookmarkEntry'), icon: handlers.bookmarked(target.path) ? 'star-filled' : 'star',
+        pressed: handlers.bookmarked(target.path), run: () => handlers.bookmark(target.path) }] : []),
     ...(target.type !== 'dir' && target.type !== 'broken'
       ? [{ key: 'download', label: t('filesDownload'), icon: 'download', inline: true, run: () => handlers.download(target.path) }] : []),
     { key: 'rename', label: t('filesRename'), icon: 'edit', inline: true, run: () => handlers.rename(target) },

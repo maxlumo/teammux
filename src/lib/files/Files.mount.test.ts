@@ -1882,3 +1882,212 @@ test('a session switch back wakes on that project\'s parked file, as a remount d
     assert.equal(shownPath(app), '/fixture/next.md');
   } finally { await app.close(); }
 });
+
+// #494: a FILE can be bookmarked too (owner 2026-11-01: "文件浏览器里只能收藏一个
+// 文件夹，其实单个文件我应该也可以收藏，同时展示在我的收藏列表里面"). One list of
+// path strings, one toggle, and a bookmark opens through the path-link door.
+function bookmarkServer(initial: string[] = [], extra: Record<string, (...args: any[]) => unknown> = {}) {
+  const stored = { list: [...initial] };
+  const stats: string[] = [];
+  const api = rpc({
+    getBookmarks: async () => ({ bookmarks: [...stored.list] }),
+    saveBookmarks: async (items: string[]) => { stored.list = [...items]; return {}; },
+    fsStat: async (path: string) => {
+      stats.push(path);
+      if (path === '/fixture/sub') return { path, type: 'dir' };
+      if (path === '/fixture/gone.md') throw new Error('No such file or directory');
+      return { path, is_text: true, writable: true, readable: true, size: 100, mime_hint: 'text/markdown' };
+    },
+    fsList: async (path: string) => ({ path, entries: path === '/fixture/sub' ? [{ name: 'inner.md', path: '/fixture/sub/inner.md', type: 'file', size: 1 }] : entries }),
+    ...extra,
+  });
+  return { api, stored, stats };
+}
+const rowOf = (app: App, name: string) => [...app.document.querySelectorAll<HTMLElement>('.file-row')]
+  .find(r => r.querySelector('.file-main')?.textContent?.includes(name))!;
+const panelText = (app: App) => app.document.querySelector('.bookmarks-panel')?.textContent ?? '';
+const bookmarkRow = (app: App, path: string) => [...app.document.querySelectorAll<HTMLButtonElement>('.bookmarks-panel .bm-path')]
+  .find(b => b.textContent?.trim() === path);
+const previewName = (app: App) => app.document.querySelector('.preview-name')?.textContent ?? '';
+
+test('a file is bookmarked from its row menu, listed with the folders, and a click opens its preview (#494)', async context => {
+  const server = bookmarkServer(['/fixture/sub']);
+  const app = await (await compiled).mount(context, { props: { visible: true, session: 'fixture' }, modules: [server.api] });
+  try {
+    await settle(app);
+    contextMenu(app, rowOf(app, 'next.md')); await app.flush();
+    assert.equal(menuAction(app, 'Bookmark').getAttribute('aria-checked') ?? 'false', 'false', 'not yet bookmarked');
+    menuAction(app, 'Bookmark').click(); await settle(app);
+    assert.deepEqual(server.stored.list, ['/fixture/sub', '/fixture/next.md'], 'the same list of path strings');
+    button(app, 'Bookmarks').click(); await settle(app);
+    assert.ok(bookmarkRow(app, '/fixture/next.md') && bookmarkRow(app, '/fixture/sub'), `both listed: ${panelText(app)}`);
+    bookmarkRow(app, '/fixture/next.md')!.click(); await settle(app);
+    assert.equal(previewName(app), 'next.md', 'the file opens its preview');
+    assert.equal(app.document.querySelector('.bookmarks-panel'), null, 'the panel closes');
+  } finally { await app.close(); }
+});
+
+test('a folder bookmark still lists the folder; a gone path shows the open s own error (#494)', async context => {
+  const server = bookmarkServer(['/fixture/sub', '/fixture/gone.md']);
+  const app = await (await compiled).mount(context, { props: { visible: true, session: 'fixture' }, modules: [server.api] });
+  try {
+    await settle(app);
+    button(app, 'Bookmarks').click(); await settle(app);
+    bookmarkRow(app, '/fixture/sub')!.click(); await settle(app);
+    assert.ok(rowOf(app, 'inner.md'), 'the folder is listed');
+    assert.match(app.document.querySelector('.bc-scroll')?.textContent ?? '', /sub/u, 'and the crumbs are there');
+    button(app, 'Bookmarks').click(); await settle(app);
+    bookmarkRow(app, '/fixture/gone.md')!.click(); await settle(app);
+    assert.match(app.document.querySelector('.error')?.textContent ?? '', /\/fixture\/gone\.md/u, `the existing missing-file line: ${app.document.querySelector('.error')?.textContent}`);
+  } finally { await app.close(); }
+});
+
+test('the preview header s star toggles the open file, and the list survives a reload (#494)', async context => {
+  const server = bookmarkServer();
+  const app = await (await compiled).mount(context, { props: { visible: true, session: 'fixture' }, modules: [server.api] });
+  try {
+    await settle(app);
+    rowOf(app, 'AGENTS.md').querySelector<HTMLButtonElement>('.file-main')!.click(); await settle(app);
+    const star = () => app.document.querySelector<HTMLButtonElement>('.preview-actions button[aria-label="Bookmark"]')!;
+    assert.equal(star().getAttribute('aria-pressed'), 'false');
+    star().click(); await settle(app);
+    assert.deepEqual(server.stored.list, ['/fixture/AGENTS.md']);
+    assert.equal(star().getAttribute('aria-pressed'), 'true', 'pressed while bookmarked');
+  } finally { await app.close(); }
+  // A new instance reads the persisted list: the file is still listed.
+  const again = await (await compiled).mount(context, { props: { visible: true, session: 'fixture' }, modules: [server.api] });
+  try {
+    await settle(again);
+    button(again, 'Bookmarks').click(); await settle(again);
+    assert.ok(bookmarkRow(again, '/fixture/AGENTS.md'), `listed after a reload: ${panelText(again)}`);
+    button(again, 'Bookmarks').click(); await settle(again);
+    rowOf(again, 'AGENTS.md').querySelector<HTMLButtonElement>('.file-main')!.click(); await settle(again);
+    again.document.querySelector<HTMLButtonElement>('.preview-actions button[aria-label="Bookmark"]')!.click(); await settle(again);
+    assert.deepEqual(server.stored.list, [], 'toggling again removes it');
+  } finally { await again.close(); }
+});
+
+test('a bookmark click asks an unsaved editor first: Keep editing opens nothing, Discard opens only the target (#494 review P1-A)', async context => {
+  const server = bookmarkServer(['/fixture/next.md']);
+  const app = await (await compiled).mount(context, {
+    props: { visible: true, session: 'fixture' }, modules: [server.api], pendingImports: ['highlight.js/'],
+    setup(window) { window.localStorage.setItem('tmux_layout_mode', 'desktop'); },
+  });
+  try {
+    await settle(app);
+    rowOf(app, 'AGENTS.md').querySelector<HTMLButtonElement>('.file-main')!.click(); await settle(app);
+    button(app, 'Edit').click(); await settle(app);
+    const area = app.document.querySelector<HTMLTextAreaElement>('.editor-layer textarea')!;
+    area.value = '# Rules\n\nchanged'; area.dispatchEvent(new app.window.Event('input', { bubbles: true })); await settle(app);
+    // The split keeps the list and its panel beside the editor (Files.svelte's files-left).
+    assert.ok(app.document.querySelector('.files-left'), 'the list is on screen beside the editor');
+    button(app, 'Bookmarks').click(); await settle(app);
+    // Toggling a bookmark only edits the list: no question, the editor stays.
+    contextMenu(app, rowOf(app, 'next.md')); await app.flush();
+    menuAction(app, 'Bookmark').click(); await settle(app);
+    assert.deepEqual(server.stored.list, [], 'the row menu removed it');
+    assert.equal(app.document.querySelector('[role=alertdialog]'), null, 'and asked nothing');
+    contextMenu(app, rowOf(app, 'next.md')); await app.flush();
+    menuAction(app, 'Bookmark').click(); await settle(app);
+    assert.deepEqual(server.stored.list, ['/fixture/next.md']);
+    assert.equal(area.isConnected && area.value, '# Rules\n\nchanged', 'the editor is untouched');
+    if (!app.document.querySelector('.bookmarks-panel')) { button(app, 'Bookmarks').click(); await settle(app); }
+    const statsBefore = server.stats.length;
+    bookmarkRow(app, '/fixture/next.md')!.click(); await settle(app);
+    assert.ok(app.document.querySelector('[role=alertdialog]'), 'the editor s own discard confirmation');
+    assert.equal(server.stats.length, statsBefore, 'the target is not opened while it asks');
+    button(app, 'Keep editing').click(); await settle(app);
+    assert.equal(area.isConnected && area.value, '# Rules\n\nchanged', 'Keep editing keeps the file and its text');
+    assert.match(app.document.querySelector('.bc-scroll')?.textContent ?? '', /fixture/u, 'and the list where it was');
+    bookmarkRow(app, '/fixture/next.md')!.click(); await settle(app);
+    button(app, 'Discard').click(); await settle(app);
+    assert.deepEqual(server.stats.slice(statsBefore), ['/fixture/next.md'], 'Discard opens only the clicked target');
+    assert.equal(previewName(app), 'next.md');
+  } finally { await app.close(); }
+});
+
+test('a Recent row asks an unsaved editor first, like a bookmark (#494, orchestrator)', async context => {
+  const server = bookmarkServer([], { getPrefs: async () => ({ recentFiles: [{ path: '/fixture/next.md', name: 'next.md' }] }) });
+  const app = await (await compiled).mount(context, {
+    props: { visible: true, session: 'fixture' }, modules: [server.api], pendingImports: ['highlight.js/'],
+    setup(window) { window.localStorage.setItem('tmux_layout_mode', 'desktop'); },
+  });
+  try {
+    await settle(app);
+    rowOf(app, 'AGENTS.md').querySelector<HTMLButtonElement>('.file-main')!.click(); await settle(app);
+    button(app, 'Edit').click(); await settle(app);
+    const area = app.document.querySelector<HTMLTextAreaElement>('.editor-layer textarea')!;
+    area.value = '# Rules\n\nchanged'; area.dispatchEvent(new app.window.Event('input', { bubbles: true })); await settle(app);
+    button(app, 'Recent files').click(); await settle(app);
+    const recent = () => [...app.document.querySelectorAll<HTMLButtonElement>('.bookmarks-panel .bm-path')].find(b => b.textContent?.includes('next.md'));
+    assert.ok(recent(), 'the Recent row is on screen beside the editor');
+    const statsBefore = server.stats.length;
+    recent()!.click(); await settle(app);
+    assert.ok(app.document.querySelector('[role=alertdialog]'), 'the editor s own discard confirmation');
+    assert.equal(server.stats.length, statsBefore, 'nothing opens while it asks');
+    button(app, 'Keep editing').click(); await settle(app);
+    assert.equal(area.isConnected && area.value, '# Rules\n\nchanged', 'Keep editing keeps the text');
+  } finally { await app.close(); }
+});
+
+// #494 review P1-C: the history a bookmark open leaves behind an accepted
+// discard is the file's READ view; an editor is never restored without its
+// own buffer, so B's text can never be saved under A's name.
+async function editWith(app: App, text: string) {
+  button(app, 'Edit').click(); await settle(app);
+  const area = app.document.querySelector<HTMLTextAreaElement>('.editor-layer textarea')!;
+  area.value = text; area.dispatchEvent(new app.window.Event('input', { bubbles: true })); await settle(app);
+  return area;
+}
+const editor = (app: App) => app.document.querySelector<HTMLTextAreaElement>('.editor-layer textarea');
+const backIn = (app: App, panel: string) => app.document.querySelector<HTMLButtonElement>(`${panel} button[aria-label="Back"]`)!;
+
+test('edit A, open bookmark B, discard, edit B, discard, Back: A returns in its read view with its own text (#494 review P1-C)', async context => {
+  const server = bookmarkServer(['/fixture/next.md']);
+  const app = await (await compiled).mount(context, {
+    props: { visible: true, session: 'fixture' }, modules: [server.api], pendingImports: ['highlight.js/'],
+    setup(window) { window.localStorage.setItem('tmux_layout_mode', 'desktop'); },
+  });
+  try {
+    await settle(app);
+    rowOf(app, 'AGENTS.md').querySelector<HTMLButtonElement>('.file-main')!.click(); await settle(app);
+    await editWith(app, 'A DRAFT');
+    button(app, 'Bookmarks').click(); await settle(app);
+    bookmarkRow(app, '/fixture/next.md')!.click(); await settle(app);
+    button(app, 'Discard').click(); await settle(app);
+    assert.equal(previewName(app), 'next.md');
+    await editWith(app, 'B DRAFT');
+    backIn(app, '.editor-layer, .files-right').click(); await settle(app);
+    button(app, 'Discard').click(); await settle(app);
+    assert.equal(editor(app), null, 'B is back in its preview');
+    assert.equal(previewName(app), 'next.md');
+    backIn(app, '.preview-header').click(); await settle(app);
+    assert.equal(previewName(app), 'AGENTS.md', 'Back reaches A');
+    assert.equal(editor(app), null, 'in its READ view: the discarded editor is not revived');
+    assert.doesNotMatch(app.document.querySelector('.files')?.textContent ?? '', /[AB] DRAFT/u, 'no draft text comes along');
+    button(app, 'Edit').click(); await settle(app);
+    assert.equal(editor(app)?.value, '# Rules\n\n[Next](next.md)', 're-entering edit loads A s own text');
+    assert.equal(button(app, 'Undo').disabled, true, 'with no undo state from B');
+  } finally { await app.close(); }
+});
+
+test('edit A, open a FOLDER bookmark, discard, Back: A returns in its read view (#494 review P1-C)', async context => {
+  const server = bookmarkServer(['/fixture/sub']);
+  const app = await (await compiled).mount(context, {
+    props: { visible: true, session: 'fixture' }, modules: [server.api], pendingImports: ['highlight.js/'],
+    setup(window) { window.localStorage.setItem('tmux_layout_mode', 'desktop'); },
+  });
+  try {
+    await settle(app);
+    rowOf(app, 'AGENTS.md').querySelector<HTMLButtonElement>('.file-main')!.click(); await settle(app);
+    await editWith(app, 'A DRAFT');
+    button(app, 'Bookmarks').click(); await settle(app);
+    bookmarkRow(app, '/fixture/sub')!.click(); await settle(app);
+    button(app, 'Discard').click(); await settle(app);
+    assert.ok(rowOf(app, 'inner.md'), 'the folder is listed');
+    button(app, 'Back').click(); await settle(app);
+    assert.equal(previewName(app), 'AGENTS.md', 'Back returns to A');
+    assert.equal(editor(app), null, 'in its read view');
+    assert.doesNotMatch(app.document.querySelector('.files')?.textContent ?? '', /A DRAFT/u);
+  } finally { await app.close(); }
+});

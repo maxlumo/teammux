@@ -45,7 +45,7 @@ directory, or the server's home directory when no session is open yet.
   preview its independent, resizable width defaults to 400px (320-520px), not
   the global navigation sidebar width. File sizes sit to the right of complete
   names, on the same row; ordinary file and folder rows share a height.
-- Bookmark panel (star current dir, scrollable saved paths)
+- Bookmark panel (star current dir, scrollable saved paths of folders and files, #494)
 - Recent files panel (last 20 opened files, scrollable, capped to 40vh)
 - File preview: Markdown (rendered through the shared safe renderer, `core/markdown.ts`, + mermaid + KaTeX), CSV (table), code (syntax highlighted; the lined view shows the first 3000 lines with a "Show all N lines" button), HTML (sandboxed iframe), PDF (pdf.js), images (tap → the fullscreen Lightbox with pinch/wheel zoom and a download button for the file shown (#447); a trackpad pinch on the inline image opens it instead of zooming the page), video (the browser's `<video>` streaming ranges from the signed `/dl` URL — mp4/m4v/webm/mov/mkv/ogv, any size — under our own controls (#453): a tap shows or hides the bar, a drag on the position bar commits one seek on release, speed is in More, mute only (no volume range), fullscreen where the host gives it and picture-in-picture where the API exists; until the first frame is on screen the box shows our own placeholder tile, never the WebView's default poster (#470); design-docs/features/file-handling.md), audio (our player on the same stream — mp3 (`audio/mpeg`), m4a (`audio/mp4`), aac (`audio/aac`), ogg/oga/opus (`audio/ogg`), wav, flac, weba (`audio/webm`), any size; no waveform, playlist, background playback or cover art; hiding the page — a tab or server switch — pauses video and audio, and showing it again never plays). pdf.js, mermaid and highlight.js load on first use, not at startup.
 - Text editor with syntax highlighting, undo stack, save button
@@ -97,6 +97,11 @@ directory, or the server's home directory when no session is open yet.
 - Menu Open and row Open both protect an unsaved editor. Menu Delete still
   requires confirmation; Back closes the menu before leaving the current view.
 - Star button → bookmark current directory
+- A file or folder row's menu (right-click / long-press) and the file preview
+  header's star → bookmark that path (#494); the same list, the same toggle
+- A bookmark click opens through the path-link door: a folder lists, a file
+  opens its preview, a gone path shows the missing-file line; an unsaved
+  editor is asked first
 - Hidden-file and bookmark tools expose pressed state; bookmark/recent panels
   expose expanded state and an associated panel ID. An opened empty panel
   distinguishes loading, read failure/retry and a confirmed empty collection.
