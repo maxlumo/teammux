@@ -792,6 +792,13 @@ mod test_seam {
     use std::sync::atomic::{AtomicU64, AtomicUsize, Ordering};
     use std::sync::{Condvar, Mutex};
     pub static PREP_DELAY_MS: AtomicU64 = AtomicU64::new(0);
+    pub static PANIC_AFTER_SPAWN: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
+    /// A controlled panic after the version threads exist (the P2 row).
+    pub fn maybe_panic() {
+        if PANIC_AFTER_SPAWN.swap(false, Ordering::SeqCst) {
+            panic!("test_seam: a controlled panic after the spawn");
+        }
+    }
     pub static SPAWNS: AtomicUsize = AtomicUsize::new(0);
     pub static GATE: (Mutex<bool>, Condvar) = (Mutex::new(false), Condvar::new());
     pub fn prepared() {
@@ -886,34 +893,40 @@ pub fn refresh(deadline: Instant) -> Value {
             return refresh_timed_out();
         }
     }
-    // From here on the threads this work starts are ITS OWN: it joins every
-    // one before it returns, however late, so the flight stays taken until
-    // they have all ended and a stuck one is never piled on. Only the CALLER
+    // From here on the threads this work starts are ITS OWN: they run in a
+    // `std::thread::scope`, which joins every one before the scope ends on
+    // ANY way out, a panic in the spawn or the shell probe included
+    // (reviewer P2 on #492 phase 1), so the flight stays taken until they
+    // have all ended and a stuck one is never piled on. Only the CALLER
     // times out, through the flight's deadline.
-    let versions: Vec<_> = Backend::ALL
-        .iter()
-        .map(|b| {
-            let (program, path) = (b.launch_program(), path.clone());
-            #[cfg(test)]
-            test_seam::spawned();
-            std::thread::spawn(move || installed(program, &path, deadline))
-        })
-        .collect();
-    let probe = refresh_probe(&needs, claude_env.as_ref().ok(), deadline);
-    let rows: Vec<Value> = needs
-        .iter()
-        .zip(versions)
-        .map(|((b, need), v)| {
-            let installed = v.join().unwrap_or(Installed { state: State::Unknown, path: None, version: None, reason: Some("probe_lost".into()) });
-            let answers = if TESTABLE.contains(b) {
-                json!({ "state": "unknown", "count": null, "reason": "test_only" })
-            } else {
-                json!({ "state": "unknown", "count": null, "reason": "first_run" })
-            };
-            row(*b, &installed, &decide(need, &probe), answers)
-        })
-        .collect();
-    json!({ "backends": rows, "scope": "default", "baseline": probe.as_ref().err().copied() })
+    std::thread::scope(|scope| {
+        let versions: Vec<_> = Backend::ALL
+            .iter()
+            .map(|b| {
+                let (program, path) = (b.launch_program(), path.as_str());
+                #[cfg(test)]
+                test_seam::spawned();
+                scope.spawn(move || installed(program, path, deadline))
+            })
+            .collect();
+        #[cfg(test)]
+        test_seam::maybe_panic();
+        let probe = refresh_probe(&needs, claude_env.as_ref().ok(), deadline);
+        let rows: Vec<Value> = needs
+            .iter()
+            .zip(versions)
+            .map(|((b, need), v)| {
+                let installed = v.join().unwrap_or(Installed { state: State::Unknown, path: None, version: None, reason: Some("probe_lost".into()) });
+                let answers = if TESTABLE.contains(b) {
+                    json!({ "state": "unknown", "count": null, "reason": "test_only" })
+                } else {
+                    json!({ "state": "unknown", "count": null, "reason": "first_run" })
+                };
+                row(*b, &installed, &decide(need, &probe), answers)
+            })
+            .collect();
+        json!({ "backends": rows, "scope": "default", "baseline": probe.as_ref().err().copied() })
+    })
 }
 
 /// One explicit Test of `b` (in `TESTABLE`).
@@ -1479,6 +1492,35 @@ mod tests {
         let fresh = F.run(Duration::from_secs(5), refresh_timed_out, refresh);
         assert_eq!(spawns(), first_batch + Backend::ALL.len(), "a fresh run");
         assert_ne!(fresh["baseline"], "check_timeout", "{fresh}");
+    }
+
+    /// Reviewer P2 on #492 phase 1: a PANIC after the version threads exist
+    /// does not detach them. The work still holds its flight until every
+    /// thread has ended, a second Refresh meanwhile starts none, and the
+    /// panic surfaces as the flight's `check_failed` once they are done.
+    #[test]
+    fn a_panic_after_the_spawn_keeps_the_threads_owned() {
+        use std::sync::atomic::Ordering;
+        static F: Flight = Flight::new();
+        let spawns = || test_seam::SPAWNS.load(Ordering::SeqCst);
+        test_seam::close();
+        test_seam::PANIC_AFTER_SPAWN.store(true, Ordering::SeqCst);
+        let base = spawns();
+        assert_eq!(F.run(Duration::from_millis(300), refresh_timed_out, refresh), refresh_timed_out());
+        assert_eq!(spawns(), base + Backend::ALL.len());
+        std::thread::sleep(Duration::from_millis(150));
+        assert!(F.slot.lock().unwrap().is_some(), "the panicked work still holds its flight while its threads run");
+        assert_eq!(F.run(Duration::from_millis(300), refresh_timed_out, refresh), refresh_timed_out());
+        assert_eq!(spawns(), base + Backend::ALL.len(), "no second batch");
+        test_seam::open();
+        for _ in 0..100 {
+            if F.slot.lock().unwrap().is_none() {
+                break;
+            }
+            std::thread::sleep(Duration::from_millis(20));
+        }
+        assert!(F.slot.lock().unwrap().is_none(), "the flight cleared once the threads ended");
+        assert_eq!(spawns(), base + Backend::ALL.len());
     }
 
     /// Control (b), made reachable without a production seam (reviewer,
