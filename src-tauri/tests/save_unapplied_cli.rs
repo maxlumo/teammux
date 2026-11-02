@@ -43,7 +43,7 @@ fn run(server: &str, args: &[&str]) -> (bool, String, String) {
         .args(args)
         .env_clear()
         .env("PATH", "/usr/bin:/bin")
-        .env("HOME", std::env::temp_dir())
+        .env("HOME", { let h = tmux_mobile::config::test_scratch("tmm-home"); std::fs::create_dir_all(&h).unwrap(); h })
         .env("TMM_SERVER", server)
         .env("TMM_TOKEN", "t")
         .env("TMM_PROJECT", "p")

@@ -822,7 +822,7 @@ mod tests {
     use std::os::unix::fs::symlink;
 
     fn scratch() -> PathBuf {
-        let d = std::env::temp_dir().join(format!("tmm-review-{}", uuid::Uuid::new_v4()));
+        let d = crate::config::test_scratch("tmm-review");
         std::fs::create_dir_all(d.join("src")).unwrap();
         std::fs::write(d.join("src/main.rs"), "fn main() {}\n").unwrap();
         std::fs::canonicalize(&d).unwrap()
@@ -932,7 +932,7 @@ mod tests {
     #[test]
     fn paths_outside_the_root_and_symlinks_out_are_refused() {
         let d = scratch();
-        let outside = std::env::temp_dir().join(format!("tmm-review-out-{}", uuid::Uuid::new_v4()));
+        let outside = crate::config::test_scratch("tmm-review-out");
         std::fs::create_dir_all(&outside).unwrap();
         std::fs::write(outside.join("secret.txt"), "x").unwrap();
         symlink(outside.join("secret.txt"), d.join("src/link-out.txt")).unwrap();
@@ -947,7 +947,7 @@ mod tests {
 
     #[test]
     fn planted_links_at_every_store_object_are_refused_or_never_followed() {
-        let outside = std::env::temp_dir().join(format!("tmm-review-out-{}", uuid::Uuid::new_v4()));
+        let outside = crate::config::test_scratch("tmm-review-out");
         std::fs::create_dir_all(&outside).unwrap();
         let rel = "src/main.rs";
         let key = store_key(rel);
@@ -984,7 +984,7 @@ mod tests {
 
     #[test]
     fn a_root_swapped_between_its_identity_read_and_its_open_is_refused() {
-        let outside = std::env::temp_dir().join(format!("tmm-review-out-{}", uuid::Uuid::new_v4()));
+        let outside = crate::config::test_scratch("tmm-review-out");
         std::fs::create_dir_all(&outside).unwrap();
         // The root becomes a symlink to a directory outside.
         let d = scratch();
@@ -995,9 +995,9 @@ mod tests {
         })));
         assert!(Root::open(d.to_str().unwrap()).is_err(), "a symlink in its place");
         // A parent of the root becomes a symlink (same name, same leaf).
-        let parent = std::env::temp_dir().join(format!("tmm-review-parent-{}", uuid::Uuid::new_v4()));
+        let parent = crate::config::test_scratch("tmm-review-parent");
         std::fs::create_dir_all(parent.join("ws")).unwrap();
-        let other = std::env::temp_dir().join(format!("tmm-review-other-{}", uuid::Uuid::new_v4()));
+        let other = crate::config::test_scratch("tmm-review-other");
         std::fs::create_dir_all(other.join("ws")).unwrap();
         let ws = std::fs::canonicalize(parent.join("ws")).unwrap();
         let (p2, op) = (std::fs::canonicalize(&parent).unwrap(), other.clone());
@@ -1020,7 +1020,7 @@ mod tests {
 
     #[test]
     fn a_reviews_dir_swapped_for_a_link_after_the_root_is_proved_is_never_followed() {
-        let outside = std::env::temp_dir().join(format!("tmm-review-out-{}", uuid::Uuid::new_v4()));
+        let outside = crate::config::test_scratch("tmm-review-out");
         std::fs::create_dir_all(&outside).unwrap();
         let d = scratch();
         std::fs::create_dir_all(d.join(".tmm/reviews")).unwrap();
@@ -1036,7 +1036,7 @@ mod tests {
 
     #[test]
     fn a_source_swapped_between_resolve_and_read_is_read_from_the_fd_it_opened() {
-        let outside = std::env::temp_dir().join(format!("tmm-review-out-{}", uuid::Uuid::new_v4()));
+        let outside = crate::config::test_scratch("tmm-review-out");
         std::fs::create_dir_all(&outside).unwrap();
         std::fs::write(outside.join("main.rs"), "outside").unwrap();
         let d = scratch();
@@ -1261,7 +1261,7 @@ mod rpc_tests {
     /// end, a reversed range or cols without lines are refused.
     #[test]
     fn whole_lines_are_measured_by_the_server_in_its_own_read() {
-        let d = std::env::temp_dir().join(format!("tmm-review-lines-{}", uuid::Uuid::new_v4()));
+        let d = crate::config::test_scratch("tmm-review-lines");
         std::fs::create_dir_all(&d).unwrap();
         let file = d.join("f.txt");
         std::fs::write(&file, "first\r\nabcdef\r\nthird\n").unwrap();
@@ -1282,7 +1282,7 @@ mod rpc_tests {
 
     #[test]
     fn add_list_update_delete_feedback_and_a_stale_revision() {
-        let d = std::env::temp_dir().join(format!("tmm-review-rpc-{}", uuid::Uuid::new_v4()));
+        let d = crate::config::test_scratch("tmm-review-rpc");
         std::fs::create_dir_all(d.join("docs")).unwrap();
         let file = d.join("docs/plan.md");
         std::fs::write(&file, "# Plan\r\nship the parser\r\nthen the UI\r\n").unwrap();

@@ -614,7 +614,7 @@ mod tests {
     fn launch_script_keeps_typed_line_short() {
         // The typed `. '<script>'` line must stay tiny no matter how large the
         // inline system prompt grows — kiro-cli-term swallows ≥2 KB bursts.
-        let dir = std::env::temp_dir().join(format!("tmm-launch-test-{}", std::process::id()));
+        let dir = crate::config::test_scratch("tmm-launch-test");
         std::fs::create_dir_all(&dir).unwrap();
         let huge_cmd = format!("TEAM_AGENT='x' claude --append-system-prompt '{}' 'kick'", "p".repeat(8000));
         let script = write_launch_script(&dir, "planner", &huge_cmd).unwrap();
@@ -632,10 +632,7 @@ mod tests {
 
     #[test]
     fn claude_channel_inherits_only_the_user_env_block() {
-        let root = std::env::temp_dir().join(format!(
-            "teamtest-claude-env-{}",
-            uuid::Uuid::new_v4()
-        ));
+        let root = crate::config::test_scratch("teamtest-claude-env");
         std::fs::create_dir_all(&root).unwrap();
         let settings = root.join("settings.json");
         std::fs::write(
@@ -653,7 +650,7 @@ mod tests {
 
     #[test]
     fn codex_system_files_link_config_env_and_auth_idempotently() {
-        let root = std::env::temp_dir().join(format!("teamtest-codex-system-{}", uuid::Uuid::new_v4()));
+        let root = crate::config::test_scratch("teamtest-codex-system");
         let system_home = root.join("system");
         let agent_home = root.join("agent");
         std::fs::create_dir_all(&system_home).unwrap();
@@ -681,7 +678,7 @@ mod tests {
 
     #[test]
     fn codex_system_files_missing_source_removes_only_team_config() {
-        let root = std::env::temp_dir().join(format!("teamtest-codex-no-auth-{}", uuid::Uuid::new_v4()));
+        let root = crate::config::test_scratch("teamtest-codex-no-auth");
         let agent_home = root.join("agent");
         std::fs::create_dir_all(&agent_home).unwrap();
         std::fs::write(agent_home.join("config.toml"), "[mcp_servers.team]").unwrap();
@@ -696,7 +693,7 @@ mod tests {
 
     #[test]
     fn codex_auth_does_not_replace_an_existing_private_file() {
-        let root = std::env::temp_dir().join(format!("teamtest-codex-existing-auth-{}", uuid::Uuid::new_v4()));
+        let root = crate::config::test_scratch("teamtest-codex-existing-auth");
         let system_home = root.join("system");
         let agent_home = root.join("agent");
         std::fs::create_dir_all(&system_home).unwrap();
@@ -720,7 +717,7 @@ mod tests {
     #[cfg(unix)]
     fn a_linked_codex_home_is_refused_before_the_inheritance_touches_it() {
         use std::os::unix::fs::PermissionsExt;
-        let root = std::env::temp_dir().join(format!("teamtest-codex-linked-{}", uuid::Uuid::new_v4()));
+        let root = crate::config::test_scratch("teamtest-codex-linked");
         let user = super::super::codex::codex_user_home();
         std::fs::create_dir_all(&user).unwrap();
         let user_cfg = user.join("config.toml");
@@ -755,7 +752,7 @@ mod tests {
         // Board #448: `write_owned(None)` removes through the held directory;
         // a link by that name is an error and its target stays.
         use std::os::unix::fs::PermissionsExt;
-        let root = std::env::temp_dir().join(format!("teamtest-owned-{}", uuid::Uuid::new_v4()));
+        let root = crate::config::test_scratch("teamtest-owned");
         let home = root.join("home");
         std::fs::create_dir_all(&home).unwrap();
         let target = root.join("user.json");
@@ -779,7 +776,7 @@ mod tests {
         // (content and mode), a stale LINK to it is removed itself, and our
         // profile is a private file rewritten whole on every render.
         use std::os::unix::fs::PermissionsExt;
-        let root = std::env::temp_dir().join(format!("teamtest-codex-profile-{}", uuid::Uuid::new_v4()));
+        let root = crate::config::test_scratch("teamtest-codex-profile");
         let (system_home, agent_home) = (root.join("system"), root.join("agent"));
         std::fs::create_dir_all(&system_home).unwrap();
         std::fs::create_dir_all(&agent_home).unwrap();

@@ -1834,7 +1834,7 @@ mod tests {
     #[test]
     fn a_recipe_migration_waits_for_a_team_move_and_keeps_it() {
         use crate::projects::recipe::{recipe_section, update_in};
-        let home = std::env::temp_dir().join(format!("tmm-kiro-mig-{}", uuid::Uuid::new_v4())).join(".tmm/agents/dev");
+        let home = crate::config::test_scratch("tmm-kiro-mig").join(".tmm/agents/dev");
         std::fs::create_dir_all(home.join("agents")).unwrap();
         let cfg = home.join("agents").join("dev.json");
         std::fs::write(&cfg, r#"{"name":"dev","prompt":"p","hooks":{}}"#).unwrap();
@@ -2078,7 +2078,7 @@ mod tests {
 
     #[test]
     fn session_reply_finds_the_session_under_any_cwd_hash() {
-        let root = std::env::temp_dir().join(format!("tmm-kiro-sessions-{}", std::process::id()));
+        let root = crate::config::test_scratch("tmm-kiro-sessions");
         let sess = root.join("1f1f982434702399").join("sess_abc");
         std::fs::create_dir_all(&sess).unwrap();
         std::fs::write(sess.join("messages.jsonl"), "{\"payload\":{\"type\":\"turn_start\"}}\n{\"payload\":{\"type\":\"assistant\",\"content\":\"done and verified\"}}\n{\"payload\":{\"type\":\"turn_end\"}}").unwrap();
@@ -2298,7 +2298,7 @@ mod tests {
             r#"{"id":"515c-say","timestamp":"2026-10-13T23:58:45.402Z","payload":{"type":"assistant","content":"(No assistant response was recorded for the preceding turn. This placeholder was inserted automatically to preserve message alternation — it is not a reply the assistant produced.)","operationType":"Say","executionId":"4a87","_meta":{"kiro":{"agentMode":"writer"}}}}"#,
             r#"{"id":"steer-58ec","timestamp":"2026-10-13T23:58:45.427Z","payload":{"type":"user","content":"[tmm chat 2026-10-14 07:58] editor: [reply] ok","source":"steer"}}"#,
         ];
-        let home = std::env::temp_dir().join(format!("tmm-kiro-empty-{}", uuid::Uuid::new_v4()));
+        let home = crate::config::test_scratch("tmm-kiro-empty");
         let dir = home.join("sessions").join("297005da4b9f6bd1").join("sess_aea9");
         std::fs::create_dir_all(&dir).unwrap();
         std::fs::write(dir.join("messages.jsonl"), rows.join("\n")).unwrap();
@@ -2509,7 +2509,7 @@ mod tests {
     /// takes the link away; a foreign file is never clobbered.
     #[test]
     fn workspace_entry_follows_the_engine_door_and_never_clobbers() {
-        let root = std::env::temp_dir().join(format!("tmm-kiro-wsentry-{}", std::process::id()));
+        let root = crate::config::test_scratch("tmm-kiro-wsentry");
         let ws = root.join("ws");
         let home = ws.join(".tmm").join("agents").join("dev");
         std::fs::create_dir_all(home.join("agents")).unwrap();
@@ -2570,7 +2570,7 @@ mod tests {
     /// the CLI already upgraded (array + permissions) is left byte-identical.
     #[test]
     fn patch_profile_is_idempotent_on_both_shapes() {
-        let dir = std::env::temp_dir().join(format!("tmm-kiro-profile-{}", std::process::id()));
+        let dir = crate::config::test_scratch("tmm-kiro-profile");
         std::fs::create_dir_all(&dir).unwrap();
         let path = dir.join("a.json");
         std::fs::write(&path, serde_json::to_string_pretty(&json!({

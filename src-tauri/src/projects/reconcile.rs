@@ -344,7 +344,7 @@ mod tests {
     #[test]
     #[cfg(unix)]
     fn a_line_that_may_not_be_replayed_or_staged_refuses_the_start() {
-        let ws = std::env::temp_dir().join(format!("tmm-p1b-{}", uuid::Uuid::new_v4()));
+        let ws = crate::config::test_scratch("tmm-p1b");
         let home = ws.join(".tmm/agents/dev");
         std::fs::create_dir_all(&home).unwrap();
         let legacy = "command codex -c 'mcp_servers.s.env.K=\"SENTINEL\"'";
@@ -532,7 +532,7 @@ mod tests {
     /// Windows without an isolated home keep the direct send, unchanged.
     #[test]
     fn a_managed_relaunch_is_staged_as_a_script_not_a_burst() {
-        let ws = std::env::temp_dir().join(format!("tmm-stage-{}", uuid::Uuid::new_v4()));
+        let ws = crate::config::test_scratch("tmm-stage");
         let home = ws.join(".tmm").join("agents").join("dev");
         std::fs::create_dir_all(&home).unwrap();
         let ws_str = ws.to_string_lossy().to_string();

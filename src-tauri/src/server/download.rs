@@ -785,7 +785,7 @@ mod tests {
     // ── The scope mode (board #433) ─────────────────────────────────────
 
     fn scope_dir(tag: &str) -> std::path::PathBuf {
-        let d = std::env::temp_dir().join(format!("tmm-433-{tag}-{}", uuid::Uuid::new_v4()));
+        let d = crate::config::test_scratch(&format!("tmm-433-{tag}"));
         std::fs::create_dir_all(&d).unwrap();
         d.canonicalize().unwrap()
     }

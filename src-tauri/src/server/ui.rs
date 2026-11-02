@@ -246,7 +246,7 @@ mod tests {
     use super::*;
 
     fn site(tag: &str) -> PathBuf {
-        let d = std::env::temp_dir().join(format!("ui-{tag}-{}", std::process::id()));
+        let d = crate::config::test_scratch(&format!("ui-{tag}"));
         let _ = std::fs::remove_dir_all(&d);
         std::fs::create_dir_all(d.join("assets")).unwrap();
         std::fs::write(d.join("index.html"), "<!doctype html><html><head><title>t</title></head></html>").unwrap();

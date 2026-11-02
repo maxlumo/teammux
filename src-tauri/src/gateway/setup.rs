@@ -349,7 +349,7 @@ mod tests {
 
     #[test]
     fn tls_needs_both_existing_files() {
-        let dir = std::env::temp_dir().join(format!("setup-tls-{}", std::process::id()));
+        let dir = crate::config::test_scratch("setup-tls");
         std::fs::create_dir_all(&dir).unwrap();
         let (c, k) = (dir.join("c.pem"), dir.join("k.pem"));
         std::fs::write(&c, "x").unwrap();
@@ -378,7 +378,7 @@ mod tests {
     #[test]
     fn the_write_is_atomic_and_0600() {
         use std::os::unix::fs::PermissionsExt;
-        let dir = std::env::temp_dir().join(format!("setup-write-{}", std::process::id()));
+        let dir = crate::config::test_scratch("setup-write");
         std::fs::create_dir_all(&dir).unwrap();
         let p = dir.join("config.toml");
         std::fs::write(&p, "token = \"a\"\n").unwrap();
@@ -391,7 +391,7 @@ mod tests {
     }
 
     fn scratch(tag: &str) -> std::path::PathBuf {
-        let d = std::env::temp_dir().join(format!("setup-{tag}-{}", std::process::id()));
+        let d = crate::config::test_scratch(&format!("setup-{tag}"));
         let _ = std::fs::remove_dir_all(&d);
         std::fs::create_dir_all(&d).unwrap();
         d

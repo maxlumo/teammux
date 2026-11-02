@@ -1110,7 +1110,7 @@ mod tests {
     /// from the XDG base. Two roots on the same base give two different logs.
     #[test]
     fn the_log_lives_in_the_chosen_root_not_in_a_name_rebuilt_from_the_base() {
-        let home = std::env::temp_dir().join(format!("tmm-log-root-{}", std::process::id()));
+        let home = crate::config::test_scratch("tmm-log-root");
         let (sys, _) = fake(&home, true);
         for root in ["teammux", "tmux-mobile"] {
             let sys = Sys { root: home.join(".config").join(root), ..fake(&home, true).0 };
@@ -1335,7 +1335,7 @@ mod tests {
     }
 
     fn scratch(tag: &str) -> PathBuf {
-        let d = std::env::temp_dir().join(format!("svc-{tag}-{}", std::process::id()));
+        let d = crate::config::test_scratch(&format!("svc-{tag}"));
         let _ = std::fs::remove_dir_all(&d);
         std::fs::create_dir_all(&d).unwrap();
         d

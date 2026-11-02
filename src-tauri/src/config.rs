@@ -313,6 +313,22 @@ pub fn fresh_process_dir(prefix: &str) -> PathBuf {
     dir
 }
 
+/// Test support (board #500): where ONE test may put a directory of its own,
+/// `<root>/<name>-<uuid>`, nothing created. `root` is this process's
+/// `fresh_process_dir("tmm-scratch")`, taken once, so a test that never
+/// removes what it made leaks nothing: the next run reclaims the whole root
+/// at the door. Before this, ~180 per-test workspaces were left directly in
+/// the temp dir by every run (`tmm-r2-*`, `tmm-review-*`, …), never removed.
+/// The suffix is 12 hex digits, not a full uuid: some of these paths are tmux
+/// SOCKETS, and a Unix socket path is capped at ~108 bytes (a private
+/// `TMPDIR` plus the root plus a full uuid crossed it).
+#[doc(hidden)]
+pub fn test_scratch(name: &str) -> PathBuf {
+    static ROOT: std::sync::OnceLock<PathBuf> = std::sync::OnceLock::new();
+    let id = uuid::Uuid::new_v4().simple().to_string();
+    ROOT.get_or_init(|| fresh_process_dir("tmm-scratch")).join(format!("{name}-{}", &id[..12]))
+}
+
 /// `kill(pid, 0)`: alive, or alive but not ours (EPERM). Nonsense pids count
 /// as alive so they are never reclaimed.
 fn process_alive(pid: libc::pid_t) -> bool {
@@ -549,8 +565,7 @@ mod tests {
 
     fn mkfile(mode: u32) -> std::path::PathBuf {
         let n = TEST_CTR.fetch_add(1, Ordering::Relaxed);
-        let p = std::env::temp_dir()
-            .join(format!("tmux_mobile_cfg_test_{}_{}", std::process::id(), n));
+        let p = test_scratch(&format!("tmux_mobile_cfg_test_{n}"));
         std::fs::write(&p, b"token = \"x\"\n").unwrap();
         std::fs::set_permissions(&p, std::fs::Permissions::from_mode(mode)).unwrap();
         p
@@ -581,6 +596,7 @@ mod tests {
         let dead_pid = dead.id();
         dead.wait().unwrap(); // exited and reaped: kill(pid, 0) says ESRCH
         let mut live = std::process::Command::new("sleep").arg("30").spawn().unwrap();
+        // temp-dir: allow (this test is about fresh_process_dir's reclaim AT THE TOP of the temp dir)
         let tmp = std::env::temp_dir();
         let dead_dir = tmp.join(format!("{prefix}-{dead_pid}"));
         let live_dir = tmp.join(format!("{prefix}-{}", live.id()));
@@ -601,9 +617,239 @@ mod tests {
         }
     }
 
+    /// Which bytes of a Rust source are CODE: not inside a comment (line or
+    /// nested block), a string, a raw string (any `#` count, `br` too) or a
+    /// char literal. A `'` starts a char literal only as `'x'` or `'\…'`, so
+    /// a lifetime or a label stays code. A minimal lexer, because the item
+    /// boundaries below must not be fooled by a brace in a string (reviewer
+    /// P1-A on 6766fc8c: `dsh.rs`'s MCP_ECHO raw string holds a column-0
+    /// `}` that ended its test module early) and the crate has no Rust
+    /// parser to borrow.
+    fn code_mask(src: &str) -> Vec<bool> {
+        let b = src.as_bytes();
+        let mut code = vec![true; b.len()];
+        let ident = |c: u8| c.is_ascii_alphanumeric() || c == b'_';
+        let mut i = 0;
+        let mut mark = |code: &mut Vec<bool>, from: usize, to: usize| for k in from..to.min(code.len()) { code[k] = false };
+        while i < b.len() {
+            let c = b[i];
+            let prev = if i > 0 { b[i - 1] } else { b' ' };
+            if c == b'/' && b.get(i + 1) == Some(&b'/') {
+                let e = src[i..].find('\n').map_or(b.len(), |n| i + n);
+                mark(&mut code, i, e);
+                i = e;
+            } else if c == b'/' && b.get(i + 1) == Some(&b'*') {
+                let (mut depth, mut j) = (0usize, i);
+                while j < b.len() {
+                    if b[j] == b'/' && b.get(j + 1) == Some(&b'*') { depth += 1; j += 2; continue }
+                    if b[j] == b'*' && b.get(j + 1) == Some(&b'/') { depth -= 1; j += 2; if depth == 0 { break } continue }
+                    j += 1;
+                }
+                mark(&mut code, i, j);
+                i = j;
+            } else if c == b'r' && !ident(prev) || (c == b'r' && prev == b'b' && (i < 2 || !ident(b[i - 2]))) {
+                let mut j = i + 1;
+                while b.get(j) == Some(&b'#') { j += 1 }
+                if b.get(j) == Some(&b'"') {
+                    let close = format!("\"{}", "#".repeat(j - i - 1));
+                    let e = src[j + 1..].find(&close).map_or(b.len(), |n| j + 1 + n + close.len());
+                    mark(&mut code, i, e);
+                    i = e;
+                } else {
+                    i += 1;
+                }
+            } else if c == b'"' {
+                let mut j = i + 1;
+                while j < b.len() && b[j] != b'"' { if b[j] == b'\\' { j += 1 } j += 1 }
+                mark(&mut code, i, j + 1);
+                i = j + 1;
+            } else if c == b'\'' {
+                let rest = &src[i + 1..];
+                // `len`: where the closing quote is, counted from after the opening one.
+                let len = if rest.starts_with('\\') {
+                    rest.get(2..).and_then(|r| r.find('\'')).map(|n| n + 2)
+                } else {
+                    rest.chars().next().filter(|_| rest[rest.chars().next().map_or(0, char::len_utf8)..].starts_with('\'')).map(|ch| ch.len_utf8())
+                };
+                match len {
+                    Some(n) => { mark(&mut code, i, i + n + 2); i += n + 2 }
+                    None => i += 1, // a lifetime or a label: code
+                }
+            } else {
+                i += 1;
+            }
+        }
+        code
+    }
+
+    /// A cfg predicate that REQUIRES `test`: `test` itself, or an `all(…)`
+    /// listing one at any position, nested `all` included. `any(test, …)`
+    /// compiles in production when another arm holds, and `not(test)` is
+    /// production, so neither counts (validator P2 on c6eab263).
+    fn cfg_requires_test(pred: &str) -> bool {
+        let pred = pred.trim();
+        if pred == "test" { return true }
+        let Some(list) = pred.strip_prefix("all").map(str::trim_start)
+            .and_then(|r| r.strip_prefix('(')).and_then(|r| r.strip_suffix(')')) else { return false };
+        let (mut depth, mut quoted, mut start) = (0i32, false, 0);
+        let mut items = Vec::new();
+        for (i, c) in list.char_indices() {
+            match c {
+                '"' => quoted = !quoted,
+                '(' if !quoted => depth += 1,
+                ')' if !quoted => depth -= 1,
+                ',' if !quoted && depth == 0 => { items.push(&list[start..i]); start = i + 1 }
+                _ => {}
+            }
+        }
+        items.push(&list[start..]);
+        items.into_iter().any(cfg_requires_test)
+    }
+
+    /// Every bare `temp_dir()` use in TEST code of one file: all of it for a
+    /// `tests/` file (`whole`), else every item under a `#[cfg(…)]` attribute
+    /// whose predicate requires `test` (`cfg_requires_test`), from the attribute to the brace that
+    /// closes the item (or its `;`), braces counted in code only. Lines
+    /// carrying `temp-dir: allow (<reason>)`, or under one, are skipped.
+    fn bare_temp_uses(label: &str, text: &str, whole: bool) -> Vec<String> {
+        // Built from pieces, so these lines are not hits themselves.
+        let needle = concat!("temp_dir", "()");
+        let marker = concat!("temp-dir: ", "allow (");
+        let code = code_mask(text);
+        let b = text.as_bytes();
+        let line_of = |pos: usize| text[..pos].bytes().filter(|&c| c == b'\n').count();
+        let lines: Vec<&str> = text.lines().collect();
+        let mut inside = vec![whole; lines.len() + 1];
+        if !whole {
+            let mut at = 0;
+            for (n, line) in text.split_inclusive('\n').enumerate() {
+                let t = line.trim_start();
+                let pos = at + (line.len() - t.len());
+                at += line.len();
+                let attr = t.strip_prefix("#[cfg(").is_some_and(|r| {
+                    let mut depth = 1i32;
+                    let close = r.find(|c| { depth += match c { '(' => 1, ')' => -1, _ => 0 }; depth == 0 });
+                    close.is_some_and(|e| cfg_requires_test(&r[..e]))
+                });
+                if !attr || !code[pos] { continue }
+                // The item after the attribute(s): its first code `{` or `;`
+                // outside parentheses and brackets.
+                let mut j = pos + t.find(']').map_or(0, |e| e + 1);
+                let (mut nest, mut end) = (0i32, b.len());
+                while j < b.len() {
+                    if code[j] {
+                        match b[j] {
+                            b'(' | b'[' => nest += 1,
+                            b')' | b']' => nest -= 1,
+                            b';' if nest == 0 => { end = j; break }
+                            b'{' if nest == 0 => {
+                                let mut depth = 0i32;
+                                let mut k = j;
+                                while k < b.len() {
+                                    if code[k] { if b[k] == b'{' { depth += 1 } else if b[k] == b'}' { depth -= 1; if depth == 0 { break } } }
+                                    k += 1;
+                                }
+                                end = k;
+                                break;
+                            }
+                            _ => {}
+                        }
+                    }
+                    j += 1;
+                }
+                for k in n..=line_of(end.min(b.len().saturating_sub(1))) { if k < inside.len() { inside[k] = true } }
+            }
+        }
+        let mut bare = Vec::new();
+        let mut at = 0;
+        for (n, line) in lines.iter().enumerate() {
+            let allowed = line.contains(marker) || (n > 0 && lines[n - 1].contains(marker));
+            let hit = line.match_indices(needle).any(|(off, _)| code[at + off]);
+            if inside[n] && hit && !allowed { bare.push(format!("{label}:{}: {}", n + 1, line.trim_start())) }
+            at += line.len() + 1;
+        }
+        bare
+    }
+
+    /// Board #500: test code takes its temp space from `fresh_process_dir` or
+    /// `test_scratch`, never a bare `temp_dir()` — a bare join left ~180
+    /// per-test directories in the temp dir on every full run. Test code is
+    /// every `tests/` file and, in `src/`, every item whose cfg requires
+    /// `test` (`bare_temp_uses`). A site whose LOCATION is the point
+    /// carries `temp-dir: allow (<reason>)` on its line or the line above;
+    /// production code is not looked at.
+    #[test]
+    fn test_code_takes_temp_space_from_the_one_mechanism() {
+        let manifest = std::path::Path::new(env!("CARGO_MANIFEST_DIR"));
+        let mut files = Vec::new();
+        let mut walk = vec![manifest.join("src"), manifest.join("tests")];
+        while let Some(dir) = walk.pop() {
+            for e in std::fs::read_dir(&dir).unwrap().flatten() {
+                let p = e.path();
+                if p.is_dir() { walk.push(p) } else if p.extension().is_some_and(|x| x == "rs") { files.push(p) }
+            }
+        }
+        let mut bare = Vec::new();
+        for f in &files {
+            let text = std::fs::read_to_string(f).unwrap();
+            let label = f.strip_prefix(manifest).unwrap().display().to_string();
+            bare.extend(bare_temp_uses(&label, &text, f.starts_with(manifest.join("tests"))));
+        }
+        assert!(bare.is_empty(), "test code uses the bare temp dir; take config::test_scratch or fresh_process_dir instead: {bare:#?}");
+    }
+
+    /// The guard's boundaries on the shapes that fooled or could fool it
+    /// (reviewer P1-A on 6766fc8c).
+    #[test]
+    fn the_temp_dir_guard_finds_test_items_by_code_braces_only() {
+        let t = concat!("temp_dir", "()");
+        let allow = concat!("temp-dir: ", "allow (why)");
+        // A raw string whose text has a column-0 `}` (the dsh.rs MCP_ECHO
+        // shape): the module goes on after it, and a call after it is caught.
+        let raw = format!("fn prod() {{}}\n#[cfg(test)]\nmod tests {{\n    const JS: &str = r#\"function f() {{\n}}\n\"#;\n    fn later() {{ let _ = std::env::{t}; }}\n}}\n");
+        assert_eq!(bare_temp_uses("raw", &raw, false).len(), 1, "{raw}");
+        // A production call after the real end of a test item is not caught.
+        let after = format!("#[cfg(test)]\nfn helper() {{ let _ = 1; }}\nfn prod() {{ let _ = std::env::{t}; }}\n");
+        assert!(bare_temp_uses("after", &after, false).is_empty(), "{after}");
+        // A one-statement item ends at its `;`.
+        let stmt = format!("#[cfg(test)]\nuse std::path::{{Path, PathBuf}};\nfn prod() {{ let _ = std::env::{t}; }}\n");
+        assert!(bare_temp_uses("stmt", &stmt, false).is_empty(), "{stmt}");
+        // A char literal brace and a lifetime do not move the boundary.
+        let chars = format!("#[cfg(test)]\nmod t {{\n    fn f<'a>(x: &'a str) -> char {{ let _ = x; '}}' }}\n    fn g() {{ let _ = std::env::{t}; }}\n}}\n");
+        assert_eq!(bare_temp_uses("chars", &chars, false).len(), 1, "{chars}");
+        // A lone lifetime is code, so a call after it and before a real char
+        // literal is still seen (read as a char literal, the lifetime would
+        // hide everything up to that next quote).
+        let lifetime = format!("#[cfg(test)]\nmod t {{\n    fn f(x: &'static str) {{ let _ = x; }}\n    fn g() {{ let _ = std::env::{t}; }}\n    fn h() -> char {{ 'z' }}\n}}\n");
+        assert_eq!(bare_temp_uses("lifetime", &lifetime, false).len(), 1, "{lifetime}");
+        // Braces in comments and strings, then a call: still inside.
+        let text = format!("#[cfg(all(test, unix))]\nmod t {{\n    // }}\n    /* }} /* }} */ */\n    const S: &str = \"}}\";\n    fn g() {{ let _ = std::env::{t}; }}\n}}\n");
+        assert_eq!(bare_temp_uses("text", &text, false).len(), 1, "{text}");
+        // The named allow still works, on the line or the line above.
+        let allowed = format!("#[cfg(test)]\nmod t {{\n    // {allow}\n    fn g() {{ let _ = std::env::{t}; }}\n}}\n");
+        assert!(bare_temp_uses("allowed", &allowed, false).is_empty(), "{allowed}");
+        // A tests/ file is test code all through.
+        assert_eq!(bare_temp_uses("it", &format!("fn g() {{ let _ = std::env::{t}; }}\n"), true).len(), 1);
+    }
+
+    /// An item is test code when its cfg REQUIRES test, wherever `test` sits
+    /// in an `all(…)`; `any(test, …)` and `not(test)` are not test code
+    /// (validator P2 on c6eab263: `all(unix, test)` escaped a prefix match).
+    #[test]
+    fn the_temp_dir_guard_reads_test_code_from_the_cfg_predicate() {
+        let t = concat!("temp_dir", "()");
+        let item = |cfg: &str| format!("#[cfg({cfg})]\nmod m {{\n    fn g() {{ let _ = std::env::{t}; }}\n}}\n");
+        for cfg in ["test", "all(test, unix)", "all(unix, test)", "all(unix, all(feature = \"a,b\", test))"] {
+            assert_eq!(bare_temp_uses(cfg, &item(cfg), false).len(), 1, "{cfg} requires test");
+        }
+        for cfg in ["any(test, feature = \"x\")", "not(test)", "all(unix, not(test))", "unix", "all(unix, tests)"] {
+            assert!(bare_temp_uses(cfg, &item(cfg), false).is_empty(), "{cfg} does not require test");
+        }
+    }
+
     #[test]
     fn harden_on_missing_file_is_noop() {
-        let p = std::env::temp_dir().join("tmux_mobile_cfg_test_nonexistent");
+        let p = test_scratch("tmux_mobile_cfg_test_nonexistent");
         let _ = std::fs::remove_file(&p);
         harden_path_0600(&p); // must not panic
     }
@@ -802,7 +1048,7 @@ mod root_choice_tests {
     use std::os::unix::fs::symlink;
 
     fn base(tag: &str) -> PathBuf {
-        let b = std::env::temp_dir().join(format!("tmm-root-{tag}-{}", std::process::id()));
+        let b = test_scratch(&format!("tmm-root-{tag}"));
         let _ = std::fs::remove_dir_all(&b);
         std::fs::create_dir_all(&b).unwrap();
         b

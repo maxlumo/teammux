@@ -489,7 +489,9 @@ mod tests {
     }
 
     fn write_temp(name: &str, bytes: &[u8]) -> std::path::PathBuf {
-        let path = std::env::temp_dir().join(name);
+        let dir = crate::config::test_scratch("tmm-pptx");
+        std::fs::create_dir_all(&dir).unwrap();
+        let path = dir.join(name);
         std::fs::write(&path, bytes).unwrap();
         path
     }

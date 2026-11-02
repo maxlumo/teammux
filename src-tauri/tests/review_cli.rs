@@ -58,7 +58,7 @@ fn run(server: &str, cwd: &std::path::Path, args: &[&str]) -> (Option<i32>, Stri
         .current_dir(cwd)
         .env_clear()
         .env("PATH", "/usr/bin:/bin")
-        .env("HOME", std::env::temp_dir())
+        .env("HOME", { let h = tmux_mobile::config::test_scratch("tmm-home"); std::fs::create_dir_all(&h).unwrap(); h })
         .env("TMM_SERVER", server)
         .env("TMM_TOKEN", "t")
         .env("TMM_PROJECT", "p")
@@ -69,7 +69,7 @@ fn run(server: &str, cwd: &std::path::Path, args: &[&str]) -> (Option<i32>, Stri
 }
 
 fn scratch() -> std::path::PathBuf {
-    let d = std::env::temp_dir().join(format!("tmm-review-cli-{}", uuid::Uuid::new_v4()));
+    let d = tmux_mobile::config::test_scratch("tmm-review-cli");
     std::fs::create_dir_all(&d).unwrap();
     d
 }

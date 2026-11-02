@@ -861,7 +861,7 @@ mod tests {
         assert_eq!(Backend::Dsh.resume_command("dsh-headless", None, None, "a"), "TMM_DSH_SESSION=recent dsh-headless");
 
         // Kiro: only what its OWN store holds for this agent.
-        let home = std::env::temp_dir().join(format!("tmm-kiro-exact-{}", uuid::Uuid::new_v4().simple()));
+        let home = crate::config::test_scratch("tmm-kiro-exact");
         let v2 = home.join("sessions/cli");
         std::fs::create_dir_all(&v2).unwrap();
         let id = "9147464d-a6fc-4391-8597-9263de1ce85f";

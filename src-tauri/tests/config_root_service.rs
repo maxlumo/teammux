@@ -10,7 +10,7 @@ use std::process::Command;
 
 #[test]
 fn the_unit_records_the_base_and_the_log_lives_in_the_chosen_root() {
-    let top = std::env::temp_dir().join(format!("config-root-service-{}", std::process::id()));
+    let top = tmux_mobile::config::test_scratch("config-root-service");
     let _ = std::fs::remove_dir_all(&top);
     let base = top.join("cfg");
     let ext = top.join("disk/state");

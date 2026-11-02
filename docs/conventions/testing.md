@@ -721,12 +721,36 @@ flaky wall-clock assertions in the test.
     `config::fresh_process_dir(prefix)`. It has no drop, so it is reclaimed
     at the door: each run first removes every `<prefix>-<pid>` whose
     process is gone, then creates its own.
+  - A per-test directory the test does not remove itself (a declared
+    project's workspace, a review fixture, a sibling "outside" path):
+    `config::test_scratch(name)`, a path `<root>/<name>-<uuid>` inside this
+    process's ONE `fresh_process_dir("tmm-scratch")`, so it goes with that
+    root at the next run's door. It creates nothing; the test creates,
+    canonicalizes or removes as before. A file path takes
+    `.with_extension(…)` on it (a probe script, a socket, a log). Never a
+    bare `std::env::temp_dir()` in test code: `config.rs`'s
+    `test_code_takes_temp_space_from_the_one_mechanism` scans every
+    `tests/` file and every `src/` item whose cfg REQUIRES test (`test`,
+    or an `all(…)` listing it anywhere; `any(test, …)` and `not(test)` are
+    production) and fails on one. A site whose LOCATION is the point carries
+    `temp-dir: allow (<reason>)` on its line or the line above; there are
+    three, all about the top of the temp dir itself (the private-socket
+    guard and its message in `tmux.rs`, `fresh_process_dir`'s own reclaim
+    test). The suffix is 12 hex digits, not a full uuid, because some of
+    these paths are tmux sockets and a Unix socket path is capped near 108
+    bytes.
   Reason: board #265 (t06 flaked during #264) and #268 (the lib tests #265
   missed; validator 15:30, the per-process store dir grew by one per run).
   A passing full `npm run test:rust` leaves nothing in the temp dir but one
   `fresh_process_dir` per prefix (board #269, measured by diffing `/tmp`
   across a run: `tmm-gp-*` and `tmm-spawn-codex-*` had grown by one per run,
-  ~130 each, and the symlink fixtures used fixed names).
+  ~130 each, and the symlink fixtures used fixed names). Board #500
+  (2026-11-02) found that rule broken again: one full run with an empty
+  private `TMPDIR` left 216 entries, ~180 of them per-test directories
+  joined straight onto `temp_dir()` (`tmm-r2-*` 115, `tmm-review*` 30,
+  `tmm-root-*` 13, `tmm-handoff-ws-*` 9, `tmm-dl-*` 1), and the host had
+  ~2400 `tmm-*` entries. Measure it the same way: run the suite with
+  `TMPDIR` set to an empty directory and list what is left.
 
 ## Current source-contract inventory
 

@@ -597,7 +597,7 @@ mod tests {
     /// malformed id finds nothing, and a sibling agent's home is never read.
     #[test]
     fn session_reply_follows_this_homes_index_only() {
-        let ws = std::env::temp_dir().join(format!("tmm-kimi-reply-{}", uuid::Uuid::new_v4()));
+        let ws = crate::config::test_scratch("tmm-kimi-reply");
         let write_home = |name: &str, reply: &str| {
             let home = ws.join(".tmm").join("agents").join(name);
             let kimi = home.join("kimi");
@@ -709,7 +709,7 @@ pattern = "Bash(rm -rf*)"
         let t: toml::Table = plain.parse().unwrap();
         assert!(t.get("thinking").is_none() && t.get("models").is_none());
 
-        let dir = std::env::temp_dir().join(format!("tmm-kimi-refresh-{}", uuid::Uuid::new_v4()));
+        let dir = crate::config::test_scratch("tmm-kimi-refresh");
         std::fs::create_dir_all(dir.join("kimi")).unwrap();
         std::fs::write(dir.join("kimi").join("config.toml"), &cfg).unwrap();
         assert!(!refresh(&dir, "/bin/sh helper kimi # tmm").unwrap(), "same hooks: no rewrite");
@@ -739,7 +739,7 @@ pattern = "Bash(rm -rf*)"
         .unwrap();
         assert_eq!(models_fetch(), Some(vec!["bedrock-kimi-k3".to_string()]));
 
-        let ws = std::env::temp_dir().join(format!("tmm-kimi-render-ws-{}", uuid::Uuid::new_v4()));
+        let ws = crate::config::test_scratch("tmm-kimi-render-ws");
         std::fs::create_dir_all(&ws).unwrap();
         let home = ws.join(".tmm").join("agents").join("k1");
         let def = RegAgent {

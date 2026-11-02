@@ -923,7 +923,7 @@ mod tests {
     /// `input_mode = 'queue'`, and a saved `steer` round-trips.
     #[test]
     fn v24_agents_gain_queue_input_mode() {
-        let dir = std::env::temp_dir().join(format!("tmm-store-v25-{}", uuid::Uuid::new_v4()));
+        let dir = crate::config::test_scratch("tmm-store-v25");
         let path = dir.join("state.db");
         {
             let store = Store::open(&path).unwrap();
@@ -948,7 +948,7 @@ mod tests {
     /// old row therefore takes the content match it always had.
     #[test]
     fn v23_deliveries_and_activity_gain_message_ids_empty() {
-        let dir = std::env::temp_dir().join(format!("tmm-store-v24-{}", uuid::Uuid::new_v4()));
+        let dir = crate::config::test_scratch("tmm-store-v24");
         let path = dir.join("state.db");
         {
             let store = Store::open(&path).unwrap();
@@ -1034,7 +1034,7 @@ mod tests {
     /// version-gated CREATE would have skipped it for ever after that.
     #[test]
     fn a_database_stamped_at_the_current_version_without_its_table_heals_on_open() {
-        let dir = std::env::temp_dir().join(format!("tmm-store-heal-{}", uuid::Uuid::new_v4()));
+        let dir = crate::config::test_scratch("tmm-store-heal");
         let path = dir.join("state.db");
         {
             let store = Store::open(&path).unwrap();
@@ -1071,7 +1071,7 @@ mod tests {
 
     #[test]
     fn migrating_v13_repairs_renamed_and_orphaned_boards() {
-        let dir = std::env::temp_dir().join(format!("tmm-board-v14-{}", uuid::Uuid::new_v4()));
+        let dir = crate::config::test_scratch("tmm-board-v14");
         std::fs::create_dir_all(&dir).unwrap();
         let path = dir.join("state.db");
 
@@ -1263,7 +1263,7 @@ mod tests {
     /// into a seeded registry, a delete sticks, a custom def is respected.
     #[test]
     fn v22_backfills_kimi_into_an_already_seeded_registry() {
-        let dir = std::env::temp_dir().join(format!("tmm-migrate-kimi-{}", uuid::Uuid::new_v4()));
+        let dir = crate::config::test_scratch("tmm-migrate-kimi");
         std::fs::create_dir_all(&dir).unwrap();
         let path = dir.join("state.db");
         {
@@ -1353,7 +1353,7 @@ mod tests {
     /// v9, a plain CREATE) into a v4 database: v5–v8 succeed, v9 fails.
     #[test]
     fn a_failed_migration_step_rolls_every_step_back() {
-        let dir = std::env::temp_dir().join(format!("tmm-migrate-atomic-{}", uuid::Uuid::new_v4()));
+        let dir = crate::config::test_scratch("tmm-migrate-atomic");
         std::fs::create_dir_all(&dir).unwrap();
         let path = dir.join("state.db");
         let v4 = Connection::open(&path).unwrap();

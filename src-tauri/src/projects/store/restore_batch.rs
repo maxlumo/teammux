@@ -594,7 +594,7 @@ mod tests {
     /// batch_state_commits_nothing` (the capture tick, through `SCAN_HOOK`).
     #[test]
     fn a_batch_opened_by_another_connection_after_a_scan_voids_its_commit() {
-        let dir = std::env::temp_dir().join(format!("tmm-scan-{}", uuid::Uuid::new_v4()));
+        let dir = crate::config::test_scratch("tmm-scan");
         let path = dir.join("state.db");
         let mut ours = Store::open(&path).unwrap();
         let mut theirs = Store::open(&path).unwrap();

@@ -529,7 +529,7 @@ mod tests {
         std::fs::symlink_metadata(p).unwrap().permissions().mode() & 0o7777
     }
     fn scratch(tag: &str) -> std::path::PathBuf {
-        let d = std::env::temp_dir().join(format!("tmm-safefs-{tag}-{}", uuid::Uuid::new_v4()));
+        let d = crate::config::test_scratch(&format!("tmm-safefs-{tag}"));
         std::fs::create_dir_all(&d).unwrap();
         d
     }
@@ -794,7 +794,7 @@ mod db_tests {
         std::fs::symlink_metadata(p).unwrap().permissions().mode() & 0o7777
     }
     fn scratch(tag: &str, m: u32) -> std::path::PathBuf {
-        let d = std::env::temp_dir().join(format!("tmm-safedb-{tag}-{}", uuid::Uuid::new_v4()));
+        let d = crate::config::test_scratch(&format!("tmm-safedb-{tag}"));
         std::fs::create_dir_all(&d).unwrap();
         std::fs::set_permissions(&d, std::fs::Permissions::from_mode(m)).unwrap();
         d
@@ -949,7 +949,7 @@ mod walk_tests {
         std::fs::symlink_metadata(p).unwrap().permissions().mode() & 0o7777
     }
     fn scratch(tag: &str) -> std::path::PathBuf {
-        let d = std::env::temp_dir().join(format!("tmm-walk-{tag}-{}", uuid::Uuid::new_v4()));
+        let d = crate::config::test_scratch(&format!("tmm-walk-{tag}"));
         std::fs::create_dir_all(&d).unwrap();
         d
     }

@@ -116,7 +116,7 @@ impl Drop for Home {
 }
 
 fn empty_home(label: &str) -> Home {
-    let dir = std::env::temp_dir().join(format!("tmm-flags-{label}-{}-{:?}", std::process::id(), std::thread::current().id()).replace(['(', ')', ' '], ""));
+    let dir = tmux_mobile::config::test_scratch(&format!("tmm-flags-{label}"));
     let _ = std::fs::remove_dir_all(&dir);
     std::fs::create_dir_all(&dir).unwrap();
     Home(dir)

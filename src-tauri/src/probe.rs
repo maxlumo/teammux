@@ -370,7 +370,7 @@ mod tests {
                 .into_iter()
                 .enumerate()
         {
-            let pidf = std::env::temp_dir().join(format!("tmm-probe-{}-{i}", std::process::id()));
+            let pidf = crate::config::test_scratch(&format!("tmm-probe-{i}"));
             let _ = std::fs::remove_file(&pidf);
             let mut cmd = std::process::Command::new("sh");
             cmd.args(["-c", &script]).env("PIDF", &pidf);

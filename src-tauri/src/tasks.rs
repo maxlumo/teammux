@@ -908,7 +908,7 @@ mod tests {
         let _server = PrivateTmux::start(&scope, "wake");
         let session = "tmm-test-wake";
         let pid = std::process::id();
-        let log = std::env::temp_dir().join(format!("tmm-test-wake-{pid}.log"));
+        let log = crate::config::test_scratch("tmm-test-wake").with_extension("log");
         let _ = std::fs::remove_file(&log);
         let wake = format!("echo \"$0 status=#{{pane_dead_status}} sig=#{{pane_dead_signal}} {}\" >> {}", format_literal("#x"), log.display());
         let sh = |c: &str| -> Vec<String> { vec!["sh".into(), "-c".into(), c.into()] };

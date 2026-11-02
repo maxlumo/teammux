@@ -4825,7 +4825,7 @@ mod tests {
     #[test]
     fn same_second_order_survives_a_real_process_restart() {
         for back in [0, 1] {
-        let dir = std::env::temp_dir().join(format!("tmm-fresh-proc-{}", uuid::Uuid::new_v4()));
+        let dir = crate::config::test_scratch("tmm-fresh-proc");
         std::fs::create_dir_all(&dir).unwrap();
         let db = dir.join("state.db");
         let t = now() - back;

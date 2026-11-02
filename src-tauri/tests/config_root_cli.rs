@@ -20,7 +20,7 @@ struct Base {
 
 impl Base {
     fn new(tag: &str) -> Base {
-        let root = std::env::temp_dir().join(format!("config-root-{tag}-{}", std::process::id()));
+        let root = tmux_mobile::config::test_scratch(&format!("config-root-{tag}"));
         let _ = std::fs::remove_dir_all(&root);
         std::fs::create_dir_all(root.join("cfg")).unwrap();
         std::fs::create_dir_all(root.join("home")).unwrap();

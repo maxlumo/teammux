@@ -193,7 +193,7 @@ impl AgentNotificationHub {
     /// was opened by `prompt` (the call-site test in hub_rpc).
     #[cfg(test)]
     pub(crate) fn scratch_with_turn(session: &str, window: &str, prompt: &str) -> (Self, PathBuf) {
-        let root = std::env::temp_dir().join(format!("tmm-scratch-hub-{}", uuid::Uuid::new_v4()));
+        let root = crate::config::test_scratch("tmm-scratch-hub");
         let hub = Self::load_at(root.clone());
         hub.start_turn(session, window, prompt);
         (hub, root)
@@ -1454,7 +1454,7 @@ mod tests {
     /// hub stays functional: the inbox dir exists for the helper to write into.
     #[test]
     fn load_removes_the_legacy_unread_file_and_keeps_the_inbox() {
-        let root = std::env::temp_dir().join(format!("tmm-legacy-unread-{}", uuid::Uuid::new_v4()));
+        let root = crate::config::test_scratch("tmm-legacy-unread");
         std::fs::create_dir_all(&root).unwrap();
         std::fs::write(root.join("unread.json"), r#"[{"summary":"stale"}]"#).unwrap();
         let hub = AgentNotificationHub::load_at(root.clone());
@@ -1470,7 +1470,7 @@ mod tests {
     /// epoch prefix the helper writes.
     #[test]
     fn inbox_is_consumed_in_the_order_the_hooks_wrote_it() {
-        let dir = std::env::temp_dir().join(format!("tmm-inbox-order-{}", uuid::Uuid::new_v4()));
+        let dir = crate::config::test_scratch("tmm-inbox-order");
         std::fs::create_dir_all(&dir).unwrap();
         // Written out of order on purpose, including a second-boundary pair.
         for name in ["1755300010-42.json", "1755300002-7.json", "1755300002-3.json", "notes.txt"] {
@@ -1665,7 +1665,7 @@ mod tests {
     #[cfg(unix)]
     #[test]
     fn the_hook_helper_never_opens_a_network_connection() {
-        let root = std::env::temp_dir().join(format!("tmm-agent-helper-net-{}", uuid::Uuid::new_v4()));
+        let root = crate::config::test_scratch("tmm-agent-helper-net");
         let hub = AgentNotificationHub::load_at(root.clone());
         hub.write_helper().unwrap();
         let script = std::fs::read_to_string(hub.helper_path()).unwrap();
@@ -1684,7 +1684,7 @@ mod tests {
         use std::io::Write;
         use std::process::{Command, Stdio};
 
-        let root = std::env::temp_dir().join(format!("tmm-agent-helper-{}", uuid::Uuid::new_v4()));
+        let root = crate::config::test_scratch("tmm-agent-helper");
         let hub = AgentNotificationHub::load_at(root.clone());
         hub.write_helper().unwrap();
         let helper = hub.helper_path();
@@ -1807,7 +1807,7 @@ mod tests {
         .trim()
         .to_string();
 
-        let root = std::env::temp_dir().join(format!("tmm-prompt-hub-{}", uuid::Uuid::new_v4()));
+        let root = crate::config::test_scratch("tmm-prompt-hub");
         let hub = AgentNotificationHub::load_at(root.clone());
         // What deliver_mentions types into the pane.
         let line = "[tmm chat] human: @dev ship it";
@@ -1873,7 +1873,7 @@ mod tests {
         .unwrap()
         .trim()
         .to_string();
-        let root = std::env::temp_dir().join(format!("tmm-subagent-hub-{}", uuid::Uuid::new_v4()));
+        let root = crate::config::test_scratch("tmm-subagent-hub");
         let hub = AgentNotificationHub::load_at(root.clone());
         std::fs::create_dir_all(root.join("inbox")).unwrap();
         let write = |name: &str, payload: Value| {
@@ -1956,7 +1956,7 @@ mod tests {
         .unwrap()
         .trim()
         .to_string();
-        let root = std::env::temp_dir().join(format!("tmm-subask-hub-{}", uuid::Uuid::new_v4()));
+        let root = crate::config::test_scratch("tmm-subask-hub");
         let hub = AgentNotificationHub::load_at(root.clone());
         std::fs::create_dir_all(root.join("inbox")).unwrap();
         let envelope = json!({ "backend": "codex", "pane_id": pane_id, "payload": {
@@ -2014,7 +2014,7 @@ mod tests {
         .trim()
         .to_string();
 
-        let root = std::env::temp_dir().join(format!("tmm-restart-hub-{}", uuid::Uuid::new_v4()));
+        let root = crate::config::test_scratch("tmm-restart-hub");
         let hub = AgentNotificationHub::load_at(root.clone());
         let line = "[tmm chat] human: @dev restart proof";
         crate::projects::telemetry::record_delivery(&session, &pane.window_name, line, "");
@@ -2057,7 +2057,7 @@ mod tests {
     fn a_stop_payload_posts_the_agents_final_answer_to_the_room() {
         crate::projects::tests::use_test_store();
         let session = format!("tmm-auto-{}", std::process::id());
-        let ws = std::env::temp_dir().join(format!("tmm-auto-ws-{}", uuid::Uuid::new_v4()));
+        let ws = crate::config::test_scratch("tmm-auto-ws");
         std::fs::create_dir_all(ws.join(".tmm/agents/dev")).unwrap();
         std::fs::write(ws.join(".tmm/agents/dev/launch.json"), "{}").unwrap();
         let created = std::process::Command::new("tmux")
@@ -2089,7 +2089,7 @@ mod tests {
         }
         let spy = std::sync::Arc::new(Spy(std::sync::Mutex::new(Vec::new())));
 
-        let root = std::env::temp_dir().join(format!("tmm-auto-hub-{}", uuid::Uuid::new_v4()));
+        let root = crate::config::test_scratch("tmm-auto-hub");
         let hub = AgentNotificationHub::load_at(root.clone());
         hub.set_room_poster(spy.clone());
         let (_, win, _) = crate::tmux::resolve_pane_id(&pane_id).expect("pane resolves");
@@ -2143,7 +2143,7 @@ mod tests {
     fn a_tool_only_turn_then_a_request_then_a_reply_posts_to_the_requester() {
         crate::projects::tests::use_test_store();
         let session = format!("tmm-tool-turn-{}", uuid::Uuid::new_v4());
-        let ws = std::env::temp_dir().join(format!("tmm-tool-turn-ws-{}", uuid::Uuid::new_v4()));
+        let ws = crate::config::test_scratch("tmm-tool-turn-ws");
         std::fs::create_dir_all(ws.join(".tmm/agents/v")).unwrap();
         std::fs::write(ws.join(".tmm/agents/v/launch.json"), "{}").unwrap();
         let created = std::process::Command::new("tmux")
@@ -2177,7 +2177,7 @@ mod tests {
             }
         }
         let spy = std::sync::Arc::new(Spy(std::sync::Mutex::new(Vec::new())));
-        let root = std::env::temp_dir().join(format!("tmm-tool-turn-hub-{}", uuid::Uuid::new_v4()));
+        let root = crate::config::test_scratch("tmm-tool-turn-hub");
         let hub = AgentNotificationHub::load_at(root.clone());
         hub.set_room_poster(spy.clone());
         std::fs::create_dir_all(root.join("inbox")).unwrap();
@@ -2253,7 +2253,7 @@ mod tests {
     fn only_a_real_reply_reopens_a_spent_nudge_through_the_real_fallback() {
         crate::projects::tests::use_test_store();
         use crate::projects::telemetry::{arm_nudge, disarm_nudge, nudge_wait, record_notification_with, record_prompt, NudgeWait};
-        let home = std::env::temp_dir().join(format!("tmm-quality-home-{}", uuid::Uuid::new_v4()));
+        let home = crate::config::test_scratch("tmm-quality-home");
         let session_file = |id: &str, rows: Option<&str>| {
             let dir = home.join("sessions").join("297005da4b9f6bd1").join(id);
             std::fs::create_dir_all(&dir).unwrap();
@@ -2305,7 +2305,7 @@ mod tests {
     fn an_empty_stop_reaches_the_status_and_owes_one_nudge() {
         crate::projects::tests::use_test_store();
         let session = format!("tmm-empty-turn-{}", uuid::Uuid::new_v4());
-        let ws = std::env::temp_dir().join(format!("tmm-empty-turn-ws-{}", uuid::Uuid::new_v4()));
+        let ws = crate::config::test_scratch("tmm-empty-turn-ws");
         std::fs::create_dir_all(ws.join(".tmm/agents/v")).unwrap();
         std::fs::write(ws.join(".tmm/agents/v/launch.json"), "{}").unwrap();
         let created = std::process::Command::new("tmux")
@@ -2328,7 +2328,7 @@ mod tests {
             std::process::Command::new("tmux").args(["display-message", "-p", "-t", &session, "#{pane_id}"])
                 .output().unwrap().stdout,
         ).unwrap().trim().to_string();
-        let root = std::env::temp_dir().join(format!("tmm-empty-turn-hub-{}", uuid::Uuid::new_v4()));
+        let root = crate::config::test_scratch("tmm-empty-turn-hub");
         let hub = AgentNotificationHub::load_at(root.clone());
         std::fs::create_dir_all(root.join("inbox")).unwrap();
         let mut seq = 0;
@@ -2377,7 +2377,7 @@ mod tests {
         crate::projects::tests::use_test_store();
         let scope = crate::tmux::test_support::GlobalSocket::hold();
         let server = crate::tmux::test_support::PrivateTmux::start(&scope, "an-422");
-        let ws = std::env::temp_dir().join(format!("tmm-an422-{}", uuid::Uuid::new_v4().simple()));
+        let ws = crate::config::test_scratch("tmm-an422");
         for slot in ["dev", "rev"] {
             let home = ws.join(".tmm/agents").join(slot);
             std::fs::create_dir_all(&home).unwrap();
@@ -2450,7 +2450,7 @@ mod tests {
             }
         }
         let spy = std::sync::Arc::new(Spy(std::sync::Mutex::new(Vec::new())));
-        let root = std::env::temp_dir().join(format!("tmm-an422-hub-{}", uuid::Uuid::new_v4()));
+        let root = crate::config::test_scratch("tmm-an422-hub");
         let hub = AgentNotificationHub::load_at(root.clone());
         hub.set_room_poster(spy.clone());
         let n = std::cell::Cell::new(0);
@@ -2625,7 +2625,7 @@ mod tests {
     fn kimi_array_prompt_bodiless_stop_and_interrupt_are_turn_edges() {
         crate::projects::tests::use_test_store();
         let session = format!("tmm-kimi-{}", std::process::id());
-        let ws = std::env::temp_dir().join(format!("tmm-kimi-ws-{}", uuid::Uuid::new_v4()));
+        let ws = crate::config::test_scratch("tmm-kimi-ws");
         let seed_home = |name: &str, reply: &str| {
             let home = ws.join(".tmm/agents").join(name);
             let kimi = home.join("kimi");
@@ -2674,7 +2674,7 @@ mod tests {
             }
         }
         let spy = std::sync::Arc::new(Spy(std::sync::Mutex::new(Vec::new())));
-        let root = std::env::temp_dir().join(format!("tmm-kimi-hub-{}", uuid::Uuid::new_v4()));
+        let root = crate::config::test_scratch("tmm-kimi-hub");
         let hub = AgentNotificationHub::load_at(root.clone());
         hub.set_room_poster(spy.clone());
         std::fs::create_dir_all(root.join("inbox")).unwrap();
@@ -2879,7 +2879,7 @@ mod tests {
             use crate::backends::dsh::tests::which;
             crate::projects::tests::use_test_store();
             let (zsh, node) = (which("zsh")?, which("node")?);
-            let ws_raw = std::env::temp_dir().join(format!("tmm-dsh-e2e-{}", uuid::Uuid::new_v4()));
+            let ws_raw = crate::config::test_scratch("tmm-dsh-e2e");
             std::fs::create_dir_all(&ws_raw).unwrap();
             let ws = ws_raw.canonicalize().unwrap();
             let home = ws.join(".tmm/agents/d1");
@@ -2908,7 +2908,7 @@ mod tests {
                 ),
             )
             .unwrap();
-            let root = std::env::temp_dir().join(format!("tmm-dsh-hub-{}", uuid::Uuid::new_v4()));
+            let root = crate::config::test_scratch("tmm-dsh-hub");
             let hub = AgentNotificationHub::load_at(root.clone());
             hub.ensure_helper().unwrap();
             let spy = std::sync::Arc::new(RigSpy(std::sync::Mutex::new(Vec::new()), std::sync::atomic::AtomicUsize::new(0)));
@@ -3362,7 +3362,7 @@ mod tests {
     /// this test's own session is `Alive`.
     #[test]
     fn a_pgrep_that_cannot_answer_is_unknown() {
-        let dir = std::env::temp_dir().join(format!("tmm-421-pgrep-{}", uuid::Uuid::new_v4()));
+        let dir = crate::config::test_scratch("tmm-421-pgrep");
         std::fs::create_dir_all(&dir).unwrap();
         let exits2 = dir.join("pgrep");
         std::fs::write(&exits2, "#!/bin/sh\necho 'pgrep: bad session' >&2\nexit 2\n").unwrap();
@@ -4580,7 +4580,7 @@ mod tests {
     #[test]
     fn the_helpers_exit_is_a_receipt_only_for_a_numbered_producer() {
         use std::os::unix::fs::PermissionsExt;
-        let root = std::env::temp_dir().join(format!("tmm-receipt-{}", uuid::Uuid::new_v4()));
+        let root = crate::config::test_scratch("tmm-receipt");
         let hub = AgentNotificationHub::load_at(root.clone());
         hub.ensure_helper().unwrap();
         // `reads`: whether the helper reads its payload on this path. With no
@@ -4642,7 +4642,7 @@ mod tests {
     /// then the sequence (missing = 0), then arrival.
     #[test]
     fn the_helper_names_a_producers_sequence_and_the_inbox_honours_it() {
-        let root = std::env::temp_dir().join(format!("tmm-seq-{}", uuid::Uuid::new_v4()));
+        let root = crate::config::test_scratch("tmm-seq");
         let hub = AgentNotificationHub::load_at(root.clone());
         hub.ensure_helper().unwrap();
         let run = |seq: Option<&str>| {
@@ -4733,7 +4733,7 @@ mod tests {
         ]
         .join("\n\n");
         assert!(combined.find("validator:").unwrap() > 1024, "the second requester sits past the text cut");
-        let root = std::env::temp_dir().join(format!("tmm-combined-{}", uuid::Uuid::new_v4()));
+        let root = crate::config::test_scratch("tmm-combined");
         let hub = AgentNotificationHub::load_at(root.clone());
         hub.start_turn(&session, "v", &combined);
         record_prompt(&session, "v", &combined);
@@ -4788,7 +4788,7 @@ mod tests {
             "w2",
             "[tmm chat 2026-09-08 08:06] lead: @worker finish it",
         );
-        let root = std::env::temp_dir().join(format!("tmm-reply-edge-{}", uuid::Uuid::new_v4()));
+        let root = crate::config::test_scratch("tmm-reply-edge");
         let restarted = AgentNotificationHub::load_at(root.clone());
         assert_eq!(restarted.take_reply_targets(&session, "w2"), vec!["lead"]);
         let _ = std::fs::remove_dir_all(root);
@@ -4963,7 +4963,7 @@ mod tests {
         tmux.run(&["new-session", "-d", "-s", &session, "sleep 60"]).expect("the private server starts");
         let real = tmux.socket().to_string();
         let made_by = identity_of_the_server();
-        let root = std::env::temp_dir().join(format!("tmm-back-hub-{}", uuid::Uuid::new_v4()));
+        let root = crate::config::test_scratch("tmm-back-hub");
         let hub = AgentNotificationHub::load_at(root.clone());
         let inbox = root.join("inbox");
         std::fs::create_dir_all(&inbox).unwrap();
@@ -5005,7 +5005,7 @@ mod tests {
         let session = format!("tmm-incarnation-{}", std::process::id());
         tmux.run(&["new-session", "-d", "-s", &session, "sleep 60"]).expect("the first server starts");
         let old = identity_of_the_server();
-        let root = std::env::temp_dir().join(format!("tmm-incarnation-hub-{}", uuid::Uuid::new_v4()));
+        let root = crate::config::test_scratch("tmm-incarnation-hub");
         let hub = AgentNotificationHub::load_at(root.clone());
         let inbox = root.join("inbox");
         std::fs::create_dir_all(&inbox).unwrap();
@@ -5055,7 +5055,7 @@ mod tests {
         let session = format!("tmm-foreign-{}", std::process::id());
         tmux.run(&["new-session", "-d", "-s", &session, "sleep 60"]).expect("the private server starts");
         let mine = identity_of_the_server();
-        let root = std::env::temp_dir().join(format!("tmm-foreign-hub-{}", uuid::Uuid::new_v4()));
+        let root = crate::config::test_scratch("tmm-foreign-hub");
         let hub = AgentNotificationHub::load_at(root.clone());
         let inbox = root.join("inbox");
         std::fs::create_dir_all(&inbox).unwrap();
@@ -5081,7 +5081,7 @@ mod tests {
         let tmux = PrivateTmux::start(&guard, "inbox-legacy");
         let session = format!("tmm-legacy-{}", std::process::id());
         let real = tmux.socket().to_string();
-        let root = std::env::temp_dir().join(format!("tmm-legacy-hub-{}", uuid::Uuid::new_v4()));
+        let root = crate::config::test_scratch("tmm-legacy-hub");
         let hub = AgentNotificationHub::load_at(root.clone());
         let inbox = root.join("inbox");
         std::fs::create_dir_all(&inbox).unwrap();
@@ -5127,7 +5127,7 @@ mod tests {
         tmux.run(&["new-session", "-d", "-s", &session, "sleep 60"]).expect("the private server starts");
         let real = tmux.socket().to_string();
         let made_by = identity_of_the_server();
-        let root = std::env::temp_dir().join(format!("tmm-numbered-hub-{}", uuid::Uuid::new_v4()));
+        let root = crate::config::test_scratch("tmm-numbered-hub");
         let hub = AgentNotificationHub::load_at(root.clone());
         let inbox = root.join("inbox");
         std::fs::create_dir_all(&inbox).unwrap();
@@ -5162,7 +5162,7 @@ mod tests {
         let session = format!("tmm-fence-{}", std::process::id());
         tmux.run(&["new-session", "-d", "-s", &session, "sleep 60"]).expect("the private server starts");
         let made_by = identity_of_the_server();
-        let root = std::env::temp_dir().join(format!("tmm-fence-hub-{}", uuid::Uuid::new_v4()));
+        let root = crate::config::test_scratch("tmm-fence-hub");
         let hub = AgentNotificationHub::load_at(root.clone());
         let inbox = root.join("inbox");
         std::fs::create_dir_all(&inbox).unwrap();
@@ -5210,7 +5210,7 @@ mod tests {
         let session = format!("tmm-fenceun-{point}-{}", std::process::id());
         tmux.run(&["new-session", "-d", "-s", &session, "sleep 60"]).expect("the private server starts");
         let made_by = identity_of_the_server();
-        let root = std::env::temp_dir().join(format!("tmm-fenceun-hub-{point}-{}", uuid::Uuid::new_v4()));
+        let root = crate::config::test_scratch(&format!("tmm-fenceun-hub-{point}"));
         let hub = AgentNotificationHub::load_at(root.clone());
         let inbox = root.join("inbox");
         std::fs::create_dir_all(&inbox).unwrap();
@@ -5252,7 +5252,7 @@ mod tests {
         let (first_session, second_session) = (format!("tmm-swap-a-{numbered}-{}", std::process::id()), format!("tmm-swap-b-{numbered}-{}", std::process::id()));
         tmux.run(&["new-session", "-d", "-s", &first_session, "sleep 60"]).expect("the first server starts");
         let old = identity_of_the_server();
-        let root = std::env::temp_dir().join(format!("tmm-swap-hub-{numbered}-{}", uuid::Uuid::new_v4()));
+        let root = crate::config::test_scratch(&format!("tmm-swap-hub-{numbered}"));
         let hub = AgentNotificationHub::load_at(root.clone());
         let inbox = root.join("inbox");
         std::fs::create_dir_all(&inbox).unwrap();
@@ -5316,7 +5316,7 @@ mod tests {
     fn helper_against_fake_tmux(body: &str) -> (Value, std::time::Duration, i32) {
         use std::os::unix::fs::PermissionsExt;
         use std::os::unix::process::CommandExt;
-        let root = std::env::temp_dir().join(format!("tmm-hang-hub-{}", uuid::Uuid::new_v4()));
+        let root = crate::config::test_scratch("tmm-hang-hub");
         let hub = AgentNotificationHub::load_at(root.clone());
         hub.ensure_helper().unwrap();
         let fake_dir = root.join("fakebin");
@@ -5327,7 +5327,7 @@ mod tests {
         let mut cmd = std::process::Command::new("/bin/sh");
         cmd.arg(hub.helper_path()).arg("kiro").env_clear()
             .env("PATH", format!("{}:/usr/bin:/bin", fake_dir.display()))
-            .env("HOME", std::env::temp_dir())
+            .env("HOME", { let h = crate::config::test_scratch("tmm-home"); std::fs::create_dir_all(&h).unwrap(); h })
             .env("TMUX_PANE", "%0")
             .env("TMUX", "/tmp/tmm-hang-425/sock,4242,0")
             .stdin(std::process::Stdio::piped())
@@ -5408,7 +5408,7 @@ mod tests {
     /// so no fixture can hit it on demand; the order is pinned in the generated script instead.
     #[test]
     fn the_helpers_cleanup_trap_is_armed_after_its_background_jobs_are_gone() {
-        let root = std::env::temp_dir().join(format!("tmm-trap-hub-{}", uuid::Uuid::new_v4()));
+        let root = crate::config::test_scratch("tmm-trap-hub");
         let hub = AgentNotificationHub::load_at(root.clone());
         hub.ensure_helper().unwrap();
         let script = std::fs::read_to_string(hub.helper_path()).unwrap();
@@ -5423,7 +5423,7 @@ mod tests {
     /// cleanup trap is armed later. A numbered producer is told (exit 1), any other caller is not.
     #[test]
     fn an_empty_payload_publishes_nothing_and_leaves_no_temp_file() {
-        let root = std::env::temp_dir().join(format!("tmm-empty-hub-{}", uuid::Uuid::new_v4()));
+        let root = crate::config::test_scratch("tmm-empty-hub");
         let hub = AgentNotificationHub::load_at(root.clone());
         hub.ensure_helper().unwrap();
         for (seq, expect) in [(None, Some(0)), (Some("9"), Some(1))] {
@@ -5454,7 +5454,7 @@ mod tests {
         let (pane_a, pane_b) = (pane_of(&a), pane_of(&b));
         assert_ne!(pane_a, pane_b);
         let made_by = identity_of_the_server();
-        let root = std::env::temp_dir().join(format!("tmm-scope-hub-{}", uuid::Uuid::new_v4()));
+        let root = crate::config::test_scratch("tmm-scope-hub");
         let hub = AgentNotificationHub::load_at(root.clone());
         let inbox = root.join("inbox");
         std::fs::create_dir_all(&inbox).unwrap();
@@ -5521,14 +5521,14 @@ mod tests {
         let session = format!("tmm-helper-{}", std::process::id());
         tmux.run(&["new-session", "-d", "-s", &session, "sleep 60"]).expect("the private server starts");
         let incarnation = crate::tmux::server_incarnation().unwrap();
-        let root = std::env::temp_dir().join(format!("tmm-helper-hub-{}", uuid::Uuid::new_v4()));
+        let root = crate::config::test_scratch("tmm-helper-hub");
         let hub = AgentNotificationHub::load_at(root.clone());
         hub.ensure_helper().unwrap();
         let tmux_bin = String::from_utf8(std::process::Command::new("which").arg("tmux").output().unwrap().stdout).unwrap();
         let tmux_dir = Path::new(tmux_bin.trim()).parent().unwrap().to_string_lossy().to_string();
         let run = |env: &[(&str, String)], path: &str| {
             let mut cmd = std::process::Command::new("/bin/sh");
-            cmd.arg(hub.helper_path()).arg("kiro").env_clear().env("PATH", path).env("HOME", std::env::temp_dir());
+            cmd.arg(hub.helper_path()).arg("kiro").env_clear().env("PATH", path).env("HOME", { let h = crate::config::test_scratch("tmm-home"); std::fs::create_dir_all(&h).unwrap(); h });
             for (k, v) in env { cmd.env(k, v); }
             let mut child = cmd.stdin(std::process::Stdio::piped()).spawn().unwrap();
             use std::io::Write;
@@ -5570,7 +5570,7 @@ mod tests {
         }
         // A server that answers on a socket path with a SPACE in it is still not trusted: the field is
         // plain path characters only, and a path that needs quoting is left to the identity-less path.
-        let spaced_dir = std::env::temp_dir().join(format!("tmm test spaced {}", std::process::id()));
+        let spaced_dir = crate::config::test_scratch("tmm test spaced");
         std::fs::create_dir_all(&spaced_dir).unwrap();
         let spaced = spaced_dir.join(format!("{}spaced-{}.sock", crate::tmux::test_support::PRIVATE_PREFIX, std::process::id())).to_string_lossy().to_string();
         crate::tmux::run_tmux_on(Some(&spaced), &["new-session", "-d", "-s", "spaced", "sleep 60"]).expect("a server on a spaced socket");

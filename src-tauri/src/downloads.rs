@@ -234,7 +234,7 @@ mod tests {
     const ID: &str = "0123456789abcdef";
     fn b64(bytes: &[u8]) -> String { base64::engine::general_purpose::STANDARD.encode(bytes) }
     fn tmp(tag: &str) -> PathBuf {
-        let dir = std::env::temp_dir().join(format!("tmm-dl-{}-{tag}", std::process::id()));
+        let dir = crate::config::test_scratch(&format!("tmm-dl-{tag}"));
         let _ = std::fs::remove_dir_all(&dir);
         std::fs::create_dir_all(&dir).unwrap();
         dir

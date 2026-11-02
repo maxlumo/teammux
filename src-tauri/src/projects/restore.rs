@@ -700,7 +700,7 @@ mod tests {
         assert_eq!(tmux_now(), first, "the same server answers the same identity");
         assert_eq!(socket_key(), server.socket(), "the checkpoint is keyed by the socket we reach");
 
-        let dir = std::env::temp_dir().join(format!("tmm-test-restore-locked-{}", std::process::id()));
+        let dir = crate::config::test_scratch("tmm-test-restore-locked");
         std::fs::create_dir_all(&dir).unwrap();
         use std::os::unix::fs::PermissionsExt;
         std::fs::set_permissions(&dir, std::fs::Permissions::from_mode(0o000)).unwrap();
@@ -954,7 +954,7 @@ mod tests {
     /// backend's `resume_id`, which dsh and openclaw do not have.
     #[test]
     fn live_facts_read_the_recipe_and_the_resume_table() {
-        let ws = std::env::temp_dir().join(format!("tmm-facts-{}", uuid::Uuid::new_v4()));
+        let ws = crate::config::test_scratch("tmm-facts");
         let path = ws.to_string_lossy().to_string();
         for (name, recipe) in [("ok", r#"{"cmd":"kiro-cli chat"}"#), ("nocmd", "{}"), ("blank", r#"{"cmd":"  "}"#), ("broken", "{")] {
             std::fs::create_dir_all(ws.join(".tmm/agents").join(name)).unwrap();

@@ -200,7 +200,7 @@ mod tests {
 
     #[test]
     fn find_config_walks_up() {
-        let root = std::env::temp_dir().join(format!("mcpcli-test-{}", std::process::id()));
+        let root = crate::config::test_scratch("mcpcli-test");
         let deep = root.join("a").join("b");
         std::fs::create_dir_all(&deep).unwrap();
         std::fs::create_dir_all(root.join(".tmm")).unwrap();

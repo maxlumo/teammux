@@ -2246,7 +2246,7 @@ mod tests {
 
     /// Declare a project with these slots (agents get fake homes) and return it.
     fn declare(tag: &str, slots: Vec<Slot>) -> Proj {
-        let ws = std::env::temp_dir().join(format!("tmm-r2-{tag}-{}", uuid::Uuid::new_v4().simple()));
+        let ws = crate::config::test_scratch(&format!("tmm-r2-{tag}"));
         std::fs::create_dir_all(&ws).unwrap();
         let ws = ws.canonicalize().unwrap();
         for s in slots.iter().filter(|s| s.kind == SlotKind::Agent) {
@@ -4238,7 +4238,7 @@ mod tests {
         with_store(|s| s.set_session(&renamed.id, &new_name, &renamed.session)).unwrap();
         // Move `moved` to another directory: same id, another path.
         let mut row = with_store(|s| s.project(&moved.id)).unwrap().unwrap();
-        let elsewhere = std::env::temp_dir().join(format!("tmm-r2-elsewhere-{}", uuid::Uuid::new_v4().simple()));
+        let elsewhere = crate::config::test_scratch("tmm-r2-elsewhere");
         std::fs::create_dir_all(&elsewhere).unwrap();
         row.path = elsewhere.to_string_lossy().to_string();
         let slots = with_store(|s| s.slots(&moved.id)).unwrap();
@@ -4455,7 +4455,7 @@ mod tests {
             assert!(matches!(classify(odd), Outcome::Unknown(_)), "{odd:?}");
         }
         let step = Step { op: "test", project: "g5".into(), ord: None };
-        let nowhere = std::env::temp_dir().join(format!("tmm-test-nowhere-{}", uuid::Uuid::new_v4().simple()));
+        let nowhere = crate::config::test_scratch("tmm-test-nowhere");
         std::fs::write(&nowhere, "").unwrap();
         let got = guarded(&nowhere.to_string_lossy(), &step, "@0", "1", "display -p x").unwrap();
         let _ = std::fs::remove_file(&nowhere);
@@ -5300,7 +5300,7 @@ mod tests {
 
     #[test]
     fn the_strict_door_never_falls_back() {
-        let ws = std::env::temp_dir().join(format!("tmm-r2-door-{}", uuid::Uuid::new_v4().simple()));
+        let ws = crate::config::test_scratch("tmm-r2-door");
         let ws_s = ws.to_string_lossy().to_string();
         fake_agent(&ws, "dev");
         let door = |slot: &Slot, managed| super::super::reconcile::slot_command_exact(&ws_s, slot, managed);

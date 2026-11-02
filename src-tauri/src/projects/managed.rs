@@ -247,7 +247,7 @@ mod marker_tests {
     #[test]
     fn managed_state_tells_unreadable_from_absent() {
         use std::os::unix::fs::PermissionsExt;
-        let ws = std::env::temp_dir().join(format!("tmm-mstate-{}", uuid::Uuid::new_v4()));
+        let ws = crate::config::test_scratch("tmm-mstate");
         let agents = ws.join(".tmm/agents");
         std::fs::create_dir_all(agents.join("dev")).unwrap();
         std::fs::write(agents.join("dev/launch.json"), "{}").unwrap();
@@ -303,7 +303,7 @@ mod tests {
     /// definition placed, and a solo agent, are not joined.
     #[test]
     fn a_join_is_a_team_without_a_member() {
-        let ws = std::env::temp_dir().join(format!("tmm-joined-{}", uuid::Uuid::new_v4()));
+        let ws = crate::config::test_scratch("tmm-joined");
         for (name, recipe) in [("joiner", r#"{"team":"squad","member":""}"#), ("placed", r#"{"team":"squad","member":"dev"}"#), ("solo", r#"{"team":""}"#)] {
             let home = ws.join(".tmm/agents").join(name);
             std::fs::create_dir_all(&home).unwrap();
@@ -321,7 +321,7 @@ mod tests {
     #[test]
     fn removing_an_agent_drops_its_slot_and_home() {
         use_test_store();
-        let dir = std::env::temp_dir().join(format!("tmm-rm-{}", uuid::Uuid::new_v4()));
+        let dir = crate::config::test_scratch("tmm-rm");
         std::fs::create_dir_all(&dir).unwrap();
         let path = dir.to_string_lossy().to_string();
         let made = create(&path, Some("rmtest"), None, None).unwrap();
@@ -369,7 +369,7 @@ mod tests {
     fn accepted_paints_are_forgotten_only_when_their_identity_is_removed() {
         use crate::projects::telemetry as tm;
         use_test_store();
-        let dir = std::env::temp_dir().join(format!("tmm-rmpaint-{}", uuid::Uuid::new_v4()));
+        let dir = crate::config::test_scratch("tmm-rmpaint");
         std::fs::create_dir_all(&dir).unwrap();
         let made = create(&dir.to_string_lossy(), Some("rmpaint"), None, None).unwrap();
         let id = made["id"].as_str().unwrap().to_string();
@@ -416,7 +416,7 @@ mod tests {
     #[test]
     fn a_name_that_is_a_path_removes_nothing() {
         use_test_store();
-        let dir = std::env::temp_dir().join(format!("tmm-rmpath-{}", uuid::Uuid::new_v4()));
+        let dir = crate::config::test_scratch("tmm-rmpath");
         std::fs::create_dir_all(&dir).unwrap();
         let path = dir.to_string_lossy().to_string();
         let made = create(&path, Some("rmpath"), None, None).unwrap();
@@ -443,7 +443,7 @@ mod tests {
     #[test]
     fn a_stopped_agent_can_be_removed_by_its_declaration_alone() {
         use_test_store();
-        let dir = std::env::temp_dir().join(format!("tmm-rmstop-{}", uuid::Uuid::new_v4()));
+        let dir = crate::config::test_scratch("tmm-rmstop");
         std::fs::create_dir_all(&dir).unwrap();
         let made = create(&dir.to_string_lossy(), Some("rmstop"), None, None).unwrap();
         let id = made["id"].as_str().unwrap().to_string();
@@ -478,7 +478,7 @@ mod tests {
     /// NOT the window name — a hand-started window may share the name.
     #[test]
     fn managed_is_the_recipe_not_the_directory() {
-        let ws = std::env::temp_dir().join(format!("tmm-managed-{}", uuid::Uuid::new_v4()));
+        let ws = crate::config::test_scratch("tmm-managed");
         let path = ws.to_string_lossy().to_string();
         // spawn writes launch.json for every backend before the window exists —
         // THAT is the marker, not the directory.
@@ -524,7 +524,7 @@ mod tighten_tests {
     #[test]
     fn a_wide_home_is_closed_at_startup_without_a_respawn_and_a_plain_dir_is_not() {
         super::super::tests::use_test_store();
-        let ws = std::env::temp_dir().join(format!("tmm-tighten-{}", uuid::Uuid::new_v4()));
+        let ws = crate::config::test_scratch("tmm-tighten");
         let (home, plain) = (ws.join(".tmm/agents/dev"), ws.join(".tmm/agents/notes"));
         for d in [&home, &plain] { std::fs::create_dir_all(d).unwrap(); }
         std::fs::write(home.join("launch.json"), r#"{"backend":"codex"}"#).unwrap();

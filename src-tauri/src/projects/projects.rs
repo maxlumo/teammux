@@ -957,7 +957,7 @@ mod tests {
     #[test]
     fn the_session_follows_the_project_name_not_the_folder() {
         use_test_store();
-        let dir = std::env::temp_dir().join(format!("tmm-name-{}", uuid::Uuid::new_v4()));
+        let dir = crate::config::test_scratch("tmm-name");
         std::fs::create_dir_all(&dir).unwrap();
         let path = dir.to_string_lossy().to_string();
 
@@ -970,7 +970,7 @@ mod tests {
         assert_eq!(made.get("session").and_then(|v| v.as_str()), Some("close-test"));
 
         // An explicit session still wins over the name.
-        let other = std::env::temp_dir().join(format!("tmm-name-{}", uuid::Uuid::new_v4()));
+        let other = crate::config::test_scratch("tmm-name");
         std::fs::create_dir_all(&other).unwrap();
         let made2 = create(&other.to_string_lossy(), Some("Label"), Some("chosen"), None).unwrap();
         assert_eq!(made2.get("session").and_then(|v| v.as_str()), Some("chosen"));
@@ -988,7 +988,7 @@ mod tests {
     #[test]
     fn renaming_a_project_moves_its_session_but_never_its_room() {
         use_test_store();
-        let dir = std::env::temp_dir().join(format!("tmm-rename-{}", uuid::Uuid::new_v4()));
+        let dir = crate::config::test_scratch("tmm-rename");
         std::fs::create_dir_all(&dir).unwrap();
         let made = create(&dir.to_string_lossy(), Some("Old Name"), None, None).unwrap();
         let id = made["id"].as_str().unwrap().to_string();
@@ -1010,7 +1010,7 @@ mod tests {
 
         // A name another project holds is REFUSED, not decorated — including when
         // that project is archived and therefore invisible in the list.
-        let other = std::env::temp_dir().join(format!("tmm-rename-other-{}", uuid::Uuid::new_v4()));
+        let other = crate::config::test_scratch("tmm-rename-other");
         std::fs::create_dir_all(&other).unwrap();
         let taken = create(&other.to_string_lossy(), Some("Taken Name"), None, None).unwrap();
         set_archived(taken["id"].as_str().unwrap(), true).unwrap();
@@ -1071,7 +1071,7 @@ mod tests {
     #[test]
     fn an_adopted_project_is_renamed_like_any_other() {
         use_test_store();
-        let dir = std::env::temp_dir().join(format!("tmm-rename-adopted-{}", uuid::Uuid::new_v4()));
+        let dir = crate::config::test_scratch("tmm-rename-adopted");
         std::fs::create_dir_all(&dir).unwrap();
         let ts = now();
         let project = Project {
@@ -1124,7 +1124,7 @@ mod tests {
     #[test]
     fn two_projects_can_share_one_directory() {
         use_test_store();
-        let dir = std::env::temp_dir().join(format!("tmm-share-{}", uuid::Uuid::new_v4()));
+        let dir = crate::config::test_scratch("tmm-share");
         std::fs::create_dir_all(&dir).unwrap();
         let path = dir.to_string_lossy().to_string();
 
@@ -1152,7 +1152,7 @@ mod tests {
 
         // Same name + same path a THIRD way: even when the id seed collides,
         // the salt keeps ids unique — session name gets suffixed, not merged.
-        let other = std::env::temp_dir().join(format!("tmm-share-{}", uuid::Uuid::new_v4()));
+        let other = crate::config::test_scratch("tmm-share");
         std::fs::create_dir_all(&other).unwrap();
         let c = create(&path, Some("alpha-proj"), Some("alpha-two"), None).unwrap();
         assert_ne!(
@@ -1169,7 +1169,7 @@ mod tests {
     #[test]
     fn delete_forgets_the_project_and_its_agent_homes_but_not_your_files() {
         use_test_store();
-        let dir = std::env::temp_dir().join(format!("tmm-del-{}", uuid::Uuid::new_v4()));
+        let dir = crate::config::test_scratch("tmm-del");
         std::fs::create_dir_all(&dir).unwrap();
         // A file of the user's, and an agent home of ours.
         std::fs::write(dir.join("keep-me.txt"), "mine").unwrap();
@@ -1208,7 +1208,7 @@ mod tests {
 
     /// A directory holding one agent home, `builder`, for the #415 tests.
     fn dir_with_a_home(tag: &str) -> (std::path::PathBuf, std::path::PathBuf, String) {
-        let dir = std::env::temp_dir().join(format!("tmm-del-{tag}-{}", uuid::Uuid::new_v4()));
+        let dir = crate::config::test_scratch(&format!("tmm-del-{tag}"));
         let home = dir.join(".tmm").join("agents").join("builder");
         std::fs::create_dir_all(&home).unwrap();
         std::fs::write(home.join("launch.json"), "{}").unwrap();
@@ -1450,7 +1450,7 @@ mod tests {
     /// a delete next to such a project keeps the homes, saying why.
     #[test]
     fn same_dir_compares_canonical_paths_and_a_failed_resolution_is_unknown() {
-        let dir = std::env::temp_dir().join(format!("tmm-same-{}", uuid::Uuid::new_v4()));
+        let dir = crate::config::test_scratch("tmm-same");
         std::fs::create_dir_all(dir.join("a")).unwrap();
         let p = dir.join("a").canonicalize().unwrap().to_string_lossy().to_string();
         std::os::unix::fs::symlink(&p, dir.join("alias")).unwrap();
@@ -1537,7 +1537,7 @@ mod tests {
     /// and won the tie by coming first. Real directories here.
     #[test]
     fn a_parked_window_is_home_under_any_spelling() {
-        let fx = std::env::temp_dir().join(format!("tmm-427-{}", uuid::Uuid::new_v4()));
+        let fx = crate::config::test_scratch("tmm-427");
         std::fs::create_dir_all(fx.join("home")).unwrap();
         std::fs::create_dir_all(fx.join("proj")).unwrap();
         let fx = fx.canonicalize().unwrap();
@@ -1565,7 +1565,7 @@ mod tests {
     fn a_session_is_adopted_at_the_directory_it_was_made_in() {
         // `$HOME` by directory identity, on real directories (review P1-A):
         // a real home, a symlink alias of it, and a project elsewhere.
-        let fx = std::env::temp_dir().join(format!("tmm-421-home-{}", uuid::Uuid::new_v4()));
+        let fx = crate::config::test_scratch("tmm-421-home");
         std::fs::create_dir_all(fx.join("home")).unwrap();
         std::fs::create_dir_all(fx.join("proj")).unwrap();
         let fx = fx.canonicalize().unwrap();
@@ -1770,7 +1770,7 @@ mod tests {
     #[test]
     fn an_up_clears_only_the_intents_it_read_and_only_on_success() {
         use_test_store();
-        let dir = std::env::temp_dir().join(format!("tmm-upv-{}", uuid::Uuid::new_v4()));
+        let dir = crate::config::test_scratch("tmm-upv");
         std::fs::create_dir_all(&dir).unwrap();
         let id = id_of(&create(&dir.to_string_lossy(), Some("upv"), Some(&format!("upv{}", std::process::id())), None).unwrap());
         let a = store::Slot { id: None, ord: 0, window_name: "a".into(), cwd: String::new(), kind: store::SlotKind::Agent, command: Some("kiro".into()), auto_run: true, agent_session_id: None, first_seen_at: 1, settled_at: Some(2) };
@@ -1899,7 +1899,7 @@ mod tests {
         let scope = tmux::test_support::GlobalSocket::hold();
         let server = tmux::test_support::PrivateTmux::start(&scope, "close-locked");
         server.run(&["new-session", "-d", "-s", "lock", "-n", "w"]).unwrap();
-        let dir = std::env::temp_dir().join(format!("tmm-test-close-locked-{}", std::process::id()));
+        let dir = crate::config::test_scratch("tmm-test-close-locked");
         std::fs::create_dir_all(&dir).unwrap();
         std::fs::set_permissions(&dir, std::fs::Permissions::from_mode(0o000)).unwrap();
         scope.set(Some(dir.join("x.sock").to_string_lossy().to_string()));
@@ -1922,7 +1922,7 @@ mod tests {
     #[test]
     fn a_down_whose_kill_fails_stays_on_record() {
         use_test_store();
-        let dir = std::env::temp_dir().join(format!("tmm-down-{}", uuid::Uuid::new_v4()));
+        let dir = crate::config::test_scratch("tmm-down");
         std::fs::create_dir_all(&dir).unwrap();
         let id = id_of(&create(&dir.to_string_lossy(), Some("downfail"), Some(&format!("downfail{}", std::process::id())), None).unwrap());
         let marked_before_close = std::cell::Cell::new(false);

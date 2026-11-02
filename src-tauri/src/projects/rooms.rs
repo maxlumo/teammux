@@ -567,7 +567,7 @@ mod tests {
     #[test]
     fn legacy_import_copies_proj_rooms_once_and_skips_team_rooms() {
         crate::projects::tests::use_test_store();
-        let dir = std::env::temp_dir().join(format!("tmm-import-{}", uuid::Uuid::new_v4()));
+        let dir = crate::config::test_scratch("tmm-import");
         std::fs::create_dir_all(&dir).unwrap();
         let legacy = dir.join("team.db");
         {

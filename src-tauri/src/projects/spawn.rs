@@ -1590,7 +1590,7 @@ mod relaunch_tests {
     /// `<home>/sessions/<cwd-hash>/<id>/session.json`.
     #[test]
     fn a_restart_resumes_a_v3_session_only_if_the_agents_own_home_holds_it() {
-        let ws = std::env::temp_dir().join(format!("tmm-relaunch-379-{}", uuid::Uuid::new_v4()));
+        let ws = crate::config::test_scratch("tmm-relaunch-379");
         let home = agent_home(ws.to_str().unwrap(), "lead");
         std::fs::create_dir_all(&home).unwrap();
         LaunchRecipe {
@@ -1629,7 +1629,7 @@ mod relaunch_tests {
     /// production), persist its recipe, and plant a session of the given mode
     /// in its isolated home. Returns the workspace and the id.
     fn v3_agent_with_session(window_name: &str, def_name: &str, mode: &str) -> (std::path::PathBuf, String) {
-        let ws = std::env::temp_dir().join(format!("tmm-relaunch-379-{}", uuid::Uuid::new_v4()));
+        let ws = crate::config::test_scratch("tmm-relaunch-379");
         let home = agent_home(ws.to_str().unwrap(), window_name);
         std::fs::create_dir_all(&home).unwrap();
         // Central-asset resolution touches the process-global store: never the
@@ -1733,7 +1733,7 @@ mod relaunch_tests {
 
     #[test]
     fn relaunch_line_replays_env_identity_and_resume() {
-        let ws = std::env::temp_dir().join(format!("tmm-relaunch-{}", uuid::Uuid::new_v4()));
+        let ws = crate::config::test_scratch("tmm-relaunch");
         let home = agent_home(ws.to_str().unwrap(), "lead");
         std::fs::create_dir_all(&home).unwrap();
         LaunchRecipe { backend: "kiro", env: &[("KIRO_HOME".to_string(), home.to_string_lossy().to_string())], cmd: "command kiro-cli chat --agent lead --model m --trust-all-tools", spawned_by: "", team: None, agent_def: "", member: "", from_member: "", input_mode: "" }
@@ -2116,7 +2116,7 @@ mod tests {
         let mode = |p: &Path| std::fs::symlink_metadata(p).unwrap().permissions().mode() & 0o777;
         let notifications = crate::agent_notifications::AgentNotificationHub::load();
         for b in crate::backends::Backend::ALL {
-            let ws = std::env::temp_dir().join(format!("tmm-sentinel-{}-{}", b.name(), uuid::Uuid::new_v4()));
+            let ws = crate::config::test_scratch(&format!("tmm-sentinel-{}", b.name()));
             std::fs::create_dir_all(&ws).unwrap();
             let home = ws.join(".tmm/agents/sec");
             make_home_private(&home).unwrap();
@@ -2173,7 +2173,7 @@ mod tests {
     #[test]
     #[cfg(unix)]
     fn a_copy_into_a_home_whose_target_is_a_link_refuses_the_render_and_the_start() {
-        let ws = std::env::temp_dir().join(format!("tmm-copy-link-{}", uuid::Uuid::new_v4()));
+        let ws = crate::config::test_scratch("tmm-copy-link");
         let outside = ws.join("outside");
         std::fs::create_dir_all(&outside).unwrap();
         let sentinel = outside.join("theirs");
@@ -2214,7 +2214,7 @@ mod tests {
     #[test]
     #[cfg(unix)]
     fn refresh_hooks_refuses_a_home_it_cannot_make_private() {
-        let ws = std::env::temp_dir().join(format!("tmm-refresh-priv-{}", uuid::Uuid::new_v4()));
+        let ws = crate::config::test_scratch("tmm-refresh-priv");
         let outside = ws.join("outside");
         std::fs::create_dir_all(outside.join("agents/dev")).unwrap();
         std::fs::write(outside.join("agents/dev/launch.json"), "{}").unwrap();
@@ -2257,7 +2257,7 @@ mod tests {
 
     #[test]
     fn kiro_home_is_isolated_and_wired_to_tmm() {
-        let dir = std::env::temp_dir().join(format!("tmm-spawn-kiro-{}", uuid::Uuid::new_v4()));
+        let dir = crate::config::test_scratch("tmm-spawn-kiro");
         let mut d = def("kiro");
         d.model = "claude-haiku-4.5".into();
         let r = render_kiro(&d, "tester", &dir, &dir, &build_prompt(&d, "tester", "proj", "fix the bug", "lead", ""), &[]).unwrap();
@@ -2371,7 +2371,7 @@ mod tests {
     /// re-materializes the hooks in place, and nothing else.
     #[test]
     fn refresh_hooks_repairs_a_stale_config_without_touching_the_prompt() {
-        let ws = std::env::temp_dir().join(format!("tmm-refresh-{}", uuid::Uuid::new_v4()));
+        let ws = crate::config::test_scratch("tmm-refresh");
         let home = ws.join(".tmm/agents/dev/agents");
         std::fs::create_dir_all(&home).unwrap();
         let cfg = home.join("dev.json");
@@ -2411,7 +2411,7 @@ mod tests {
     /// the middle of it.
     #[test]
     fn refresh_hooks_backfills_queue_mode_settings() {
-        let ws = std::env::temp_dir().join(format!("tmm-qmode-{}", uuid::Uuid::new_v4()));
+        let ws = crate::config::test_scratch("tmm-qmode");
         let home = ws.join(".tmm/agents/dev");
         std::fs::create_dir_all(home.join("agents")).unwrap();
         std::fs::write(home.join("agents/dev.json"), serde_json::to_string_pretty(&json!({
@@ -2456,7 +2456,7 @@ mod tests {
 
     #[test]
     fn refresh_hooks_backfills_claude_status_line() {
-        let ws = std::env::temp_dir().join(format!("tmm-cc-status-{}", uuid::Uuid::new_v4()));
+        let ws = crate::config::test_scratch("tmm-cc-status");
         let home = ws.join(".tmm/agents/cc");
         std::fs::create_dir_all(&home).unwrap();
         let settings = home.join("settings.json");
@@ -2485,7 +2485,7 @@ mod tests {
     /// (an isolated home loaded the agent + hooks and answered a real turn).
     #[test]
     fn grok_home_is_isolated_and_wired_to_tmm() {
-        let dir = std::env::temp_dir().join(format!("tmm-spawn-grok-{}", uuid::Uuid::new_v4()));
+        let dir = crate::config::test_scratch("tmm-spawn-grok");
         let mut d = def("grok");
         d.model = "grok-4.6".into();
         let r = render_grok(&d, "tester", &dir, &build_prompt(&d, "tester", "proj", "fix the bug", "lead", ""), &[]).unwrap();
@@ -2517,7 +2517,7 @@ mod tests {
 
     #[test]
     fn omp_home_is_isolated_and_wired_to_tmm() {
-        let dir = std::env::temp_dir().join(format!("tmm-spawn-omp-{}", uuid::Uuid::new_v4()));
+        let dir = crate::config::test_scratch("tmm-spawn-omp");
         let mut d = def("omp");
         d.model = "anthropic/claude-opus-4-6".into();
         d.effort = "high".into();
@@ -2558,7 +2558,7 @@ mod tests {
     /// launch line carries no --thinking.
     #[test]
     fn omp_defaults_leave_config_and_thinking_off() {
-        let dir = std::env::temp_dir().join(format!("tmm-spawn-omp-def-{}", uuid::Uuid::new_v4()));
+        let dir = crate::config::test_scratch("tmm-spawn-omp-def");
         let d = def("omp");
         let r = render_omp(&d, "t2", &dir, "prompt", &[]).unwrap();
         assert!(!r.cmd.contains("--thinking"), "{}", r.cmd);
@@ -2571,7 +2571,7 @@ mod tests {
     /// pinned model and keep loading a revoked server (#241, validator).
     #[test]
     fn omp_rerender_removes_an_unpinned_model_and_revoked_mcp() {
-        let dir = std::env::temp_dir().join(format!("tmm-spawn-omp-rr-{}", uuid::Uuid::new_v4()));
+        let dir = crate::config::test_scratch("tmm-spawn-omp-rr");
         let mut d = def("omp");
         d.model = "anthropic/claude-opus-4-6".into();
         render_omp(&d, "t3", &dir, "prompt", &[]).unwrap();
@@ -2624,7 +2624,7 @@ hooks = [ { type = "command", command = "/opt/guard.sh" } ]
     /// a hardcoded id (the launch line used to force `claude-sonnet-4.6`).
     #[test]
     fn no_model_configured_leaves_the_backend_default_alone() {
-        let dir = std::env::temp_dir().join(format!("tmm-spawn-nomodel-{}", uuid::Uuid::new_v4()));
+        let dir = crate::config::test_scratch("tmm-spawn-nomodel");
         let mut d = def("kiro");
         d.model = "   ".into();
         let r = render_kiro(&d, "tester", &dir, &dir, "p", &[]).unwrap();
@@ -2640,7 +2640,7 @@ hooks = [ { type = "command", command = "/opt/guard.sh" } ]
     /// drops it entirely on restart. Every start moves it into the config once.
     #[test]
     fn a_launch_line_model_migrates_into_the_config() {
-        let ws = std::env::temp_dir().join(format!("tmm-modelmig-{}", uuid::Uuid::new_v4()));
+        let ws = crate::config::test_scratch("tmm-modelmig");
         let home = ws.join(".tmm/agents/dev");
         std::fs::create_dir_all(home.join("agents")).unwrap();
         let cfg = home.join("agents").join("dev.json");
@@ -2676,7 +2676,7 @@ hooks = [ { type = "command", command = "/opt/guard.sh" } ]
             eprintln!("kiro-cli unavailable — nothing can be rejected, skipping");
             return;
         }
-        let ws = std::env::temp_dir().join(format!("tmm-modelbad-{}", uuid::Uuid::new_v4()));
+        let ws = crate::config::test_scratch("tmm-modelbad");
         let home = ws.join(".tmm/agents/dev");
         std::fs::create_dir_all(home.join("agents")).unwrap();
         let cfg = home.join("agents").join("dev.json");
@@ -2698,7 +2698,7 @@ hooks = [ { type = "command", command = "/opt/guard.sh" } ]
     /// survive every respawn), and unknown entries are kept.
     #[test]
     fn mcp_config_seeds_and_never_clobbers() {
-        let ws = std::env::temp_dir().join(format!("tmm-mcpseed-{}", uuid::Uuid::new_v4()));
+        let ws = crate::config::test_scratch("tmm-mcpseed");
         std::fs::create_dir_all(&ws).unwrap();
         let mk = |name: &str, cmd: &str| -> shared::McpDef {
             serde_json::from_value(json!({ "name": name, "command": cmd })).unwrap()
@@ -2743,7 +2743,7 @@ hooks = [ { type = "command", command = "/opt/guard.sh" } ]
 
     #[test]
     fn claude_state_pretrusts_the_git_root_without_clobbering_session_data() {
-        let root = std::env::temp_dir().join(format!("tmm-cc-trust-{}", uuid::Uuid::new_v4()));
+        let root = crate::config::test_scratch("tmm-cc-trust");
         let workspace = root.join("repo/subdir");
         let home = root.join("home");
         std::fs::create_dir_all(root.join("repo/.git")).unwrap();
@@ -2903,7 +2903,7 @@ hooks = [ { type = "command", command = "/opt/guard.sh" } ]
     #[test]
     fn claude_and_codex_render_without_team_plumbing() {
         for backend in ["claude", "codex"] {
-            let dir = std::env::temp_dir().join(format!("tmm-spawn-{backend}-{}", uuid::Uuid::new_v4()));
+            let dir = crate::config::test_scratch(&format!("tmm-spawn-{backend}"));
             std::fs::create_dir_all(&dir).unwrap();
             let d = def(backend);
             let prompt = build_prompt(&d, "tester", "proj", "", "", "");
@@ -2977,7 +2977,7 @@ hooks = [ { type = "command", command = "/opt/guard.sh" } ]
     /// (#455, non-negotiable 10). Empty = not set, nothing on the line.
     #[test]
     fn effort_reaches_each_backend_in_its_own_dialect() {
-        let dir = std::env::temp_dir().join(format!("tmm-effort-{}", uuid::Uuid::new_v4()));
+        let dir = crate::config::test_scratch("tmm-effort");
         std::fs::create_dir_all(&dir).unwrap();
         let mut d = def("kiro");
         d.effort = "high".into();
@@ -3050,7 +3050,7 @@ hooks = [ { type = "command", command = "/opt/guard.sh" } ]
         })).unwrap();
         // Skills are imported (files copied into the managed store) — build
         // a real local source so the import path runs for real.
-        let src = std::env::temp_dir().join(format!("tmm-central-skill-{}", uuid::Uuid::new_v4()));
+        let src = crate::config::test_scratch("tmm-central-skill");
         std::fs::create_dir_all(&src).unwrap();
         std::fs::write(src.join("SKILL.md"), "---\nname: central-skill\n---\nbody").unwrap();
         super::super::skill_save(&serde_json::json!({
@@ -3114,7 +3114,7 @@ hooks = [ { type = "command", command = "/opt/guard.sh" } ]
         assert!(first.contains("] lead: fix it"), "the hook can recover the reply edge: {first}");
 
         // The recipe retains who created the slot as provenance across refresh.
-        let ws = std::env::temp_dir().join(format!("tmm-spawnedby-{}", std::process::id()));
+        let ws = crate::config::test_scratch("tmm-spawnedby");
         let home = ws.join(".tmm").join("agents").join("b");
         std::fs::create_dir_all(&home).unwrap();
         LaunchRecipe { backend: "kiro", env: &[], cmd: "command kiro-cli chat --agent b", spawned_by: "lead", team: None, agent_def: "", member: "", from_member: "", input_mode: "" }.write(&home).unwrap();
@@ -3133,7 +3133,7 @@ hooks = [ { type = "command", command = "/opt/guard.sh" } ]
     #[test]
     fn a_joined_agent_is_in_the_team_but_not_in_its_definition() {
         super::super::tests::use_test_store();
-        let ws = std::env::temp_dir().join(format!("tmm-join-{}", uuid::Uuid::new_v4()));
+        let ws = crate::config::test_scratch("tmm-join");
         let ws_str = ws.to_string_lossy().to_string();
         let read = |p: &Path| -> Value { serde_json::from_str(&std::fs::read_to_string(p).unwrap()).unwrap() };
         let save = |name: &str, persona: &str| {
@@ -3224,7 +3224,7 @@ hooks = [ { type = "command", command = "/opt/guard.sh" } ]
     #[test]
     fn an_agent_moves_in_and_out_of_a_team_by_its_recipe_alone() {
         super::super::tests::use_test_store();
-        let ws = std::env::temp_dir().join(format!("tmm-move-{}", uuid::Uuid::new_v4()));
+        let ws = crate::config::test_scratch("tmm-move");
         let ws_str = ws.to_string_lossy().to_string();
         let read = |p: &Path| -> Value { serde_json::from_str(&std::fs::read_to_string(p).unwrap()).unwrap() };
         super::super::registry_save(&json!({ "name": "mvbase", "backend": "kiro", "system": "Base.", "skills": "[]", "mcp": "[]" })).unwrap();
@@ -3352,7 +3352,7 @@ hooks = [ { type = "command", command = "/opt/guard.sh" } ]
     #[test]
     fn refresh_agent_rematerializes_from_the_current_def_and_keeps_the_spawner() {
         super::super::tests::use_test_store();
-        let ws = std::env::temp_dir().join(format!("tmm-refresh-{}", uuid::Uuid::new_v4()));
+        let ws = crate::config::test_scratch("tmm-refresh");
         let ws_str = ws.to_string_lossy().to_string();
         let name = "rfagent";
         let save = |persona: &str| {
@@ -3409,7 +3409,7 @@ hooks = [ { type = "command", command = "/opt/guard.sh" } ]
     #[test]
     fn a_team_member_input_mode_override_renders_on_restart_and_empty_inherits() {
         super::super::tests::use_test_store();
-        let ws = std::env::temp_dir().join(format!("tmm-member-mode-{}", uuid::Uuid::new_v4()));
+        let ws = crate::config::test_scratch("tmm-member-mode");
         let ws_str = ws.to_string_lossy().to_string();
         let save = |name: &str, backend: &str, mode: &str| {
             super::super::registry_save(&json!({
@@ -3476,7 +3476,7 @@ hooks = [ { type = "command", command = "/opt/guard.sh" } ]
         assert!(super::super::registry_save(&json!({ "name": "dmempty", "backend": "kiro", "input_mode": "", "system": "", "skills": "[]", "mcp": "[]" })).is_err(),
             "an empty mode is still refused, not defaulted");
 
-        let ws = std::env::temp_dir().join(format!("tmm-default-mode-{}", uuid::Uuid::new_v4()));
+        let ws = crate::config::test_scratch("tmm-default-mode");
         let ws_str = ws.to_string_lossy().to_string();
         let d = super::super::registry_get("dmkiro").unwrap().unwrap();
         materialize(&super::super::recipe::recipe_section(&agent_home(&ws_str, "dmkiro")), &d, "dmkiro", "proj", &ws_str, "", "", None, "dmkiro", "", "").unwrap();
@@ -3547,7 +3547,7 @@ hooks = [ { type = "command", command = "/opt/guard.sh" } ]
     #[test]
     fn a_codex_restart_takes_the_definitions_model_from_the_profile_not_the_line() {
         super::super::tests::use_test_store();
-        let ws = std::env::temp_dir().join(format!("tmm-cx455-{}", uuid::Uuid::new_v4()));
+        let ws = crate::config::test_scratch("tmm-cx455");
         let ws_str = ws.to_string_lossy().to_string();
         let name = format!("cx455-{}", &uuid::Uuid::new_v4().to_string()[..6]);
         let save = |model: &str, effort: &str| {
@@ -3590,7 +3590,7 @@ hooks = [ { type = "command", command = "/opt/guard.sh" } ]
     #[test]
     fn refresh_agent_keeps_old_materials_only_when_the_definition_is_absent() {
         super::super::tests::use_test_store();
-        let ws = std::env::temp_dir().join(format!("tmm-rf452-{}", uuid::Uuid::new_v4()));
+        let ws = crate::config::test_scratch("tmm-rf452");
         let ws_str = ws.to_string_lossy().to_string();
         let tag = &uuid::Uuid::new_v4().to_string()[..8];
         let setup = |window: &str, recipe: &str| {
@@ -3685,7 +3685,7 @@ hooks = [ { type = "command", command = "/opt/guard.sh" } ]
     #[test]
     fn refresh_agent_follows_the_recipes_provenance_not_the_window_name() {
         super::super::tests::use_test_store();
-        let ws = std::env::temp_dir().join(format!("tmm-refresh-prov-{}", uuid::Uuid::new_v4()));
+        let ws = crate::config::test_scratch("tmm-refresh-prov");
         let ws_str = ws.to_string_lossy().to_string();
         let read = |p: &Path| -> Value { serde_json::from_str(&std::fs::read_to_string(p).unwrap()).unwrap() };
         let save = |name: &str, persona: &str| {
@@ -3805,7 +3805,7 @@ hooks = [ { type = "command", command = "/opt/guard.sh" } ]
     /// has room for; a project at the cap in managed agents must refuse.
     #[test]
     fn spawn_cap_counts_only_managed_windows() {
-        let ws = std::env::temp_dir().join(format!("tmm-cap-{}", uuid::Uuid::new_v4()));
+        let ws = crate::config::test_scratch("tmm-cap");
         let pane = |w: usize, name: &str| crate::tmux::TmuxPane {
             session: "s".into(), window: w, pane: 0, width: 80, height: 24,
             current_command: "kiro-cli".into(), window_name: name.into(),
@@ -3870,7 +3870,7 @@ hooks = [ { type = "command", command = "/opt/guard.sh" } ]
     #[test]
     fn a_fork_of_a_solo_agent_launches_its_def_in_a_fresh_home() {
         super::super::tests::use_test_store();
-        let ws = std::env::temp_dir().join(format!("tmm-fork-solo-{}", uuid::Uuid::new_v4()));
+        let ws = crate::config::test_scratch("tmm-fork-solo");
         let ws_str = ws.to_string_lossy().to_string();
         fk_save("fksolo", "Fork persona.", "steer");
         let def = super::super::registry_get("fksolo").unwrap().unwrap();
@@ -3910,7 +3910,7 @@ hooks = [ { type = "command", command = "/opt/guard.sh" } ]
     #[test]
     fn a_fork_of_a_team_member_copies_its_def_and_joins_the_team_without_its_slot() {
         super::super::tests::use_test_store();
-        let ws = std::env::temp_dir().join(format!("tmm-fork-team-{}", uuid::Uuid::new_v4()));
+        let ws = crate::config::test_scratch("tmm-fork-team");
         let ws_str = ws.to_string_lossy().to_string();
         let read = |p: &Path| -> Value { serde_json::from_str(&std::fs::read_to_string(p).unwrap()).unwrap() };
         fk_save("fkbase", "Base persona.", "steer");
@@ -3972,7 +3972,7 @@ hooks = [ { type = "command", command = "/opt/guard.sh" } ]
     #[test]
     fn a_fork_is_refused_for_a_stopped_unknown_or_defless_source_and_names_are_never_clobbered() {
         super::super::tests::use_test_store();
-        let ws = std::env::temp_dir().join(format!("tmm-fork-refuse-{}", uuid::Uuid::new_v4()));
+        let ws = crate::config::test_scratch("tmm-fork-refuse");
         let ws_str = ws.to_string_lossy().to_string();
         fk_save("fkref", "Persona.", "queue");
         let def = super::super::registry_get("fkref").unwrap().unwrap();
@@ -4008,7 +4008,7 @@ hooks = [ { type = "command", command = "/opt/guard.sh" } ]
     #[test]
     fn a_fork_of_a_nested_team_member_joins_the_root_and_keeps_the_member_path() {
         super::super::tests::use_test_store();
-        let ws = std::env::temp_dir().join(format!("tmm-fork-nested-{}", uuid::Uuid::new_v4()));
+        let ws = crate::config::test_scratch("tmm-fork-nested");
         let ws_str = ws.to_string_lossy().to_string();
         fk_save("fnbase", "Nested base.", "queue");
         super::super::teams_save(&json!({ "name": "fninner", "description": "", "members": r#"[{"name":"rev","base":"fnbase","role":"review the diff"}]"# })).unwrap();
@@ -4039,7 +4039,7 @@ hooks = [ { type = "command", command = "/opt/guard.sh" } ]
     /// both ask for goes to exactly one.
     #[test]
     fn two_forks_that_reach_the_same_candidate_get_different_names_and_homes() {
-        let ws = std::env::temp_dir().join(format!("tmm-fork-claim-{}", uuid::Uuid::new_v4()));
+        let ws = crate::config::test_scratch("tmm-fork-claim");
         let ws_str = ws.to_string_lossy().to_string();
         let race = |candidates: Vec<String>, explicit: bool| {
             let barrier = std::sync::Arc::new(std::sync::Barrier::new(2));
@@ -4078,7 +4078,7 @@ hooks = [ { type = "command", command = "/opt/guard.sh" } ]
     /// (what a team spawn passes) is refused, not silently written over.
     #[test]
     fn a_fork_and_an_ordinary_spawn_reaching_for_the_same_name_never_share_it() {
-        let ws = std::env::temp_dir().join(format!("tmm-fork-shared-{}", uuid::Uuid::new_v4()));
+        let ws = crate::config::test_scratch("tmm-fork-shared");
         let ws_str = ws.to_string_lossy().to_string();
         let live = vec!["dev".to_string()];
 
@@ -4118,7 +4118,7 @@ hooks = [ { type = "command", command = "/opt/guard.sh" } ]
     /// keeps its home.
     #[test]
     fn a_claim_that_is_dropped_removes_only_an_empty_home_it_made() {
-        let ws = std::env::temp_dir().join(format!("tmm-fork-drop-{}", uuid::Uuid::new_v4()));
+        let ws = crate::config::test_scratch("tmm-fork-drop");
         let ws_str = ws.to_string_lossy().to_string();
         let live: Vec<String> = Vec::new();
         let written = claim_first(&ws_str, &|| Ok(live.clone()), &["w-2".to_string()], true).unwrap();
@@ -4147,7 +4147,7 @@ hooks = [ { type = "command", command = "/opt/guard.sh" } ]
     #[test]
     fn a_home_that_appears_after_the_plan_survives_and_an_unreadable_homes_dir_refuses() {
         use std::os::unix::fs::PermissionsExt;
-        let ws = std::env::temp_dir().join(format!("tmm-fork-late-{}", uuid::Uuid::new_v4()));
+        let ws = crate::config::test_scratch("tmm-fork-late");
         let ws_str = ws.to_string_lossy().to_string();
         let candidates = vec!["late-2".to_string(), "late-3".to_string()];
         // Between choosing the candidates and claiming, somebody else made late-2.
@@ -4178,7 +4178,7 @@ hooks = [ { type = "command", command = "/opt/guard.sh" } ]
     #[test]
     fn a_fork_of_a_pre_113_agent_finds_its_def_by_the_source_name_and_renders_the_new_one() {
         super::super::tests::use_test_store();
-        let ws = std::env::temp_dir().join(format!("tmm-fork-old-{}", uuid::Uuid::new_v4()));
+        let ws = crate::config::test_scratch("tmm-fork-old");
         let ws_str = ws.to_string_lossy().to_string();
         fk_save("fkold", "Old persona.", "queue");
         let def = super::super::registry_get("fkold").unwrap().unwrap();
@@ -4213,7 +4213,7 @@ hooks = [ { type = "command", command = "/opt/guard.sh" } ]
     #[test]
     fn a_nested_fork_keeps_the_sub_teams_rules_and_has_one_team_section() {
         super::super::tests::use_test_store();
-        let ws = std::env::temp_dir().join(format!("tmm-fork-rules-{}", uuid::Uuid::new_v4()));
+        let ws = crate::config::test_scratch("tmm-fork-rules");
         let ws_str = ws.to_string_lossy().to_string();
         fk_save("fgbase", "Rules base.", "queue");
         super::super::teams_save(&json!({ "name": "fgchild", "description": "Review only: never edit files.", "members": r#"[{"name":"rev","base":"fgbase","role":"review the diff"}]"# })).unwrap();
@@ -4284,7 +4284,7 @@ hooks = [ { type = "command", command = "/opt/guard.sh" } ]
     /// it out of reach — the stale read shown at the end is what the old code did.)
     #[test]
     fn a_late_ordinary_spawn_skips_a_fork_that_has_completed_and_is_running() {
-        let ws = std::env::temp_dir().join(format!("tmm-fork-late-hire-{}", uuid::Uuid::new_v4()));
+        let ws = crate::config::test_scratch("tmm-fork-late-hire");
         let ws_str = ws.to_string_lossy().to_string();
         let live = std::sync::Arc::new(std::sync::Mutex::new(vec!["dev".to_string()]));
         let fresh = { let live = live.clone(); move || Ok(live.lock().unwrap().clone()) };
@@ -4317,7 +4317,7 @@ hooks = [ { type = "command", command = "/opt/guard.sh" } ]
     /// still started again.
     #[test]
     fn a_team_member_whose_planned_name_a_fork_took_is_refused_but_its_own_stopped_slot_is_started() {
-        let ws = std::env::temp_dir().join(format!("tmm-fork-team-plan-{}", uuid::Uuid::new_v4()));
+        let ws = crate::config::test_scratch("tmm-fork-team-plan");
         let ws_str = ws.to_string_lossy().to_string();
         let member = Starting { agent_def: "", team: "squad", member: "dev" };
         // The fork of a squad member: a joined agent, team root, no member.
@@ -4347,7 +4347,7 @@ hooks = [ { type = "command", command = "/opt/guard.sh" } ]
     #[test]
     fn a_home_is_the_requests_own_only_when_its_recipe_says_so() {
         use std::os::unix::fs::PermissionsExt;
-        let ws = std::env::temp_dir().join(format!("tmm-own-slot-{}", uuid::Uuid::new_v4()));
+        let ws = crate::config::test_scratch("tmm-own-slot");
         let ws_str = ws.to_string_lossy().to_string();
         let lead = Starting { agent_def: "lead", team: "", member: "" };
         assert_eq!(may_start_in(&ws_str, "lead", &lead), Ok(true), "no home: free");
@@ -4375,7 +4375,7 @@ hooks = [ { type = "command", command = "/opt/guard.sh" } ]
     /// it: it makes its home and writes into it, and the write survives.
     #[test]
     fn an_old_claims_cleanup_finishes_before_a_new_claim_can_use_the_name() {
-        let ws = std::env::temp_dir().join(format!("tmm-claim-order-{}", uuid::Uuid::new_v4()));
+        let ws = crate::config::test_scratch("tmm-claim-order");
         let ws_str = ws.to_string_lossy().to_string();
         let nobody = || Starting { agent_def: "", team: "", member: "" };
         for round in 0..300 {
@@ -4428,7 +4428,7 @@ hooks = [ { type = "command", command = "/opt/guard.sh" } ]
     /// reported) or steps to the next name, never writes over the other.
     #[test]
     fn a_team_spawn_planning_a_name_and_a_fork_reaching_for_it_never_both_get_it() {
-        let ws = std::env::temp_dir().join(format!("tmm-fork-clash-{}", uuid::Uuid::new_v4()));
+        let ws = crate::config::test_scratch("tmm-fork-clash");
         let ws_str = ws.to_string_lossy().to_string();
         let (mut member_won, mut fork_won) = (0, 0);
         for round in 0..60 {
@@ -4499,9 +4499,9 @@ hooks = [ { type = "command", command = "/opt/guard.sh" } ]
     /// empty starts as before.
     #[test]
     fn a_failed_live_read_refuses_every_allocation_and_touches_nothing() {
-        let ws = std::env::temp_dir().join(format!("tmm-live-unknown-{}", uuid::Uuid::new_v4()));
+        let ws = crate::config::test_scratch("tmm-live-unknown");
         let ws_str = ws.to_string_lossy().to_string();
-        let untouched = std::env::temp_dir().join(format!("tmm-live-unknown-new-{}", uuid::Uuid::new_v4()));
+        let untouched = crate::config::test_scratch("tmm-live-unknown-new");
         let untouched_str = untouched.to_string_lossy().to_string();
         // `dev` is running, and its recipe is the one a hire of `dev` would match.
         write_recipe(&ws_str, "dev", r#"{"agent_def":"dev","member":"","team":""}"#);
@@ -4550,7 +4550,7 @@ hooks = [ { type = "command", command = "/opt/guard.sh" } ]
     #[test]
     fn a_fork_whose_allocation_read_fails_claims_nothing() {
         super::super::tests::use_test_store();
-        let ws = std::env::temp_dir().join(format!("tmm-fork-read-fails-{}", uuid::Uuid::new_v4()));
+        let ws = crate::config::test_scratch("tmm-fork-read-fails");
         let ws_str = ws.to_string_lossy().to_string();
         fk_save("fkread", "Fork persona.", "steer");
         let def = super::super::registry_get("fkread").unwrap().unwrap();
@@ -4595,7 +4595,7 @@ hooks = [ { type = "command", command = "/opt/guard.sh" } ]
     #[test]
     fn a_restart_before_the_slot_settles_starts_what_the_recipe_says_not_a_registry_name() {
         super::super::tests::use_test_store();
-        let ws = std::env::temp_dir().join(format!("tmm-respawn-{}", uuid::Uuid::new_v4()));
+        let ws = crate::config::test_scratch("tmm-respawn");
         let ws_str = ws.to_string_lossy().to_string();
         fk_save("rpsolo", "Respawn persona.", "steer");
         let def = super::super::registry_get("rpsolo").unwrap().unwrap();
@@ -4694,7 +4694,7 @@ hooks = [ { type = "command", command = "/opt/guard.sh" } ]
     #[test]
     fn a_respawn_waits_for_a_move_that_holds_the_recipe_and_keeps_it() {
         super::super::tests::use_test_store();
-        let ws = std::env::temp_dir().join(format!("tmm-respawn-barrier-{}", uuid::Uuid::new_v4()));
+        let ws = crate::config::test_scratch("tmm-respawn-barrier");
         let ws_str = ws.to_string_lossy().to_string();
         fk_save("rbbase", "Base.", "steer");
         fk_save("rbsolo", "Solo persona.", "steer");
@@ -4754,7 +4754,7 @@ hooks = [ { type = "command", command = "/opt/guard.sh" } ]
     #[test]
     fn only_a_missing_recipe_falls_back_to_the_window_name_and_an_unreadable_one_refuses() {
         super::super::tests::use_test_store();
-        let ws = std::env::temp_dir().join(format!("tmm-respawn-unreadable-{}", uuid::Uuid::new_v4()));
+        let ws = crate::config::test_scratch("tmm-respawn-unreadable");
         let ws_str = ws.to_string_lossy().to_string();
         fk_save("ab1", "Legacy persona.", "steer");
         fk_save("bad1", "Another agent's persona.", "steer");

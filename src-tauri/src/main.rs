@@ -45,7 +45,7 @@ mod tests {
         fn name(&self) -> &str { &self.name }
         /// Write a probe script beside this session's name; removed on drop.
         fn probe(&mut self, body: &str) -> String {
-            let path = std::env::temp_dir().join(format!("{}_{}.py", self.name, self.files.len()));
+            let path = tmux_mobile::config::test_scratch(&format!("{}_{}", self.name, self.files.len())).with_extension("py");
             std::fs::write(&path, body).unwrap();
             self.files.push(path.clone());
             path.display().to_string()

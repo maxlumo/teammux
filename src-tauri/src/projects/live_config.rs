@@ -323,7 +323,7 @@ mod tests {
     impl Ws {
         fn new(tag: &str) -> Ws {
             super::super::tests::use_test_store();
-            let dir = std::env::temp_dir().join(format!("tmm-dshlive-{tag}-{}", uuid::Uuid::new_v4()));
+            let dir = crate::config::test_scratch(&format!("tmm-dshlive-{tag}"));
             std::fs::create_dir_all(&dir).unwrap();
             let id = format!("p-{}", uuid::Uuid::new_v4());
             super::super::with_store(|s| {

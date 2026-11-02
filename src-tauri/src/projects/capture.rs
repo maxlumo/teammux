@@ -496,7 +496,7 @@ mod tests {
         let scope = tmux::test_support::GlobalSocket::hold();
         let server = tmux::test_support::PrivateTmux::start(&scope, "tick");
         let socket = server.socket().to_string();
-        let ws = std::env::temp_dir().join(format!("tmm-tick-{}", uuid::Uuid::new_v4()));
+        let ws = crate::config::test_scratch("tmm-tick");
         std::fs::create_dir_all(&ws).unwrap();
         let cwd = ws.to_string_lossy().to_string();
         let start = |s: &str| server.run(&["new-session", "-d", "-s", s, "-c", &cwd]).unwrap();

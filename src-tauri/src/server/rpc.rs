@@ -853,7 +853,7 @@ mod tests {
     fn sessions_page_kills_record_the_persons_intent() {
         crate::projects::tests::use_test_store();
         let session = format!("tmm-kill-{}", std::process::id());
-        let ws = std::env::temp_dir().join(format!("tmm-kill-ws-{}", uuid::Uuid::new_v4()));
+        let ws = crate::config::test_scratch("tmm-kill-ws");
         std::fs::create_dir_all(ws.join(".tmm/agents/dev")).unwrap();
         std::fs::write(ws.join(".tmm/agents/dev/launch.json"), "{}").unwrap();
         let cwd = ws.to_string_lossy().to_string();
@@ -949,7 +949,7 @@ mod tests {
     /// names the file.
     #[test]
     fn a_preview_scope_is_the_longest_declared_project_else_the_files_directory() {
-        let base = std::env::temp_dir().join(format!("tmm-433-scope-{}", uuid::Uuid::new_v4()));
+        let base = crate::config::test_scratch("tmm-433-scope");
         std::fs::create_dir_all(base.join("proj/site/pages")).unwrap();
         let base = base.canonicalize().unwrap();
         let html = base.join("proj/site/pages/index.html");

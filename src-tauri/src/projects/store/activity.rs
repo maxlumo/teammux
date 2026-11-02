@@ -1085,7 +1085,7 @@ mod tests {
     /// its id and message — never one without the other.
     #[test]
     fn a_numbered_prompt_settles_its_receipts_with_its_row_or_not_at_all() {
-        let path = std::env::temp_dir().join(format!("tmm-settle-{}", uuid::Uuid::new_v4())).join("state.db"); // a private parent: /tmp itself is refused (#448)
+        let path = crate::config::test_scratch("tmm-settle").join("state.db"); // a private parent: /tmp itself is refused (#448)
         let mut store = Store::open(&path).unwrap();
         store.insert_delivery("s", "w", "[tmm chat 2026-10-16 21:30] lead: @w go", 0, 100, "m-1").unwrap();
         let d = store.pending_deliveries("s", Some("w")).unwrap()[0].id;
@@ -1143,7 +1143,7 @@ mod tests {
     /// is written as dated and moves nothing.
     #[test]
     fn a_restart_never_stamps_below_the_durable_high_water() {
-        let path = std::env::temp_dir().join(format!("tmm-hw-{}", uuid::Uuid::new_v4())).join("state.db"); // a private parent: /tmp itself is refused (#448)
+        let path = crate::config::test_scratch("tmm-hw").join("state.db"); // a private parent: /tmp itself is refused (#448)
         let ahead = wall_ms() + 3_600_000;
         let mut store = Store::open(&path).unwrap();
         store.set_activity_clock(move || ahead);

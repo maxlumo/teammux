@@ -251,7 +251,7 @@ mod tests {
     use std::time::Duration;
 
     fn home() -> PathBuf {
-        let h = std::env::temp_dir().join(format!("tmm-recipe-{}", uuid::Uuid::new_v4())).join(".tmm/agents/dev");
+        let h = crate::config::test_scratch("tmm-recipe").join(".tmm/agents/dev");
         std::fs::create_dir_all(&h).unwrap();
         h
     }

@@ -723,13 +723,13 @@ mod tests {
         use_test_store();
         let tag = &uuid::Uuid::new_v4().to_string()[..8];
         // A bundle skill (SKILL.md + scripts + references) and a flat one.
-        let bundle = std::env::temp_dir().join(format!("tmm-skill-bundle-{tag}"));
+        let bundle = crate::config::test_scratch(&format!("tmm-skill-bundle-{tag}"));
         std::fs::create_dir_all(bundle.join("scripts")).unwrap();
         std::fs::create_dir_all(bundle.join("references")).unwrap();
         std::fs::write(bundle.join("SKILL.md"), "---\nname: bundle\ndescription: does bundled things\n---\nRun scripts/x.sh.\n").unwrap();
         std::fs::write(bundle.join("scripts/x.sh"), "#!/bin/sh\necho x\n").unwrap();
         std::fs::write(bundle.join("references/a.md"), "# A\n").unwrap();
-        let flat = std::env::temp_dir().join(format!("tmm-skill-flat-{tag}"));
+        let flat = crate::config::test_scratch(&format!("tmm-skill-flat-{tag}"));
         std::fs::create_dir_all(&flat).unwrap();
         std::fs::write(flat.join("SKILL.md"), "---\nname: flat\n---\nJust text.").unwrap();
         let (b, f) = (format!("load-bundle-{tag}"), format!("load-flat-{tag}"));
@@ -832,7 +832,7 @@ mod tests {
     /// cannot be read is an error, never a shorter list.
     #[test]
     fn the_file_listing_is_bounded_per_file_and_an_unreadable_part_is_an_error() {
-        let dir = std::env::temp_dir().join(format!("tmm-skill-walk-{}", uuid::Uuid::new_v4()));
+        let dir = crate::config::test_scratch("tmm-skill-walk");
         let make = |sub: &str, n: usize| {
             let d = dir.join(sub);
             std::fs::create_dir_all(&d).unwrap();
@@ -917,7 +917,7 @@ mod tests {
         if std::env::var_os("TMM_SKILL_ROOT_CHILD").is_none() {
             return;
         }
-        let gone = std::env::temp_dir().join(format!("tmm-gone-cwd-{}", uuid::Uuid::new_v4()));
+        let gone = crate::config::test_scratch("tmm-gone-cwd");
         std::fs::create_dir_all(&gone).unwrap();
         std::env::set_current_dir(&gone).unwrap();
         std::fs::remove_dir(&gone).unwrap();
@@ -930,7 +930,7 @@ mod tests {
     fn skill_import_owns_the_files_and_refresh_resyncs() {
         use_test_store();
         // A local source directory with a SKILL.md.
-        let src = std::env::temp_dir().join(format!("tmm-skill-src-{}", uuid::Uuid::new_v4()));
+        let src = crate::config::test_scratch("tmm-skill-src");
         std::fs::create_dir_all(&src).unwrap();
         std::fs::write(src.join("SKILL.md"), "---\nname: demo\n---\nv1").unwrap();
         std::fs::write(src.join("helper.py"), "print(1)").unwrap();
@@ -996,7 +996,7 @@ mod tests {
     fn skill_import_discovers_plugin_layouts() {
         use_test_store();
         // A claude-plugin-shaped tree: skills live under skills/<name>/.
-        let root = std::env::temp_dir().join(format!("tmm-plugin-{}", uuid::Uuid::new_v4()));
+        let root = crate::config::test_scratch("tmm-plugin");
         std::fs::create_dir_all(root.join("skills/alpha")).unwrap();
         std::fs::create_dir_all(root.join("skills/beta/scripts")).unwrap();
         std::fs::create_dir_all(root.join(".claude-plugin")).unwrap();
@@ -1026,7 +1026,7 @@ mod tests {
         assert!(skill_file("beta", "/etc/passwd").is_err());
 
         // A built-in name inside an import is SKIPPED, not stolen.
-        let clash = std::env::temp_dir().join(format!("tmm-clash-{}", uuid::Uuid::new_v4()));
+        let clash = crate::config::test_scratch("tmm-clash");
         std::fs::create_dir_all(clash.join("skills/mem")).unwrap();
         std::fs::write(clash.join("skills/mem/SKILL.md"), "---\nname: mem\n---\nX").unwrap();
         let r = skill_import(clash.to_str().unwrap()).unwrap();
@@ -1044,7 +1044,7 @@ mod tests {
         assert!(err.contains("a-zA-Z0-9"), "directory-unsafe names refused: {err}");
         let err = skill_save(&serde_json::json!({ "name": "ok", "source": "relative/path" })).unwrap_err();
         assert!(err.contains("absolute"), "{err}");
-        let empty = std::env::temp_dir().join(format!("tmm-noskill-{}", uuid::Uuid::new_v4()));
+        let empty = crate::config::test_scratch("tmm-noskill");
         std::fs::create_dir_all(&empty).unwrap();
         let err = skill_save(&serde_json::json!({ "name": "ok", "source": empty.to_string_lossy() })).unwrap_err();
         assert!(err.contains("SKILL.md"), "{err}");

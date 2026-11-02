@@ -2494,7 +2494,7 @@ mod tests {
     #[cfg(unix)]
     fn a_start_whose_privacy_fails_is_refused_and_the_old_secret_line_is_never_replayed() {
         let (session, _) = unique("p448");
-        let ws = std::env::temp_dir().join(format!("tmm-p448-{}", uuid::Uuid::new_v4()));
+        let ws = crate::config::test_scratch("tmm-p448");
         let home = ws.join(".tmm/agents/lg");
         std::fs::create_dir_all(home.join("codex")).unwrap();
         let def = format!("p448-{}", &uuid::Uuid::new_v4().to_string()[..8]);
@@ -2558,7 +2558,7 @@ mod tests {
     fn project_with(names: &[&str]) -> String {
         crate::projects::tests::use_test_store();
         let tag = uuid::Uuid::new_v4().simple().to_string()[..8].to_string();
-        let ws = std::env::temp_dir().join(format!("tmm-handoff-ws-{tag}"));
+        let ws = crate::config::test_scratch(&format!("tmm-handoff-ws-{tag}"));
         let recipe = serde_json::json!({ "backend": "kiro", "cmd": "kiro-cli chat --agent x", "team": "" }).to_string();
         for name in names {
             let home = ws.join(".tmm/agents").join(name);
@@ -2620,7 +2620,7 @@ mod tests {
     /// windows and solo agents are not in the map.
     #[test]
     fn stopped_teams_names_each_stopped_member_by_its_recipe_team() {
-        let ws = std::env::temp_dir().join(format!("tmm-stopped-teams-{}", uuid::Uuid::new_v4()));
+        let ws = crate::config::test_scratch("tmm-stopped-teams");
         for (name, team, member) in [("qa", "squad", "qa"), ("sub", "squad/inner", "sub"), ("solo", "", ""), ("lead", "squad", "lead"), ("gone", "squad", "archivist"), ("old", "squad", "")] {
             let home = ws.join(".tmm/agents").join(name);
             std::fs::create_dir_all(&home).unwrap();
@@ -2658,7 +2658,7 @@ mod tests {
         crate::projects::tests::use_test_store();
         let tag = uuid::Uuid::new_v4().simple().to_string()[..8].to_string();
         let session = format!("tmm-join-{tag}");
-        let ws = std::env::temp_dir().join(format!("tmm-join-ws-{tag}"));
+        let ws = crate::config::test_scratch(&format!("tmm-join-ws-{tag}"));
         let windows = [("lead", "squad", "lead"), ("rev", "squad/review", "r1"), ("helper", "squad", ""), ("solo", "", ""), ("other", "ops", "dev")];
         for (name, team, member) in windows {
             let home = ws.join(".tmm/agents").join(name);
@@ -2721,7 +2721,7 @@ mod tests {
         crate::projects::tests::use_test_store();
         let tag = uuid::Uuid::new_v4().simple().to_string()[..8].to_string();
         let session = format!("tmm-move-{tag}");
-        let ws = std::env::temp_dir().join(format!("tmm-move-ws-{tag}"));
+        let ws = crate::config::test_scratch(&format!("tmm-move-ws-{tag}"));
         let windows = [("lead", "squad", "lead"), ("helper", "", ""), ("solo", "", ""), ("other", "ops", "dev")];
         for (name, team, member) in windows {
             let home = ws.join(".tmm/agents").join(name);
@@ -2805,7 +2805,7 @@ mod tests {
         crate::projects::tests::use_test_store();
         let tag = uuid::Uuid::new_v4().simple().to_string()[..8].to_string();
         let session = format!("tmm-mvrev-{tag}");
-        let ws = std::env::temp_dir().join(format!("tmm-mvrev-ws-{tag}"));
+        let ws = crate::config::test_scratch(&format!("tmm-mvrev-ws-{tag}"));
         let windows = [("lead", "squad", "lead"), ("helper", "squad", ""), ("ops1", "ops", "ops1"), ("core1", "core", "core1"), ("solo", "", "")];
         for (name, team, member) in windows {
             let home = ws.join(".tmm/agents").join(name);
@@ -2887,7 +2887,7 @@ mod tests {
     fn a_refused_notice_is_not_recorded_and_the_next_announcement_retries_it() {
         use crate::projects::recipe::{plan, update_recipe, Told};
         use std::cell::RefCell;
-        let home = std::env::temp_dir().join(format!("tmm-told-{}", uuid::Uuid::new_v4())).join(".tmm/agents/helper");
+        let home = crate::config::test_scratch("tmm-told").join(".tmm/agents/helper");
         std::fs::create_dir_all(&home).unwrap();
         let seeded = Told { mover: "squad".into(), members: [("lead", "squad"), ("dev", "squad")].iter().map(|(a, b)| (a.to_string(), b.to_string())).collect() };
         update_recipe(&home, |r| *r = Some(serde_json::json!({ "team": "core", "team_told": seeded.to_value() }))).unwrap();
@@ -3933,7 +3933,7 @@ mod tests {
         crate::projects::tests::use_test_store();
         let tag = uuid::Uuid::new_v4().simple().to_string()[..8].to_string();
         let session = format!("tmm-offl-{tag}");
-        let ws = std::env::temp_dir().join(format!("tmm-offl-ws-{tag}"));
+        let ws = crate::config::test_scratch(&format!("tmm-offl-ws-{tag}"));
         let recipe = serde_json::json!({ "backend": "kiro", "cmd": "kiro-cli chat --agent dev", "team": "" }).to_string();
         for name in ["dev", "ghost"] {
             let home = ws.join(".tmm/agents").join(name);
@@ -4288,7 +4288,7 @@ mod tests {
     fn concurrent_multiline_mentions_to_two_panes_each_arrive_whole() {
         crate::projects::tests::use_test_store();
         let session = format!("tmm-paste-hub-{}", uuid::Uuid::new_v4());
-        let ws = std::env::temp_dir().join(format!("tmm-paste-hub-ws-{}", uuid::Uuid::new_v4()));
+        let ws = crate::config::test_scratch("tmm-paste-hub-ws");
         for name in ["lead", "solo"] {
             let home = ws.join(".tmm/agents").join(name);
             std::fs::create_dir_all(&home).unwrap();
@@ -4365,7 +4365,7 @@ mod tests {
     fn a_kiro_delivery_types_no_at_so_its_file_picker_never_takes_the_enter() {
         crate::projects::tests::use_test_store();
         let session = format!("tmm-picker-{}", uuid::Uuid::new_v4());
-        let ws = std::env::temp_dir().join(format!("tmm-picker-ws-{}", uuid::Uuid::new_v4()));
+        let ws = crate::config::test_scratch("tmm-picker-ws");
         for name in ["engineer", "lead"] {
             let home = ws.join(".tmm/agents").join(name);
             std::fs::create_dir_all(&home).unwrap();
@@ -4478,7 +4478,7 @@ while True:
     fn the_sending_agent_is_told_once_but_not_a_self_wake_or_a_human() {
         crate::projects::tests::use_test_store();
         let session = format!("tmm-unconf-{}", uuid::Uuid::new_v4());
-        let ws = std::env::temp_dir().join(format!("tmm-unconf-ws-{}", uuid::Uuid::new_v4()));
+        let ws = crate::config::test_scratch("tmm-unconf-ws");
         for name in ["lead", "dev", "qa", "engineer"] {
             let home = ws.join(".tmm/agents").join(name);
             std::fs::create_dir_all(&home).unwrap();
@@ -4551,7 +4551,7 @@ while True:
     fn a_mention_to_a_pane_in_copy_mode_warns_at_once_and_owes_nothing() {
         crate::projects::tests::use_test_store();
         let session = format!("tmm-copymode-hub-{}", uuid::Uuid::new_v4());
-        let ws = std::env::temp_dir().join(format!("tmm-copymode-hub-ws-{}", uuid::Uuid::new_v4()));
+        let ws = crate::config::test_scratch("tmm-copymode-hub-ws");
         for name in ["lead", "solo"] {
             let home = ws.join(".tmm/agents").join(name);
             std::fs::create_dir_all(&home).unwrap();
@@ -4620,7 +4620,7 @@ while True:
     fn a_command_into_a_window_a_restore_holds_is_refused() {
         crate::projects::tests::use_test_store();
         let session = format!("tmm-cmd-held-{}", uuid::Uuid::new_v4());
-        let ws = std::env::temp_dir().join(format!("tmm-cmd-held-ws-{}", uuid::Uuid::new_v4()));
+        let ws = crate::config::test_scratch("tmm-cmd-held-ws");
         let home = ws.join(".tmm/agents/lead");
         std::fs::create_dir_all(&home).unwrap();
         std::fs::write(home.join("launch.json"), serde_json::json!({ "backend": "kiro", "cmd": "kiro-cli chat --agent lead", "team": "" }).to_string()).unwrap();
@@ -4691,7 +4691,7 @@ while True:
     fn every_input_branch_types_a_released_slot_only_into_its_bound_pane() {
         crate::projects::tests::use_test_store();
         let session = format!("tmm-bound-{}", uuid::Uuid::new_v4());
-        let ws = std::env::temp_dir().join(format!("tmm-bound-ws-{}", uuid::Uuid::new_v4()));
+        let ws = crate::config::test_scratch("tmm-bound-ws");
         let home = ws.join(".tmm/agents/lead");
         std::fs::create_dir_all(&home).unwrap();
         std::fs::write(home.join("launch.json"), serde_json::json!({ "backend": "claude", "cmd": "claude", "team": "" }).to_string()).unwrap();
@@ -4862,7 +4862,7 @@ while True:
     fn the_mode_toggle_and_the_interrupt_go_through_the_send_door() {
         crate::projects::tests::use_test_store();
         let session = format!("tmm-door-{}", uuid::Uuid::new_v4());
-        let ws = std::env::temp_dir().join(format!("tmm-door-ws-{}", uuid::Uuid::new_v4()));
+        let ws = crate::config::test_scratch("tmm-door-ws");
         let home = ws.join(".tmm/agents/lead");
         std::fs::create_dir_all(&home).unwrap();
         std::fs::write(home.join("launch.json"), serde_json::json!({ "backend": "kiro", "cmd": "kiro-cli chat --agent lead", "team": "", "input_mode": "queue" }).to_string()).unwrap();
@@ -5027,7 +5027,7 @@ while True:
     fn a_command_to_a_busy_queue_mode_agent_is_typed_now_never_held() {
         crate::projects::tests::use_test_store();
         let session = format!("tmm-cmd-busy-{}", uuid::Uuid::new_v4());
-        let ws = std::env::temp_dir().join(format!("tmm-cmd-busy-ws-{}", uuid::Uuid::new_v4()));
+        let ws = crate::config::test_scratch("tmm-cmd-busy-ws");
         let home = ws.join(".tmm/agents/lead");
         std::fs::create_dir_all(&home).unwrap();
         std::fs::write(
@@ -5080,7 +5080,7 @@ while True:
     fn a_dsh_agents_model_effort_and_new_are_run_by_the_app_not_typed() {
         crate::projects::tests::use_test_store();
         let session = format!("tmm-cmd-dsh-{}", uuid::Uuid::new_v4());
-        let ws = std::env::temp_dir().join(format!("tmm-cmd-dsh-ws-{}", uuid::Uuid::new_v4()));
+        let ws = crate::config::test_scratch("tmm-cmd-dsh-ws");
         let name = format!("dshcmd{}", &uuid::Uuid::new_v4().to_string()[..6]);
         crate::projects::registry_save(&serde_json::json!({ "name": name, "backend": "dsh", "model": "deepseek-flash", "effort": "", "system": "x", "skills": "[]", "mcp": "[]" })).unwrap();
         let def = crate::projects::registry_get(&name).unwrap().unwrap();
@@ -5150,7 +5150,7 @@ while True:
         use std::os::unix::fs::PermissionsExt;
         crate::projects::tests::use_test_store();
         let session = format!("tmm-cmd-all-{}", uuid::Uuid::new_v4());
-        let ws = std::env::temp_dir().join(format!("tmm-cmd-all-ws-{}", uuid::Uuid::new_v4()));
+        let ws = crate::config::test_scratch("tmm-cmd-all-ws");
         let tag = &uuid::Uuid::new_v4().to_string()[..6];
         let (good, bad) = (format!("allgood{tag}"), format!("allbad{tag}"));
         for n in [&good, &bad] {
@@ -5195,7 +5195,7 @@ while True:
     fn an_agents_command_names_it_skips_it_and_is_refused_to_itself() {
         crate::projects::tests::use_test_store();
         let session = format!("tmm-cmd-from-{}", uuid::Uuid::new_v4());
-        let ws = std::env::temp_dir().join(format!("tmm-cmd-from-ws-{}", uuid::Uuid::new_v4()));
+        let ws = crate::config::test_scratch("tmm-cmd-from-ws");
         for name in ["lead", "dev"] {
             let home = ws.join(".tmm/agents").join(name);
             std::fs::create_dir_all(&home).unwrap();
@@ -5263,7 +5263,7 @@ while True:
     fn a_fired_wake_reaches_its_own_sender_once() {
         crate::projects::tests::use_test_store();
         let session = format!("tmm-wake-{}", uuid::Uuid::new_v4());
-        let ws = std::env::temp_dir().join(format!("tmm-wake-ws-{}", uuid::Uuid::new_v4()));
+        let ws = crate::config::test_scratch("tmm-wake-ws");
         for name in ["dev", "lead"] {
             let home = ws.join(".tmm/agents").join(name);
             std::fs::create_dir_all(&home).unwrap();
@@ -5342,7 +5342,7 @@ while True:
         crate::projects::tests::use_test_store();
         let tag = uuid::Uuid::new_v4().simple().to_string()[..8].to_string();
         let session = format!("tmm-wren-{tag}");
-        let ws = std::env::temp_dir().join(format!("tmm-wren-ws-{tag}"));
+        let ws = crate::config::test_scratch(&format!("tmm-wren-ws-{tag}"));
         let home = ws.join(".tmm/agents/dev");
         std::fs::create_dir_all(&home).unwrap();
         std::fs::write(home.join("launch.json"), serde_json::json!({ "backend": "kiro", "cmd": "kiro-cli chat --agent dev", "team": "" }).to_string()).unwrap();
@@ -5407,7 +5407,7 @@ while True:
     fn a_command_to_all_with_one_pane_in_copy_mode_warns_for_it_and_runs_the_rest() {
         crate::projects::tests::use_test_store();
         let session = format!("tmm-copymode-cmd-{}", uuid::Uuid::new_v4());
-        let ws = std::env::temp_dir().join(format!("tmm-copymode-cmd-ws-{}", uuid::Uuid::new_v4()));
+        let ws = crate::config::test_scratch("tmm-copymode-cmd-ws");
         for name in ["lead", "solo"] {
             let home = ws.join(".tmm/agents").join(name);
             std::fs::create_dir_all(&home).unwrap();
@@ -5480,7 +5480,7 @@ while True:
     fn an_in_word_at_delivers_to_nobody_but_a_bracketed_address_does() {
         crate::projects::tests::use_test_store();
         let session = format!("tmm-inword-{}", uuid::Uuid::new_v4());
-        let ws = std::env::temp_dir().join(format!("tmm-inword-ws-{}", uuid::Uuid::new_v4()));
+        let ws = crate::config::test_scratch("tmm-inword-ws");
         let home = ws.join(".tmm/agents/bob");
         std::fs::create_dir_all(&home).unwrap();
         std::fs::write(
@@ -5616,7 +5616,7 @@ while True:
     fn a_board_reply_is_persisted_and_typed_into_the_assignees_pane() {
         crate::projects::tests::use_test_store();
         let session = format!("tmm-board-reply-{}", uuid::Uuid::new_v4());
-        let ws = std::env::temp_dir().join(format!("tmm-board-reply-ws-{}", uuid::Uuid::new_v4()));
+        let ws = crate::config::test_scratch("tmm-board-reply-ws");
         let home = ws.join(".tmm/agents/dev");
         std::fs::create_dir_all(&home).unwrap();
         std::fs::write(
@@ -5675,7 +5675,7 @@ while True:
     fn stopping_a_managed_agent_kills_the_window_and_says_so() {
         crate::projects::tests::use_test_store();
         let session = format!("tmm-stop-{}", std::process::id());
-        let ws = std::env::temp_dir().join(format!("tmm-stop-ws-{}", uuid::Uuid::new_v4()));
+        let ws = crate::config::test_scratch("tmm-stop-ws");
         std::fs::create_dir_all(ws.join(".tmm/agents/dev")).unwrap();
         std::fs::write(ws.join(".tmm/agents/dev/launch.json"), "{}").unwrap();
         // Start it IN the workspace: `adopt` derives the project path from the
@@ -5731,7 +5731,7 @@ while True:
     fn a_clean_start_clears_the_stop_it_found_and_a_later_stop_survives() {
         crate::projects::tests::use_test_store();
         let session = format!("tmm-start-{}", std::process::id());
-        let ws = std::env::temp_dir().join(format!("tmm-start-ws-{}", uuid::Uuid::new_v4()));
+        let ws = crate::config::test_scratch("tmm-start-ws");
         let home = ws.join(".tmm/agents/dev");
         std::fs::create_dir_all(&home).unwrap();
         crate::projects::spawn::LaunchRecipe {
@@ -5831,7 +5831,7 @@ while True:
         crate::projects::tests::use_test_store();
         let session = format!("tmm-tdrop-{}", std::process::id());
         let team = format!("tdrop{}", std::process::id());
-        let ws = std::env::temp_dir().join(format!("tmm-tdrop-ws-{}", uuid::Uuid::new_v4()));
+        let ws = crate::config::test_scratch("tmm-tdrop-ws");
         let home = ws.join(".tmm/agents/gone");
         std::fs::create_dir_all(&home).unwrap();
         std::fs::write(home.join("launch.json"), serde_json::json!({ "backend": "kiro", "cmd": "sleep 600", "agent_def": "", "team": team, "member": "gone" }).to_string()).unwrap();
@@ -5888,7 +5888,7 @@ while True:
     fn interrupting_a_managed_agent_leaves_the_window_and_says_so() {
         crate::projects::tests::use_test_store();
         let session = format!("tmm-int-{}", std::process::id());
-        let ws = std::env::temp_dir().join(format!("tmm-int-ws-{}", uuid::Uuid::new_v4()));
+        let ws = crate::config::test_scratch("tmm-int-ws");
         std::fs::create_dir_all(ws.join(".tmm/agents/dev")).unwrap();
         std::fs::write(ws.join(".tmm/agents/dev/launch.json"), "{}").unwrap();
         let created = std::process::Command::new("tmux")
@@ -5953,7 +5953,7 @@ while True:
         use telemetry::PERSIST_IN_TEST;
         crate::projects::tests::use_test_store();
         let session = format!("tmm-394-{}", uuid::Uuid::new_v4().simple());
-        let ws = std::env::temp_dir().join(format!("tmm-394-ws-{}", uuid::Uuid::new_v4()));
+        let ws = crate::config::test_scratch("tmm-394-ws");
         for name in ["dev", "aux"] {
             std::fs::create_dir_all(ws.join(format!(".tmm/agents/{name}"))).unwrap();
             std::fs::write(ws.join(format!(".tmm/agents/{name}/launch.json")),

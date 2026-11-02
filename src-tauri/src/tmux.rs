@@ -1682,7 +1682,7 @@ impl Scratch {
     /// `tmm-test-<tag>-<pid>`, with a fresh empty directory of that name.
     pub(crate) fn new(tag: &str) -> Self {
         let tag = format!("tmm-test-{tag}-{}", std::process::id());
-        let dir = std::env::temp_dir().join(&tag);
+        let dir = crate::config::test_scratch(&tag);
         let _ = std::fs::remove_dir_all(&dir);
         std::fs::create_dir_all(&dir).expect("create the scratch dir");
         Scratch { tag, sessions: Vec::new(), dir }
@@ -1858,9 +1858,10 @@ pub(crate) mod test_support {
     /// does not accept.
     pub fn destroy_private_server(socket: &str) -> Result<String, String> {
         assert!(
+            // temp-dir: allow (this guard DEFINES a private test socket as one under the temp dir)
             is_private_socket(Path::new(socket), &std::env::temp_dir(), &super::implicit_socket()),
             "refusing to kill-server on {socket:?}: not a private test server (an absolute {PRIVATE_PREFIX}* path under {}, and never the implicit socket)",
-            std::env::temp_dir().display()
+            std::env::temp_dir().display() // temp-dir: allow (the same guard's message)
         );
         super::run_tmux_on(Some(socket), &["kill-server"])
     }
@@ -1874,7 +1875,7 @@ pub(crate) mod test_support {
 
     impl PrivateServer {
         pub fn new(tag: &str) -> Self {
-            let socket: PathBuf = std::env::temp_dir().join(format!("{PRIVATE_PREFIX}{tag}-{}.sock", std::process::id()));
+            let socket: PathBuf = crate::config::test_scratch(&format!("{PRIVATE_PREFIX}{tag}")).with_extension("sock");
             let socket = socket.to_string_lossy().to_string();
             let _ = destroy_private_server(&socket);
             Self { socket }
@@ -2014,8 +2015,8 @@ mod tests {
     #[test]
     fn a_scope_restores_the_global_it_found_on_every_exit() {
         let entry = get_socket();
-        let p1 = std::env::temp_dir().join("tmm-test-restore-1.sock").to_string_lossy().to_string();
-        let p2 = std::env::temp_dir().join("tmm-test-restore-2.sock").to_string_lossy().to_string();
+        let p1 = crate::config::test_scratch("tmm-test-restore-1").with_extension("sock").to_string_lossy().to_string();
+        let p2 = crate::config::test_scratch("tmm-test-restore-2").with_extension("sock").to_string_lossy().to_string();
         // Normal exit after writing None (a probe test's shape).
         {
             let scope = test_support::GlobalSocket::hold();
@@ -2098,7 +2099,7 @@ mod tests {
         // a7b7a5cd: a fixture that builds a PrivateTmux would, with a broken
         // gate, run a destroy inside an unisolated child).
         let target = "tmux::tests::opening_a_scope_is_the_gate";
-        let iso = std::env::temp_dir().join(format!("tmm-test-iso-{}", std::process::id()));
+        let iso = crate::config::test_scratch("tmm-test-iso");
         std::fs::create_dir_all(&iso).unwrap();
         // `tmux_env`: what the child sees of tmux — None = the isolated shape
         // (TMUX/TMUX_PANE unset, TMUX_TMPDIR = a throwaway dir); Some(k, v) =
@@ -2167,7 +2168,7 @@ mod tests {
     #[test]
     fn a_private_tmux_destroys_before_its_scope_restores() {
         let scope = test_support::GlobalSocket::hold();
-        let entry = std::env::temp_dir().join("tmm-test-order-entry.sock").to_string_lossy().to_string();
+        let entry = crate::config::test_scratch("tmm-test-order-entry").with_extension("sock").to_string_lossy().to_string();
         scope.set(Some(entry.clone()));
         let p = test_support::PrivateTmux::start(&scope, "order");
         let sock = p.socket().to_string();

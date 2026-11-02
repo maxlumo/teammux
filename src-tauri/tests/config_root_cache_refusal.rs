@@ -5,7 +5,7 @@
 
 #[test]
 fn a_refusal_is_remembered_and_its_consumers_stop_loudly() {
-    let base = std::env::temp_dir().join(format!("config-root-refusal-{}", std::process::id()));
+    let base = tmux_mobile::config::test_scratch("config-root-refusal");
     let _ = std::fs::remove_dir_all(&base);
     std::fs::create_dir_all(base.join("teammux")).unwrap();
     std::fs::create_dir_all(base.join("tmux-mobile")).unwrap();

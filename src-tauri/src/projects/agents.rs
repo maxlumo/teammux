@@ -519,7 +519,7 @@ mod tests {
     /// wrote at spawn is the record, so it wins for managed windows.
     #[test]
     fn a_managed_window_is_detected_by_its_recipe_not_its_process_name() {
-        let ws = std::env::temp_dir().join(format!("tmm-detect-{}", std::process::id()));
+        let ws = crate::config::test_scratch("tmm-detect");
         let home = ws.join(".tmm").join("agents").join("cx-probe");
         std::fs::create_dir_all(&home).unwrap();
         std::fs::write(home.join("launch.json"), r#"{"backend":"codex","cmd":"command codex"}"#).unwrap();

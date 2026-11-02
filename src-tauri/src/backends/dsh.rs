@@ -1778,7 +1778,7 @@ pub(crate) mod tests {
             eprintln!("skipped: no dsh or node on PATH");
             return;
         };
-        let ws = std::env::temp_dir().join(format!("tmm-dsh-412-{}", uuid::Uuid::new_v4()));
+        let ws = crate::config::test_scratch("tmm-dsh-412");
         let home = ws.join(".tmm/agents/d1");
         std::fs::create_dir_all(&home).unwrap();
         let server = ws.join("echo.mjs");
@@ -1888,7 +1888,7 @@ pub(crate) mod tests {
     /// and its file is left exactly as it was.
     #[test]
     fn the_skill_root_is_the_definitions_skills_and_odd_ones_are_refused() {
-        let ws = std::env::temp_dir().join(format!("tmm-dsh-skills-{}", uuid::Uuid::new_v4()));
+        let ws = crate::config::test_scratch("tmm-dsh-skills");
         let root = ws.join("root");
         let sk = |dir: &str, front: &str| {
             let d = ws.join(dir);
@@ -1955,7 +1955,7 @@ pub(crate) mod tests {
             eprintln!("skipped: no dsh or zsh on PATH");
             return;
         };
-        let ws = std::env::temp_dir().join(format!("tmm-dsh-410-{}", uuid::Uuid::new_v4()));
+        let ws = crate::config::test_scratch("tmm-dsh-410");
         let home = ws.join(".tmm/agents/d1");
         std::fs::create_dir_all(&home).unwrap();
         let def: RegAgent = serde_json::from_value(json!({"name": "d1", "backend": "dsh", "input_mode": "steer"})).unwrap();
@@ -2061,7 +2061,7 @@ if (at < 0) {
             eprintln!("skipped: no dsh on PATH");
             return;
         };
-        let ws = std::env::temp_dir().join(format!("tmm-dsh-408-{}", uuid::Uuid::new_v4()));
+        let ws = crate::config::test_scratch("tmm-dsh-408");
         let home = ws.join(".tmm/agents/d1");
         std::fs::create_dir_all(&home).unwrap();
         let def: RegAgent = serde_json::from_value(json!({"name":"d1","backend":"dsh"})).unwrap();
@@ -2103,7 +2103,7 @@ if (at < 0) {
             eprintln!("skipped: no dsh on PATH");
             return;
         };
-        let ws = std::env::temp_dir().join(format!("tmm-dsh-411-{}", uuid::Uuid::new_v4()));
+        let ws = crate::config::test_scratch("tmm-dsh-411");
         let home = ws.join(".tmm/agents/d1");
         std::fs::create_dir_all(&home).unwrap();
         let def: RegAgent = serde_json::from_value(json!({"name":"d1","backend":"dsh","model":"deepseek-flash"})).unwrap();
@@ -2186,7 +2186,7 @@ if (at < 0) {
     /// about the model or a key reaches the launch line or the environment.
     #[test]
     fn render_writes_an_isolated_home_and_refresh_rewrites_the_runtime() {
-        let ws = std::env::temp_dir().join(format!("tmm-dsh-render-{}", uuid::Uuid::new_v4()));
+        let ws = crate::config::test_scratch("tmm-dsh-render");
         let home = ws.join(".tmm").join("agents").join("d1");
         std::fs::create_dir_all(&home).unwrap();
         let def: RegAgent = serde_json::from_value(json!({"name":"d1","backend":"dsh","model":"deepseek-v4-pro","effort":"high"})).unwrap();
@@ -2311,7 +2311,7 @@ if (at < 0) {
     impl ScratchPane {
         fn start(tag: &str, extra_path: &[std::path::PathBuf]) -> Option<ScratchPane> {
             let zsh = which("zsh")?;
-            let dir = std::env::temp_dir().join(format!("tmm-dsh-{tag}-{}", uuid::Uuid::new_v4()));
+            let dir = crate::config::test_scratch(&format!("tmm-dsh-{tag}"));
             let (bin, zdot, dsh_home) = (dir.join("bin"), dir.join("zsh"), dir.join("dsh"));
             for d in [&bin, &zdot, &dsh_home] {
                 std::fs::create_dir_all(d).unwrap();
@@ -2590,7 +2590,7 @@ if (at < 0) {
     /// document, never a model-only patch that drops the agent's tools.
     #[test]
     fn a_live_model_change_keeps_the_mcp_rows_and_the_skill_root() {
-        let home = std::env::temp_dir().join(format!("tmm-dsh-live412-{}", uuid::Uuid::new_v4()));
+        let home = crate::config::test_scratch("tmm-dsh-live412");
         std::fs::create_dir_all(&home).unwrap();
         let mcp = json!([{"name": "echo", "command": "node", "args": ["srv.mjs"]}]).to_string();
         let def = |model: &str| -> RegAgent { serde_json::from_value(json!({"name": "d1", "backend": "dsh", "model": model, "mcp": mcp})).unwrap() };
@@ -2620,7 +2620,7 @@ if (at < 0) {
     /// document or all of the other, never an empty or half-written file.
     #[test]
     fn a_reader_at_publication_sees_a_whole_patch() {
-        let dir = std::env::temp_dir().join(format!("tmm-dsh-atomic-{}", uuid::Uuid::new_v4()));
+        let dir = crate::config::test_scratch("tmm-dsh-atomic");
         let profile = dir.join("dsh").join("profiles").join(PROFILE);
         std::fs::create_dir_all(&profile).unwrap();
         let entry = dir.join("dsh").join("plugins").join(PLUGIN_NAME).join("index.mjs");
@@ -2782,7 +2782,7 @@ if (at < 0) {
     /// readiness. Board #413: nor is a zombie (exited, not yet reaped).
     #[test]
     fn a_ready_file_is_believed_only_while_its_owner_lives() {
-        let home = std::env::temp_dir().join(format!("tmm-dsh-owner-{}", uuid::Uuid::new_v4()));
+        let home = crate::config::test_scratch("tmm-dsh-owner");
         let file = home.join("dsh/tmm/ready");
         std::fs::create_dir_all(file.parent().unwrap()).unwrap();
         let me = std::process::id();
@@ -2824,7 +2824,7 @@ if (at < 0) {
     /// process, naming the run the shell minted last, in the mode it loaded.
     #[test]
     fn a_steer_claim_is_believed_only_for_this_run_of_this_pane() {
-        let home = std::env::temp_dir().join(format!("tmm-dsh-claim-{}", uuid::Uuid::new_v4()));
+        let home = crate::config::test_scratch("tmm-dsh-claim");
         let state = home.join("dsh/tmm");
         std::fs::create_dir_all(&state).unwrap();
         let me = std::process::id();
@@ -2872,7 +2872,7 @@ if (at < 0) {
             eprintln!("skipped: no zsh");
             return;
         };
-        let dir = std::env::temp_dir().join(format!("tmm-dsh-launch-{}", uuid::Uuid::new_v4()));
+        let dir = crate::config::test_scratch("tmm-dsh-launch");
         let home = dir.join("home");
         let (bin, zdot) = (dir.join("bin"), home.join("zsh"));
         for d in [&bin, &zdot, &home.join("dsh")] {
@@ -2950,7 +2950,7 @@ if (at < 0) {
             eprintln!("skipped: no node");
             return;
         };
-        let dir = std::env::temp_dir().join(format!("tmm-dsh-stubborn-{}", uuid::Uuid::new_v4()));
+        let dir = crate::config::test_scratch("tmm-dsh-stubborn");
         std::fs::create_dir_all(&dir).unwrap();
         std::fs::write(dir.join("index.mjs"), plugin_js(stubborn)).unwrap();
         std::fs::write(
@@ -3024,7 +3024,7 @@ if (at < 0) {
     /// state directory. `None` without node.
     pub(crate) fn run_plugin(config: Value, sessions: Value, events: Value) -> Option<(Option<i32>, String, Vec<Value>, std::path::PathBuf)> {
         let node = which("node")?;
-        let dir = std::env::temp_dir().join(format!("tmm-dsh-plugin-{}", uuid::Uuid::new_v4()));
+        let dir = crate::config::test_scratch("tmm-dsh-plugin");
         std::fs::create_dir_all(&dir).unwrap();
         std::fs::write(dir.join("index.mjs"), plugin_js(&seq_sink(&dir.join("hooks")))).unwrap();
         std::fs::write(
@@ -3139,7 +3139,7 @@ if (at < 0) {
             eprintln!("skipped: no node");
             return;
         };
-        let dir = std::env::temp_dir().join(format!("tmm-dsh-reader-{}", uuid::Uuid::new_v4()));
+        let dir = crate::config::test_scratch("tmm-dsh-reader");
         std::fs::create_dir_all(&dir).unwrap();
         std::fs::write(dir.join("index.mjs"), plugin_js("true")).unwrap();
         std::fs::write(dir.join("t.mjs"), STEER_READER_CASES).unwrap();
@@ -3488,7 +3488,7 @@ process.exit(0)
             eprintln!("skipped: no node");
             return;
         };
-        let dir = std::env::temp_dir().join(format!("tmm-dsh-esc-{}", uuid::Uuid::new_v4()));
+        let dir = crate::config::test_scratch("tmm-dsh-esc");
         std::fs::create_dir_all(&dir).unwrap();
         std::fs::write(dir.join("index.mjs"), plugin_js("cat > /dev/null")).unwrap();
         std::fs::write(dir.join("driver.mjs"), "import * as p from './index.mjs'\np.apply({ on() {} }, {})\nprocess.stdout.write('RUNNING\\n')\nsetInterval(() => {}, 1000)\n").unwrap();

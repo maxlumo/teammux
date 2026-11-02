@@ -64,7 +64,7 @@ impl Fake {
             .args(args)
             .env_clear()
             .env("PATH", "/usr/bin:/bin")
-            .env("HOME", std::env::temp_dir())
+            .env("HOME", { let h = tmux_mobile::config::test_scratch("tmm-home"); std::fs::create_dir_all(&h).unwrap(); h })
             .env("TMM_SERVER", &self.addr)
             .env("TMM_TOKEN", "t")
             .env("TMM_PROJECT", "p")
