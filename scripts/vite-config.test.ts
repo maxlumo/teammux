@@ -1,7 +1,7 @@
 import assert from 'node:assert/strict';
 import test from 'node:test';
 import { readFileSync } from 'node:fs';
-import { buildIdentity, CLIENT_PATCHES, createViteConfig, devProxy, fsDeny, QUIET_RECONNECT_MEASURED_ON, quietDevReconnect, scanEntries, viteCacheDir, VITE_DEFAULT_FS_DENY, watchIgnored } from '../vite.config.js';
+import { buildIdentity, CLIENT_PATCHES, createViteConfig, devProxy, fsDeny, PROXY_HEADERS, QUIET_RECONNECT_MEASURED_ON, quietDevReconnect, refuseProxied, scanEntries, viteCacheDir, VITE_DEFAULT_FS_DENY, watchIgnored } from '../vite.config.js';
 import { DEV_HOST_ENV, DEV_SERVER_PORT_ENV, devHost } from './dev-ports.mjs';
 
 test('Vite proxies WebSocket and downloads to the same internal Rust server', () => {
@@ -26,14 +26,14 @@ test('what is not the web app is neither watched nor scanned (#342, #393)', asyn
   // holds that no browser page imports: src-tauri/ (the Android build writes
   // `.html` files under target/ and gen/android/build/, and Vite answers any
   // changed `.html` with a full page reload of every open tab), temp/, build/,
-  // dist/ and .tmm/.
+  // dist/ and .tmm/; #505 adds deploy/ (gitignored deploy configs, read over /@fs by the pentest).
   const { fileURLToPath } = await import('node:url');
   const here = fileURLToPath(new URL('..', import.meta.url)).replace(/\/$/, '');
   const config = createViteConfig('serve', {});
   assert.deepEqual(config.server.watch, { ignored: [
-    `${here}/worktree/**`, `${here}/src-tauri/**`, `${here}/temp/**`, `${here}/build/**`, `${here}/dist/**`, `${here}/.tmm/**`,
+    `${here}/worktree/**`, `${here}/src-tauri/**`, `${here}/temp/**`, `${here}/build/**`, `${here}/dist/**`, `${here}/.tmm/**`, `${here}/deploy/**`,
   ] }, 'the watch ignore is ABSOLUTE and anchored at the config: a worktree’s own Vite ignores only what is nested inside it');
-  assert.deepEqual(config.optimizeDeps.entries, ['**/*.html', '!worktree/**', '!src-tauri/**', '!temp/**', '!build/**', '!dist/**', '!.tmm/**'],
+  assert.deepEqual(config.optimizeDeps.entries, ['**/*.html', '!worktree/**', '!src-tauri/**', '!temp/**', '!build/**', '!dist/**', '!.tmm/**', '!deploy/**'],
     'Vite’s default entry glob, minus the same directories — an explicit list REPLACES the default, so it must keep **/*.html');
   assert.deepEqual(config.optimizeDeps.exclude, ['@xterm/xterm'], 'the xterm source-serving rule is untouched');
   // And the build sees the same scan rule (a build never watches).
@@ -87,7 +87,7 @@ test('the dev server listens on the loopback unless a person says otherwise (#39
   assert.equal(createViteConfig('serve', { [DEV_HOST_ENV]: '0.0.0.0' }).server.host, '0.0.0.0');
   assert.equal(devHost({ TAURI_DEV_HOST: '192.168.1.5' }), '192.168.1.5', 'Tauri’s own name for mobile dev');
   assert.equal(devHost({ [DEV_HOST_ENV]: '10.0.0.7', TAURI_DEV_HOST: '192.168.1.5' }), '10.0.0.7', 'ours wins');
-  assert.equal(createViteConfig('serve', {}).server.allowedHosts.join(), ['.ts.net', 'localhost'].join(), 'allowedHosts is not widened');
+  assert.equal(createViteConfig('serve', {}).server.allowedHosts.join(), ['localhost'].join(), 'allowedHosts is not widened, and holds no proxied name (#505: .ts.net went with the tailscale serve rule)');
 });
 
 test('what is not the web app is not SERVED either: a watch ignore is not access control (#393, security)', async (context) => {
@@ -110,7 +110,7 @@ test('what is not the web app is not SERVED either: a watch ignore is not access
   writeFileSync(join(root, 'index.html'), '<!doctype html><html><body>app</body></html>');
   mkdirSync(join(root, 'src'), { recursive: true });
   writeFileSync(join(root, 'src', 'app.js'), 'export const app = 1;\n');
-  const hidden = ['.tmm/agents/x/launch.json', 'temp/x.txt', 'worktree/y.txt', 'src-tauri/Cargo.toml', 'build/z.txt', 'dist/index.html'];
+  const hidden = ['.tmm/agents/x/launch.json', 'temp/x.txt', 'worktree/y.txt', 'src-tauri/Cargo.toml', 'build/z.txt', 'dist/index.html', 'deploy/caddy/Caddyfile'];
   for (const f of hidden) { mkdirSync(join(root, f, '..'), { recursive: true }); writeFileSync(join(root, f), 'SECRET'); }
   const server = await createServer({
     root, configFile: false, logLevel: 'silent', cacheDir: join(root, '.cache'),
@@ -130,6 +130,105 @@ test('what is not the web app is not SERVED either: a watch ignore is not access
   assert.equal(await status('/'), 200, 'the app’s page still serves');
   assert.equal(await status('/src/app.js'), 200, 'and its source');
   assert.equal(await status(`/@fs${join(root, 'src', 'app.js')}`), 200, 'by /@fs too');
+});
+
+test('the dev server refuses anything that came through a proxy: page, /@fs, HMR and the /ws proxy, an upgrade before its upstream is dialled (#505, incident 2026-11-02)', async (context) => {
+  const { mkdtempSync, rmSync, writeFileSync } = await import('node:fs');
+  const { createServer: createNetServer } = await import('node:net');
+  const { request } = await import('node:http');
+  const { tmpdir } = await import('node:os');
+  const { join } = await import('node:path');
+  const { createServer } = await import('vite');
+  assert.equal(createViteConfig('serve', {}).plugins[0].name, 'refuse-proxied', 'the gate is in the real config, first');
+  assert.deepEqual(createViteConfig('serve', {}).server.allowedHosts, ['localhost'], 'no proxied host name is allowed');
+  // A stand-in for the gateway: it counts every connection the /ws proxy opens to it.
+  let dialled = 0;
+  const upstream = createNetServer((socket) => { dialled += 1; socket.destroy(); });
+  await new Promise<void>((resolve) => upstream.listen(0, '127.0.0.1', resolve));
+  context.after(() => upstream.close());
+  const up = (upstream.address() as { port: number }).port;
+  const root = mkdtempSync(join(tmpdir(), 'tmm-vite-proxied-'));
+  context.after(() => rmSync(root, { recursive: true, force: true }));
+  writeFileSync(join(root, 'index.html'), '<!doctype html><html><body>app</body></html>');
+  const server = await createServer({
+    root, configFile: false, logLevel: 'silent', cacheDir: join(root, '.cache'), plugins: [refuseProxied()],
+    server: { host: '127.0.0.1', port: 0, strictPort: false, proxy: { '/ws': { target: `ws://127.0.0.1:${up}`, ws: true } } },
+    optimizeDeps: { noDiscovery: true, entries: [] },
+  });
+  await server.listen();
+  context.after(() => server.close());
+  const port = (server.httpServer!.address() as { port: number }).port;
+  const get = (path: string, headers: Record<string, string> = {}) => new Promise<number>((resolve, reject) => {
+    request({ host: '127.0.0.1', port, path, headers }, (res) => { res.resume(); resolve(res.statusCode!); }).on('error', reject).end();
+  });
+  const upgrade = (path: string, headers: Record<string, string> = {}, protocol?: string) => new Promise<number>((resolve, reject) => {
+    const req = request({ host: '127.0.0.1', port, path, headers: {
+      connection: 'Upgrade', upgrade: 'websocket', 'sec-websocket-version': '13', 'sec-websocket-key': 'dGhlIHNhbXBsZSBub25jZQ==',
+      ...(protocol ? { 'sec-websocket-protocol': protocol } : {}), ...headers,
+    } });
+    req.on('upgrade', (res, socket) => { socket.destroy(); resolve(res.statusCode!); });
+    req.on('response', (res) => { res.resume(); resolve(res.statusCode!); });
+    req.on('error', () => resolve(0));
+    req.on('timeout', () => reject(new Error('no answer')));
+    req.setTimeout(5000);
+    req.end();
+  });
+  // The headers Caddy and CloudFront put on the way in, each alone.
+  const viaProxy: Record<string, string> = {
+    forwarded: 'for=192.0.2.1', 'x-forwarded-for': '192.0.2.1', 'x-forwarded-host': 'd.cloudfront.net', 'x-forwarded-proto': 'https',
+    'x-real-ip': '192.0.2.1', via: '2.0 abc.cloudfront.net (CloudFront)', 'cloudfront-viewer-address': '192.0.2.1:1', 'x-amz-cf-id': 'x',
+  };
+  assert.deepEqual(Object.keys(viaProxy).sort(), [...PROXY_HEADERS].sort(), 'every header the gate names is exercised');
+  for (const [name, value] of Object.entries(viaProxy)) {
+    for (const path of ['/', `/@fs${join(root, 'index.html')}`, '/__open-in-editor?file=index.html']) {
+      assert.equal(await get(path, { [name]: value }), 403, `${path} with ${name}`);
+    }
+    assert.equal(await upgrade('/ws', { [name]: value }), 403, `the /ws proxy upgrade with ${name}`);
+    assert.equal(await upgrade('/', { [name]: value }, 'vite-hmr'), 403, `the HMR upgrade with ${name}`);
+  }
+  await new Promise((r) => setTimeout(r, 200));
+  assert.equal(dialled, 0, 'a refused upgrade never dials the gateway');
+  // The control: the same server, asked directly.
+  assert.equal(await get('/'), 200, 'a direct page request is served');
+  assert.equal(await upgrade('/', {}, 'vite-hmr'), 101, 'a direct HMR upgrade is accepted');
+  await upgrade('/ws');
+  await new Promise((r) => setTimeout(r, 200));
+  assert.equal(dialled, 1, 'a direct /ws upgrade reaches the gateway');
+});
+
+test('no tracked recipe puts the dev server behind a tunnel, a proxy or tailscale (#505)', async () => {
+  const { execFileSync } = await import('node:child_process');
+  const repo = new URL('..', import.meta.url);
+  const files = execFileSync('git', ['ls-files', '-z'], { cwd: repo, encoding: 'utf8' }).split('\0')
+    .filter((f) => f && !f.startsWith('docs/exec-plans/') && f !== 'scripts/vite-config.test.ts');
+  const forwards = [
+    /-R\s+(?:\S+:)?5173:/u, // ssh -R [bind:]5173:host:port
+    /-R\s+\S*:5173\b/u, // ssh -R port:host:5173
+    /reverse_proxy\s+\S*:5173\b/u,
+    /header_up\s+Host\s+\S*:5173\b/u,
+    /tailscale\s+(?:serve|funnel)\b.*\b5173\b/u,
+  ];
+  for (const sample of ['-R 127.0.0.1:5173:127.0.0.1:5173', '-R 9000:localhost:5173', 'reverse_proxy 127.0.0.1:5173', '\theader_up Host localhost:5173', 'tailscale serve --bg 5173']) {
+    assert.ok(forwards.some((re) => re.test(sample)), `the pattern list catches ${sample}`);
+  }
+  for (const fine of ['-R 127.0.0.1:9899:127.0.0.1:9899', 'tailscale serve --bg 9899', 'http://localhost:5173', 'reverse_proxy 127.0.0.1:9899']) {
+    assert.ok(!forwards.some((re) => re.test(fine)), `${fine} is not a forward of the dev server`);
+  }
+  const hits: string[] = [];
+  for (const file of files) {
+    let text: string;
+    try { text = readFileSync(new URL(file, repo), 'utf8'); } catch { continue; }
+    text.split('\n').forEach((line, i) => { if (forwards.some((re) => re.test(line))) hits.push(`${file}:${i + 1}`); });
+  }
+  assert.deepEqual(hits, [], 'the dev server is never forwarded (docs/conventions/development.md § The dev server is never public)');
+});
+
+test('the #441 runbook checks the public root is CLOSED, never 200 (#505 review P1-A)', () => {
+  const runbook = readFileSync(new URL('../docs/reference/config.md', import.meta.url), 'utf8');
+  assert.doesNotMatch(runbook, /https:\/\/<distribution-domain>\/` gives `200`/u, 'the old success check expected the dev server on the root');
+  assert.match(runbook, /for p in \/ \/@vite\/client \/@fs\/ \/__open-in-editor; do/u, 'the root and the dev endpoints are checked');
+  assert.match(runbook, /= 404 \]/u, 'each is expected to be 404');
+  assert.match(runbook, /"\/\$BP\/"\)" = 200 \]/u, 'and the gateway UI route to answer, its path read from proxy.env');
 });
 
 test('package-lock.json pins the Vite the dev-client patch was measured on: a fresh npm ci installs the stamped version, not only a checkout whose node_modules had drifted (#396)', () => {

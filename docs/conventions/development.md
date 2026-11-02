@@ -307,12 +307,92 @@ not exist afterwards; pinned on a scratch root with the real config's plugins), 
 ## Remote access (Tailscale)
 
 ```bash
-tailscale serve --bg 5173
-# UI:        https://your-machine.tailnet-name.ts.net/
+tailscale serve --bg 9899
+# UI:        https://your-machine.tailnet-name.ts.net/    (the gateway's own UI, embed-ui)
 # WebSocket: wss://your-machine.tailnet-name.ts.net/ws
 ```
 
-Port 9899 stays loopback-only and needs no serve rule.
+The gateway still listens on the loopback; `tailscale serve` dials it there.
+Never `serve` (or `funnel`) the dev server's `:5173`: see the next section.
+
+## The dev server is never public (#505)
+
+**Rule.** The Vite dev server (`:5173`) is reached only DIRECTLY: from this host
+on the loopback, or from the LAN when a person opts in with `TEAMMUX_DEV_HOST`.
+It is never put behind a reverse SSH tunnel, a reverse proxy, a CDN or
+`tailscale serve`/`funnel`. A browser anywhere else uses the gateway's own UI
+(`npm run build:server` embeds `dist/`, `server/ui.rs` serves it with `/ws` and
+`/dl` on the gateway's port), so the dev server is never a production origin. An
+edge's catch-all route answers `404`; it is never a fallback to Vite. Forwarding
+`:5173` anywhere is a forbidden config, not a known risk.
+
+**The real topology** (2026-11-02, after the containment below):
+
+```
+CloudFront d2s31qhvdzbz3r ─▶ Caddy on tky (:8082, CloudFront's origin-facing prefix list only)
+   this host's secret route prefix (BACKEND_PATH) ─▶ 127.0.0.1:9899 on tky
+        ─▶ reverse SSH tunnel (tmm-tunnel-tky.service: -R 127.0.0.1:9899 only)
+        ─▶ this host's gateway 127.0.0.1:9899 (UI + /ws + /dl; lockout keyed by XFF, #441)
+   other secret prefixes                           ─▶ other machines' gateways (not drawn)
+   anything else                                   ─▶ respond 404
+this host: Vite 127.0.0.1:5173, proxying /ws and /dl to 127.0.0.1:9899 — local dev only
+```
+
+The edge (Caddy, the tunnel unit) is configured outside this repository; the
+secret path names live there and are never written here.
+
+**Why (incident, 2026-11-02 17:00).** Until then the edge's catch-all `handle`
+reverse-proxied to port 5173 and the tunnel also forwarded that port, so the
+public distribution's root WAS the dev server. The
+owner's pentest reported, all through that one route: the gateway's `/ws` control
+channel at the root (a real handshake and `invalid token` answer, any `Origin`);
+a `/@fs` read of the gitignored `deploy/caddy/Caddyfile`, which names a secret
+route prefix; source reads over `/@fs` that echo absolute paths and the username;
+`/__open-in-editor` as a file-existence oracle that spawns a process; 500/502
+from Vite's proxy on large bodies; and lockouts through that route. Those
+findings are the owner's report; this section did not reproduce them. The report
+explained the lockouts as Vite's proxy dropping `X-Forwarded-For`, so that every
+login shared the 127.0.0.1 key. The source does not support that mechanism, and it
+is unproven: `devProxy()` is only `target` + `ws: true`, Vite's proxy copies the
+incoming request headers (Caddy's `X-Forwarded-For` included; without `xfwd` it
+adds none, and it removes none), and #441's go-live check measured a login on
+`/ws` at the root keyed by the viewer. Closing the route does not depend on it.
+Orchestrator contained it the same hour (reversible): the catch-all became
+`respond 404` (Caddyfile backup kept on tky) and the `:5173` forward was dropped
+from the tunnel unit. Read back afterwards from this host: the running tunnel
+carries `-R 127.0.0.1:9899` and no `:5173`; `https://d2s31qhvdzbz3r.cloudfront.net/`
+and `/@vite/client` answer 404; `127.0.0.1:9899/` answers 200 with the
+`tmm-gateway` marker; Vite listens on `127.0.0.1:5173` only.
+
+**How the rule is held from the source** (the edge cannot be tested from here):
+
+- *The dev server refuses proxied requests* (`refuseProxied()` in
+  `vite.config.js`, the first plugin). A request that carries any header a
+  reverse proxy or CDN adds on the way in (`Forwarded`, `X-Forwarded-For`,
+  `-Host`, `-Proto`, `X-Real-IP`, `Via`, `CloudFront-Viewer-Address`,
+  `X-Amz-Cf-Id`) gets `403` before Vite sees it: pages, `/@fs`,
+  `/__open-in-editor`, the HMR socket and the `/ws` + `/dl` proxy. The gate sits on
+  the HTTP server's `emit`, ahead of every `request` and `upgrade` listener, so a
+  refused `/ws` upgrade never dials the gateway. Caddy always adds
+  `X-Forwarded-For`, and CloudFront adds `Via`, so re-adding the old route gives
+  403s, not the app. `scripts/vite-config.test.ts` runs a real server: each header
+  alone is refused on every door, the stand-in gateway is dialled zero times, and
+  the same requests without the headers are served (the control). With the gate
+  disabled the test fails.
+- *No proxied host name.* `allowedHosts` is `['localhost']`; `.ts.net` went with
+  the old Tailscale recipe that served the dev port. (Vite always accepts an IP address, which is
+  what LAN dev uses.)
+- *Gitignored deploy configs are not served.* `deploy/` joined `NOT_THE_WEB_APP`
+  (watch, scan and `fs.deny`); the served-files test asserts
+  `deploy/caddy/Caddyfile` is 403 by plain URL and `/@fs`.
+- *No tracked recipe forwards it.* `scripts/vite-config.test.ts` fails if a tracked
+  file outside `docs/exec-plans/` holds an ssh `-R` forward of `5173`, a
+  `reverse_proxy` or `header_up Host` to `:5173`, or a `tailscale serve`/`funnel`
+  of `5173`.
+
+What is left open: a raw TCP forward with no HTTP proxy in front adds no header.
+Vite's host check still refuses a domain name there, not a bare IP address, and
+the dev server would still be public. Only the rule above prevents that.
 
 ## Android signing
 
@@ -335,8 +415,9 @@ history as containing a live signing key.
 
 ### The dev server: what it watches, and a lost HMR socket (#393)
 
-The owner's browser app is the Vite dev server (`:5173`, through CloudFront →
-Caddy → a reverse SSH tunnel). Two things made its tab reload by itself
+Until #505 (2026-11-02) the owner's browser app was the Vite dev server
+(`:5173`, through CloudFront → Caddy → a reverse SSH tunnel; forbidden now,
+§ The dev server is never public). Two things made its tab reload by itself
 ("[vite] server connection lost. Polling for restart…" is Vite's dev client
 about to call `location.reload()`).
 
@@ -379,9 +460,10 @@ a plain URL and over `/@fs/<absolute path>`. Now (`devHost`, `fsDeny` in
   `/@fs/<abs>/src/main.ts` still 200. `scripts/vite-config.test.ts` runs a real
   server and asserts the same on a scratch root.
 
-This does NOT close the CloudFront route to Vite: whoever holds that URL still
-reaches the app's own source through Vite. Pointing the route at the gateway's
-built UI (`:9899`) is the owner's decision.
+This did NOT close the CloudFront route to Vite: whoever held that URL still
+reached the app's own source through Vite, and the 2026-11-02 pentest used
+exactly that. The route is closed now and forwarding the dev server is forbidden
+(§ The dev server is never public, #505).
 
 **A lost HMR socket reconnects; it does not reload the page.** `quietDevReconnect()`
 (a Vite plugin in `vite.config.js`) patches Vite's own dev client, the way

@@ -213,7 +213,9 @@ export function quietDevReconnect() {
 // Absolute and anchored at THIS config's directory, so a worktree's own Vite
 // ignores only what is nested inside it.
 const ROOT = fileURLToPath(new URL('.', import.meta.url)).replace(/\/$/, '');
-const NOT_THE_WEB_APP = ['worktree', 'src-tauri', 'temp', 'build', 'dist', '.tmm'];
+// deploy/ (gitignored local deploy configs) joined on #505: the pentest read its
+// Caddyfile, and with it a secret route prefix, over `/@fs` (2026-11-02).
+const NOT_THE_WEB_APP = ['worktree', 'src-tauri', 'temp', 'build', 'dist', '.tmm', 'deploy'];
 
 // Where THIS checkout's dependency pre-bundle cache lives (board #464). Vite's
 // default is `<root>/node_modules/.vite`, and a task worktree's `node_modules` is
@@ -283,10 +285,52 @@ export function devServerIdentity(now = new Date()) {
   return { version: PACKAGE.version, commit: 'dev', built: minuteOf(now), devServer: true };
 }
 
+// The dev server is never behind a proxy (board #505, incident 2026-11-02). The
+// public CloudFront distribution's catch-all routed to this server through Caddy
+// and a reverse SSH tunnel, and the owner's pentest read the gitignored
+// deploy/caddy/Caddyfile over `/@fs`, reached the gateway's `/ws` at the root,
+// and spawned `/__open-in-editor`. The edge and the
+// tunnel are configured outside this repository, so the rule is held here, at
+// the server's own door: a request that carries a header a reverse proxy or CDN
+// adds on the way in is refused (403) before Vite sees it — page, `/@fs`, HMR
+// and the `/ws` + `/dl` proxy alike, an upgrade before any upstream is dialled.
+// A browser on this host or the LAN talks to Vite directly and sends none of
+// them. A remote browser uses the gateway's own UI (`npm run build:server`,
+// embed-ui), never this server.
+export const PROXY_HEADERS = ['forwarded', 'x-forwarded-for', 'x-forwarded-host', 'x-forwarded-proto', 'x-real-ip', 'via', 'cloudfront-viewer-address', 'x-amz-cf-id'];
+export const proxiedRequest = (headers) => PROXY_HEADERS.some((name) => headers[name] !== undefined);
+const REFUSED = 'the dev server is not served through a proxy (docs/conventions/development.md § The dev server is never public)\n';
+
+export function refuseProxied() {
+  return {
+    name: 'refuse-proxied',
+    apply: 'serve',
+    configureServer(server) {
+      const http = server.httpServer;
+      if (!http) return;
+      // One gate for both doors: Vite's proxy and HMR add their own 'upgrade'
+      // listeners (some after this hook), so the gate sits on emit, ahead of all.
+      const emit = http.emit;
+      http.emit = function gated(event, req, out, ...rest) {
+        if ((event === 'request' || event === 'upgrade') && proxiedRequest(req.headers)) {
+          if (event === 'request') {
+            out.writeHead(403, { 'content-type': 'text/plain; charset=utf-8', connection: 'close' });
+            out.end(REFUSED);
+          } else {
+            out.end(`HTTP/1.1 403 Forbidden\r\nContent-Type: text/plain; charset=utf-8\r\nContent-Length: ${Buffer.byteLength(REFUSED)}\r\nConnection: close\r\n\r\n${REFUSED}`);
+          }
+          return true;
+        }
+        return emit.call(this, event, req, out, ...rest);
+      };
+    },
+  };
+}
+
 export function createViteConfig(command, env = process.env, identityDeps = {}) {
   return {
     cacheDir: viteCacheDir(),
-    plugins: [allowCompactXtermLines(), quietDevReconnect(), svelte()],
+    plugins: [refuseProxied(), allowCompactXtermLines(), quietDevReconnect(), svelte()],
     // esbuild dep pre-bundling bypasses plugin transforms, so the compact-lines
     // patch above would never apply in dev. Serve @xterm/xterm from source.
     optimizeDeps: {
@@ -309,7 +353,8 @@ export function createViteConfig(command, env = process.env, identityDeps = {}) 
       host: devHost(env),
       port: DEV_WEB_PORT,
       strictPort: true,
-      allowedHosts: ['.ts.net', 'localhost'],
+      // No proxied names (#505): a tailnet or edge name only ever arrives through a proxy.
+      allowedHosts: ['localhost'],
       watch: { ignored: watchIgnored() },
       fs: { deny: fsDeny() },
       ...(command === 'serve' ? { proxy: devProxy(env) } : {}),
