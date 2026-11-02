@@ -10,6 +10,7 @@ const rpc = {
   registryList: async () => ({ agents: [alpha] }),
   teamsList: async () => ({ teams: [] }), skillsList: async () => ({ skills: [] }),
   mcpList: async () => ({ mcp: [] }), modelsList: async () => ({ models: [] }),
+  getCaps: () => undefined, onCaps: () => {},
 };
 type App = Awaited<ReturnType<Awaited<typeof compiled>['mount']>>;
 async function edit(app: App) {
@@ -88,7 +89,7 @@ test('a focus change keeps A s guest editor and its draft; B s editor is its own
     registryList: async () => { sent.push(`${id}:registryList`); return { agents: [{ ...alpha, system: `prompt on ${id}` }] }; },
     registrySave: async (def: { system?: string }) => { sent.push(`${id}:registrySave:${def.system}`); return {}; },
     teamsList: async () => ({ teams: [] }), skillsList: async () => ({ skills: [] }), mcpList: async () => ({ mcp: [] }),
-    modelsList: async () => ({ models: [] }), backendsList: async () => ({ backends: [] }),
+    modelsList: async () => ({ models: [] }), backendsList: async () => ({ backends: [] }), getCaps: () => undefined, onCaps: () => {},
     addTeamMessageListener: () => {}, removeTeamMessageListener: () => {},
   });
   const app = await (await guests).mount(context, {
@@ -136,7 +137,7 @@ test('the page asks the SHOWN guest: its exit guard and its Back, never the last
   const server = (id: string) => ({
     registryList: async () => ({ agents: [{ ...alpha, system: `prompt on ${id}` }] }), registrySave: async () => ({}),
     teamsList: async () => ({ teams: [] }), skillsList: async () => ({ skills: [] }), mcpList: async () => ({ mcp: [] }),
-    modelsList: async () => ({ models: [] }), backendsList: async () => ({ backends: [] }),
+    modelsList: async () => ({ models: [] }), backendsList: async () => ({ backends: [] }), getCaps: () => undefined, onCaps: () => {},
     addTeamMessageListener: () => {}, removeTeamMessageListener: () => {},
   });
   let back: (() => boolean) | null = null;
@@ -171,7 +172,7 @@ test('an edit request opens in the guest of the server it names, and never moves
   const server = (id: string) => ({
     registryList: async () => ({ agents: [{ ...alpha, system: `prompt on ${id}` }] }), registrySave: async () => ({}),
     teamsList: async () => ({ teams: [] }), skillsList: async () => ({ skills: [] }), mcpList: async () => ({ mcp: [] }),
-    modelsList: async () => ({ models: [] }), backendsList: async () => ({ backends: [] }),
+    modelsList: async () => ({ models: [] }), backendsList: async () => ({ backends: [] }), getCaps: () => undefined, onCaps: () => {},
     addTeamMessageListener: () => {}, removeTeamMessageListener: () => {},
   });
   const app = await (await guests).mount(context, {
@@ -206,7 +207,7 @@ test('A s draft survives B leaving the category, and a hidden guest keeps its ow
   const server = (id: string) => ({
     registryList: async () => ({ agents: [{ ...alpha, system: `prompt on ${id}` }] }), registrySave: async () => ({}),
     teamsList: async () => ({ teams: [] }), skillsList: async () => ({ skills: [] }), mcpList: async () => ({ mcp: [] }),
-    modelsList: async () => ({ models: [] }), backendsList: async () => ({ backends: [] }),
+    modelsList: async () => ({ models: [] }), backendsList: async () => ({ backends: [] }), getCaps: () => undefined, onCaps: () => {},
     addTeamMessageListener: () => {}, removeTeamMessageListener: () => {},
   });
   const app = await (await guests).mount(context, {
@@ -243,7 +244,7 @@ async function twoGuests(context: import('node:test').TestContext, props: Record
   const server = (id: string) => ({
     registryList: async () => ({ agents: [{ ...alpha, system: `prompt on ${id}` }] }), registrySave: async () => ({}),
     teamsList: async () => ({ teams: [] }), skillsList: async () => ({ skills: [] }), mcpList: async () => ({ mcp: [] }),
-    modelsList: async () => ({ models: [] }), backendsList: async () => ({ backends: [] }),
+    modelsList: async () => ({ models: [] }), backendsList: async () => ({ backends: [] }), getCaps: () => undefined, onCaps: () => {},
     addTeamMessageListener: () => {}, removeTeamMessageListener: () => {},
   });
   const app = await (await guests).mount(context, {
@@ -394,5 +395,42 @@ test('only a shown, free guest is visible: a request waits while its guest is hi
     assert.equal(editorIn('a'), 0, 'A is held: A s request waits');
     await props({ guestHeld: '' });
     assert.equal(editorIn('a'), 1, 'free again, A takes it');
+  } finally { await app.close(); }
+});
+
+// Board #492 phase 2: the phone's fifth Agent row, Backends, by the SAME
+// shown-predicate as the desktop category: only where the shown guest's
+// server announces `backends_check`; a stored tab on a server known to lack
+// it leaves through the existing correction.
+const rows = (app: App) => [...app.document.querySelectorAll('.preferences > .sidebar .side-row')].map((b) => b.textContent?.trim());
+test('Settings shows Backends only where the server can run the check, and a stored Backends tab falls back (#492)', async context => {
+  const checks: string[] = [];
+  const serve = (caps: string[] | undefined) => ({ ...rpc, getCaps: () => caps,
+    backendsCheck: async () => { checks.push('refresh'); return { backends: [], scope: 'default', baseline: null }; } });
+  let app = await (await compiled).mount(context, {
+    props: { showAgents: true }, modules: [serve(['backends_check'])],
+    setup(window) { window.HTMLCanvasElement.prototype.getContext = () => null; },
+  });
+  try {
+    for (let i = 0; i < 6; i++) await app.flush();
+    assert.deepEqual(rows(app).slice(-5), ['Agents', 'Teams', 'Skills', 'MCP servers', 'Backends'], 'the fifth row of the Agent group');
+    assert.deepEqual(checks, [], 'listing the row is not entering it');
+    category(app, 'Backends');
+    for (let i = 0; i < 8; i++) await app.flush();
+    assert.deepEqual(checks, ['refresh'], 'opening it runs its one Refresh');
+    assert.equal(app.document.querySelector('.preferences .page-head h1')?.textContent, 'Backends', 'Settings\u2019 own head names it');
+  } finally { await app.close(); }
+  app = await (await compiled).mount(context, {
+    props: { showAgents: true }, modules: [serve([])],
+    setup(window) {
+      window.localStorage.setItem('tmux_settings_tab', 'backends');
+      window.HTMLCanvasElement.prototype.getContext = () => null;
+    },
+  });
+  try {
+    for (let i = 0; i < 8; i++) await app.flush();
+    assert.ok(!rows(app).includes('Backends'), 'a server known to lack the check has no row');
+    assert.equal(app.window.localStorage.getItem('tmux_settings_tab'), 'appearance', 'the stored tab leaves through the existing correction');
+    assert.deepEqual(checks, ['refresh'], 'and nothing is asked of that server');
   } finally { await app.close(); }
 });

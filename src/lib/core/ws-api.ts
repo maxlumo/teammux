@@ -570,6 +570,11 @@ export function createWsApi(connection: Connection) {
   /** The backends this server can spawn, with the client's resource names for
    * each (name, avatar path, colour token, effort levels), first = default. */
   const backendsList = () => call<{ backends: BackendInfo[] }>('backends_list');
+  /** Backend readiness (board #492): a Refresh, or with `test` an explicit
+   * Test of the one backend the server says only a Test can decide. The waits
+   * sit above the server's own 15 s / 30 s budgets, which answer first. */
+  const backendsCheck = (test?: string) =>
+    call<unknown>('backends_check', test ? { test } : {}, test ? 35000 : 20000);
   /** The model ids a backend accepts. `models` is null where the backend cannot
    * enumerate them (claude/codex take aliases), and the editor keeps the field as
    * free text in that case. */
@@ -645,7 +650,7 @@ export function createWsApi(connection: Connection) {
     boardGet, boardSave, boardNote, boardDelete, hubActivity, hubSpawn, hubSpawnTeam,
     hubAgentStop, hubAgentRemove, hubAgentInterrupt, hubAgentInputMode, hubAgentSetTeam, hubAgentRestart, hubAgentFork,
     hubTeamRestart, registryList, registrySave, registryDelete, globalPromptGet,
-    globalPromptSet, teamsList, teamsSave, teamsDelete, backendsList, modelsList, skillsList,
+    globalPromptSet, teamsList, teamsSave, teamsDelete, backendsList, backendsCheck, modelsList, skillsList,
     skillsSave, skillsDelete, skillsRefresh, skillsRead, skillsImport, skillsFiles,
     skillsFile, mcpList, mcpSave, mcpDelete, fsDownloadHttp, fsPreviewBase,
   };
@@ -705,7 +710,7 @@ export const RPC_KIND = {
   registryList: 'read', registrySave: 'write', registryDelete: 'write',
   globalPromptGet: 'read', globalPromptSet: 'write',
   teamsList: 'read', teamsSave: 'write', teamsDelete: 'write',
-  backendsList: 'read', modelsList: 'read',
+  backendsList: 'read', backendsCheck: 'read', modelsList: 'read',
   skillsList: 'read', skillsSave: 'write', skillsDelete: 'write', skillsRefresh: 'write',
   skillsRead: 'read', skillsImport: 'write', skillsFiles: 'read', skillsFile: 'read',
   mcpList: 'read', mcpSave: 'write', mcpDelete: 'write',

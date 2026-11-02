@@ -27,6 +27,11 @@ export const HUB_FILES = 'hub_files';
  * none of those six calls is sent without this. */
 export const MCP_MASKED = 'mcp_masked';
 
+/** `backends_check` exists (board #492): the Agents page offers its Backends section. An older
+ * server answers method-not-found, which must never read as "not installed", so the section is
+ * offered only when this is announced, and is absent (not empty) when it is known not to be. */
+export const BACKENDS_CHECK = 'backends_check';
+
 /** What an older server lacking a capability means for the person, per cap. */
 const TOO_OLD: Record<string, string> = {
   [BOARD_DISPATCH]: 'This server is older than the app. Update the server to assign.',

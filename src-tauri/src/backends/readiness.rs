@@ -658,7 +658,7 @@ pub fn reason_text(code: &str) -> &'static str {
         "probe_lost" => "the check stopped without an answer",
         "probe_protocol" => "the login-shell check gave no well-formed answer",
         "config_unreadable" => "its config could not be read",
-        "config_invalid" => "its config is not valid TOML",
+        "config_invalid" => "its config is invalid",
         "config_absent" => "it has no config file",
         "invalid_env_name" => "its config names an invalid variable",
         "aws_chain" => "an AWS credential chain, known at its first run",

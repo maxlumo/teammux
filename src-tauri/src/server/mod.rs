@@ -35,11 +35,14 @@ pub type NotificationHub = Arc<AgentNotificationHub>;
 /// that needs Files asks for this first instead of guessing from the shape of an answer. `mcp_masked`
 /// (board #451): `mcp_list`, `registry_list` and `teams_list` mask every MCP env/header value as
 /// `"<set>"`, and their saves keep the stored value for it. An older server prints the values and
-/// would store the marker as a literal, so a client sends none of those six calls without it. An older server announces no `caps` at all, and a client that
+/// would store the marker as a literal, so a client sends none of those six calls without it. `backends_check`
+/// (board #492): the `backends_check` RPC exists, so the Agents page may offer its Backends
+/// section; an older server answers method-not-found, which the page must never read as "not
+/// installed". An older server announces no `caps` at all, and a client that
 /// needs one refuses the write instead of saving a label nobody acts on. The
 /// phone's server has no Hub, so it announces none.
 #[cfg(not(any(target_os = "android", target_os = "ios")))]
-pub(crate) const LOGIN_CAPS: &[&str] = &["board_dispatch", "spawn_join", "agent_team", "hub_files", "mcp_masked"];
+pub(crate) const LOGIN_CAPS: &[&str] = &["board_dispatch", "spawn_join", "agent_team", "hub_files", "mcp_masked", "backends_check"];
 #[cfg(any(target_os = "android", target_os = "ios"))]
 pub(crate) const LOGIN_CAPS: &[&str] = &[];
 

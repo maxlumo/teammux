@@ -23,6 +23,8 @@
   import CheckboxGroup from '../ui/CheckboxGroup.svelte';
   import { activeModal } from '../ui/modal.ts';
   import { configFingerprint, configPayload, configValid } from './config-draft.ts';
+  import BackendsSection from './BackendsSection.svelte';
+  import { watchBackendsCap } from './backends-cap.svelte.ts';
 
   // The backends a registry agent can run on and the effort levels each
   // accepts come from the SERVER (`backends_list`, board #130) — the client
@@ -57,6 +59,7 @@
     teams: ['teamsTitle', 'teamsHint'],
     skills: ['skillsTitle', 'skillsHint'],
     mcp: ['mcpTitle', 'mcpHint'],
+    backends: ['backendsTitle', 'settingsBackendsHint'],
   };
   // The desktop's categories (the sidebar's rows). `count` feeds the row's
   // trailing figure; `start` is the "+" in the category page's head.
@@ -67,17 +70,31 @@
     teams: { label: 'teamsTitle', hint: 'settingsTeamsHint', add: 'teamsNew', start: (x) => startTeam(x) },
     skills: { label: 'skillsTitle', hint: 'settingsSkillsHint', add: 'skillsNew', start: (x) => startSkill(x) },
     mcp: { label: 'mcpTitle', hint: 'settingsMcpHint', add: 'mcpNew', start: (x) => startMcp(x) },
+    // Backend readiness (board #492): no roster and no editor, only the
+    // check's own section in the main column.
+    backends: { label: 'backendsTitle', hint: 'settingsBackendsHint' },
   };
+  // Shown only on a server that can run the check: THE shown-predicate the
+  // phone's Settings row reads too (backends-view.ts). A reconnect (caps
+  // unknown) keeps it; a server known to lack it has no entry.
+  const backendsCap = watchBackendsCap(() => guardOwner);
   const CATS = $derived([
     { id: 'global', label: 'agentsGlobal', hint: 'settingsGlobalHint', count: null },
     { id: 'agents', label: 'agentsTitle', hint: 'settingsAgentsHint', count: () => String(defs.length) },
     { id: 'teams', label: 'teamsTitle', hint: 'settingsTeamsHint', count: () => String(teams.length) },
     { id: 'skills', label: 'skillsTitle', hint: 'settingsSkillsHint', count: () => String(skills.length) },
     { id: 'mcp', label: 'mcpTitle', hint: 'settingsMcpHint', count: () => String(mcps.length) },
+    ...(backendsCap.shown ? [{ id: 'backends', label: 'backendsTitle', hint: 'settingsBackendsHint', count: null }] : []),
   ]);
   const storedCat = typeof localStorage !== 'undefined' ? localStorage.getItem(CAT_KEY) : null;
   let cat = $state(storedCat && storedCat in CAT_META ? storedCat : 'agents');
   let categoryOpen = $state(false);
+  // A stored or chosen Backends category on a server KNOWN to lack the check
+  // goes where an invalid stored category goes (P1-B). It has no editor, so
+  // no leave guard is involved; the stored choice stays for a server that has it.
+  $effect(() => {
+    if (!backendsCap.shown && cat === 'backends') untrack(() => { cat = 'agents'; });
+  });
   function pickCat(id) {
     if (cat === id) { categoryOpen = true; return; }
     requestLeave(() => {
@@ -160,6 +177,12 @@
     measure();
     return () => observer.disconnect();
   });
+  // The Backends section is ENTERED when it is on screen: the phone's section,
+  // or the desktop category with its column showing (a stacked pane shows it
+  // only once opened). Each entry runs its one Refresh (BackendsSection).
+  const showsBackends = $derived(section === 'backends' || (!section && cat === 'backends'));
+  const backendsDrill = $derived(!section && (paneMode === 'stacked' || compactViewport));
+  const backendsActive = $derived(visible && showsBackends && (!!section || !backendsDrill || categoryOpen));
   let original = $state('');
   let pendingOperation = $state('');
   const saving = $derived(!!pendingOperation);
@@ -334,7 +357,7 @@
       if (pendingExit) { keepEditing(); return true; }
       if (pending) { pending = null; return true; }
       if (drilled) { requestLeave(closeAll); return true; }
-      if (!section && categoryOpen && paneMode === 'stacked') { categoryOpen = false; return true; }
+      if (!section && categoryOpen && (paneMode === 'stacked' || (cat === 'backends' && backendsDrill))) { categoryOpen = false; return true; }
       return false;
     });
   });
@@ -858,7 +881,8 @@
       {/if}
 {/snippet}
 
-<div class="agents-root config-compact config-entity" bind:this={rootEl} class:editing={drilled} class:with-rows={!section}
+<div class="agents-root config-compact config-entity" bind:this={rootEl} class:editing={drilled} class:with-rows={!section && cat !== 'backends'}
+  class:bare-cat={!section && cat === 'backends'} class:solo={section === 'backends'}
   class:reduced={paneMode === 'reduced'} class:stacked={paneMode === 'stacked'} class:category-open={categoryOpen}
   class:drill-fwd={drillAnim === 'fwd'} class:drill-back={drillAnim === 'back'}>
   <aside class="sidebar config-navigation">
@@ -883,7 +907,7 @@
     </div>
   </aside>
 
-  {#if !section}
+  {#if !section && cat !== 'backends'}
     <!-- The desktop's SECOND level (board #94: "右侧拆分成两级"): the chosen
          category's rows are their own column, so an open editor no longer
          REPLACES them — the list stays beside what it selected, the same
@@ -1242,6 +1266,9 @@
           {/if}
         </div>
       </fieldset></div>
+    {:else if showsBackends}
+      <BackendsSection runtime={guardOwner} active={backendsActive} cap={backendsCap.state} head={!section}
+        tag={scope?.tag} icon={backendIcon} onBack={backendsDrill ? () => categoryOpen = false : null} />
     {:else if !section}
       <!-- Desktop, nothing being edited: the rows live in their own column
            now (board #94), so the main column is the category's front page —
@@ -1316,6 +1343,19 @@
   }
   @media (prefers-reduced-motion: reduce) {
     .agents-root.drill-fwd .mid, .agents-root.drill-back .sidebar { animation: none; }
+  }
+  /* Backends (board #492) has no roster column: on the desktop it is the
+     categories beside the section, and a stacked pane drills to it like a
+     category's rows; the phone's section is the section alone. */
+  .agents-root.solo { grid-template-columns: minmax(0, 1fr); }
+  .agents-root.solo .sidebar { display: none; }
+  .agents-root.solo:not(.editing) .mid, .agents-root.reduced.bare-cat:not(.editing) .mid { display: flex; }
+  .agents-root.stacked.bare-cat.category-open:not(.editing) .sidebar { display: none; }
+  .agents-root.stacked.bare-cat.category-open:not(.editing) .mid { display: flex; }
+  @media (max-width: 760px) {
+    .agents-root.bare-cat:not(.category-open):not(.editing) .mid { display: none; }
+    .agents-root.bare-cat.category-open:not(.editing) .sidebar { display: none; }
+    .agents-root.bare-cat.category-open:not(.editing) .mid { display: flex; }
   }
 
   .sidebar { position: relative; background: var(--bg2); border-right: 1px solid var(--border); display: flex; flex-direction: column; min-height: 0; }

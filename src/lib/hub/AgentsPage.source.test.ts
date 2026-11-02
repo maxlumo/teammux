@@ -34,9 +34,10 @@ test('the desktop config page has THREE levels: categories | rows | editor (boar
   // their own column, so an open editor no longer REPLACES them — the list
   // stays beside what it selected. Compact keeps the two-level drill; the
   // phone's Settings sections keep their sidebar-of-rows shape.
-  assert.match(source, /class:with-rows=\{!section\}/u, 'the third column exists only on the desktop page');
+  // Backends (board #492) is a category without a roster, so it has no rows column.
+  assert.match(source, /class:with-rows=\{!section && cat !== 'backends'\}/u, 'the third column exists only on the desktop page');
   assert.match(source, /<aside class="cat-rows config-navigation">/u, 'the rows column is its own shared configuration navigation');
-  assert.match(source, /\{#if !section\}[\s\S]{0,900}?<aside class="cat-rows config-navigation">/u, 'and renders only without a section');
+  assert.match(source, /\{#if !section && cat !== 'backends'\}[\s\S]{0,900}?<aside class="cat-rows config-navigation">/u, 'and renders only without a section');
   assert.match(source, /\{@render rows\(cat\)\}/u, 'the ONE rows snippet feeds it — no second list dialect');
   // The global instructions have no roster, only the one document.
   assert.match(source, /class:open=\{!!editingGlobal\} onclick=\{startGlobal\}[\s\S]{0,120}?AGENTS\.md/u,

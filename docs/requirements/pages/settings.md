@@ -22,6 +22,7 @@ where Agents is a page of its own, reads as one plain list):
 
 **Agent** (phone only, where Agents is not a page of its own)
 - **Agents / Teams / Skills / MCP servers** — four second-level pages, each the real AgentsPage narrowed to one section (owner, 2026-09-02)
+- **Backends** — a fifth, only where the shown server announces the `backends_check` cap (board #492): for each agent CLI on that server, Installed (version, and the program's path as selectable text), Set up and Answers, each a status dot with words, the known fix where there is one, a Refresh (one runs on opening the page) and, on the row the server says only a Test decides (kiro), a Test with what it writes. A stored Backends tab on a server known to lack the cap opens Appearance instead; a reconnect keeps the page and its last results
 
 ## Components
 - Connection setup command opens the existing address/token form.

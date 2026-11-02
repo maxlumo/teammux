@@ -23,6 +23,7 @@ function rpc(extra: Record<string, (...args: any[]) => unknown> = {}) {
     registryList: async () => ({ agents: [alpha] }),
     teamsList: async () => ({ teams: [] }), skillsList: async () => ({ skills: [] }),
     mcpList: async () => ({ mcp: [] }), modelsList: async () => ({ models: [] }),
+    getCaps: () => undefined, onCaps: () => {},
     ...extra,
   };
 }

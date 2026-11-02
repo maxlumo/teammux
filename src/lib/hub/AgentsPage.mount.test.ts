@@ -18,6 +18,8 @@ function rpc(extra: Record<string, (...args: any[]) => unknown> = {}) {
     skillsList: async () => ({ skills: [] }),
     mcpList: async () => ({ mcp: [] }),
     modelsList: async () => ({ models: [] }),
+    // The login answer's caps (board #492): unanswered unless a test says.
+    getCaps: () => undefined, onCaps: () => {},
     ...extra,
   };
 }
@@ -933,5 +935,104 @@ test('a new successful read after a refusal reopens the kind, and clears only th
     assert.equal(app.document.querySelector('textarea')?.value, 'Kept through the refusal');
     assert.equal(command(app, 'Save').disabled, false, 'the draft can be saved again');
     assert.equal(app.document.querySelector('.editor .err'), null, 'the refusal it showed is gone');
+  } finally { await app.close(); }
+});
+
+// ── Backends (board #492 phase 2): the category, the phone section, and the
+// one shown-predicate over the server's `backends_check` cap. ──────────────
+const KIRO_ROW = {
+  name: 'kiro', program: 'kiro-cli',
+  installed: { state: 'present', path: '/home/u/.local/bin/kiro-cli', version: '1.2.3', reason: null },
+  set_up: { state: 'unknown', basis: 'presence', via: null, missing: [], reason: 'test_only' },
+  answers: { state: 'unknown', count: null, reason: 'test_only' },
+};
+/** A server whose login caps a test can change (a reconnect, another server). */
+function capsServer(initial: string[] | undefined) {
+  let now = initial;
+  const watchers: ((caps: string[] | undefined) => void)[] = [];
+  const checks: string[] = [];
+  const modules = rpc({
+    getCaps: () => now,
+    onCaps: (cb: (caps: string[] | undefined) => void) => { watchers.push(cb); },
+    backendsCheck: async (test?: string) => { checks.push(test ?? 'refresh'); return { backends: [KIRO_ROW], scope: 'default', baseline: null }; },
+  });
+  const set = async (app: App, caps: string[] | undefined) => {
+    now = caps;
+    for (const w of watchers) w(caps);
+    for (let i = 0; i < 6; i++) await app.flush();
+  };
+  return { modules, set, checks };
+}
+const categories = (app: App) => [...app.document.querySelectorAll('.sidebar .side-row .r-name')].map((n) => n.textContent);
+const settle = async (app: App) => { for (let i = 0; i < 8; i++) await app.flush(); };
+
+test('desktop: Backends is a category only on a server that announces the check, and opening it runs one Refresh (#492)', async context => {
+  const old = capsServer([]);
+  let app = await (await compiled).mount(context, { props: { visible: true }, modules: [old.modules] });
+  try {
+    await settle(app);
+    assert.ok(!categories(app).includes('Backends'), 'a server known to lack it has no entry');
+    assert.deepEqual(old.checks, []);
+  } finally { await app.close(); }
+  const current = capsServer(['mcp_masked', 'backends_check']);
+  app = await (await compiled).mount(context, { props: { visible: true }, modules: [current.modules] });
+  try {
+    await settle(app);
+    assert.deepEqual(categories(app).slice(-2), ['MCP servers', 'Backends'], 'the sixth category, after MCP');
+    assert.deepEqual(current.checks, [], 'the page\u2019s mount runs no check');
+    const row = [...app.document.querySelectorAll<HTMLButtonElement>('.sidebar .side-row')].find((b) => b.textContent?.includes('Backends'))!;
+    row.click(); await settle(app);
+    assert.deepEqual(current.checks, ['refresh'], 'entering the section runs its one Refresh');
+    assert.equal(app.document.querySelector('.cat-rows'), null, 'no roster column: the section is the main column');
+    assert.match(app.document.querySelector('main.mid')?.textContent ?? '', /kiro[\s\S]*1\.2\.3/u);
+    row.click(); await settle(app);
+    assert.deepEqual(current.checks, ['refresh'], 'choosing the open category again is not a new entry');
+  } finally { await app.close(); }
+});
+
+test('desktop: a stored Backends category on a server known to lack the check falls back to Agents; caps unknown keeps it (#492 P1-B)', async context => {
+  const old = capsServer([]);
+  let app = await (await compiled).mount(context, {
+    props: { visible: true }, modules: [old.modules],
+    setup(window) { window.localStorage.setItem('tmux_agents_cat', 'backends'); },
+  });
+  try {
+    await settle(app);
+    assert.equal(app.document.querySelector('.sidebar .side-row.open .r-name')?.textContent, 'Agents', 'the existing invalid-category fallback');
+    assert.equal(app.document.querySelector('.backends'), null, 'no empty page');
+    assert.deepEqual(old.checks, []);
+  } finally { await app.close(); }
+  const s = capsServer(['backends_check']);
+  app = await (await compiled).mount(context, {
+    props: { visible: true }, modules: [s.modules],
+    setup(window) { window.localStorage.setItem('tmux_agents_cat', 'backends'); },
+  });
+  try {
+    await settle(app);
+    assert.deepEqual(s.checks, ['refresh'], 'a stored category on screen is an entry');
+    await s.set(app, undefined);
+    assert.ok(categories(app).includes('Backends'), 'a reconnect keeps the category');
+    assert.match(app.document.querySelector('.backends')?.textContent ?? '', /Waiting for the connection to check\.[\s\S]*kiro[\s\S]*1\.2\.3/u,
+      'and its last results, said to be waiting');
+    await s.set(app, ['backends_check']);
+    assert.deepEqual(s.checks, ['refresh'], 'and nothing re-runs by itself');
+    await s.set(app, []);
+    assert.ok(!categories(app).includes('Backends'), 'now known to lack it: no entry');
+    assert.equal(app.document.querySelector('.sidebar .side-row.open .r-name')?.textContent, 'Agents');
+  } finally { await app.close(); }
+});
+
+test('phone: the Backends section is the section alone, its path selectable on the row, one Refresh when shown (#492)', async context => {
+  const s = capsServer(['backends_check']);
+  const app = await (await compiled).mount(context, { props: { visible: false, section: 'backends' }, modules: [s.modules] });
+  try {
+    await settle(app);
+    assert.deepEqual(s.checks, [], 'a hidden page has not been entered');
+    await app.setProps({ visible: true }); await settle(app);
+    assert.deepEqual(s.checks, ['refresh']);
+    assert.ok(app.document.querySelector('.agents-root.solo'), 'one column: no roster sidebar beside it');
+    assert.equal(app.document.querySelector('.backends')?.closest('.page-head'), null);
+    assert.equal(app.document.querySelector('main.mid .page-head'), null, 'Settings owns the head on the phone');
+    assert.equal(app.document.querySelector('.fact-path')?.textContent, '/home/u/.local/bin/kiro-cli');
   } finally { await app.close(); }
 });

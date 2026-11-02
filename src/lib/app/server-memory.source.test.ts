@@ -47,6 +47,10 @@ const GLOBAL: Record<string, Record<string, string>> = {
   'files/review-html-map.ts': { loading: 'the lazy parse5/entities import, a library module, not a server\'s data (#434)' },
   'hub/hub.ts': { squashed: 'a WeakMap on message objects; the tree that holds them is gone' },
   'hub/reveal.ts': { inFlight: 'a WeakMap on DOM nodes' },
+  // The last definite backends_check cap per RUNTIME handle (board #492): a
+  // WeakMap on the runtime object, so it goes with its runtime and a new
+  // runtime (same server id or not) starts with nothing known.
+  'hub/backends-view.ts': { lastKnown: 'a WeakMap on runtime handles; it goes with its runtime' },
   // The ONE drop of stale Rust download claims (board #447): a property of the page's
   // PROCESS, begun once at load and awaited by every download, never of a server.
   'files/save-file.ts': { realm: 'once per page load, the process\'s claims in Rust' },

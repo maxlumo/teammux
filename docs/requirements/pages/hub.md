@@ -208,12 +208,26 @@ completion).
   not draw fails a source test instead of rendering a blank box.
   On the desktop the Agents page is a category page like Settings: the
   sidebar lists Instructions for every agent · Agents · Teams · Skills · MCP
-  servers (with counts), the main column shows the chosen category's rows
+  servers (with counts) · Backends (only on a server that announces the
+  `backends_check` cap, board #492), the main column shows the chosen category's rows
   and a "+" in its head, and picking a row opens its editor there (the
   chosen category persists). On the phone each category is its own Settings
   page (`section`) whose list IS the screen. "Instructions for every agent"
   edits the app-wide `<config>/AGENTS.md` that leads every managed agent's
   system prompt (also `tmm prompt`).
+  Backends (board #492) has no rows and no editor: the section itself is the
+  main column. It says, per agent CLI on THIS server, whether it is
+  installed (version and the program's path, selectable), set up and
+  answering, each fact a status dot in the one dot language plus words, with
+  the fix where the fix is known (install on the managed PATH, set a variable
+  in the server's login shell, start tmux, press Test, check PATH
+  permissions, try later after a timeout). Opening the section runs ONE
+  Refresh; the Refresh button runs another; Test runs only on its click, on
+  the row the server says only a Test decides. A failed check keeps the last
+  rows and says they are from HH:MM; it never turns a fact into "not
+  installed". The scope line says the facts are about a new agent on each
+  CLI's default provider and model, and that whether it can run a task is
+  known at its first run. Also `tmm agent backends`.
   Teams are configured on the Agents page (Teams section). Each member chooses
   one source: a bare coding agent configured here (backend/model/effort,
   prompt, Skills, MCP), a custom registry agent inherited whole, or a sub-team
