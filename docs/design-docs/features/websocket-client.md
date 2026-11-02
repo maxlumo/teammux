@@ -1374,9 +1374,11 @@ the source:
   `sendSubscribe`). The server answers any frame before the login with
   ERR_AUTH `auth required…` and closes (`connection.rs`, also in the owner's
   53a4c410). `isAuthRefusal` read the CODE only, so that answer counted as a
-  bad token. Reproduced against the real release server in a netns
-  (`temp/b502/repro.mjs`: one `ping` on the socket's open or on its nonce;
-  20 runs per variant) and, by the validator, on the Docker three-gateway
+  bad token. Reproduced against the real release server (a one-off script,
+  not kept: the server with a temporary config, a private tmux socket and
+  its own port, inside `unshare -rn`; one injected `ping` on the socket's
+  open or on its nonce; 20 runs per variant) and, by the validator, on the
+  Docker three-gateway
   rig with one injected plaintext `ping` before the login: the member row
   read "Token refused" and `tmux_refused_tokens` was written. Without an
   injection the validator's 12 natural drop cycles on that rig did not
@@ -1480,9 +1482,9 @@ classification rows fail; the close-during-encrypt row passes on both, as a
 regression pin for the check that already existed. For the review's P1s,
 each row goes red with its fix taken out: the loop's protocol diagnosis
 (reconnect), the member's protocol state (members), and the superseded
-digest's reject (refused-attempts). `temp/b502/repro.mjs`
-against the fix: every variant connected, and the gateway logged no auth
-line.
+digest's reject (refused-attempts). The same one-off repro against the
+fix: every variant connected, and the gateway logged no auth line. The
+behaviour is pinned by the tests above, not by that script.
 
 **A member that gave up on reachability is re-armed passively** (board #493,
 2026-11-02). Owner, 2026-11-01 23:44: "all included 模式有一台服务器提示连不上，重试失败；选只连这一台可以；再切回 all included 两台都能连". Measured on the
