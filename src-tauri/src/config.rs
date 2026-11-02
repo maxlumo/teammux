@@ -331,7 +331,7 @@ pub fn test_scratch(name: &str) -> PathBuf {
 
 /// `kill(pid, 0)`: alive, or alive but not ours (EPERM). Nonsense pids count
 /// as alive so they are never reclaimed.
-fn process_alive(pid: libc::pid_t) -> bool {
+pub(crate) fn process_alive(pid: libc::pid_t) -> bool {
     if pid <= 0 {
         return true;
     }

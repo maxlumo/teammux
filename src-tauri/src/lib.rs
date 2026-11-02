@@ -37,6 +37,12 @@ pub mod system_status;
 #[cfg(not(any(target_os = "android", target_os = "ios")))]
 pub mod probe;
 
+/// `tmm merge` (board #445): the squash merge, its diff-equality proof and
+/// the issue note from values this process read. Desktop and unix only: it
+/// is run by an agent or a person on the machine that holds the checkout.
+#[cfg(all(unix, not(any(target_os = "android", target_os = "ios"))))]
+pub mod merge;
+
 #[cfg(all(desktop, feature = "gui"))]
 use config::Config;
 

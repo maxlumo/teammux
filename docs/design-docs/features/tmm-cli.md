@@ -64,6 +64,11 @@ tmm board assign <id> <name|->        hand it to someone else; `-` clears it (#3
 tmm board move <id> <todo|doing|review|done>
 tmm board note <id> <text> [--image <path|url>]  progress/decisions ON the issue (an image alone is a note)
 
+# integration (board #445; local git plus the board note, see § tmm merge)
+tmm merge <issue> <branch> --expect <tip> [--message-file <f>] [--dry-run]
+                                     squash-merge a reviewed branch onto the branch checked out HERE;
+                                     the note is built from this process's own reads
+
 # review comments on a project file (board #434; the Files preview's store)
 tmm review list <path> [--all]       open comments with where each is now (located|missing|ambiguous)
 tmm review add <path> --lines A[-B] [--cols C-D] --note <text>   the gateway measures the lines
@@ -490,6 +495,78 @@ can get wrong to save three characters.
 - The `tmm-tasks` fallback session keeps one idle shell window (the one tmux
   creates with the session). Harmless, and it keeps the session alive between
   tasks.
+
+## tmm merge (board #445, 2026-11-02)
+
+Why it exists: "paste the hash from returned output" was broken by every agent, the orchestrator included, about a hundred times (the tally on #445). Each time a value was written before, or without, the command that produced it. A rule everyone breaks under load is in the wrong layer, so the merge, its proof and its record are now one command that reads every value itself (tenet 12). The contract is reviewer-CLEARed (2026-11-02 11:02). The code is `src-tauri/src/merge.rs`; `tmm.rs` reads the issue and posts the note.
+
+`tmm merge <issue> <branch> --expect <tip> [--message-file <f>] [--dry-run] [--output json]` runs on the repository and branch of the caller's working directory, normally the launch checkout.
+
+- **What it does not check: the gates.** YOU confirm reviewer CLEAR and validator SHIP of one tip, and pass that tip as the required `--expect` (at least 8 hex characters). The command checks only that `--expect` names exactly one commit (git's own ambiguity refusal stands) and that this commit is the branch tip. The board keeps no gate record a program could read, and a hash found in free text is no approval. The note says so: "the gates were confirmed by <you>, not checked by this command".
+- **The order.** Every value is read once, and from then on only full OIDs are used, never a movable name.
+  1. Read the issue in this project (`hub_board_get`) before anything local. The answer must BE that issue (its `id`), not just a successful reply.
+  2. Locate the repository, then read an existing `tmm-merge.lock` BEFORE any other work (below). A real run takes the lock here, so its own checks run alone.
+  3. Bind the git dirs, the target ref (`symbolic-ref HEAD`; a detached HEAD refuses), OLD, and the branch: an existing `refs/heads/<name>` (`show-ref --verify`; a revision such as `feat~1` is not a branch), then its tip.
+  4. Refuse if a merge, cherry-pick, revert, bisect, rebase or sequencer is in progress, or if a tracked file has changes. These checks never write the index (below).
+  5. Require exactly one merge base.
+  6. Build the merged tree with `git merge-tree --write-tree`, without touching the checkout. A conflict refuses; this needs git 2.38+.
+  7. Refuse a submodule (gitlink) change.
+  8. Compare the diffs (next bullet).
+  9. Build the trailers and the message.
+  10. Check the paths the merge adds (below).
+  11. Write the commit object (`commit-tree`, the configured author, one parent).
+  12. Read the commit back: tree, parent, author and trailers.
+  13. Land it (below).
+  14. Post the note, and print the same line. Hashes are shown as git's unique abbreviation here (`rev-parse --short=8`), never a fixed cut.
+- **Diff equality is byte-exact, not `patch-id`.** `git patch-id --stable` ignores whitespace (measured: a tab-indented and a space-indented line give one id). Both sides, `BASE..tip` and `OLD..merged tree`, come from ONE diff form: `--no-color --no-ext-diff --no-textconv --binary --no-renames --diff-algorithm=myers`, fixed prefixes, `-U3`, with `diff.*` config neutralised. The only normalisation drops a header's `index` line and the line numbers in `@@`. If the target changed lines next to the branch's hunks, the context differs and the command refuses with "rebase the branch". There is no force. The note shows the byte length and `patch-id --verbatim` as display values only.
+- **Trailers and the message.** The Co-authored-by set is the distinct values on the branch's own commits, oldest first (`rev-list --reverse --topo-order`), and nothing of the merging agent's (development.md: an integrator adds none). A one-commit branch keeps its message; more commits need `--message-file`. Only the Co-authored-by trailers are replaced, and every other trailer (`Signed-off-by` …) stays. git's own `interpret-trailers --parse` finds the block and checks the result.
+- **Files nobody tracked.** Measured on git 2.50.1: `git read-tree -m -u` overwrites an IGNORED file in the way of a path it adds, and its `-n` dry run does not refuse it. So the command checks that nothing exists at any path the merge adds, and that no ancestor of one exists as a file OLD does not track. Paths are git's raw `-z` records, kept as bytes: a name git would quote in text output (CJK, a tab, a newline, invalid UTF-8) is looked up as itself, and shown escaped only in messages. A lookup that fails other than "not found" (permission, I/O) refuses: a path that cannot be checked is never treated as free. It never cleans, stashes, resets or moves a file.
+- **Checks never write the index.** Every git call carries `--no-optional-locks`, but that does not stop `git diff --quiet` from saving refreshed stat data when a file's stat is stale and its content is not (measured, git 2.50.1). So the worktree-versus-index check reads a private copy of the index (`GIT_INDEX_FILE`, removed afterwards). A dry run or a refusal leaves the index's bytes as they were.
+- **No hook runs.** Every git call carries `-c core.hooksPath=/dev/null`: read-tree fires post-index-change and update-ref fires reference-transaction (measured). A deploy a hook would have done stays a separate step.
+- **The landing, and its precondition.** While it runs, nothing else may write this checkout or the target ref. The command DETECTS a breach at fixed checkpoints and stops; it does not exclude one. `tmm-merge.lock` keeps out only a second `tmm merge`, and git has no lock covering a ref swap plus a checkout. The steps:
+  1. Just before the swap, re-check that HEAD still points at the target, that the target is still OLD, the index file's identity, that index and files are clean against OLD, and that the added paths are still empty.
+  2. Swap with `git update-ref <target> NEW OLD`, a compare-and-swap on the ref by name. Another branch checked out at the same OID cannot receive it, and a target moved even to an ancestor fails it. A swap git reports as failed is classified by reading the ref: still OLD is a refusal; NEW, another value or an unreadable ref is unconfirmed, with no checkout.
+  3. Re-check the same things BEFORE any index or file write. A takeover stops here, with the ref landed and nothing written.
+  4. Update the checkout with `git read-tree -m -u OLD NEW`.
+  5. Read back the target, HEAD, NEW's tree and parent, the index and the files.
+
+  SIGINT and SIGTERM are ignored from the swap to the end of the read-back. The gap between the last check and read-tree is covered only by the precondition: a file a concurrent writer creates there can be overwritten.
+- **Outcomes**, each with OLD and NEW printed, and nothing ever rolled back or replayed by itself:
+  - *refused*: no ref, index or file changed, though unreferenced git objects may exist.
+  - *landed*.
+  - *ref landed, checkout not started*: a takeover was detected, or read-tree refused and the read-back proves index and files untouched. The finishing `git read-tree -m -u OLD NEW` is printed only in that proven case.
+  - *ref landed, checkout incomplete*: read-tree failed after it may have written; the output lists what to inspect.
+  - *unconfirmed*: a read-back did not match.
+- **The note.** It is posted for every outcome past the swap, and says which one. *Posted* means the server answered `{ok: true}`, the acknowledgement `hub_board_note` gives. *Refused* (the server answered an error, or nothing was sent): the text is printed to post by hand. *Unknown* (no answer after it may have been sent, or an answer that does not confirm the note): "it may be on the card, check `tmm board show` first". Re-running `tmm merge` is never the fix: the lock refuses it, and so would the diff check, since the target already holds the change.
+- **The lock** is `<git-common-dir>/tmm-merge.lock`, created exclusively. It is the mutex and the record of the run. Each phase is saved atomically: a temp file, fsync, rename, fsync of the directory. A process killed mid-write therefore leaves the previous valid record.
+  - Phases: `binding`, `bound`, `committed`, `swapping` (saved BEFORE the swap, so a crash right after a successful swap is still visible), `swapped`, `checking-out`, `checked-out`, then `noting` or `unsettled`. It records the pid, issue, target, OLD, SRC, NEW, the outcome and the note text.
+  - A record that cannot be saved before the swap is a refusal. After the swap it ENDS the run, before any further write, the issue note included. The note is posted only once its own record (`noting` or `unsettled`) is durable. A lost record exits non-zero with `record: lost` and `note: not_attempted` in the JSON. The line says whether the merge had landed and read back, so a landed merge is never described as not merged, and the lock keeps the last record that was saved.
+  - It is removed only after a landed merge whose note posted and whose last record saved, or after a refusal.
+  - Any run, a dry run included, reads an existing lock FIRST. A live holder refuses. A dead one (SIGKILL, crash) refuses with the recorded phase and what git says NOW: the target is OLD, NEW or neither, and the index matches OLD, NEW or neither. The index is read in the checkout the command runs in, which is named, as is the recorded one when they differ (the lock is in the common git dir, shared by worktrees). It also prints the saved note. The refusal says "this run did nothing", never "nothing was merged", which would deny what the earlier run did. An unreadable lock refuses too. The command never removes a lock and never binds over one; the operator removes it after checking.
+- **`--dry-run`** checks everything up to the landing and prints what it would do. It changes no ref, index or file, writes no commit and posts no note (merge-tree may leave unreferenced trees and blobs).
+- **Never:** push, deploy, delete a branch.
+- **Pinned by** `src/merge/tests.rs` on scratch repositories:
+  - a clean two-commit squash, with its parent, author, trailer, message, checkout and note;
+  - Signed-off-by kept; trailer order and none-means-none;
+  - `--expect` too short, not hex, unknown, or another commit; a missing message file;
+  - a dirty tree, a conflict, a detached HEAD, MERGE_HEAD, nothing to merge;
+  - whitespace drift that `--stable` cannot see (the control row asserts it cannot);
+  - normalisation; a gitlink; an ignored file at a new path and a file where a directory must go;
+  - hooks that never run; the dry run;
+  - a twin branch at OLD and a target moved to an ancestor before the swap;
+  - a target moved by another writer AFTER the pre-swap re-read and before update-ref, the window only the compare-and-swap guards: their commit stays the target, nothing is checked out (X7, a test-only seam);
+  - a takeover after the swap (the index byte-identical, no file written), and a file appearing after the swap;
+  - read-tree refused untouched versus failed partway;
+  - a tracked file edited right after the checkout (unconfirmed, nothing rolled back);
+  - ignored files named in CJK, with a tab, with a newline and in invalid UTF-8, each found and kept; a path that cannot be checked;
+  - a stale stat cache: the dry run and a refusal leave the index's bytes alone;
+  - a run stopped after the swap and after the checkout, reported by the next run (a dry run too) from the lock and from git;
+  - a crash between the swap and its record; a swap reported failed but done;
+  - a failed record at `swapped`, `checking-out` and `checked-out`, and of the final `noting` (a landed merge) and `unsettled`: no note is posted, the run fails, and the previous record is kept;
+  - a record write cut halfway (the previous record still parses); a half-written temp record; an unreadable lock; a revision given as the branch;
+  - a live lock and a dead lock; an interruption after the checkout; a refused or lost note.
+
+  `tests/merge_cli.rs` pins the real CLI against a fake gateway: the issue is read first, the note is exactly the printed line, a missing issue or an answer that is not the issue does nothing local, `--expect` is required, a dry run posts nothing, and a refused, lost or unconfirmed note exits 1.
 
 ## Waking an agent later (`--in` / `--at`, board #275)
 

@@ -553,6 +553,24 @@ before the connect card is in
   separate free-port preview); do not mistake the existing server's UI for the
   worktree's code and do not restart the supervised server.
 
+### Integrating a reviewed branch (`tmm merge`, board #445)
+
+The integration checkout merges a branch only after reviewer CLEAR and
+validator SHIP of ONE tip. `tmm merge <issue> <branch> --expect <that tip>`
+does the rest, run in that checkout:
+- reads the issue and binds the repository, the target and the branch tip;
+- squash-merges with `git merge-tree --write-tree`;
+- proves the squash diff is byte-for-byte the branch diff;
+- commits with the configured author and the branch's own Co-authored-by
+  trailers;
+- swaps the target ref by compare-and-swap and checks it out;
+- reads it all back and posts the issue note from those reads.
+
+It does not push, deploy or delete the branch; those stay separate, explicit
+steps. The manual sequence it replaces is the same order, written out in
+tmm-cli.md § tmm merge. A value typed into a note by hand is exactly what the
+command exists to stop.
+
 ### Commits and AI attribution
 
 - **Commit after every verified change** (owner's standing instruction): once a

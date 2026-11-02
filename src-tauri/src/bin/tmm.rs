@@ -73,6 +73,13 @@ USAGE (agent):
   tmm board assign <id> <name|->      hand it to someone else; `-` clears the assignee
   tmm board move <id> <todo|doing|review|done>
   tmm board note <id> <text> [--image <path|url>]  progress/decisions ON the issue
+  tmm merge <issue> <branch> --expect <tip>  squash-merge a reviewed branch onto the branch checked
+                    [--message-file <f>]  out HERE, prove the squash diff is byte-for-byte the branch
+                    [--dry-run]       diff, and post the issue note from this process's own reads.
+                                      YOU confirm reviewer CLEAR and validator SHIP of <tip> first;
+                                      it checks only that --expect (8+ hex) names the branch tip.
+                                      No push, deploy, branch delete or hook. Nothing else may write
+                                      this checkout while it runs.
   tmm review list <path> [--all]      a project file's review comments (open; --all: resolved too)
   tmm review add <path> --lines A[-B] [--cols C-D] --note <text>
                                       comment on lines A..B (columns C..D, inclusive)
@@ -785,6 +792,51 @@ async fn main() {
                     println!("{}", r["text"].as_str().unwrap_or(""));
                 }
                 other => fail(EXIT_USAGE, &format!("unknown review verb '{other}': list | add | resolve | reopen | delete | feedback")),
+            }
+        }
+        // `tmm merge` (board #445): the squash merge, its byte-exact diff
+        // proof and the issue note, every value read by this process
+        // (`tmux_mobile::merge`; tmm-cli.md § tmm merge).
+        ("merge", rest) => {
+            let session = need_project(&ctx);
+            let id = rest.first().and_then(|s| s.trim_start_matches('#').parse::<i64>().ok());
+            let (Some(id), Some(branch), None) = (id, rest.get(1), rest.get(2)) else {
+                fail(EXIT_USAGE, "merge needs an issue and a branch: tmm merge 445 agent/builder-2/445-merge --expect <reviewed tip>");
+            };
+            let Some(expect) = flags.get("expect").cloned().flatten() else {
+                fail(EXIT_USAGE, "--expect <the reviewed tip, at least 8 hex> is required: you confirm reviewer CLEAR and validator SHIP of that tip; tmm merge checks only that it is the branch tip");
+            };
+            // The issue first, in THIS project, before any local work: the
+            // answer must BE that issue, not merely a successful reply.
+            let issue = rpc(&ctx, "hub_board_get", json!({ "session": session, "id": id })).await;
+            if issue.get("id").and_then(|v| v.as_i64()) != Some(id) {
+                fail(EXIT_ERR, &format!("the server's answer for issue #{id} is not that issue; nothing was merged"));
+            }
+            let opts = tmux_mobile::merge::Options {
+                issue: id,
+                branch: branch.clone(),
+                expect,
+                message_file: flags.get("message-file").cloned().flatten().map(std::path::PathBuf::from),
+                dry_run: flags.contains_key("dry-run"),
+                cwd: std::env::current_dir().unwrap_or_else(|e| fail(EXIT_ERR, &format!("no working directory: {e}"))),
+                operator: ctx.agent.clone().unwrap_or_else(|| "human".into()),
+            };
+            // The merge is synchronous git work and its note an RPC: it runs on
+            // its own thread, which posts through a runtime of its own (this
+            // one is current-thread and cannot be re-entered).
+            let report = std::thread::scope(|scope| {
+                scope.spawn(|| {
+                    let mut io = MergeNote { ctx: &ctx, session: &session, id };
+                    tmux_mobile::merge::run(&opts, &mut io)
+                }).join().unwrap_or_else(|_| fail(EXIT_ERR, "tmm merge stopped unexpectedly; read the lock in the git dir before anything else"))
+            });
+            if ctx.json {
+                println!("{}", report.json);
+            } else {
+                println!("{}", report.line);
+            }
+            if !report.ok() {
+                std::process::exit(EXIT_ERR);
             }
         }
         ("board", rest) => {
@@ -2404,7 +2456,8 @@ fn file_line(f: &Value, with_room: bool) -> String {
 const VALUED: &[&str] = &["project", "agent", "server", "output", "since", "limit", "brief",
                           "name", "session", "with-agent", "backend", "model", "effort", "input-mode", "system", "skills", "mcp",
                           "ref", "source", "description", "def", "grep", "image", "body", "assignee", "team", "join", "file",
-                          "in", "at", "to", "code", "signal", "re", "as", "from", "before", "lines", "cols", "note", "args-json", "test"];
+                          "in", "at", "to", "code", "signal", "re", "as", "from", "before", "lines", "cols", "note", "args-json", "test",
+                          "expect", "message-file"];
 
 /// An argument is a flag only if it has a flag's SHAPE: `-x`, `--name`, `--name=value`, a letter
 /// first and then letters, digits, `_` or `-` (board #456). Anything else that begins with `-`
@@ -2534,6 +2587,7 @@ const VERB_FLAGS: &[VerbFlags] = &[
     VerbFlags { key: "board take", ctx: true, flags: &[] },
     VerbFlags { key: "board move", ctx: true, flags: &[] },
     VerbFlags { key: "board note", ctx: true, flags: &["image"] },
+    VerbFlags { key: "merge", ctx: true, flags: &["expect", "message-file", "dry-run"] },
     VerbFlags { key: "spawn", ctx: true, flags: &["brief", "join", "team"] },
     VerbFlags { key: "teams", ctx: true, flags: &[] },
     VerbFlags { key: "teams list", ctx: true, flags: &[] },
@@ -2729,6 +2783,37 @@ fn absolutize_ref(src: &str) -> String {
         .unwrap_or_else(|_| s.to_string())
 }
 
+/// `tmm merge`'s issue note: posted through the existing `hub_board_note`,
+/// and told apart as posted, refused (the server answered an error, or the
+/// call was never sent) or unknown (no answer after it may have been sent).
+struct MergeNote<'a> {
+    ctx: &'a Ctx,
+    session: &'a str,
+    id: i64,
+}
+
+impl tmux_mobile::merge::Io for MergeNote<'_> {
+    fn note(&mut self, text: &str) -> tmux_mobile::merge::NoteResult {
+        use tmux_mobile::merge::NoteResult;
+        let who = self.ctx.agent.clone().unwrap_or_else(|| "human".into());
+        let params = json!({ "session": self.session, "id": self.id, "body": text, "who": who });
+        let sent = std::cell::Cell::new(false);
+        let rt = match tokio::runtime::Builder::new_current_thread().enable_all().build() {
+            Ok(rt) => rt,
+            Err(e) => return NoteResult::Refused(format!("no runtime for the note: {e}")),
+        };
+        match rt.block_on(try_rpc_tracked(self.ctx, "hub_board_note", params, None, Some(&sent))) {
+            // hub_board_note acknowledges a stored note with `{ok: true}`;
+            // anything else after the call was sent is not a confirmed write.
+            Ok(v) if v.get("ok").and_then(|o| o.as_bool()) == Some(true) => NoteResult::Posted,
+            Ok(v) => NoteResult::Unknown(format!("an answer that does not confirm the note ({v})")),
+            // An error reply is the server's own answer: not on the card.
+            Err((code, msg)) if code != EXIT_NET || !sent.get() => NoteResult::Refused(msg),
+            Err((_, msg)) => NoteResult::Unknown(msg),
+        }
+    }
+}
+
 /// One connect → auth → call → close round trip. All failure modes funnel to
 /// the tiered exit codes; success returns the RPC result value.
 async fn rpc(ctx: &Ctx, method: &str, params: Value) -> Value {
@@ -2785,6 +2870,14 @@ async fn rpc_needing(ctx: &Ctx, need: &str, method: &str, params: Value) -> Valu
 }
 
 async fn try_rpc_with(ctx: &Ctx, method: &str, params: Value, need: Option<&str>) -> Result<Value, (i32, String)> {
+    try_rpc_tracked(ctx, method, params, need, None).await
+}
+
+/// `try_rpc`, saying whether the call itself may have reached the server:
+/// `sent` is set just before the call frame is written (board #445: a note
+/// whose answer was lost may be on the card; one refused before it was sent
+/// is not).
+async fn try_rpc_tracked(ctx: &Ctx, method: &str, params: Value, need: Option<&str>, sent: Option<&std::cell::Cell<bool>>) -> Result<Value, (i32, String)> {
     // ONE deadline for both transports (board #440): a socket that falls
     // back to TCP never doubles the connect timeout.
     let deadline = tokio::time::Instant::now() + CONNECT_TIMEOUT;
@@ -2798,7 +2891,7 @@ async fn try_rpc_with(ctx: &Ctx, method: &str, params: Value, need: Option<&str>
                     .map_err(|e| (EXIT_NET, format!("the local socket {} refused the handshake: {e}", path.display())))?;
                 // Never retried over TCP from here on: a send or a spawn must
                 // not run twice, and a bad token must not reach the lockout.
-                return session(ws, ctx, method, params, need, Some(&ctx.endpoint)).await;
+                return session(ws, ctx, method, params, need, Some(&ctx.endpoint), sent).await;
             }
             Local::Absent => {}
             Local::Refused(why) => return Err((EXIT_NET, why)),
@@ -2809,7 +2902,7 @@ async fn try_rpc_with(ctx: &Ctx, method: &str, params: Value, need: Option<&str>
         .await
         .map_err(|_| (EXIT_NET, format!("server not reachable at {} (2s timeout) — is Teammux running?", ctx.server)))?
         .map_err(|e| (EXIT_NET, tcp_connect_failure(&ctx.server, &e)))?;
-    session(ws, ctx, method, params, need, None).await
+    session(ws, ctx, method, params, need, None, sent).await
 }
 
 /// What a failed TCP connect says (board #440). Nothing listening is "not
@@ -2830,7 +2923,7 @@ fn tcp_connect_failure(server: &str, e: &tokio_tungstenite::tungstenite::Error) 
 /// The login and the one call, on whichever transport was chosen. `endpoint`
 /// is set for a local socket: its gateway must say it is THIS config's
 /// (port and canonical config dir), or nothing is sent after the login.
-async fn session<S>(mut ws: tokio_tungstenite::WebSocketStream<S>, ctx: &Ctx, method: &str, params: Value, need: Option<&str>, endpoint: Option<&Value>) -> Result<Value, (i32, String)>
+async fn session<S>(mut ws: tokio_tungstenite::WebSocketStream<S>, ctx: &Ctx, method: &str, params: Value, need: Option<&str>, endpoint: Option<&Value>, sent: Option<&std::cell::Cell<bool>>) -> Result<Value, (i32, String)>
 where
     S: tokio::io::AsyncRead + tokio::io::AsyncWrite + Unpin,
 {
@@ -2864,6 +2957,9 @@ where
     }
 
     let call = json!({ "id": 2, "method": method, "params": params });
+    if let Some(sent) = sent {
+        sent.set(true);
+    }
     ws.send(Message::Text(call.to_string().into()))
         .await
         .map_err(|e| (EXIT_NET, format!("send failed: {e}")))?;
