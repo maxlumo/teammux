@@ -12,6 +12,12 @@
 //!   no answer within the deadline. Never treated as free.
 //! - `None` — connection refused.
 //!
+//! A config with NO token never logs in (board #503): nothing can be ours,
+//! and an empty-token proof is a bad credential that spends the per-IP
+//! lockout of whatever listens. Its port is checked by a bind instead,
+//! (socket2, no SO_REUSEADDR, never listened on, inside DEADLINE), which
+//! opens no connection: free is `None`, taken or undecidable `Occupied`.
+//!
 //! The address and scheme come from the effective `Config`: a wildcard bind
 //! (`0.0.0.0` / `::`) is reached on the matching loopback, a specific address
 //! on itself; `wss` when a TLS certificate is configured, trusting exactly
@@ -80,10 +86,73 @@ pub enum Asked {
 /// the probe deadline as a whole.
 pub async fn probe_and_ask(cfg: &Config, ask: Option<&str>) -> (Verdict, Option<Asked>) {
     let url = local_url(cfg);
+    // Board #503: a config with NO token has no gateway of its own (a
+    // gateway mints its token at its first start), so nothing that answers
+    // can be ours, and an authentication with an empty token is a bad
+    // credential: on this host it put 3 "Auth failed … invalid proof" lines
+    // on the live gateway per full test run (a fresh-config `gateway
+    // status` in config_root_cli and config_root_service), and it spends the
+    // per-IP lockout of whatever listens. So the port is checked by BINDING
+    // it, which opens no connection at all.
+    if cfg.token.is_empty() {
+        return (unowned(cfg, &url).await, None);
+    }
     match tokio::time::timeout(DEADLINE, attempt(cfg, &url, ask)).await {
         Ok(v) => v,
         Err(_) => (Verdict::Occupied(format!("{url} did not answer within {} ms", DEADLINE.as_millis())), None),
     }
+}
+
+/// The verdict for a config without a token (reviewer P1-C on 586c6fbb): a
+/// BIND of its port through socket2, with no SO_REUSEADDR and never a listen,
+/// inside the probe's DEADLINE. An IP literal binds directly; a hostname is
+/// resolved within the same budget. Free is `None`; taken or undecidable is
+/// `Occupied`, never `Ours`, and no connection is made.
+async fn unowned(cfg: &Config, url: &str) -> Verdict {
+    unowned_with(cfg, url, |host, port| async move { tokio::net::lookup_host((host.as_str(), port)).await.map(|a| a.collect::<Vec<_>>()) }).await
+}
+
+/// `unowned` with the name resolution as a seam (validator P2-V3 on
+/// 94f02481: a resolver that never answers must still end inside DEADLINE).
+async fn unowned_with<F, Fut>(cfg: &Config, url: &str, resolve: F) -> Verdict
+where
+    F: FnOnce(String, u16) -> Fut,
+    Fut: std::future::Future<Output = std::io::Result<Vec<std::net::SocketAddr>>>,
+{
+    let taken = || Verdict::Occupied(format!("{url}: port unavailable; no credentials to identify it; not asked"));
+    let host = cfg.host.trim_matches(['[', ']']).to_string();
+    let addrs: Vec<std::net::SocketAddr> = match host.parse::<std::net::IpAddr>() {
+        Ok(ip) => vec![std::net::SocketAddr::new(ip, cfg.port)],
+        Err(_) => match tokio::time::timeout(DEADLINE, resolve(host, cfg.port)).await {
+            Ok(Ok(found)) => found,
+            _ => return taken(),
+        },
+    };
+    if addrs.is_empty() {
+        return taken();
+    }
+    for addr in addrs {
+        if !bind_only(addr) {
+            return taken();
+        }
+    }
+    Verdict::None
+}
+
+/// Whether `addr` can be bound right now, bound the way the REAL start binds
+/// (reviewer/validator P1-C on 94f02481: server/mod.rs uses tokio's
+/// TcpListener::bind, which leaves IPV6_V6ONLY at the OS default; on a
+/// dual-stack default `[::]:port` then conflicts with an IPv4 holder, so the
+/// check must not set v6only either). A fresh socket, SO_REUSEADDR left OFF
+/// (std's TcpListener turns it on, and on macOS that can bind beside a
+/// listener), bound and dropped, never listened on.
+fn bind_only(addr: std::net::SocketAddr) -> bool {
+    use socket2::{Domain, Protocol, Socket, Type};
+    let Ok(s) = Socket::new(Domain::for_address(addr), Type::STREAM, Some(Protocol::TCP)) else { return false };
+    if s.set_reuse_address(false).is_err() {
+        return false;
+    }
+    s.bind(&addr.into()).is_ok()
 }
 
 async fn attempt(cfg: &Config, url: &str, ask: Option<&str>) -> (Verdict, Option<Asked>) {
@@ -354,6 +423,62 @@ mod tests {
         c.tls_cert = None;
         c.tls_key = None;
         c
+    }
+
+    /// Board #503: a config with no token never dials. A port held by a
+    /// listener reads Occupied and that listener sees NO connection (the old
+    /// probe logged in there with an empty token: "invalid proof" on the
+    /// live gateway, 3 per full run); a free port reads None.
+    #[tokio::test]
+    async fn a_config_without_a_token_checks_its_port_by_binding_and_never_dials() {
+        let held = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        held.set_nonblocking(true).unwrap();
+        let mut c = cfg(held.local_addr().unwrap().port());
+        c.host = "127.0.0.1".into();
+        c.token = String::new();
+        let (v, asked) = probe_and_ask(&c, Some("ui_info")).await;
+        match v {
+            Verdict::Occupied(why) => assert!(why.contains("port unavailable; no credentials to identify it; not asked"), "{why}"),
+            other => panic!("a held port is occupied, never ours: {other:?}"),
+        }
+        assert_eq!(asked, None, "nothing is asked without a login");
+        assert_eq!(held.accept().map_err(|e| e.kind()).err(), Some(std::io::ErrorKind::WouldBlock), "no connection reached the listener");
+        let free = held.local_addr().unwrap().port();
+        drop(held);
+        c.port = free;
+        assert_eq!(probe(&c).await, Verdict::None, "a free port is free");
+        // The bind leaves nothing behind: the port is still free for a real
+        // start, and it was never listened on.
+        assert!(std::net::TcpListener::bind(("127.0.0.1", free)).is_ok(), "nothing kept or listening");
+    }
+
+    /// Reviewer P1-C on 586c6fbb: a wildcard bind is checked as configured,
+    /// and a name that does not resolve is undecidable (Occupied, never
+    /// `Ours`, never `None`), answered within the probe's budget.
+    #[tokio::test]
+    async fn the_no_token_check_reads_wildcards_and_bounds_a_name_it_cannot_resolve() {
+        let held = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        let mut c = cfg(held.local_addr().unwrap().port());
+        c.token = String::new();
+        c.host = "0.0.0.0".into();
+        assert!(matches!(probe(&c).await, Verdict::Occupied(_)), "a wildcard bind meets the loopback listener");
+        // Validator P1-V1 on 94f02481: an IPv4 wildcard holder makes the
+        // IPv6 wildcard unavailable to the real (dual-stack default) start,
+        // so the check must say so too.
+        let v4 = std::net::TcpListener::bind("0.0.0.0:0").unwrap();
+        c.port = v4.local_addr().unwrap().port();
+        c.host = "::".into();
+        assert!(matches!(probe(&c).await, Verdict::Occupied(_)), "[::] beside an IPv4 wildcard holder is not free");
+        drop(v4);
+        // P2-V3: a resolver that never answers ends inside the budget.
+        c.host = "slow.example".into();
+        let t = std::time::Instant::now();
+        let never = |_: String, _: u16| std::future::pending::<std::io::Result<Vec<std::net::SocketAddr>>>();
+        let v = tokio::time::timeout(DEADLINE + std::time::Duration::from_secs(2), unowned_with(&c, "ws://slow.example:1", never))
+            .await
+            .expect("the resolution is bounded by DEADLINE, not left to hang");
+        assert!(matches!(v, Verdict::Occupied(ref w) if w.contains("not asked")), "{v:?}");
+        assert!(t.elapsed() >= DEADLINE && t.elapsed() <= DEADLINE + std::time::Duration::from_millis(500), "the budget is what ended it: {:?}", t.elapsed());
     }
 
     #[test]

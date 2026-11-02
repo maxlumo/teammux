@@ -246,6 +246,44 @@ The rule, on top of #406 and #425: **a rig that starts a gateway or runs `tmm` c
 - **A network namespace** whenever a step could dial a default port: `install`, `status`, a probe, or a `tmm` with no `--server`. Use `unshare -rn sh -c 'ip link set lo up; …'`. Checked on this host: inside `unshare -rn`, a dial to 127.0.0.1:9899 fails with "Network is unreachable".
 - **The netns does not isolate the socket.** A filesystem socket is reached by its path, not over the network. What keeps a rig's tmm off the owner's `<config>/sock/gateway.sock` is the rig's own `XDG_CONFIG_HOME` (its derived socket path is then its own) and `env -i` (no inherited `TMM_SOCKET`). "9899 is unreachable in the netns" is never counted as proof that the rig cannot reach the live gateway.
 
+## A full suite runs where the live gateway does not exist (board #503)
+
+Incident, 2026-11-02: every full gate of the day left 3 loopback `Auth failed … invalid proof` lines on this host's LIVE gateway (bursts at 07:11 to 13:17, read from its journal). A test in our own suites reached the real service, and two such runs within a minute spend 6 of the 5-attempt lockout on 127.0.0.1. Two interim recipes failed on the way, measured by kiro:
+- `unshare --map-current-user -n` (and `unshare -rn` for a whole suite): a user namespace cannot show real root, so `/`, `/tmp` and `/local` stat as uid 65534 and `safe_fs::trusted` refuses every state.db; with `--map-current-user`, `ip link set lo up` is also not permitted. The trust check is never relaxed for tests.
+- `docker run --network none` with the real HOME mounted: no TCP, but the live socket, config, token, state.db and agent homes are all reachable by path (reviewer, 13:29).
+
+The rule: **on this Linux host, a full `npm test` or `npm run test:rust` runs through `node scripts/isolated.mjs -- <command>`, started from a LINKED worktree** (orchestrator, 2026-11-02: required on any host that runs a live gateway, after #503 lands too, because only a physical boundary stops the next regression; it is not wired into `npm test` itself, which would change every developer's loop). It is Linux-only: it mounts this host's `/usr`, `/lib` and toolchain into a container from an empty image. It is not verified on macOS or any other platform. Elsewhere the protection is only that the tests themselves keep off the default port, which #503 fixes and guards. Before any docker call it refuses:
+- the main or launch checkout (its git dir is the repository's own);
+- a target that is HOME or holds it, or holds the main checkout;
+- a worktree with `.tmm/`;
+- an inherited `GIT_DIR`, `GIT_WORK_TREE`, `GIT_COMMON_DIR` or `GIT_INDEX_FILE`.
+
+The container has:
+- `--network none`;
+- the host's system dirs and toolchain mounted READ-ONLY, so real root ownership is what the trust check sees;
+- only the worktree, its own git dir and a private `/tmp` writable;
+- HOME, XDG_*, CARGO_HOME and TMPDIR inside that `/tmp`, and an empty environment, so no `TMM_*`, `TOKEN` or `TMUX*` crosses.
+
+A self-check runs first and refuses to start the command (exit 97), in this order:
+1. the real HOME's contents, the real config dir or its gateway socket are visible, or the main checkout's `.tmm/` (agents, uploads, teams) is;
+2. a forbidden variable is set;
+3. an ancestor of the worktree shows anything but the way down (plus `.git` in the main checkout), such as another agent's worktree, or cannot be listed. The walk is a quoted `"$dir"/*` with `nullglob dotglob`, so a name with a space or a lone `*` is read as one name. This proves only that the mount list exposes nothing else along the path. It says nothing about what the explicit mounts themselves hold: that is the mount list's job, and its test's. Only a worktree NESTED under its main checkout runs (`worktree/<agent>-<task>`, this repository's layout). A sibling-layout worktree beside the checkout is refused, fail-closed, because the read-only `<checkout>/.git` mount then shows up beside the way down (validator's P2 on d16b9ca0);
+4. a step of the private HOME's setup fails;
+5. only then, 127.0.0.1:9899 or an outside address answers.
+
+It tests the socket only with `[ -e ]` and never opens it. Every refusal that a test triggers on the host comes before the TCP probes, so no test probes the real 9899.
+
+**The tripwire.** After the self-check, the container holds 127.0.0.1:9899, where a live gateway listens on a real host, with a listener that reads NO peer bytes. On each accept it counts the connection, stamps the time, writes its record and destroys the socket, synchronously and first. So a connection that sends nothing, sends half a request, or arrives at the very end is still counted, and nothing a test sends (a token, a cookie, a signed path) can reach the output. When the command ends, the shell asks the listener to stop, and it drains what is pending and writes a final record marked `ok`.
+- Any counted connection fails the run with exit 98, printing only the count and the times.
+- A listener that could not start, died, did not stop or ended non-zero, and a record that cannot be read or has no final marker, all fail closed with 97.
+- So the next test that dials the default port fails its own gate instead of showing up in the owner's journal.
+
+Measured on 2026-11-02: before the fix, `--test config_root_cli --test config_root_service` tripped with 3 connections. That is the old probe of `gateway status` on a fresh config, which logged in with an empty token, now refused in `gateway::probe`. After the fix, 0. `scripts/isolated.test.ts` pins the mounts, the environment, every refusal and the tripwire's place, using sentinel repositories only. Its tripwire behaviour rows run only inside the runner (`ISOLATED_RUNNER=1`), on a test port:
+- a connection held with no data, half a head, and a connection at the very end;
+- credential and cookie sentinels that never appear in the output;
+- a killed listener;
+- an unwritable record. The production journal is only ever READ to check that a run left nothing.
+
 ## The reboot restore has one live acceptance, and it gates the default (board #422 round 4)
 
 `scripts/restore-acceptance.sh <tmm>` runs a real gateway (`tmm gateway

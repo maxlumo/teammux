@@ -73,6 +73,7 @@ const LINES: Array<[RegExp, RegExp, string]> = [
   [/^src\/App\.shell\.mount\.test\.ts$/u, /tmux-mobile/u, 'a project named tmux-mobile in a saved-state fixture'],
   [/^src\/lib\/hub\/AgentsPage\.mount\.test\.ts$/u, /dsh-1 .{0,3}tmux-mobile/u, 'a project name in an alert'],
   [/^src\/lib\/hub\/sidebar\.ts$/u, /archivist/u, 'the project named tmux-mobile, in a dated owner quote'],
+  [/^scripts\/isolated(?:\.test)?\.(?:mjs|ts)$/u, /tmux-mobile/u, 'the old config directory name, which the isolated runner must keep invisible as well as the new one'],
   [/^vite\.config\.js$/u, /#393/u, 'a board reference in a comment; editing it would restart the supervised dev server'],
 ];
 
