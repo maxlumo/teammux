@@ -1237,7 +1237,7 @@ refusal is terminal for that door** (validator V1 on d18cd450: the client
 called it "Not answering", so each pick re-dialled with the same bad token
 and three picks tripped the server's lockout, #440, for this host's IP).
 It is now a member state of its own, `failed: 'auth'` — from the join's
-answer (`isAuthRefusal`, by the ERR_AUTH code) and from a loop that gave up
+answer (`isAuthRefusal`: the ERR_AUTH code and, since #502, a credential answer) and from a loop that gave up
 on one (`onGiveUp('auth')`) — read "Token refused — edit its connection" on
 the row; a pick records the choice ("Chosen; Token refused — …") and dials
 nothing. The fact behind it is ONE dial-eligibility rule in the member set
@@ -1361,6 +1361,128 @@ re-picks while it ran started no second loop, and after the next give-up
 0 dials in 60 s with the choice still held. Not changed: Single
 (dial first, its failure panel), the reconnect policy itself, and how a
 token refusal is worded (#459).
+
+**Only the login leaves a socket before the login, and only a credential
+answer is a refusal** (board #502, 2026-11-02). Owner, 12:06, with three
+screenshots: in All included a member (macmini, reached through a CloudFront
+address) read "Token refused — edit its connection" while One server on the
+same saved entry connected at once. Two defects in the client, each named in
+the source:
+
+- (A) `connection.ts` let an RPC or a subscribe go out on a socket that was
+  OPEN but not yet logged in (`call()` checked `readyState` only, and so did
+  `sendSubscribe`). The server answers any frame before the login with
+  ERR_AUTH `auth required…` and closes (`connection.rs`, also in the owner's
+  53a4c410). `isAuthRefusal` read the CODE only, so that answer counted as a
+  bad token. Reproduced against the real release server in a netns
+  (`temp/b502/repro.mjs`: one `ping` on the socket's open or on its nonce;
+  20 runs per variant) and, by the validator, on the Docker three-gateway
+  rig with one injected plaintext `ping` before the login: the member row
+  read "Token refused" and `tmux_refused_tokens` was written. Without an
+  injection the validator's 12 natural drop cycles on that rig did not
+  reproduce it: the injection shows the client's reaction to such a frame,
+  not that the app's own traffic produced one there.
+- (B) A refusal was stored only for a non-focus member (`refusedBy` is called
+  when `bound() !== runtime`) and NOTHING ever cleared it, while the focus's
+  dial is never held by it (its `eligible` is always 'ok'). So a refusal
+  stored once stopped that member on this device until its connection was
+  edited, while One server on the same entry kept connecting.
+
+Evidence boundary: the owner's own phone event was not captured — no frame
+record and no record of where its token came from. That frame order over
+CloudFront produced it is an inference, not a measurement. The other
+candidates are not excluded, only unsupported: the source shows no path by
+which a proof built for one socket's nonce is sent on another (every handler
+checks `ws === socket`, and the proof is sent from the handler that received
+that nonce); One server's later success with the same entry shows the saved
+token works there, not what the phone's member dial sent; and the lockout
+drops the socket without an ERR_AUTH (`connection.rs`).
+
+The fix, one rule per defect:
+
+- **The login gate.** Every socket carries `_authed`, set by `authSuccess`
+  and cleared by every close, failed dial and teardown. It is the ONE login
+  state (review P2-C): the handshake's branches, the receive chain and the
+  capability getters read it too; there is no second flag in the dial. `sendOnSocket` asks
+  it on entry, before a cipher counter is spent, and again right before the
+  write. Without it the send is refused as DISCONNECTED `not connected yet`.
+  `call()` before the login is refused at once, with no RPC timer and no
+  `notifyDisconnect`: the dial in flight decides that socket's fate, and
+  nothing is queued. A subscribe or unsubscribe before the login moves only
+  the refcount, and `resubscribeActive` (the bound runtime's bring-up and
+  `onReconnected`, a member's `onBack`) replays the live set after it. The
+  dial's own auth frames write the socket directly, outside the gate.
+- **One classification, at the login's error entry.** `refusal()` keeps the
+  wire code and adds `authKind` from `authKindOf` (`core/rpc-codes.ts`, the
+  one table of the server's ERR_AUTH sentences): `invalid token` → `token`,
+  `invalid proof` → `proof`, `auth required…` and `invalid client_nonce` →
+  `protocol`, anything else → `unknown`. `isAuthRefusal` is true only for
+  `token` and `proof`; only those are stored. `protocol` and `unknown`
+  (`loginFailure`: `'protocol'` / `'login'`) are login errors, neither a
+  refusal nor a dead address, and neither the refused-pair memory's
+  'unknown' (review P1-A): not stored, retried within the loop's budget,
+  each a member state of its own (`failed: 'protocol'` "The login was
+  interrupted by a protocol error", `failed: 'login'` "The server refused
+  the login (reason not recognised)"). The loop keeps what ITS chain's last
+  failed dial was and gives up with it (`onGiveUp('protocol' | 'login')`); a
+  later real network failure, a success, a cancel and a new chain clear it,
+  so an old diagnosis never outlives its chain. The passive re-arm takes
+  only 'unreachable', so it never restarts either; a pick starts one loop.
+  The words a person reads come from i18n by class through ONE table,
+  `loginKey` / `loginErrorKey` (dial-order.ts): the member row and the
+  chosen marker (`failureKey`), the connect card's dial error and the switch
+  panel (`SwitchState.errorKey`) all say a login error that way (review
+  P2-D). The error's own message is fixed words too (`loginMessage`, and
+  'auth failed' for any other answer to the login), so the server's text
+  reaches no message. "(wrong token)" or "(handshake proof rejected)" is
+  what the server said on THIS page, kept through the loop's give-up. A
+  refusal read back from the device keeps no reason, so it reads only
+  "Refused earlier on this device — edit its connection", never a guess at
+  token or proof.
+- **A login that succeeds clears the pair.** `ServerRuntime.dial`, after the
+  identity is recorded and the attempt still owns the runtime, calls
+  `loggedIn(id, tried)` (through the fleet). App hands it to
+  `refusedAttempts.clear`, for the focus's dials too. The page is cleared at
+  once (the pair reads 'ok' even while the device's digest is still being
+  computed), and the device once the digest is known. Every add and clear of
+  a pair takes the next number of that pair's sequence, and an async digest
+  write lands only while its number is still the latest. So a late add
+  cannot put back a cleared refusal, and a late clear cannot take out a
+  newer one. The failure callbacks follow the same order (review P1-B): a
+  superseded add whose digest rejects reports nothing. A clear whose write
+  fails is reported to the storage handling and the device keeps its old
+  fact, which a reopened page reads; a clear whose digest rejects keeps it
+  silently. A check's digest is a shared comparison, not an operation: it
+  fills the cache, asks again, and never reports a failure. A store pinned
+  by an unreadable value and a missing Web Crypto behave as before: the
+  device's fact is not touched.
+
+Pinned by `connection.test.ts` (#502 rows: nothing but the auth frame before
+the login, with no timer and no disconnect, then the live set replayed; a
+frame whose socket closed during the encrypt is not written; the
+classification on both login paths; a call and a subscribe during the
+proof's derivation and after a dispose; a sentinel server text in no error),
+`connection.source.test.ts` (one login state), `dial-order.test.ts` (the
+table, every ERR_AUTH sentence in `connection.rs` classified, and the one
+translation), `refused-attempts.test.ts` (clear, the read-back, both races,
+a superseded digest's reject, a check's reject beside a newer add or clear,
+a clear's write and digest failures, the pinned and no-crypto stores),
+`server-members.test.ts` (a race is not a refusal; guard 3 for both
+protocol answers and the unrecognised one; the words),
+`server-switch.test.ts` (the panel's key), `reconnect.test.ts` (the give-up
+reason, and no old diagnosis after a network failure, a success or a
+cancel), `server-runtime.edit.test.ts`
+(`loggedIn` once, only for this entry's own success) and
+`App.shell.mount.test.ts` (the owner's case: stored refusal → One server on
+the same entry → cleared → All included joins). With the `loggedIn` wiring
+removed the mount row fails. Against main's `connection.ts` the gate and
+classification rows fail; the close-during-encrypt row passes on both, as a
+regression pin for the check that already existed. For the review's P1s,
+each row goes red with its fix taken out: the loop's protocol diagnosis
+(reconnect), the member's protocol state (members), and the superseded
+digest's reject (refused-attempts). `temp/b502/repro.mjs`
+against the fix: every variant connected, and the gateway logged no auth
+line.
 
 **A member that gave up on reachability is re-armed passively** (board #493,
 2026-11-02). Owner, 2026-11-01 23:44: "all included 模式有一台服务器提示连不上，重试失败；选只连这一台可以；再切回 all included 两台都能连". Measured on the
@@ -2169,6 +2291,10 @@ Each entry is a decision with the reason it was made; treat them as normative. T
 ### WebSocket lifecycle
 
 `connect()` cleans up existing. `onclose` rejects pending. `doDisconnect()` clears timers. Heartbeat ping every 15s; 2 consecutive RPC timeouts → auto-close → reconnect.
+
+### Nothing but the login before the login; a refusal is a credential answer (#502)
+
+A socket carries `_authed`; `sendOnSocket` asks it before the encrypt and before the write, `call()` refuses at once without a timer or a disconnect, and a subscribe before the login moves only its refcount (`resubscribeActive` replays it). An ERR_AUTH from the login is classified once (`authKindOf`, `core/rpc-codes.ts`) and keeps its code; only `token`/`proof` are refusals and stored, `protocol` and `unknown` are login errors — retried within the budget, their own member states (`failed: 'protocol'` / `'login'`), never passively re-armed — and every surface says a login error by its class (`loginErrorKey`), never by the server's text. A successful login clears its pair (`loggedIn` → `refusedAttempts.clear`, sequenced per pair, its failure callbacks too). Reason: the server answers any early frame with ERR_AUTH `auth required`, and reading the code alone stored a correct token as refused, with nothing to clear it (owner 2026-11-02 12:06).
 
 ### One connection is one object; `ws.ts` holds none (#335 ①, ②b-4)
 

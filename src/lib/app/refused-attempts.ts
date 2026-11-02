@@ -32,6 +32,22 @@
 // - A write that fails is reported to the caller's storage error handling.
 // - Without Web Crypto (an insecure page context) the fact cannot be digested:
 //   it is kept for this page only, and a stored one is unknown.
+// - A login that SUCCEEDS with a pair is the server's newer answer about it
+//   (board #502): `clear` drops the pair from this page at once and from the
+//   device once its digest is known. The two are separate steps on purpose:
+//   the page is clear before any digest returns (a pair that logged in reads
+//   'ok' here whatever the device still holds, until it is refused again).
+//   Every add and clear of a
+//   pair takes the next number of that pair's sequence, and an asynchronous
+//   write lands only while its number is still the latest — so a digest that
+//   returns late can neither put back a cleared refusal nor take out a newer
+//   one. The same holds for a callback that FAILS: a superseded operation's
+//   digest that rejects reports nothing. A clear whose digest rejects, or
+//   whose write fails, leaves the device's old fact in place (a write failure
+//   is reported; a reopened page reads that old fact). A check's digest is a
+//   shared comparison, not an operation: it fills the cache and asks again
+//   (`ready`) and never reports a failure. A stored fact that cannot be compared (no Web Crypto, a digest that
+//   rejects) or a store pinned by an unreadable value is left as it is.
 
 import type { ServerId } from './refs.ts';
 
@@ -68,6 +84,9 @@ export interface RefusedAttempts {
   check(id: ServerId, address: string, token: string): Eligibility;
   /** The attempt was refused: remember it, here and on the device. */
   add(id: ServerId, address: string, token: string): void;
+  /** A login with this pair succeeded (#502): forget its refusal, here at
+   * once and on the device when its digest is known. */
+  clear(id: ServerId, address: string, token: string): void;
 }
 
 export interface RefusedDeps {
@@ -143,20 +162,52 @@ export function createRefusedAttempts(deps: RefusedDeps): RefusedAttempts {
     void digest(p).then((hex) => { digests.set(p, hex); deps.ready(); }, () => { digests.delete(p); uncomputable.add(p); deps.ready(); });
     return undefined;
   };
+  /** The latest operation on each (id, pair): an async write whose number
+   * is no longer the latest is dropped (#502). */
+  const ops = new Map<string, number>();
+  /** Pairs that logged in on this page since their last refusal. */
+  const proven = new Set<string>();
+  const nextOp = (id: ServerId, p: string): (() => boolean) => {
+    const key = `${id}\u0001${p}`;
+    const n = (ops.get(key) ?? 0) + 1;
+    ops.set(key, n);
+    return () => ops.get(key) === n;
+  };
   function persist(id: ServerId, p: string) {
+    const latest = nextOp(id, p);
     if (!deps.digest) return; // this page only
     void deps.digest(p).then((hex) => {
       digests.set(p, hex);
+      if (!latest()) return;                  // cleared (or added again) since
       const list = [...new Set([...(stored[id] ?? []), hex])].slice(-MAX_PER_SERVER);
       stored = { ...stored, [id]: list };
       if (pinned) return;                     // this page only: the unreadable value is not written over
       try { deps.write(JSON.stringify(stored)); } catch { deps.failed(); }
-    }, () => deps.failed());
+      // A digest that rejects is this operation's failure only while it is
+      // still the latest (#502 review P1-B): a superseded add reports nothing.
+    }, () => { if (latest()) deps.failed(); });
+  }
+  function unpersist(id: ServerId, p: string) {
+    const latest = nextOp(id, p);
+    if (!stored[id] || !deps.digest || uncomputable.has(p)) return; // nothing stored, or not comparable: kept
+    void deps.digest(p).then((hex) => {
+      digests.set(p, hex);
+      if (!latest()) return;                  // refused again since: that answer is newer
+      const list = stored[id];
+      if (!list?.includes(hex)) return;
+      const rest = list.filter((d) => d !== hex);
+      const next = { ...stored };
+      if (rest.length) next[id] = rest; else delete next[id];
+      stored = next;
+      if (pinned) return;
+      try { deps.write(Object.keys(stored).length ? JSON.stringify(stored) : null); } catch { deps.failed(); }
+    }, () => { /* not comparable: the stored fact stays, as for any check */ });
   }
   return {
     check(id, address, token) {
       const p = pair(address, token);
       if (mem.get(id)?.has(p)) return 'refused';
+      if (proven.has(`${id}\u0001${p}`)) return 'ok';
       const list = stored[id];
       if (!list) return 'ok';
       if (!deps.digest || uncomputable.has(p)) return unknownFor(id, token);
@@ -169,7 +220,16 @@ export function createRefusedAttempts(deps: RefusedDeps): RefusedAttempts {
       let set = mem.get(id);
       if (!set) { set = new Set(); mem.set(id, set); }
       set.add(p);
+      proven.delete(`${id}\u0001${p}`);
       persist(id, p);
+    },
+    clear(id, address, token) {
+      const p = pair(address, token);
+      const set = mem.get(id);
+      set?.delete(p);
+      if (set && set.size === 0) mem.delete(id);
+      proven.add(`${id}\u0001${p}`);
+      unpersist(id, p);
     },
   };
 }

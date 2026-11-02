@@ -1461,7 +1461,10 @@ test('Aggregate focus moves between connected members without a teardown (#335 â
   assert.match(source, /c\.publishing\(\);\s*provisional\.delete\(runtime\);\s*(?:\/\/[^\n]*\n\s*)*if \(!m\.keep && scopeSwap\.bound\(\) !== runtime\) retireChosen\(\);/u);
   assert.match(source, /eligible: \(address, token\) => \(bound\(\) === runtime \? 'ok' : refusedAttempts\.check\(runtime\.id, address, token\)\),/u, 'a member s loop is handed the hard rule (#458)');
   assert.match(source, /function doDisconnect\(\) \{\s*(?:\/\/[^\n]*\n\s*)*retireChosen\(\);/u, 'Disconnect ends a pending choice');
-  assert.match(source, /const why = failed && st\.reason === 'storage' \? t\('memberStorage'\) : failed && st\.reason === 'auth' \? t\('memberTokenRefused'\) : failed && st\.reason === 'unknown' \? t\('memberRefusalUnknown'\) : '';/u, 'a storage stop, a token refusal and an unknown refusal keep their own words');
+  assert.match(source, /const key = failed && st\.reason !== 'unreachable' && st\.reason !== 'elsewhere' \? failureKey\(st\) : '';\s*const why = key \? t\(key\) : '';/u, 'a storage stop, a refusal, an unknown refusal and an unrecognised login keep their own words, from the one failureKey (#502)');
+  // #502 review P2-D: the connect card and the switch panel say a login error by its class, never its text.
+  assert.match(source, /const loginKey = loginErrorKey\(result\.error\);\s*return loginKey \? t\(loginKey\) : String\(result\.error\?\.message/u, 'the connect card');
+  assert.match(source, /<p class="config-error" role="alert">\{switching\.errorKey \? t\(switching\.errorKey\) : switching\.error\}<\/p>/u, 'the switch panel');
   for (const name of ['chooseMember', 'refuseMember', 'settleChosen']) {
     const pick = source.match(new RegExp(`function ${name}\\(\\w*\\) \\{[\\s\\S]*?\\n  \\}\\n`, 'u'))?.[0] ?? '';
     assert.ok(pick, name);

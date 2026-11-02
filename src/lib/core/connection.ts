@@ -19,7 +19,7 @@
 
 import { parseBuild, type BuildInfo } from './build-info.ts';
 import { parseCaps } from './login-caps.ts';
-import { ERR_AUTH } from './rpc-codes.ts';
+import { authKindOf, ERR_AUTH, loginMessage, type AuthKind } from './rpc-codes.ts';
 
 // Cursor: x/y position, width, height, trailing trimmed lines.
 export interface Cursor { x: number; y: number; w: number; h: number; t: number }
@@ -38,11 +38,24 @@ export type PaneClosedCb = (target: string) => void;
 // Errors surfaced by this module carry an optional `code`: a JSON-RPC error
 // code (number) for definitive server answers, or 'DISCONNECTED' (string)
 // for transport-level failures.
-export type RpcClientError = Error & { code?: number | string; data?: unknown };
+// A login's ERR_AUTH also carries `authKind`: what the server's answer was
+// about (rpc-codes.ts `authKindOf`, board #502).
+export type RpcClientError = Error & { code?: number | string; data?: unknown; authKind?: AuthKind };
 
-/** The server's explicit refusal of the credentials, as a login failure: an Error that
- * carries the wire code the reconnect loop stops on (`isAuthRefusal`, app/dial-order.ts). */
-const refusal = (message: unknown): RpcClientError => Object.assign(new Error(typeof message === 'string' && message ? message : 'auth failed'), { code: ERR_AUTH });
+/** The server's ERR_AUTH answer to the login, as a login failure: an Error that keeps the
+ * wire code and says, ONCE, here, what the answer was about (board #502). Only `token` and
+ * `proof` are refusals of the credentials (`isAuthRefusal`, app/dial-order.ts); the rest is
+ * a protocol answer or one not recognised. */
+const refusal = (message: unknown): RpcClientError => {
+  const authKind = authKindOf(message);
+  return Object.assign(new Error(loginMessage(authKind, message)), { code: ERR_AUTH, authKind });
+};
+
+/** A send on a socket whose login has not completed: nothing but the dial's own auth frames
+ * may go before it (board #502). */
+function notYet(): RpcClientError {
+  return Object.assign(new Error('not connected yet'), { code: 'DISCONNECTED' });
+}
 
 // One key per direction. Under the v1 handshake both fields hold the same key
 // (kept for old servers); under v2 they are distinct HKDF outputs, so the two
@@ -54,6 +67,11 @@ interface AppSocket extends WebSocket {
   _sendQueue: Promise<void>;
   _recvQueue: Promise<void>;
   _cipher: Cipher | null;
+  /** The login on THIS socket completed (board #502). Until it has, the server answers any
+   * frame but the login with ERR_AUTH `auth required` and closes: every send but the dial's
+   * own auth frames is refused before it reaches the wire. Set by `authSuccess`, cleared by
+   * the close and by a failed dial. */
+  _authed: boolean;
   _getMachineId?: () => string | null;
   _getHostname?: () => string | null;
   /** undefined until the login answered; null when it named no build. */
@@ -395,9 +413,16 @@ export function createConnection(): Connection {
     onDisconnect?.();
   }
 
+  /** Every frame after the login goes through here, in order, on THIS socket. The login gate
+   * is asked twice (board #502): on entry, before a cipher counter is spent, and again right
+   * before the write, because the socket may have closed while the frame was encrypted. The
+   * dial's own auth frames do not come here: they write the socket directly. */
   function sendOnSocket(socket: AppSocket, message: string): Promise<void> {
+    if (!socket._authed) return Promise.reject(notYet());
     const send = socket._sendQueue.then(async () => {
+      if (!socket._authed) throw notYet();
       const out = await encryptMsg(message, socket._cipher);
+      if (!socket._authed) throw notYet();
       if (ws !== socket || socket.readyState !== WebSocket.OPEN) {
         const error: RpcClientError = new Error('connection changed before send');
         error.code = 'DISCONNECTED';
@@ -491,6 +516,7 @@ export function createConnection(): Connection {
     // the old socket don't fire handlers that still close over module-level `ws` and
     // accidentally send frames on the NEW socket (common race during reconnect).
     if (ws) {
+      ws._authed = false;
       try {
         ws.onclose = null;
         ws.onerror = null;
@@ -529,6 +555,7 @@ export function createConnection(): Connection {
         socket._sendQueue = Promise.resolve();
         socket._recvQueue = Promise.resolve();
         socket._cipher = null;
+        socket._authed = false;
       } catch (e) {
         reject(e);
         return;
@@ -539,7 +566,8 @@ export function createConnection(): Connection {
       // A cancelled dial (superseded, disconnected, disposed) ends the same way a failed one does.
       dial.fail = (error) => failDial(error);
 
-      let authed = false;
+      // The login state is the SOCKET's, `socket._authed` — the one value the outbound gate,
+      // the handshake below and the capability getters all read (board #502 review P2-C).
       // The mode this attempt CHOSE, explicitly: encrypted when Web Crypto exists, plain-token
       // when it does not. It is set once, at the nonce, and nothing else decides it — least of
       // all `cipher` being null, which is also what a failed login used to leave behind (board
@@ -564,6 +592,7 @@ export function createConnection(): Connection {
       function failDial(error: unknown) {
         if (failed) return;
         failed = true;
+        socket._authed = false;
         clearTimeout(timeout);
         socket.onmessage = null;
         socket.onopen = null;
@@ -581,8 +610,8 @@ export function createConnection(): Connection {
       function authSuccess() {
         if (failed) return;
         clearTimeout(timeout);
-        authed = true;
         socket._cipher = cipher;
+        socket._authed = true;
         emitCaps();
         recoveryEnabled = true;
         disconnectNotified = false;
@@ -598,8 +627,8 @@ export function createConnection(): Connection {
       // Expose getters
       socket._getMachineId = () => machineId;
       socket._getHostname = () => hostname;
-      socket._getBuild = () => (authed ? build : undefined);
-      socket._getCaps = () => (authed ? caps : undefined);
+      socket._getBuild = () => (socket._authed ? build : undefined);
+      socket._getCaps = () => (socket._authed ? caps : undefined);
 
       // Frames are handled strictly in arrival order. Decrypt + wire-decode is
       // async, and its latency depends on the frame: a ≥256-byte payload goes
@@ -621,7 +650,7 @@ export function createConnection(): Connection {
         // swallowed (board #393 review: the dial then hung to its timeout, or a later frame was
         // still read against a half-built session). After the login the handler has already
         // turned every failure it cares about into a disconnect or a dropped frame.
-        socket._recvQueue = job.catch((error) => { if (!authed) failDial(error); });
+        socket._recvQueue = job.catch((error) => { if (!socket._authed) failDial(error); });
       };
 
       async function handleMessage(event: MessageEvent) {
@@ -640,7 +669,7 @@ export function createConnection(): Connection {
         // frame whose `server_nonce` is 32 hex digits. A push, an RPC answer, a binary frame, a
         // plain success or a malformed nonce is a protocol error: it ends the attempt, and
         // nothing is derived, sent or dispatched on its account (board #393 review).
-        if (!authed && !serverNonce) {
+        if (!socket._authed && !serverNonce) {
           const nonce = parseServerNonce(data?.server_nonce);
           if (!nonce) { failDial(new Error('auth failed: the first frame was not a valid server nonce')); return; }
           serverNonce = nonce;
@@ -665,7 +694,7 @@ export function createConnection(): Connection {
         }
 
         // Step 2: Auth response — the only frame accepted until the login is done.
-        if (!authed && serverNonce) {
+        if (!socket._authed && serverNonce) {
           if (encrypted) {
             // Encrypted auth response — must arrive as a binary frame.
             if (!isBinary) {
@@ -694,7 +723,9 @@ export function createConnection(): Connection {
           } else {
             // Plain (token) response — text frame.
             if (data?.result?.authenticated) { machineId = data.result.machine_id; hostname = data.result.hostname; build = parseBuild(data.result.build); caps = parseCaps(data.result.caps); authSuccess(); return; }
-            failDial(data?.error?.code === ERR_AUTH ? refusal(data.error.message) : new Error(data?.error?.message || 'auth failed'));
+            // Any other answer to the login is this dial's failure, in fixed words: the server's
+            // text is not carried into a message a page may show (#502 review P2-D).
+            failDial(data?.error?.code === ERR_AUTH ? refusal(data.error.message) : new Error('auth failed'));
             return;
           }
         }
@@ -703,12 +734,12 @@ export function createConnection(): Connection {
         // listener. Both blocks above return for every frame while !authed; this line says so
         // where the dispatch begins, so a branch added above that forgets its `return` cannot
         // deliver a frame from a connection that has not proven anything (board #393 review).
-        if (!authed) return;
+        if (!socket._authed) return;
 
         // Post-auth: every encrypted message arrives as a binary frame and
         // gets decrypted + wire-decoded into JSON. Plain-token connections
         // continue to receive text frames (data is already parsed above).
-        if (authed && encrypted) {
+        if (socket._authed && encrypted) {
           if (!isBinary) return; // ignore unexpected text frames after encrypted auth
           let pt;
           try {
@@ -776,8 +807,8 @@ export function createConnection(): Connection {
           return;
         }
         stopIdleProbe();
-        const wasAuthed = authed;
-        authed = false;
+        const wasAuthed = socket._authed;
+        socket._authed = false;
         ws = null;
         emitCaps();
         rejectAllPending(wasAuthed ? 'connection lost' : 'connection closed during auth');
@@ -797,7 +828,7 @@ export function createConnection(): Connection {
 
       socket.onerror = () => {
         clearTimeout(timeout);
-        if (!authed) failDial(new Error('connection failed'));
+        if (!socket._authed) failDial(new Error('connection failed'));
       };
     });
   }
@@ -813,6 +844,7 @@ export function createConnection(): Connection {
     rejectAllPending('disconnected');
     cancelDialing('disconnected');
     if (!socket) return;
+    socket._authed = false;
     socket.onclose = null;
     socket.onerror = null;
     socket.onmessage = null;
@@ -865,6 +897,7 @@ export function createConnection(): Connection {
     const socket = ws;
     ws = null;
     emitCaps();
+    socket._authed = false;
     socket.onclose = null;
     socket.onerror = null;
     socket.onmessage = null;
@@ -885,6 +918,9 @@ export function createConnection(): Connection {
         reject(error);
         return;
       }
+      // Open but not logged in yet (board #502): refused at once, with no timer and no
+      // disconnect — the dial in flight decides this socket's fate, and nothing is queued.
+      if (!ws._authed) { reject(notYet()); return; }
       const socket = ws;
       const id = ++requestId;
       const timer = setTimeout(() => {
@@ -924,14 +960,17 @@ export function createConnection(): Connection {
     });
   }
 
+  // Before the login only the refcount moves (board #502): the server would answer the frame
+  // with `auth required` and close. The login's owner replays the live set
+  // (`resubscribeActive`) once the dial has come up.
   function sendSubscribe(target: string) {
-    if (!ws || ws.readyState !== WebSocket.OPEN) return;
+    if (!ws || ws.readyState !== WebSocket.OPEN || !ws._authed) return;
     const msg = JSON.stringify({ method: 'subscribe', params: { target } });
     const socket = ws;
     sendOnSocket(socket, msg).catch(() => {});
   }
   function sendUnsubscribe(target: string) {
-    if (!ws || ws.readyState !== WebSocket.OPEN) return;
+    if (!ws || ws.readyState !== WebSocket.OPEN || !ws._authed) return;
     const msg = JSON.stringify({ method: 'unsubscribe', params: { target } });
     const socket = ws;
     sendOnSocket(socket, msg).catch(() => {});

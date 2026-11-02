@@ -18,6 +18,7 @@
 // a second client for a machine that already has one.
 import { createConnectionRegistry, type ConnectionRegistry } from '../core/connection-registry.ts';
 import type { ServerId } from './refs.ts';
+import type { DialPair } from './dial-order.ts';
 import { loadServers, type ServerEntry } from './servers.ts';
 import { createServerRuntime, type ServerRuntime } from './server-runtime.ts';
 
@@ -29,6 +30,8 @@ export interface ServerFleetDeps {
    * one registry, since object lifetime is the registry's to own. */
   registry?: ConnectionRegistry;
   connectTimeoutMs?: number;
+  /** Every runtime's successful login (server-runtime.ts `loggedIn`, #502). */
+  loggedIn?: (id: ServerId, tried: DialPair) => void;
   /**
    * How a runtime the fleet lets go of is ENDED (board #335 ②b-4; reviewer
    * and orchestrator, 01:46): the host's one end — stop it, release its
@@ -105,6 +108,7 @@ export function createServerFleet(deps: ServerFleetDeps): ServerFleet {
       // Every recordServer can change the entry SET, so membership is
       // reconciled against it rather than each runtime watching itself.
       onRegistryChanged: reconcile,
+      ...(deps.loggedIn ? { loggedIn: deps.loggedIn } : {}),
       ...(connectTimeoutMs == null ? {} : { connectTimeoutMs }),
     });
     runtimes.set(entry.id, runtime);

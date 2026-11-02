@@ -40,6 +40,7 @@ function world() {
   let at: string | null = null;
   const fails = new Map<string, number>();
   const refused = new Set<string>();
+  const loginErrors = new Map<string, unknown>();
   const pending = new Set<{ reject: (e: Error) => void }>();
   const log: string[] = [];
   return {
@@ -48,7 +49,10 @@ function world() {
     fail(addr: string, n: number) { fails.set(addr, n); },
     /** The server answers on `addr` and refuses the token. */
     refuse(addr: string) { refused.add(addr); },
+    /** The server answers the login on `addr` with this error (#502). */
+    answerLogin(addr: string, error: unknown) { loginErrors.set(addr, error); },
     async connect(addr: string) {
+      if (loginErrors.has(addr)) throw loginErrors.get(addr);
       if (refused.has(addr)) throw new Error('auth failed');
       const n = fails.get(addr) ?? 0;
       if (n > 0) { fails.set(addr, n - 1); throw new Error('connection timeout'); }
@@ -723,4 +727,22 @@ test('a held switch to a machine-less entry, then the machine it reaches is save
   await t.sw.switchTo(loadServers(t.storage).find((s) => s.id === t.a.id)!);
   await t.sw.switchTo(loadServers(t.storage).find((s) => s.id === c.id)!);
   assert.equal(t.tokens.at(-1), 'tc-edited', 'the next dial sends the newest token');
+});
+
+test('#502 review P2-D: a login error s panel words are its class, as an i18n key — the error s own text is not what the panel says', async () => {
+  const { authKindOf, ERR_AUTH } = await import('../core/rpc-codes.ts');
+  for (const [message, key] of [['invalid token', 'memberTokenRefused'], ['SENTINEL-502', 'memberLoginUnknown']] as const) {
+    const t = app();
+    t.w.answerLogin('ws://b:2', Object.assign(new Error('login refused (reason not recognised)'), { code: ERR_AUTH, authKind: authKindOf(message) }));
+    await t.sw.switchTo(t.b);
+    const st = t.states.at(-1)!;
+    assert.equal(st.phase, 'failed');
+    assert.equal(st.errorKey, key, message);
+    assert.doesNotMatch(JSON.stringify(st), /SENTINEL/u);
+  }
+  // Negative control: an error that is not a login error has no key; the panel keeps its text.
+  const t = app();
+  t.w.fail('ws://b:2', 1);
+  await t.sw.switchTo(t.b);
+  assert.equal(t.states.at(-1)!.errorKey, undefined);
 });

@@ -10,7 +10,7 @@
 // the next address is tried when the dial itself fails, not only when the
 // probe does.
 
-import { ERR_AUTH } from '../core/rpc-codes.ts';
+import { ERR_AUTH, type AuthKind } from '../core/rpc-codes.ts';
 
 /** A dial that got nowhere because the address cannot be reached: a timeout,
  * a refusal, a socket that closed during auth. An AUTH refusal is not one:
@@ -21,15 +21,53 @@ export function isReachabilityFailure(e: unknown): boolean {
 }
 
 /** The server ANSWERED and refused the credentials: the login failed with its
- * ERR_AUTH (`invalid proof` on the encrypted path, `invalid token` on the plain
- * one — core/connection.ts keeps the code on the error). Not a drop and not a
- * reachability failure: the reconnect loop stops at once instead of retrying the
- * same answer for its whole window, and instead of feeding the server's lockout
- * (board #393). By the CODE, never by the message: a protocol surprise such as
- * "expected binary auth response", a timeout and a socket closed during auth are
- * not a bad token. */
+ * ERR_AUTH and an answer about the credentials — `invalid proof` on the
+ * encrypted path, `invalid token` on the plain one. core/connection.ts keeps
+ * the code on the error and classifies the answer once, as `authKind`
+ * (rpc-codes.ts `authKindOf`, board #502). Not a drop and not a reachability
+ * failure: the reconnect loop stops at once instead of retrying the same
+ * answer for its whole window, and instead of feeding the server's lockout
+ * (board #393). By the code AND the class, never the code alone: the same
+ * code answers a frame sent before the login (`auth required`, a client race,
+ * #502) and a malformed handshake, and neither is a bad token; a timeout and a
+ * socket closed during auth are not either. */
 export function isAuthRefusal(e: unknown): boolean {
-  return (e as { code?: unknown } | null)?.code === ERR_AUTH;
+  const err = e as { code?: unknown; authKind?: unknown } | null;
+  return err?.code === ERR_AUTH && (err.authKind === 'token' || err.authKind === 'proof');
+}
+
+/** A login the server answered with an ERR_AUTH that is not about the
+ * credentials (board #502; review P1-A): `'protocol'` for its known protocol
+ * answers (`auth required…`, `invalid client_nonce`), `'login'` for one this
+ * client does not recognise; null for everything else. Neither is a refusal
+ * (nothing is remembered) nor a dead address: the loop retries it within its
+ * budget, a give-up says which it was, and nothing passive starts it again. */
+export function loginFailure(e: unknown): 'protocol' | 'login' | null {
+  const err = e as { code?: unknown; authKind?: unknown } | null;
+  if (err?.code !== ERR_AUTH) return null;
+  return err.authKind === 'protocol' ? 'protocol' : err.authKind === 'unknown' ? 'login' : null;
+}
+
+/** The ONE translation of a login error into words a person reads (an i18n
+ * key), by its class and never by the server's text (#502 review P2-D): the
+ * member row, the connect card and the switch panel all say it this way.
+ * null: not a login error (the caller's own words apply). */
+export function loginErrorKey(e: unknown): string | null {
+  const err = e as { code?: unknown; authKind?: unknown } | null;
+  if (err?.code !== ERR_AUTH) return null;
+  const kind = err.authKind;
+  return kind === 'token' || kind === 'proof' || kind === 'protocol' || kind === 'unknown' ? loginKey(kind) : null;
+}
+
+/** The i18n key for one login-error class: the table `loginErrorKey` and a
+ * member's row (`failureKey`) both read. */
+export function loginKey(kind: AuthKind): string {
+  switch (kind) {
+    case 'token': return 'memberTokenRefused';
+    case 'proof': return 'memberProofRefused';
+    case 'protocol': return 'memberLoginProtocol';
+    default: return 'memberLoginUnknown';
+  }
 }
 
 /** How long ONE dial of an address of class 0 (LAN), 1 (Tailscale) or 2

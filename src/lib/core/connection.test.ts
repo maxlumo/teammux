@@ -1484,9 +1484,10 @@ test('a socket error, a close or a timeout BEFORE the nonce ends the attempt as 
 
 test('the PLAIN-token path takes only the server’s ERR_AUTH code as a refusal: another code, no code and no error are this dial’s failure only (#393 follow-up, validator P3)', async (t) => {
   const answers: Array<[string, unknown, string]> = [
-    ['a JSON-RPC internal error', { id: 0, error: { code: -32603, message: 'internal' } }, 'internal'],
-    ['a legacy HTTP-style code', { id: 0, error: { code: 401, message: 'invalid token' } }, 'invalid token'],
-    ['a message and no code', { id: 0, error: { message: 'bad token' } }, 'bad token'],
+    // The server's own text is not carried (#502 review P2-D): every one of these reads 'auth failed'.
+    ['a JSON-RPC internal error', { id: 0, error: { code: -32603, message: 'internal' } }, 'auth failed'],
+    ['a legacy HTTP-style code', { id: 0, error: { code: 401, message: 'invalid token' } }, 'auth failed'],
+    ['a message and no code', { id: 0, error: { message: 'bad token' } }, 'auth failed'],
     ['a code and no message', { id: 0, error: { code: -32603 } }, 'auth failed'],
     ['an answer that is nothing', { id: 0 }, 'auth failed'],
   ];
@@ -1535,3 +1536,163 @@ test('a dial that disconnect() or dispose() cancels announces once and ends on i
     assert.equal(conn.getMachineId() ?? null, null, `${how}: no identity`);
   }
 }));
+
+// ---- board #502: nothing but the login leaves a socket before the login completes ----
+// The server answers ANY frame before the login with ERR_AUTH `auth required` and closes
+// (connection.rs). Before #502 an RPC or a subscribe sent on a socket that was open but not
+// yet logged in drew that answer, and the reconnect loop read it as a bad token.
+
+test('#502: before the login a call is refused at once (no timer, no disconnect) and a subscribe moves only its count — the auth frame is the only frame on the wire; after the login the live set is replayed', (t) => withWebCrypto(async () => {
+  const server = new FakeE2eServer('tok', 2, 'm-502', 'h-502');
+  const conn = createConnection();
+  t.after(() => conn.dispose());
+  let drops = 0;
+  conn.setOnDisconnect(() => { drops++; });
+  const dialing = conn.connect('ws://gate.test/ws', 'tok');
+  const socket = MockWebSocket.instances.at(-1)!;
+  socket.readyState = MockWebSocket.OPEN;
+  const timers = trackTimers();
+  let early: any;
+  try {
+    // Open, no nonce yet.
+    early = await conn.call('ping').then(() => null, (e: unknown) => e);
+    assert.equal(timers.timeouts(), 0, 'the refused call armed no RPC timer');
+  } finally { timers.restore(); }
+  assert.equal(early?.code, 'DISCONNECTED');
+  assert.equal(early?.message, 'not connected yet');
+  conn.subscribe('app:0.0');
+  await settle();
+  assert.equal(socket.sent.length, 0, 'nothing on the wire before the nonce');
+  // The nonce came; the auth answer has not.
+  socket.message(server.nonceFrame());
+  await until(() => socket.sent.length >= 1);
+  const mid = await conn.call('ping').then(() => null, (e: unknown) => e) as any;
+  assert.equal(mid?.message, 'not connected yet', 'refused between the nonce and the answer too');
+  conn.subscribe('gone:0.0');
+  conn.unsubscribe('gone:0.0');
+  await settle(10);
+  assert.equal(socket.sent.length, 1, 'still only the auth frame');
+  const auth = JSON.parse(socket.sent[0] as string);
+  assert.equal(auth.method, 'auth');
+  assert.equal(await server.accept(auth), true);
+  socket.binary(await server.seal(JSON.stringify({ result: { authenticated: true, machine_id: 'm-502', hostname: 'h-502', e2e: 2 } })));
+  assert.equal(await dialing, 'm-502');
+  assert.equal(drops, 0, 'no refused send was a disconnect');
+  // The login's owner replays the subscriptions still counted: the one kept, not the one released.
+  conn.resubscribeActive();
+  const replay = await server.next(socket);
+  assert.deepEqual([replay.method, replay.params.target], ['subscribe', 'app:0.0']);
+  await settle(10);
+  assert.deepEqual(await server.drain(socket), [], 'gone:0.0 was released before the login and is not replayed');
+  // Negative control: after the login the same call goes out and is answered.
+  const ping = conn.call('ping');
+  const req = await server.next(socket);
+  assert.equal(req.method, 'ping');
+  socket.binary(await server.seal(JSON.stringify({ id: req.id, result: 'pong' })));
+  assert.equal(await ping, 'pong');
+}));
+
+test('#502: a frame queued after the login is not written once its socket closed while it was being encrypted', (t) => withWebCrypto(async () => {
+  const server = new FakeE2eServer('tok', 2, 'm-c', 'h-c');
+  const conn = createConnection();
+  t.after(() => conn.dispose());
+  const socket = await handshake(conn, server, 'ws://close.test/ws', 'tok');
+  const before = socket.sent.length;
+  const lost = conn.call('ping').then(() => null, (e: unknown) => e) as Promise<any>;
+  // The close lands while the frame is still in the async encrypt.
+  socket.onclose?.({ code: 1006, reason: '', wasClean: false });
+  const error = await lost;
+  assert.equal(error?.code, 'DISCONNECTED');
+  await settle(10);
+  assert.equal(socket.sent.length, before, 'nothing reached the closed socket');
+}));
+
+test('#502: the login’s ERR_AUTH keeps its wire code and says ONCE what it was about — only the two credential answers are refusals', async (t) => {
+  const answers: Array<[string, string, boolean]> = [
+    ['invalid token', 'token', true],
+    ['auth required — send {"method":"auth","params":{"token":"..."}} first', 'protocol', false],
+    ['invalid client_nonce', 'protocol', false],
+    ['something this client does not know', 'unknown', false],
+  ];
+  for (const [message, kind, refused] of answers) {
+    const conn = createConnection();
+    t.after(() => conn.dispose());
+    const dialing = conn.connect('ws://kind.test/ws', 'tok');
+    dialing.catch(() => {});
+    const socket = MockWebSocket.instances.at(-1)!;
+    socket.readyState = MockWebSocket.OPEN;
+    socket.message({ server_nonce: '00'.repeat(16) });
+    await until(() => socket.sent.length >= 1);
+    socket.message({ id: 0, error: { code: -32000, message } });
+    const error = await dialing.then(() => null, (e: unknown) => e) as any;
+    assert.equal(error.code, -32000, `${kind}: the wire code is kept`);
+    assert.equal(error.authKind, kind, message);
+    assert.equal(isAuthRefusal(error), refused, `${kind}: refusal ${refused}`);
+  }
+});
+
+test('#502: the encrypted path classifies its plain ERR_AUTH the same way — `invalid proof` refuses, `auth required` does not', (t) => withWebCrypto(async () => {
+  for (const [message, kind, refused] of [['invalid proof', 'proof', true], ['auth required — send … first', 'protocol', false]] as const) {
+    const server = new FakeE2eServer('tok', 2, 'm', 'h');
+    const conn = createConnection();
+    t.after(() => conn.dispose());
+    const dialing = conn.connect('ws://kind-e2e.test/ws', 'tok');
+    dialing.catch(() => {});
+    const socket = MockWebSocket.instances.at(-1)!;
+    socket.readyState = MockWebSocket.OPEN;
+    socket.message(server.nonceFrame());
+    await until(() => socket.sent.length >= 1);
+    socket.message({ id: 0, error: { code: -32000, message } });
+    const error = await dialing.then(() => null, (e: unknown) => e) as any;
+    assert.equal(error.authKind, kind);
+    assert.equal(isAuthRefusal(error), refused, message);
+  }
+}));
+
+test('#502 review: while the proof is being derived (the nonce delivered, the auth frame not yet sent) a call and a subscribe are refused the same way, and nothing they asked for leaves later — nor after a dispose', (t) => withWebCrypto(async () => {
+  const server = new FakeE2eServer('tok', 2, 'm-d', 'h-d');
+  const conn = createConnection();
+  t.after(() => conn.dispose());
+  const dialing = conn.connect('ws://derive.test/ws', 'tok');
+  const socket = MockWebSocket.instances.at(-1)!;
+  socket.readyState = MockWebSocket.OPEN;
+  socket.message(server.nonceFrame());
+  // The same turn: the key derivation has not finished, nothing is sent yet.
+  assert.equal(socket.sent.length, 0);
+  const during = conn.call('fs_list', { path: '/secret' }).then(() => null, (e: unknown) => e) as Promise<any>;
+  conn.subscribe('during:0.0');
+  assert.equal((await during)?.message, 'not connected yet');
+  await until(() => socket.sent.length >= 1);
+  await settle(10);
+  assert.equal(socket.sent.length, 1, 'only the auth frame');
+  assert.doesNotMatch(String(socket.sent[0]), /fs_list|secret|during/u, 'and no parameter of the refused call in it');
+  assert.equal(await server.accept(JSON.parse(socket.sent[0] as string)), true);
+  socket.binary(await server.seal(JSON.stringify({ result: { authenticated: true, machine_id: 'm-d', hostname: 'h-d', e2e: 2 } })));
+  await dialing;
+  await settle(10);
+  assert.equal(socket.sent.length, 1, 'the refused call is not sent after the login either');
+  // A dispose: whatever is asked of it afterwards never reaches the socket.
+  conn.dispose();
+  await conn.call('ping').then(() => null, () => null);
+  conn.subscribe('after:0.0');
+  await settle(10);
+  assert.equal(socket.sent.length, 1, 'nothing after the dispose');
+}));
+
+test('#502 review P2-D: an ERR_AUTH with an arbitrary server text reaches no error message — the login error carries fixed words and its class', async (t) => {
+  const SENTINEL = 'SENTINEL-502-do-not-show';
+  for (const answer of [{ id: 0, error: { code: -32000, message: SENTINEL } }, { id: 0, error: { code: -32603, message: SENTINEL } }, { id: 0, error: { message: SENTINEL } }]) {
+    const conn = createConnection();
+    t.after(() => conn.dispose());
+    const dialing = conn.connect('ws://sentinel.test/ws', 'tok');
+    dialing.catch(() => {});
+    const socket = MockWebSocket.instances.at(-1)!;
+    socket.readyState = MockWebSocket.OPEN;
+    socket.message({ server_nonce: '00'.repeat(16) });
+    await until(() => socket.sent.length >= 1);
+    socket.message(answer);
+    const error = await dialing.then(() => null, (e: unknown) => e) as any;
+    assert.ok(error);
+    assert.doesNotMatch(`${error.message} ${String(error)} ${JSON.stringify(error)}`, /SENTINEL/u, JSON.stringify(answer));
+  }
+});

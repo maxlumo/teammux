@@ -37,6 +37,7 @@ import type { ConnectionSlot } from '../core/connection-registry.ts';
 import { RPC_KIND, type WsApi } from '../core/ws-api.ts';
 import type { BackendInfo } from '../core/agents.ts';
 import type { ServerId } from './refs.ts';
+import type { DialPair } from './dial-order.ts';
 import { adoptHostname, loadServers, observe, recordServer, saveServers, type ServerEntry } from './servers.ts';
 import { targetOf } from './server-target.ts';
 
@@ -175,6 +176,11 @@ export interface ServerRuntimeDeps {
    * P1-c).
    */
   onRegistryChanged?: () => void;
+  /** A dial of THIS server authenticated, was recorded as this entry and is
+   * still this runtime's (board #502): `tried` is the (address, token) the
+   * dial sent — the server's newest answer about that pair, which the
+   * host's refused-pair memory reads as "no longer refused". */
+  loggedIn?: (id: ServerId, tried: DialPair) => void;
   connectTimeoutMs?: number;
 }
 
@@ -422,6 +428,7 @@ export function createServerRuntime(entry: ServerEntry, deps: ServerRuntimeDeps)
     // Reconciling may have dropped this runtime (its entry absorbed by a
     // concurrent dial), and a disposed runtime must not report success.
     if (!mine()) return { ok: false, reason: 'superseded' };
+    deps.loggedIn?.(id, { address, token });
     return { ok: true, entry: canonical };
   }
 

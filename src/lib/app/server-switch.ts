@@ -23,7 +23,7 @@
 // in its own slots, was never touched.
 
 import { activateSwitched, loadServers, observe, restoreCurrent, type ServerEntry } from './servers.ts';
-import { isReachabilityFailure, pairKey, runRound } from './dial-order.ts';
+import { isReachabilityFailure, loginErrorKey, pairKey, runRound } from './dial-order.ts';
 
 type Store = Pick<Storage, 'getItem' | 'setItem' | 'removeItem'>;
 
@@ -47,6 +47,9 @@ export interface SwitchState {
   address: string;
   phase: 'connecting' | 'failed';
   error: string;
+  /** A login error's words, as an i18n key (#502 review P2-D): the panel
+   * says these, never the error's own text. Absent: not a login error. */
+  errorKey?: string;
   /** All of the server's addresses, in the order a switch tries them: the
    * failed panel offers each. One entry when the server has no other. */
   addresses: string[];
@@ -243,7 +246,8 @@ export function createServerSwitch(d: SwitchDeps) {
       // OWNS the outcome now — its Retry, the target it kept — and a failed
       // panel here would cover that Retry with one the freeze refuses.
       if (d.frozen()) { set(null); return; }
-      set({ intent, from, target, address: tried, phase: 'failed', error: String((e as Error)?.message || e), addresses });
+      const errorKey = loginErrorKey(e);
+      set({ intent, from, target, address: tried, phase: 'failed', error: String((e as Error)?.message || e), ...(errorKey ? { errorKey } : {}), addresses });
     }
   }
 

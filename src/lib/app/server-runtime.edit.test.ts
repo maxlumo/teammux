@@ -22,7 +22,7 @@ const TWO = [
   { id: 'b', name: 'beta', address: 'ws://b:9899', token: 'tokB', machineId: 'm-b', named: true },
 ];
 /** The runtime is beta's; `answers` is the machine beta's dial reaches. */
-function rig({ servers = TWO, answers = 'm-b' }: { servers?: object[]; answers?: string } = {}) {
+function rig({ servers = TWO, answers = 'm-b', loggedIn }: { servers?: object[]; answers?: string; loggedIn?: (id: string, tried: { address: string; token: string }) => void } = {}) {
   const storage = mem({
     tmux_servers: JSON.stringify(servers),
     tmux_server_current: 'a',
@@ -41,7 +41,7 @@ function rig({ servers = TWO, answers = 'm-b' }: { servers?: object[]; answers?:
   };
   const api: Record<string, () => Promise<unknown>> = {};
   for (const name of Object.keys(RPC_KIND)) api[name] = async () => ({});
-  const runtime = createServerRuntime(loadServers(storage).find((s) => s.id === 'b')!, { storage, slot: { connection, api } as unknown as ConnectionSlot });
+  const runtime = createServerRuntime(loadServers(storage).find((s) => s.id === 'b')!, { storage, slot: { connection, api } as unknown as ConnectionSlot, ...(loggedIn ? { loggedIn } : {}) });
   return {
     storage, runtime, dials, connection, api,
     hold() { holding = true; },
@@ -161,7 +161,7 @@ test('a failed dial names the token IT sent: an edit that lands while it is out 
   const connect = r.connection.connect.bind(r.connection);
   r.connection.connect = async (address: string, token: string) => {
     const answer = await connect(address, token);
-    if (refuse) throw Object.assign(new Error('invalid proof'), { code: -32000 });
+    if (refuse) throw Object.assign(new Error('invalid proof'), { code: -32000, authKind: 'proof' });
     return answer;
   };
   refuse = true;
@@ -184,4 +184,32 @@ test('a dial sends the pair its caller decided — the token passed, not the ent
   const stale = await r.runtime.dial(() => false, { via: 'ws://b:9899', token: 'tokB' });
   assert.deepEqual(stale, { ok: false, reason: 'superseded' });
   assert.equal(r.dials.length, 1, 'not owned at the send: nothing sent');
+});
+
+test('#502: a login that succeeded as THIS entry reports the pair it sent — once; a dial that reached another machine, was superseded or failed reports nothing', async () => {
+  const seen: string[] = [];
+  const loggedIn = (id: string, tried: { address: string; token: string }) => { seen.push(`${id} ${tried.address} ${tried.token}`); };
+  const r = rig({ loggedIn });
+  setServerToken(r.storage, 'b', 'tokB-edited');
+  assert.equal((await r.runtime.dial(() => true, { via: 'ws://b-ts:9899', token: 'tokB' })).ok, true);
+  assert.deepEqual(seen, ['b ws://b-ts:9899 tokB'], 'the pair the dial sent, not the entry s token re-read');
+  // Superseded while it was out: nothing.
+  r.hold();
+  let owned = true;
+  const stale = r.runtime.dial(() => owned);
+  await Promise.resolve();
+  owned = false;
+  await r.release();
+  assert.deepEqual(await stale, { ok: false, reason: 'superseded' });
+  assert.equal(seen.length, 1);
+  // Failed: nothing.
+  r.connection.connect = async () => { throw Object.assign(new Error('invalid proof'), { code: -32000, authKind: 'proof' }); };
+  assert.equal((await r.runtime.dial()).ok, false);
+  assert.equal(seen.length, 1);
+  // Another machine answered: nothing for beta.
+  const other: string[] = [];
+  const e = rig({ answers: 'm-a', loggedIn: (id) => { other.push(id); } });
+  const elsewhere = await e.runtime.dial();
+  assert.equal(elsewhere.ok === false && elsewhere.reason, 'elsewhere');
+  assert.deepEqual(other, []);
 });

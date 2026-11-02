@@ -169,7 +169,7 @@ test('a 60 s and a 175 s outage both recover under the default budget; the old 1
 });
 
 test('an auth refusal stops the loop at once: the server answered, and retrying would repeat the answer for the whole window (#393 P2-2)', async () => {
-  const refused = (message: string) => Object.assign(new Error(message), { code: -32000 });
+  const refused = (message: string) => Object.assign(new Error(message), { code: -32000, authKind: message === 'invalid token' ? 'token' : 'proof' });
   for (const message of ['invalid proof', 'invalid token']) {
     let dials = 0;
     const h = harness({
@@ -203,7 +203,7 @@ test('an auth refusal stops the loop at once: the server answered, and retrying 
 test('auth errors do NOT mark the address unreachable', async () => {
   const h = harness({
     storage: makeStorage({ tmux_address: 'ws://9.9.9.9:1', tmux_token: 'bad' }),
-    connectImpl: async () => { throw Object.assign(new Error('invalid proof'), { code: -32000 }); },
+    connectImpl: async () => { throw Object.assign(new Error('invalid proof'), { code: -32000, authKind: 'proof' }); },
     appBudget: true,
   });
   h.machine.start();
@@ -609,7 +609,7 @@ test('a refusal at one address goes on to another address that is still a candid
     storage: twoAddresses(),
     eligible: (u) => (refused.has(u) ? 'refused' : 'ok'),
     // LAN reaches another gateway that refuses the token; the caller records it.
-    connectImpl: async (url) => { dialled.push(url); if (url === LAN) { refused.add(LAN); throw Object.assign(new Error('invalid proof'), { code: -32000 }); } },
+    connectImpl: async (url) => { dialled.push(url); if (url === LAN) { refused.add(LAN); throw Object.assign(new Error('invalid proof'), { code: -32000, authKind: 'proof' }); } },
   });
   h.machine.start();
   for (let i = 0; i < 4; i++) await h.timers.advance(1000);
@@ -627,7 +627,7 @@ test('a refusal at one address goes on to another address that is still a candid
 // it decided; only a set with no 'ok' and no 'pending' gives up: 'auth' when
 // every pair is refused, 'unknown' otherwise.
 type Pair = 'ok' | 'pending' | 'refused' | 'unknown';
-const authError = () => Object.assign(new Error('invalid proof'), { code: -32000 });
+const authError = () => Object.assign(new Error('invalid proof'), { code: -32000, authKind: 'proof' });
 
 function setWorld(initial: Record<string, Pair>) {
   const state: Record<string, Pair> = { ...initial };
@@ -996,7 +996,7 @@ test('#495: the machine takes no probe; the probe stays in ws.ts for the connect
   const { readFile } = await import('node:fs/promises');
   const machine = await readFile(new URL('./reconnect.ts', import.meta.url), 'utf8');
   assert.doesNotMatch(machine, /findBestAddress/u);
-  assert.match(machine, /import \{ dialOrder, dialTimeoutMs, isAuthRefusal, pairKey, runRound \} from '\.\/dial-order\.ts';/u);
+  assert.match(machine, /import \{ dialOrder, dialTimeoutMs, isAuthRefusal, loginFailure, pairKey, runRound \} from '\.\/dial-order\.ts';/u);
   const app = await readFile(new URL('../../App.svelte', import.meta.url), 'utf8');
   const machineDeps = app.match(/machine = createReconnectMachine\(\{[\s\S]*?\n    \}\);/u)?.[0] ?? '';
   assert.ok(machineDeps && !/findBestAddress/u.test(machineDeps), 'App hands the machine no probe');
@@ -1142,4 +1142,60 @@ test('#495 (orchestrator on b99ca858): a stale result consumed after cancel + st
   assert.deepEqual(h.events, ['success'], 'one success: the new chain s, not the stale one s');
   await h.timers.advance(200_000);
   assert.equal(dials, 2, 'nothing more');
+});
+
+test('#502 (review P1-A): an ERR_AUTH that is not about the credentials is retried within the budget; a give-up on it says "protocol" or "login", never a dead address', async () => {
+  const { authKindOf } = await import('../core/rpc-codes.ts');
+  const login = (message: string) => Object.assign(new Error(message), { code: -32000, authKind: authKindOf(message) });
+  for (const [message, why] of [['something new', 'login'], ['auth required — send … first', 'protocol'], ['invalid client_nonce', 'protocol']] as const) {
+    let dials = 0;
+    const h = harness({
+      storage: makeStorage({ tmux_address: 'ws://9.9.9.9:1', tmux_token: 't' }),
+      connectImpl: async () => { dials++; throw login(message); },
+      appBudget: true,
+    });
+    h.machine.start();
+    for (let t = 0; t < 20000; t += 500) await h.timers.advance(500);
+    assert.ok(dials > 5 && !h.events.some((e) => e.gaveUp), `${message}: not a refusal, it keeps retrying (${dials} dials)`);
+    assert.equal(h.unreachable.length, 0, `${message}: the server answered; the address is not marked unreachable`);
+    for (let t = 0; t < 170000; t += 5000) await h.timers.advance(5000);
+    const gaveUp = h.events.find((e) => e.gaveUp);
+    assert.ok(gaveUp, `${message}: the budget ends it`);
+    assert.equal(gaveUp.why, why, `${message}: gives up as ${why ?? 'unreachable'}`);
+  }
+  // Negative control: the same budget ending on a plain drop is unreachable.
+  const h = harness({ storage: makeStorage({ tmux_address: 'ws://9.9.9.9:1', tmux_token: 't' }), connectImpl: async () => { throw new Error('connection failed'); }, appBudget: true });
+  h.machine.start();
+  for (let t = 0; t < 190000; t += 5000) await h.timers.advance(5000);
+  assert.equal(h.events.find((e) => e.gaveUp)?.why, undefined);
+});
+
+test('#502 (review P1-A): the give-up reason is the CURRENT chain s last dial — a later network failure, a success and a cancel or new chain do not carry an old login diagnosis', async () => {
+  const { authKindOf } = await import('../core/rpc-codes.ts');
+  const login = (message: string) => Object.assign(new Error(message), { code: -32000, authKind: authKindOf(message) });
+  const store = () => makeStorage({ tmux_address: 'ws://9.9.9.9:1', tmux_token: 't' });
+  // A protocol answer, then only network failures: the budget ends as unreachable.
+  let n = 0;
+  const later = harness({ storage: store(), connectImpl: async () => { throw n++ === 0 ? login('auth required — send … first') : new Error('connection failed'); }, appBudget: true });
+  later.machine.start();
+  for (let t = 0; t < 190000; t += 5000) await later.timers.advance(5000);
+  assert.equal(later.events.find((e) => e.gaveUp)?.why, undefined, 'a later real network failure is reachability');
+  // A protocol answer, then a success, then a new chain of network failures: unreachable.
+  let phase = 0;
+  const after = harness({ storage: store(), connectImpl: async () => { if (phase === 0) { phase = 1; throw login('invalid client_nonce'); } if (phase === 1) { phase = 2; return; } throw new Error('connection failed'); }, appBudget: true });
+  after.machine.start();
+  for (let t = 0; t < 5000; t += 500) await after.timers.advance(500);
+  assert.ok(after.events.some((e) => e.success), 'the second dial succeeded');
+  after.machine.start();
+  for (let t = 0; t < 190000; t += 5000) await after.timers.advance(5000);
+  assert.equal(after.events.find((e) => e.gaveUp)?.why, undefined, 'the success did not leave the old diagnosis behind');
+  // A protocol answer, a cancel, a new chain of network failures: unreachable.
+  let first = true;
+  const cancelled = harness({ storage: store(), connectImpl: async () => { if (first) { first = false; throw login('something new'); } throw new Error('connection failed'); }, appBudget: true });
+  cancelled.machine.start();
+  for (let t = 0; t < 2000; t += 500) await cancelled.timers.advance(500);
+  cancelled.machine.cancel();
+  cancelled.machine.start();
+  for (let t = 0; t < 190000; t += 5000) await cancelled.timers.advance(5000);
+  assert.equal(cancelled.events.find((e) => e.gaveUp)?.why, undefined, 'a new chain starts without the old diagnosis');
 });

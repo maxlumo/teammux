@@ -17,7 +17,7 @@
 // the loop runs (a failover just proved another one).
 
 import type { ServerTarget } from './server-target.ts';
-import { dialOrder, dialTimeoutMs, isAuthRefusal, pairKey, runRound } from './dial-order.ts';
+import { dialOrder, dialTimeoutMs, isAuthRefusal, loginFailure, pairKey, runRound } from './dial-order.ts';
 import { candidateVerdict, type Eligibility } from './refused-attempts.ts';
 
 export interface ReconnectState {
@@ -27,6 +27,9 @@ export interface ReconnectState {
   /** Address-class label of the current try ('LAN' | 'Tailscale' | 'WAN' | ''). */
   label: string;
 }
+
+/** Why a loop gave up; none: reachability (the budget, the watchdog). */
+export type GiveUpReason = 'auth' | 'unknown' | 'protocol' | 'login';
 
 export interface ReconnectDeps {
   /** Dial one attempt. `handover` is THIS attempt's claim (`attempt()`),
@@ -61,8 +64,12 @@ export interface ReconnectDeps {
    * (`'auth'`) the server answered and refused the credentials, which no
    * further dial can change (#458: the caller must not dial it again), or
    * (`'unknown'`) every address is held because whether it was refused
-   * cannot be known. */
-  onGiveUp: (reason?: 'auth' | 'unknown') => void;
+   * cannot be known, or the budget ran out while the LAST dial was a login
+   * the server answered with an ERR_AUTH that is not about the credentials
+   * (board #502): `'protocol'` for its known protocol answers, `'login'` for
+   * one this client does not recognise. Neither is a dead address, so nothing
+   * passive may start it again. */
+  onGiveUp: (reason?: GiveUpReason) => void;
   /** A HARD rule, apart from the soft `isAddressViable` preference (#458):
    * may this (address, token) be sent at all? Only 'ok' is a candidate, in
    * every round, and the loop never falls back to the others. The loop reads the whole candidate set
@@ -140,6 +147,11 @@ export function createReconnectMachine(deps: ReconnectDeps) {
    * candidate set whatever the host's `eligible` says, so a refusal is never
    * sent again by the loop that received it. */
   const refusedHere = new Set<string>();
+  /** What THIS chain's last failed dial was, when it was a login error that
+   * is not about the credentials (#502, review P1-A): a give-up then says so
+   * instead of "unreachable". Any other failure (a real network one) clears
+   * it, and a new chain, a cancel and a success start without it. */
+  let lastLogin: 'protocol' | 'login' | null = null;
   const stateOf = (address: string, token: string): Eligibility =>
     refusedHere.has(pairKey({ address, token })) ? 'refused' : (eligible ? eligible(address, token) : 'ok');
   /** The candidate set of a target and its one verdict: every point the loop
@@ -181,7 +193,7 @@ export function createReconnectMachine(deps: ReconnectDeps) {
       retryTimer = null;
       parked = false;
       emit();
-      onGiveUp();
+      onGiveUp(lastLogin ?? undefined);
     }, watchdogMs);
   }
 
@@ -203,7 +215,7 @@ export function createReconnectMachine(deps: ReconnectDeps) {
     };
     // A retry continues THIS chain only while it still owns the socket.
     if (!chainOwns()) { yieldLoop(); return; }
-    const giveUp = (reason?: 'auth' | 'unknown') => {
+    const giveUp = (reason?: GiveUpReason) => {
       reconnecting = false;
       clearTimers();
       emit();
@@ -260,6 +272,7 @@ export function createReconnectMachine(deps: ReconnectDeps) {
       // server refusing us. Anything else goes on to the next pair.
       failed: (pair, e) => {
         if (isAuthRefusal(e)) refusedHere.add(pairKey(pair));
+        lastLogin = loginFailure(e);
         return 'next';
       },
       timeoutOf: (address) => dialTimeoutMs(classifyAddress(address)),
@@ -279,6 +292,7 @@ export function createReconnectMachine(deps: ReconnectDeps) {
     switch (round.kind) {
       case 'ok':
         reconnecting = false;
+        lastLogin = null;
         clearTimers();
         emit();
         onSuccess(round.pair.address, primary, handover, round.answer);
@@ -294,7 +308,7 @@ export function createReconnectMachine(deps: ReconnectDeps) {
         parked = true;
         return;
       case 'end':
-        giveUp(round.reason === 'auth' || round.reason === 'unknown' ? round.reason : undefined);
+        giveUp(round.reason === 'auth' || round.reason === 'unknown' ? round.reason : lastLogin ?? undefined);
         return;
       default:
         // Every pair this round could send has failed: the backoff, by the
@@ -319,6 +333,7 @@ export function createReconnectMachine(deps: ReconnectDeps) {
       gen++;
       held = null;      // an explicit start is a new chain, owning nothing yet
       refusedHere.clear();
+      lastLogin = null;
       dials = 0;
       reconnecting = true;
       emit();
@@ -331,6 +346,7 @@ export function createReconnectMachine(deps: ReconnectDeps) {
     cancel() {
       gen++;
       reconnecting = false;
+      lastLogin = null;
       clearTimers();
       emit();
     },

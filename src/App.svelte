@@ -38,11 +38,11 @@
   import { RAIL_GAP, RAIL_ORDER_KEY, parseRailOrder, railDropAt, railDropIndex, railDropOffset, railOrderToStore, visibleRailSlots } from './lib/app/nav-order.ts';
   import { createReconnectMachine } from './lib/app/reconnect.ts';
   import { addressesOf, targetOf } from './lib/app/server-target.ts';
-  import { dialOrder, dialTimeoutMs, isAuthRefusal } from './lib/app/dial-order.ts';
+  import { dialOrder, dialTimeoutMs, isAuthRefusal, loginErrorKey } from './lib/app/dial-order.ts';
   import ServerScope from './lib/app/ServerScope.svelte';
   import { createServerFleet } from './lib/app/server-fleet.ts';
   import { createServerView } from './lib/app/server-view.svelte.ts';
-  import { createMembers, MEMBER_REARM_MS } from './lib/app/server-members.svelte.ts';
+  import { createMembers, failureKey, MEMBER_REARM_MS } from './lib/app/server-members.svelte.ts';
   import { asideKey, createRefusedAttempts, REFUSED_KEY } from './lib/app/refused-attempts.ts';
   import { readMode, writeMode, readExcluded, setExcluded, includedServers } from './lib/app/connection-mode.ts';
   import { serverTag, shortServerTag } from './lib/app/server-tag.ts';
@@ -232,6 +232,9 @@
   const fleet = createServerFleet({
     storage: localStorage,
     registry: createConnectionRegistry(),
+    // A login that succeeded is the server's newest answer about the pair it
+    // sent, the focus's included (#502): a refusal remembered for it goes.
+    loggedIn: (id, tried) => refusedAttempts.clear(id, tried.address, tried.token),
     // A published member the set holds is ORPHANED here, at the fleet's own
     // synchronous boundary (P1-5; reviewer R1 on aed2f654): its identity is
     // detached now — api refusing, socket closed, loop stopped — and its tree
@@ -1295,7 +1298,7 @@
           if (result.ok || result.reason === 'elsewhere') return result;
           // A member's token refused, for the token THIS attempt sent: no
           // path sends it again (#458; the loop then gives up on 'auth').
-          if (result.reason === 'failed' && isAuthRefusal(result.error) && bound() !== runtime) aggregate.refusedBy(runtime, result.tried);
+          if (result.reason === 'failed' && isAuthRefusal(result.error) && bound() !== runtime) aggregate.refusedBy(runtime, result.tried, result.error);
           throw result.error ?? new Error(result.reason);
         },
         // An identity record that failed: the dial closed that socket, and
@@ -2145,7 +2148,9 @@
           return t('serverAnsweredElsewhere').replace('{name}', result.entry.name || hostLabel(result.entry.address));
         }
         if (!replace) { connected = false; page = 'settings'; }
-        return String(result.error?.message || result.error || result.reason);
+        // A login error is said by its class (#502 review P2-D), anything else as before.
+        const loginKey = loginErrorKey(result.error);
+        return loginKey ? t(loginKey) : String(result.error?.message || result.error || result.reason);
       }
       // The dial taught the gate this server's machine: it may now claim
       // pending inputs or rewrite a merge's navigation. Those writes pass
@@ -2570,7 +2575,9 @@
    * own reason (a kept choice under a block is paused, not unreachable). */
   function chosenLink(st) {
     const failed = st?.kind === 'failed';
-    const why = failed && st.reason === 'storage' ? t('memberStorage') : failed && st.reason === 'auth' ? t('memberTokenRefused') : failed && st.reason === 'unknown' ? t('memberRefusalUnknown') : '';
+    // Words for every stop that is not "not answering" (the one failureKey).
+    const key = failed && st.reason !== 'unreachable' && st.reason !== 'elsewhere' ? failureKey(st) : '';
+    const why = key ? t(key) : '';
     return { id: chosen.id, failed, chosen: true, ...(why ? { why } : {}) };
   }
   /** Complete the pending choice, from the window's drain only: it never
@@ -4171,7 +4178,7 @@
           <Icon name="info" size={22} />
           <strong class="switch-name">{t('serverSwitchFailed').replace('{name}', switching.target.name || hostLabel(switching.target.address))}</strong>
           <span class="switch-addr">{switching.address}</span>
-          <p class="config-error" role="alert">{switching.error}</p>
+          <p class="config-error" role="alert">{switching.errorKey ? t(switching.errorKey) : switching.error}</p>
           {#if switching.addresses.length > 1}
             <!-- The server's own addresses (board #353): a switch walks them
                  on its own, and when none answered each is one tap to dial

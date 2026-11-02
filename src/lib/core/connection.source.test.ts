@@ -119,3 +119,11 @@ test('the handshake takes its inputs through ONE door each and decryptMsg has no
   assert.equal(src.match(/\bhexToBytes\(/gu)?.length, 2, 'hexToBytes: its definition and the one call inside parseServerNonce');
   assert.match(src, /function parseServerNonce\(raw: unknown\)[^{]*\{\s*return typeof raw === 'string' && \/\^\[0-9a-f\]\{32\}\$\/i\.test\(raw\)/u);
 });
+
+test('#502 review P2-C: the login state is ONE value, the socket s `_authed` — no second writable copy in the dial', async () => {
+  const src = code(await read('connection.ts'));
+  assert.doesNotMatch(src, /\blet authed\b/u, 'no dial-local login flag beside the socket s');
+  assert.doesNotMatch(src, /(?<![._])\bauthed\s*=/u, 'nothing writes a bare `authed`');
+  assert.match(src, /socket\._authed = true;/u, 'the login sets it, on the socket');
+  for (const read of ['_getBuild = \\(\\) => \\(socket\\._authed', '_getCaps = \\(\\) => \\(socket\\._authed']) assert.match(src, new RegExp(read, 'u'), 'the capability getters read the same value');
+});

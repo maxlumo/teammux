@@ -414,7 +414,7 @@ test('a pick of a member that is up says so and dials nothing (#458)', async () 
 
 const authRefused = async (address: string, token: string) => {
   const { ERR_AUTH } = await import('../core/rpc-codes.ts');
-  return { ok: false as const, reason: 'failed' as const, error: Object.assign(new Error('invalid proof'), { code: ERR_AUTH }), tried: { address, token } };
+  return { ok: false as const, reason: 'failed' as const, error: Object.assign(new Error('invalid proof'), { code: ERR_AUTH, authKind: 'proof' }), tried: { address, token } };
 };
 const B = 'ws://b:9899';
 
@@ -424,7 +424,7 @@ test('a token refusal is terminal for the retry door: three picks dial nothing; 
   await settle();
   w.rt('b').answer(await authRefused(B, 't'));
   await settle();
-  assert.deepEqual(w.members.status('b'), { kind: 'failed', reason: 'auth' }, 'its own state, not "not answering"');
+  assert.deepEqual(w.members.status('b'), { kind: 'failed', reason: 'auth', detail: 'proof' }, 'its own state, not "not answering", with what the server said (#502)');
   assert.deepEqual(w.log.filter((l) => l.startsWith('retry:')), [], 'no loop after a refusal');
   for (let i = 0; i < 3; i++) assert.equal(w.members.ask('b'), 'token');
   assert.equal(w.rt('b').dials, 1, 'three picks: nothing dialled');
@@ -893,4 +893,91 @@ test('#493 P1-D: while a sync may not start joins, it starts none and writes no 
   w.members.sync([entry('c'), entry('d')]);
   await settle();
   assert.deepEqual(dials().slice(before), ['dial:c', 'dial:d'], 'C and D join');
+});
+
+// ---- board #502: what an ERR_AUTH means for a member ----
+const loginAnswer = async (message: string) => {
+  const { ERR_AUTH, authKindOf } = await import('../core/rpc-codes.ts');
+  return { ok: false as const, reason: 'failed' as const, error: Object.assign(new Error(message), { code: ERR_AUTH, authKind: authKindOf(message) }), tried: { address: B, token: 't' } };
+};
+
+test('#502: a frame-before-login race (`auth required`) is not a refusal — nothing is remembered, the row says "protocol", its loop retries', async () => {
+  const refusals = createRefusedAttempts({ read: () => null, write: () => {}, failed: () => {}, ready: () => {} });
+  const w = world(['b'], refusals);
+  w.members.sync([entry('b')]);
+  await settle();
+  w.rt('b').answer(await loginAnswer('auth required — send {"method":"auth","params":{"token":"..."}} first'));
+  await settle();
+  assert.deepEqual(w.members.status('b'), { kind: 'failed', reason: 'protocol' }, 'not "unreachable" (#502 review P1-A)');
+  assert.equal(refusals.check('b', B, 't'), 'ok', 'the pair is not remembered as refused');
+  assert.ok(w.log.includes('retry:b'), 'its own loop retries');
+  // Negative control: the server's `invalid token` is a refusal.
+  const r2 = createRefusedAttempts({ read: () => null, write: () => {}, failed: () => {}, ready: () => {} });
+  const v = world(['b'], r2);
+  v.members.sync([entry('b')]);
+  await settle();
+  v.rt('b').answer(await loginAnswer('invalid token'));
+  await settle();
+  assert.deepEqual(v.members.status('b'), { kind: 'failed', reason: 'auth', detail: 'token' });
+  assert.equal(r2.check('b', B, 't'), 'refused');
+});
+
+for (const [message, reason] of [['something new', 'login'], ['auth required — send … first', 'protocol'], ['invalid client_nonce', 'protocol']] as const) {
+  test(`#502 guard 3 (review P1-A): "${message}" is its own state — retried by its loop, never "unreachable"; once its budget is spent no passive trigger dials it and a pick starts exactly one loop`, async () => {
+    const refusals = createRefusedAttempts({ read: () => null, write: () => {}, failed: () => {}, ready: () => {} });
+    const w = world(['b'], refusals);
+    w.members.sync([entry('b')]);
+    await settle();
+    w.rt('b').answer(await loginAnswer(message));
+    await settle();
+    assert.deepEqual(w.members.status('b'), { kind: 'failed', reason });
+    assert.equal(refusals.check('b', B, 't'), 'ok', 'not remembered');
+    assert.equal(retries(w, 'b'), 1, 'its loop retries it, within its budget');
+    // The loop's budget runs out on the same answer: it says so.
+    w.members.reconnecting(w.rt('b'));
+    w.looping.delete('b');
+    w.members.gaveUp(w.rt('b'), reason);
+    assert.deepEqual(w.members.status('b'), { kind: 'failed', reason });
+    assert.equal(w.members.rearm() + w.members.rearm() + w.members.rearm(), 0, 'no passive trigger starts it again');
+    assert.equal(retries(w, 'b'), 1);
+    // The person's pick is the one door, and it starts exactly one loop.
+    assert.equal(w.members.ask('b'), 'started');
+    assert.equal(w.members.ask('b'), 'trying', 'a second pick while it runs starts nothing');
+    assert.equal(retries(w, 'b'), 2);
+    // Negative control: the same budget ending on reachability IS re-armed.
+    w.looping.delete('b');
+    w.members.gaveUp(w.rt('b'));
+    assert.deepEqual(w.members.status('b'), { kind: 'failed', reason: 'unreachable' });
+    assert.equal(w.members.rearm(), 1);
+  });
+}
+
+test('#502 guard 4: the row says what the server said this page, and a refusal read back from the device says only that it was refused', async () => {
+  const { failureKey } = await import('./server-members.svelte.ts');
+  assert.equal(failureKey({ kind: 'failed', reason: 'auth', detail: 'token' }), 'memberTokenRefused');
+  assert.equal(failureKey({ kind: 'failed', reason: 'auth', detail: 'proof' }), 'memberProofRefused');
+  assert.equal(failureKey({ kind: 'failed', reason: 'auth' }), 'memberRefusedEarlier', 'no reason kept: no guess');
+  assert.equal(failureKey({ kind: 'failed', reason: 'login' }), 'memberLoginUnknown');
+  assert.equal(failureKey({ kind: 'failed', reason: 'protocol' }), 'memberLoginProtocol');
+  assert.equal(failureKey({ kind: 'failed', reason: 'unknown' }), 'memberRefusalUnknown');
+  assert.equal(failureKey({ kind: 'failed', reason: 'storage' }), 'memberStorage');
+  assert.equal(failureKey({ kind: 'failed', reason: 'unreachable' }), 'memberUnreachable');
+  assert.equal(failureKey({ kind: 'connected' }), '');
+  assert.equal(failureKey(null), '');
+  // A stored refusal joins as `auth` with no detail; a live one keeps its detail through the loop's give-up.
+  const stored = JSON.stringify({ b: [Buffer.from(await crypto.subtle.digest('SHA-256', new TextEncoder().encode(`${B}\u0000t`))).toString('hex')] });
+  let ready = () => {};
+  const refusals = createRefusedAttempts({ read: () => stored, write: () => {}, digest: async (t) => Buffer.from(await crypto.subtle.digest('SHA-256', new TextEncoder().encode(t))).toString('hex'), failed: () => {}, ready: () => ready() });
+  const w = world(['b'], refusals);
+  ready = () => w.members.sync([entry('b')]);
+  w.members.sync([entry('b')]);
+  for (let i = 0; i < 5; i++) await new Promise((r) => setTimeout(r, 10));
+  assert.deepEqual(w.members.status('b'), { kind: 'failed', reason: 'auth' }, 'read back: no reason');
+  const v = world(['b']);
+  v.members.sync([entry('b')]);
+  await settle();
+  v.rt('b').answer(await loginAnswer('invalid proof'));
+  await settle();
+  v.members.gaveUp(v.rt('b'), 'auth');
+  assert.deepEqual(v.members.status('b'), { kind: 'failed', reason: 'auth', detail: 'proof' }, 'the give-up keeps what the server said');
 });

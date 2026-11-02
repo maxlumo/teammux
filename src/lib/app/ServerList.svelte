@@ -14,7 +14,7 @@
   import { activeModal } from '../ui/modal.ts';
   import { t } from '../core/i18n.svelte.ts';
   import type { ServerEntry } from './servers.ts';
-  import type { MemberStatus } from './server-members.svelte.ts';
+  import { failureKey, type MemberStatus } from './server-members.svelte.ts';
   import { formatBuild, type BuildInfo } from '../core/build-info.ts';
   import Switch from '../ui/Switch.svelte';
   import { stateDotColor } from '../hub/hub.ts';
@@ -100,7 +100,7 @@
     const st = id !== currentId ? members?.status(id) : null;
     if (st?.kind !== 'failed') return '';
     if (st.reason === 'elsewhere') return t('memberElsewhere').replace('{name}', st.detail ?? '');
-    return t(st.reason === 'storage' ? 'memberStorage' : st.reason === 'auth' ? 'memberTokenRefused' : st.reason === 'unknown' ? 'memberRefusalUnknown' : 'memberUnreachable');
+    return t(failureKey(st));
   }
   /** The row's hover card carries only what the row HIDES (owner,
    * 2026-10: a card must not repeat the element): the machine id, the

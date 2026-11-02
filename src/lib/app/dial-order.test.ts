@@ -1,6 +1,6 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { dialOrder, dialTimeoutMs, isAuthRefusal, isReachabilityFailure, pairKey, runRound, type DialPair, type RoundPick } from './dial-order.ts';
+import { dialOrder, dialTimeoutMs, isAuthRefusal, isReachabilityFailure, loginErrorKey, loginFailure, pairKey, runRound, type DialPair, type RoundPick } from './dial-order.ts';
 
 test('a dial that got nowhere is a reachability failure; an auth refusal is not (board #353)', () => {
   for (const m of ['connection timeout', 'connection failed', 'closed during auth', 'Connection Timeout']) {
@@ -28,10 +28,33 @@ test('dialOrder keeps the asked order, drops repeats and puts distrusted address
   assert.deepEqual(dialOrder([], () => true), []);
 });
 
-test('only the server SAYING no is an auth refusal, by its ERR_AUTH code: a drop, a timeout and a protocol surprise are not (board #393)', () => {
+test('only the server SAYING no to the credentials is an auth refusal: its ERR_AUTH code AND a credential answer — a drop, a timeout, a protocol surprise and a frame-before-login race are not (board #393, #502)', async () => {
+  const { authKindOf } = await import('../core/rpc-codes.ts');
+  // What core/connection.ts rejects with when the server answers the login with ERR_AUTH:
+  // the code, and the class read once from the server's sentence.
+  const login = (m: string) => Object.assign(new Error(m), { code: -32000, authKind: authKindOf(m) });
   const coded = (message: string, code: number) => Object.assign(new Error(message), { code });
-  // What core/connection.ts rejects with when the server answers the login with ERR_AUTH.
-  for (const m of ['invalid proof', 'invalid token', '']) assert.equal(isAuthRefusal(coded(m, -32000)), true, `-32000 "${m}"`);
+  for (const m of ['invalid proof', 'invalid token']) assert.equal(isAuthRefusal(login(m)), true, `-32000 "${m}"`);
+  // The same code for a race or a malformed handshake is not a bad token (#502): the
+  // server's `auth required…` answer to a frame sent before the login, its
+  // `invalid client_nonce`, and anything it says that this client does not recognise.
+  for (const m of ['auth required — send {"method":"auth","params":{"token":"..."}} first', 'invalid client_nonce', 'locked out', '']) {
+    assert.equal(isAuthRefusal(login(m)), false, `-32000 "${m}"`);
+  }
+  // Not a refusal, and not a reachability failure either (#502 review P1-A): its own class.
+  assert.equal(loginFailure(login('locked out')), 'login', 'an ERR_AUTH not recognised');
+  assert.equal(loginFailure(login('auth required — send … first')), 'protocol', 'a frame-before-login race');
+  assert.equal(loginFailure(login('invalid client_nonce')), 'protocol');
+  for (const m of ['invalid token', 'invalid proof']) assert.equal(loginFailure(login(m)), null, `${m} is a refusal, not a login failure`);
+  assert.equal(loginFailure(new Error('connection timeout')), null);
+  for (const m of ['locked out', 'auth required — send … first', 'invalid client_nonce']) assert.equal(isReachabilityFailure(login(m)), false, `${m}: no cooldown`);
+  // The one translation of a login error, by class (#502 review P2-D).
+  assert.deepEqual(['invalid token', 'invalid proof', 'auth required — send … first', 'invalid client_nonce', 'locked out'].map((m) => loginErrorKey(login(m))),
+    ['memberTokenRefused', 'memberProofRefused', 'memberLoginProtocol', 'memberLoginProtocol', 'memberLoginUnknown']);
+  assert.equal(loginErrorKey(new Error('connection timeout')), null, 'not a login error: the caller s own words');
+  assert.equal(loginErrorKey(coded('internal', -32603)), null);
+  // The code with no class (anything that did not come through the login's entry) is not a refusal.
+  assert.equal(isAuthRefusal(coded('invalid proof', -32000)), false, 'the code alone is not a refusal');
   // The same words WITHOUT the code are not a refusal: the message is the server's sentence, not a contract.
   for (const m of ['invalid token', 'auth failed', 'invalid proof']) assert.equal(isAuthRefusal(new Error(m)), false, `no code: ${m}`);
   // Other ways a login fails, and other wire codes, are not.
@@ -44,7 +67,22 @@ test('only the server SAYING no is an auth refusal, by its ERR_AUTH code: a drop
   assert.equal(isAuthRefusal(undefined), false);
   assert.equal(isAuthRefusal(null), false);
   // The two kinds never overlap: an auth refusal is not a reachability failure.
-  assert.equal(isReachabilityFailure(coded('invalid proof', -32000)), false);
+  assert.equal(isReachabilityFailure(login('invalid proof')), false);
+});
+
+test('authKindOf is the one table from the server’s ERR_AUTH sentences (connection.rs) to what they are about (#502)', async () => {
+  const { authKindOf } = await import('../core/rpc-codes.ts');
+  const { readFile } = await import('node:fs/promises');
+  assert.equal(authKindOf('invalid token'), 'token');
+  assert.equal(authKindOf('invalid proof'), 'proof');
+  assert.equal(authKindOf('invalid client_nonce'), 'protocol');
+  assert.equal(authKindOf('auth required — send {"method":"auth","params":{"token":"..."}} first'), 'protocol');
+  for (const m of ['Invalid Token', 'invalid token ', 'something new', '', undefined, 42]) assert.equal(authKindOf(m), 'unknown', String(m));
+  // Every ERR_AUTH sentence the server has is in the table: a new one fails here first.
+  const rs = await readFile(new URL('../../../src-tauri/src/server/connection.rs', import.meta.url), 'utf8');
+  const said = [...rs.matchAll(/Response::err\(req\.id, ERR_AUTH, "((?:[^"\\]|\\.)*)"/gu)].map((m) => (m[1] ?? '').replace(/\\"/gu, '"'));
+  assert.ok(said.length >= 4, `found the server's ERR_AUTH sentences (${said.length})`);
+  for (const m of said) assert.notEqual(authKindOf(m), 'unknown', `the server's "${m}" is classified`);
 });
 
 // ---- runRound (board #495): the one address round the switch and the reconnect machine walk ----
@@ -52,7 +90,7 @@ test('only the server SAYING no is an auth refusal, by its ERR_AUTH code: a drop
 function fixedRound(addresses: string[], answers: Record<string, 'ok' | 'timeout' | 'auth' | 'protocol'>, over: Partial<Parameters<typeof runRound>[0]> = {}) {
   const log: string[] = [];
   const timeout = new Error('connection timeout');
-  const auth = Object.assign(new Error('invalid proof'), { code: -32000 });
+  const auth = Object.assign(new Error('invalid proof'), { code: -32000, authKind: 'proof' });
   const r = runRound<string>({
     pick: (tried) => {
       const address = addresses.find((a) => !tried.has(pairKey({ address: a, token: 't' })));

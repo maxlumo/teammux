@@ -31,7 +31,8 @@
 // first dial is out, `connected` once published and answering,
 // `reconnecting` while its loop runs, `failed` with the reason. `excluded`
 // is not a status here — an excluded server is not a member.
-import { isAuthRefusal } from './dial-order.ts';
+import { isAuthRefusal, loginFailure, loginKey } from './dial-order.ts';
+import type { GiveUpReason } from './reconnect.ts';
 import { candidateVerdict, memoryRefusedAttempts, type Eligibility, type RefusedAttempts } from './refused-attempts.ts';
 import type { ServerId } from './refs.ts';
 import type { ServerEntry } from './servers.ts';
@@ -43,8 +44,15 @@ export type MemberStatus =
   | { kind: 'connected' }
   | { kind: 'reconnecting' }
   /** `unreachable`: no answer yet; `elsewhere`: another known machine
-   * answered (`detail` names it); `storage`: the app is blocked on it. */
-  | { kind: 'failed'; reason: 'unreachable' | 'auth' | 'unknown' | 'elsewhere' | 'storage'; detail?: string }
+   * answered (`detail` names it); `storage`: the app is blocked on it;
+   * `auth`: the server refused the credentials — `detail` is what it said
+   * THIS page (`token` or `proof`), absent for a refusal read back from the
+   * device, which keeps no reason (#502); `protocol` / `login`: the server
+   * answered the login with an ERR_AUTH that is not about the credentials —
+   * one of its known protocol answers, or one not recognised (#502) —
+   * retried within the loop's budget, never re-armed passively. Neither is
+   * the refused-pair memory's 'unknown' (nothing is remembered). */
+  | { kind: 'failed'; reason: 'unreachable' | 'auth' | 'unknown' | 'elsewhere' | 'storage' | 'protocol' | 'login'; detail?: string }
   /** A published member whose IDENTITY is gone — its entry absorbed into
    * another, or its own reconnect reached another known machine — while its
    * tree, drafts and all, is still mounted: detached at once (its api
@@ -110,11 +118,12 @@ export interface Members {
   answered(runtime: ServerRuntime, result: DialResult): void;
   /** `'auth'`: the server refused the credentials (#458 validator V1);
    * `'unknown'`: every address is held, its refusal state unknowable. */
-  gaveUp(runtime: ServerRuntime, reason?: 'auth' | 'unknown'): void;
+  gaveUp(runtime: ServerRuntime, reason?: GiveUpReason): void;
   /** A dial of this member's own loop came back refused for the address and
    * token it sent (`tried`, from the dial's own result): that attempt is not
-   * sent again by any path; another address or token is another attempt. */
-  refusedBy(runtime: ServerRuntime, tried: { address: string; token: string } | undefined): void;
+   * sent again by any path; another address or token is another attempt.
+   * `error` is the dial's own, for the reason the row says (#502). */
+  refusedBy(runtime: ServerRuntime, tried: { address: string; token: string } | undefined, error?: unknown): void;
   /** A member's socket closed while the app is blocked: no loop now. */
   blocked(runtime: ServerRuntime): void;
   /** Retry: redial every published member that is not answering. */
@@ -163,6 +172,31 @@ export interface Members {
  * (orchestrator 16:12; reviewer P1 on 97824925). */
 type Held = { runtime: ServerRuntime; published: boolean; join?: Activation; orphan?: boolean };
 
+/** The ONE reading of a failed member's reason as words (an i18n key), for
+ * every place that says it — the row, the chosen marker (#502). A refusal
+ * says what the server said this page; one read back from the device has no
+ * reason and says only that it was refused (never a guess at token or proof). */
+export function failureKey(status: MemberStatus | null | undefined): string {
+  if (status?.kind !== 'failed') return '';
+  switch (status.reason) {
+    case 'storage': return 'memberStorage';
+    // A refusal said this page carries its class; the login-error words are
+    // the one translation every surface uses (dial-order.ts loginKey).
+    case 'auth': return status.detail === 'token' || status.detail === 'proof' ? loginKey(status.detail) : 'memberRefusedEarlier';
+    case 'unknown': return 'memberRefusalUnknown';
+    case 'protocol': return loginKey('protocol');
+    case 'login': return loginKey('unknown');
+    case 'elsewhere': return 'memberElsewhere';
+    default: return 'memberUnreachable';
+  }
+}
+
+/** What a refusal error said, for the row: `token`, `proof` or nothing. */
+const refusalDetail = (error: unknown): string | undefined => {
+  const kind = (error as { authKind?: unknown } | null)?.authKind;
+  return kind === 'token' || kind === 'proof' ? kind : undefined;
+};
+
 /** How often a visible app re-arms the members that gave up (board #493). */
 export const MEMBER_REARM_MS = 60_000;
 
@@ -206,11 +240,13 @@ export function createMembers(deps: MemberDeps): Members {
    * member another 'ok' or 'pending' pair is left for is still trying (its
    * loop goes on or waits), never "token refused" (ruling on f20d1ea0).
    * Returns that verdict. */
-  function markRefused(runtime: ServerRuntime, tried: { address: string; token: string } | undefined, published: boolean): Eligibility {
+  function markRefused(runtime: ServerRuntime, tried: { address: string; token: string } | undefined, published: boolean, error?: unknown): Eligibility {
     const id = runtime.id;
     if (tried) refused.add(id, tried.address, tried.token);
     const can = eligible(runtime.entry());
-    if (can === 'refused' || can === 'unknown') set(id, { kind: 'failed', reason: can === 'refused' ? 'auth' : 'unknown' });
+    const detail = refusalDetail(error);
+    if (can === 'refused') set(id, { kind: 'failed', reason: 'auth', ...(detail ? { detail } : {}) });
+    else if (can === 'unknown') set(id, { kind: 'failed', reason: 'unknown' });
     else set(id, { kind: published ? 'reconnecting' : 'connecting' });
     return can;
   }
@@ -303,8 +339,18 @@ export function createMembers(deps: MemberDeps): Members {
       // Another address of its machine is still a candidate or still being
       // compared (#458 validator V3): its own loop, as after any failed join,
       // tries what is left or waits for it.
-      const can = markRefused(runtime, result.tried, h.published);
+      const can = markRefused(runtime, result.tried, h.published, result.error);
       if (can === 'ok' || can === 'pending') deps.retry(runtime);
+      return;
+    }
+    // The server answered the login with an ERR_AUTH that is not about the
+    // credentials (#502, review P1-A): nothing is remembered, its own loop
+    // retries within its budget, and the row says which — never
+    // "unreachable", which a passive re-arm restarts.
+    const login = result.reason === 'failed' ? loginFailure(result.error) : null;
+    if (login) {
+      set(id, { kind: 'failed', reason: login });
+      deps.retry(runtime);
       return;
     }
     // No answer: the member keeps its runtime and its own loop retries it.
@@ -398,11 +444,14 @@ export function createMembers(deps: MemberDeps): Members {
     gaveUp(runtime, reason) {
       const h = held.get(runtime.id);
       if (!mine(runtime) || h?.orphan) return;
+      // The refusal already on the row keeps what the server said (#502).
+      const st = statuses[runtime.id];
+      if (reason === 'auth' && st?.kind === 'failed' && st.reason === 'auth') return;
       if (reason) set(runtime.id, { kind: 'failed', reason });
       else set(runtime.id, { kind: 'failed', reason: 'unreachable' });
     },
     blocked(runtime) { if (mine(runtime)) set(runtime.id, { kind: 'failed', reason: 'storage' }); },
-    refusedBy(runtime, tried) { const h = held.get(runtime.id); if (mine(runtime) && !h?.orphan) markRefused(runtime, tried, !!h?.published); },
+    refusedBy(runtime, tried, error) { const h = held.get(runtime.id); if (mine(runtime) && !h?.orphan) markRefused(runtime, tried, !!h?.published, error); },
     handOver(runtime) {
       const h = held.get(runtime.id);
       if (!h || h.runtime !== runtime || !h.published || h.orphan) return false;

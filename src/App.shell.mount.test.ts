@@ -4986,7 +4986,7 @@ async function choiceWorld(context: TestContext, opts: { down?: string[]; refuse
       if (!key || n === 0) return null;
       if (down.has(key)) return Promise.reject(new Error('timeout'));
       // The server answers and refuses the token (its ERR_AUTH).
-      if (refuse.has(key)) return Promise.reject(Object.assign(new Error('invalid proof'), { code: -32000 }));
+      if (refuse.has(key)) return Promise.reject(Object.assign(new Error('invalid proof'), { code: -32000, authKind: 'proof' }));
       return up.has(key) ? null : new Promise<void>((r) => { waiting[key]!.push(r); });
     },
     setup(window: any) {
@@ -5274,13 +5274,13 @@ test('#458 review: a choice made while the connect card dials N waits on the win
 test('#458 validator V1: a server that refused the token is said to, and nothing dials it again — three picks dial nothing, the choice is recorded, its connection is the action', async (context) => {
   const w = await choiceWorld(context, { refuse: ['b'] });
   for (let i = 0; i < 4; i++) { await w.h.app.advance(3000); await w.h.settle(); }
-  assert.match(rowText(w.h, 'beta'), /token refused — edit its connection/iu, 'its own state, not "not answering"');
+  assert.match(rowText(w.h, 'beta'), /token refused \(handshake proof rejected\) — edit its connection/iu, 'its own state, not "not answering", with what the server said (#502)');
   const dials = () => w.events.filter((e) => e === 'connect:ws://b:9899').length;
   const before = dials();
   for (let i = 0; i < 3; i++) await pickServer(w.h, 'beta');
   for (let i = 0; i < 6; i++) { await w.h.app.advance(5000); await w.h.settle(); }
   assert.equal(dials(), before, 'three picks: not one dial (the server s lockout is never fed)');
-  assert.match(rowText(w.h, 'beta'), /chosen; token refused — edit its connection/iu, 'the choice is recorded, with the reason');
+  assert.match(rowText(w.h, 'beta'), /chosen; token refused \(handshake proof rejected\) — edit its connection/iu, 'the choice is recorded, with the reason');
   assert.ok(w.h.app.document.querySelector('.preferences .server-list button[aria-label="Addresses and token beta"]'), 'the action that can change it is on the row');
   assert.equal(w.current(), 'a');
   for (let i = 0; i < 20; i++) { await w.h.app.advance(10_000); await w.h.settle(); }
@@ -5295,7 +5295,7 @@ test('#458 validator V1: a member whose RECONNECT is refused the token is in the
   w.refuse.add('b');
   conn(w.h, 'b')!.drop();
   for (let i = 0; i < 6; i++) { await w.h.app.advance(3000); await w.h.settle(); }
-  assert.match(rowText(w.h, 'beta'), /token refused — edit its connection/iu, 'the loop s give-up carries the reason');
+  assert.match(rowText(w.h, 'beta'), /token refused \(handshake proof rejected\) — edit its connection/iu, 'the loop s give-up carries the reason, and keeps what the server said (#502)');
   const dials = () => w.events.filter((e) => e === 'connect:ws://b:9899').length;
   const before = dials();
   for (let i = 0; i < 3; i++) await pickServer(w.h, 'beta');
@@ -5336,10 +5336,13 @@ test('#458 ruling on the persisted refusal: after a reload the refused member is
   for (let i = 0; i < 4; i++) { await w.h.app.advance(3000); await w.h.settle(); }
   const dials = () => w.events.filter((e) => e === 'connect:ws://b:9899').length;
   assert.equal(dials(), 0, 'the reload sent nothing to B');
-  assert.match(rowText(w.h, 'beta'), /token refused — edit its connection/iu);
+  // A refusal read back from the device keeps no reason: the row says only
+  // that it was refused, never a guess at token or proof (#502).
+  assert.match(rowText(w.h, 'beta'), /refused earlier on this device — edit its connection/iu);
+  assert.doesNotMatch(rowText(w.h, 'beta'), /wrong token|handshake proof/iu);
   await pickServer(w.h, 'beta');
   for (let i = 0; i < 4; i++) { await w.h.app.advance(3000); await w.h.settle(); }
-  assert.match(rowText(w.h, 'beta'), /chosen; token refused/iu, 'chosen, not the old "connects on its own" refusal');
+  assert.match(rowText(w.h, 'beta'), /chosen; refused earlier on this device/iu, 'chosen, not the old "connects on its own" refusal');
   assert.equal(w.h.app.document.querySelector('.preferences .server-list [role=alert]'), null);
   assert.equal(dials(), 0, 'and the pick dialled nothing');
   assert.ok(w.h.app.document.querySelector('.preferences .server-list button[aria-label="Addresses and token beta"]'), 'Edit is the action');
@@ -5362,6 +5365,37 @@ test('#458 ruling on the persisted refusal: after a reload the refused member is
   assert.equal(w.current(), 'b', 'and the choice completes');
 });
 
+test('#502 (the owner s case): a refusal stored on this device stops the member; One server on the SAME entry logs in, which clears it, and All included then joins the member', async (context) => {
+  const digest = Buffer.from(await crypto.subtle.digest('SHA-256', new TextEncoder().encode('ws://b:9899\u0000tokB'))).toString('hex');
+  // A refusal an earlier page stored for a token that is right (main's `auth required` race).
+  const w = await choiceWorld(context, { seed: { tmux_refused_tokens: JSON.stringify({ b: [digest] }) } });
+  const crypto_ = async () => { for (let i = 0; i < 20; i++) { await new Promise((r) => setImmediate(r)); await w.h.settle(); } };
+  await crypto_();
+  for (let i = 0; i < 4; i++) { await w.h.app.advance(3000); await w.h.settle(); }
+  const dials = () => w.events.filter((e) => e === 'connect:ws://b:9899').length;
+  assert.equal(dials(), 0, 'stopped: the stored refusal is not dialled');
+  assert.match(rowText(w.h, 'beta'), /refused earlier on this device/iu);
+  // One server, then beta: the focus dial is not held by the member memory, and it logs in.
+  w.answer('b');
+  modeButton(w.h, /^one server$/iu)!.click();
+  for (let i = 0; i < 3; i++) await w.h.settle();
+  assert.equal(w.ls.getItem('tmux_connection_mode'), 'single');
+  await pickServer(w.h, 'beta');
+  for (let i = 0; i < 6; i++) { await w.h.app.advance(500); await w.h.settle(); }
+  await crypto_();
+  assert.equal(w.current(), 'b', 'One server on the same entry connects');
+  assert.equal(w.ls.getItem('tmux_refused_tokens'), null, 'the login cleared the stored refusal');
+  // Back to alpha, then All included: beta is a member again, and it joins.
+  await pickServer(w.h, 'alpha');
+  for (let i = 0; i < 6; i++) { await w.h.app.advance(500); await w.h.settle(); }
+  assert.equal(w.current(), 'a');
+  const before = dials();
+  modeButton(w.h, /all included|aggregate/iu)!.click();
+  for (let i = 0; i < 6; i++) { await w.h.app.advance(3000); await w.h.settle(); }
+  assert.ok(dials() > before, 'the member is dialled');
+  assert.doesNotMatch(rowText(w.h, 'beta'), /refused|not answering/iu, `the member joined: ${rowText(w.h, 'beta')}`);
+});
+
 test('#458 ruling P1-B: a member s own loop never re-sends an (address, token) its server refused — an alternate address that refused is not a candidate after a pick', async (context) => {
   const events: string[] = [];
   const servers = [
@@ -5375,7 +5409,7 @@ test('#458 ruling P1-B: a member s own loop never re-sends an (address, token) i
   }), (url) => (url.includes('//b') ? 'm-b' : 'm-a'), {
     calls: events, rpc: editorRpc,
     // B s own address does not answer; its alternate b2 reaches a gateway that refuses B s token.
-    gate: (url, n) => (n === 0 ? null : url.includes('//b2') ? Promise.reject(Object.assign(new Error('invalid proof'), { code: -32000 }))
+    gate: (url, n) => (n === 0 ? null : url.includes('//b2') ? Promise.reject(Object.assign(new Error('invalid proof'), { code: -32000, authKind: 'proof' }))
       : url.includes('//b:') ? Promise.reject(new Error('timeout')) : null),
     ...sandbox,
   });
@@ -5405,7 +5439,7 @@ test('#458 validator V3: a wrong route first and the right one second, the same 
   }), (url) => (url.includes('//b') ? 'm-b' : 'm-a'), {
     calls: events, rpc: editorRpc,
     // ws://bw reaches another gateway, which refuses B s token; ws://b is B.
-    gate: (url, n) => (n > 0 && url.includes('//bw') ? Promise.reject(Object.assign(new Error('invalid proof'), { code: -32000 })) : null),
+    gate: (url, n) => (n > 0 && url.includes('//bw') ? Promise.reject(Object.assign(new Error('invalid proof'), { code: -32000, authKind: 'proof' })) : null),
     ...sandbox,
   });
   for (let i = 0; i < 4; i++) await h.settle();
@@ -5440,7 +5474,7 @@ test('#458 ruling on f20d1ea0 (P1-A): the wrong route refuses while the right on
   }), (url) => (url.includes('//b') ? 'm-b' : 'm-a'), {
     calls: events, rpc: editorRpc,
     // ws://bw reaches another gateway, which refuses B s token; ws://b is B.
-    gate: (url, n) => (n > 0 && url.includes('//bw') ? Promise.reject(Object.assign(new Error('invalid proof'), { code: -32000 })) : null),
+    gate: (url, n) => (n > 0 && url.includes('//bw') ? Promise.reject(Object.assign(new Error('invalid proof'), { code: -32000, authKind: 'proof' })) : null),
     ...sandbox,
     setup(window: any) { sandbox.setup?.(window); holdDigests(window, (text) => (text === 'ws://b:9899\u0000tokB' ? held : null)); },
   });
