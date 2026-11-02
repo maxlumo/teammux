@@ -96,17 +96,24 @@ Default restore_on_start: true (since board #422 round 4's live acceptance, `scr
        echo "ok: Deployed" )
      ```
      **Do not go on until it says `ok: Deployed`**: an accepted update is not yet on every edge, and an edge on the old policy forwards a viewer-sent value.
-  3. **Copy the header into `X-Forwarded-For` in Caddy**, on the three tmux-mobile `reverse_proxy` blocks (the exact `/{$BACKEND_PATH}`, the `/{$BACKEND_PATH}/*` prefix to `:9899`, and the default `handle` to `:5173`). On `<edge>`: the edit is made on a copy, which is published only if it adds exactly those three lines and nothing else and Caddy validates it with the running image:
+  3. **Copy the header into `X-Forwarded-For` in Caddy**, on EVERY gateway `reverse_proxy` block, which is each block carrying `header_up Host localhost:9899` or `header_up Host localhost:5173`. Count them first; do not assume three. On the deployment in board #441 there were five: the exact `/{$BACKEND_PATH}` and the `/{$BACKEND_PATH}/*` prefix to `:9899`, the default `handle` to `:5173`, and two blocks for another machine's gateway on `:19899` that also send `Host localhost:9899`. The line changes nothing for a gateway until that gateway sets its own `trusted_proxies`. A block for another service (no such Host line) gets nothing. Two parts on `<edge>`, in `<caddy-dir>`. First a READ-ONLY inventory: it lists each matching `Host` line with the upstream of the `reverse_proxy` block it sits in (never the route's path), so a person checks that every one is a gateway upstream and that no other service is included:
+     ```bash
+     awk '/reverse_proxy/ { up = $2 } /^[[:blank:]]*header_up Host localhost:(9899|5173)$/ { print "line " NR ": upstream " up }' Caddyfile
+     ```
+     Then set `GATEWAY_BLOCKS` to the number of lines you CONFIRMED (`export GATEWAY_BLOCKS=<n>`). The publish block refuses unless its own count equals it. The edit is made on a copy, which is published only if it adds exactly one line per confirmed block and nothing else, and Caddy validates it with the running image:
      ```bash
      ( set -eu -o pipefail; cd <caddy-dir>
        LINE='header_up X-Forwarded-For {http.request.header.CloudFront-Viewer-Address}'
        [ "$(grep -cF "$LINE" Caddyfile || true)" = 0 ] || { echo "stop, nothing published: the line is already there"; exit 1; }
+       : "${GATEWAY_BLOCKS:?run the inventory above and set GATEWAY_BLOCKS to the confirmed count}"
+       N=$(grep -cE '^[[:blank:]]*header_up Host localhost:(9899|5173)$' Caddyfile || true)
+       [ "${N:-0}" -ge 1 ] && [ "$N" = "$GATEWAY_BLOCKS" ] || { echo "stop, nothing published: the Host lines found are not the confirmed GATEWAY_BLOCKS"; exit 1; }
        cp -p Caddyfile Caddyfile.new
-       sed -i 's/^\(\t*\)header_up Host localhost:\(9899\|5173\)$/&\n\1header_up X-Forwarded-For {http.request.header.CloudFront-Viewer-Address}/' Caddyfile.new
-       [ "$(grep -cF "$LINE" Caddyfile.new || true)" = 3 ] || { echo "stop, nothing published: not three added lines"; rm Caddyfile.new; exit 1; }
+       sed -i 's/^\([[:blank:]]*\)header_up Host localhost:\(9899\|5173\)$/&\n\1header_up X-Forwarded-For {http.request.header.CloudFront-Viewer-Address}/' Caddyfile.new
+       [ "$(grep -cF "$LINE" Caddyfile.new || true)" = "$N" ] || { echo "stop, nothing published: not one added line per gateway block"; rm Caddyfile.new; exit 1; }
        diff Caddyfile Caddyfile.new > Caddyfile.diff || true
-       [ "$(grep -c '^[<>]' Caddyfile.diff || true)" = 3 ] && [ "$(grep '^>' Caddyfile.diff | grep -vcF "$LINE" || true)" = 0 ] \
-         || { echo "stop, nothing published: the diff is not exactly the three added lines"; rm Caddyfile.new Caddyfile.diff; exit 1; }
+       [ "$(grep -c '^[<>]' Caddyfile.diff || true)" = "$N" ] && [ "$(grep '^>' Caddyfile.diff | grep -vcF "$LINE" || true)" = 0 ] \
+         || { echo "stop, nothing published: the diff is not exactly the added lines"; rm Caddyfile.new Caddyfile.diff; exit 1; }
        docker run --rm --env-file proxy.env -v "$PWD/Caddyfile.new:/etc/caddy/Caddyfile:ro" \
          "$(docker inspect -f '{{.Config.Image}}' <caddy-container>)" caddy validate --config /etc/caddy/Caddyfile --adapter caddyfile > /dev/null 2>&1 \
          || { echo "stop, nothing published: caddy validate failed"; rm Caddyfile.new Caddyfile.diff; exit 1; }
@@ -119,11 +126,13 @@ Default restore_on_start: true (since board #422 round 4's live acceptance, `scr
      ```
      **Check**: `curl -sS -o /dev/null -w '%{http_code}\n' https://<distribution-domain>/` gives `200`, and the app reconnects. The gateway still ignores the header (step 4 has not happened).
   4. **Trust the tunnel.** On this host, add `trusted_proxies = ["127.0.0.1"]` at the top level of `~/.config/tmux-mobile/config.toml` (not inside a `[table]`), then `tmm gateway restart` (every client drops and reconnects). **Check**: `tmm gateway status` says `keyed by X-Forwarded-For behind 127.0.0.1…`. Anything else (`keyed by the TCP peer (trusted_proxies ignored: …)`) is the reason, by position; undo before going on.
-  5. **The go-live check is an owner-authorized window, not a formality.** On this host (it reads the gateway's journal), with `BACKEND_PATH` set to the value in `<caddy-dir>/proxy.env` (never pasted into the room). One plain login per route with forged `CloudFront-Viewer-Address` and `X-Forwarded-For` and a wrong token: the route `/ws` (Vite), the exact `/$BACKEND_PATH` and the prefix `/$BACKEND_PATH/ws`. Each probe passes only on the server's `invalid token` answer within 10 s, and then only if the journal has exactly ONE new `Auth failed` line since the probe began, naming this host's address. Anything else is a failed check:
+  5. **The go-live check is an owner-authorized window, not a formality.** On this host (it reads the gateway's journal), with `BACKEND_PATH` set to the value in `<caddy-dir>/proxy.env` (never pasted into the room). One plain login per route with forged `CloudFront-Viewer-Address` and `X-Forwarded-For` and a wrong token: the route `/ws` (Vite), the exact `/$BACKEND_PATH` and the prefix `/$BACKEND_PATH/ws`. Each probe passes only on the server's `invalid token` answer within 10 s, and then only if the journal has exactly ONE new `Auth failed` line since the probe began, naming this host's address as CloudFront sees it, via `127.0.0.1`. That address is read first from a NON-AWS IPv4 echo: a host can leave for AWS endpoints by another path than the one CloudFront sees (board #441, 2026-11-02: `checkip.amazonaws.com` named the other path and turned a working cutover into a failed check). The echo is the exit this host was OBSERVED to use toward CloudFront on that night, not a rule: another host or route may leave differently. If the address does not match, the check stops; it is never passed by trying another echo or by reading the expected value from the log. The block prints no address in any form; a failure names only its case. Run it with bash. Anything else is a failed check:
      ```bash
      ( set -eu -o pipefail; umask 077; cd "${OP:?run step 0 first}"
        : "${BACKEND_PATH:?set BACKEND_PATH from <caddy-dir>/proxy.env}"
-       ME=$(curl -sS -4 --max-time 10 https://checkip.amazonaws.com); [ -n "$ME" ]
+       ME=$(curl -sS -4 --max-time 10 https://api.ipify.org); [ -n "$ME" ]
+       case "$ME" in 127.*|192.0.2.*) echo "stop, nothing probed: the echoed address is loopback or forged"; exit 1;; esac
+       echo "$ME" | grep -Eq '^((25[0-5]|2[0-4][0-9]|1?[0-9]?[0-9])\.){3}(25[0-5]|2[0-4][0-9]|1?[0-9]?[0-9])$' || { echo "stop, nothing probed: the echoed address is not IPv4"; exit 1; }
        cat > probe.mjs <<'JS'
      const [url, label] = process.argv.slice(2);
      const fail = (why) => { console.error(`FAIL ${label}: ${why}`); process.exit(1); };
@@ -145,8 +154,14 @@ Default restore_on_start: true (since board #422 round 4's live acceptance, `scr
          NODE_OPTIONS=--dns-result-order=ipv4first node probe.mjs "wss://<distribution-domain>/$route" "$label"
          sleep 2
          NEW=$(journalctl --user -u tmux-mobile-gateway.service --since "@$MARK" --no-pager -o cat | grep 'Auth failed from' || true)
-         [ "$(printf '%s' "$NEW" | grep -c . || true)" = 1 ] || { echo "FAIL $label: not exactly one new Auth failed line: $NEW"; exit 1; }
-         case "$NEW" in *"Auth failed from $ME (via 127.0.0.1:"*) echo "ok $label: keyed by $ME";; *) echo "FAIL $label: $NEW"; exit 1;; esac
+         N=$(printf '%s' "$NEW" | grep -c . || true)
+         [ "$N" = 1 ] || { echo "FAIL $label: $N new Auth failed lines, not exactly one"; exit 1; }
+         case "$NEW" in
+           *"192.0.2."*) echo "FAIL $label: case forged (a forged header was believed)"; exit 1;;
+           *"Auth failed from 127."*) echo "FAIL $label: case loopback (keyed by the tunnel)"; exit 1;;
+           *"Auth failed from $ME (via 127.0.0.1:"*) echo "ok $label: keyed by the viewer";;
+           *) echo "FAIL $label: case other (the address differs from the echo, or not via 127.0.0.1)"; exit 1;;
+         esac
        done
        echo "ok: every route keys by the viewer" )
      ```
