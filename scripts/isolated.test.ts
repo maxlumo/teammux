@@ -4,11 +4,11 @@
 // refuses to start when any of that does not hold.
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { spawnSync } from 'node:child_process';
-import { chmodSync, mkdtempSync, mkdirSync, realpathSync, rmSync } from 'node:fs';
+import { spawn, spawnSync } from 'node:child_process';
+import { chmodSync, existsSync, mkdtempSync, mkdirSync, readFileSync, realpathSync, rmSync, symlinkSync, utimesSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
-import { ancestry, dockerArgs, forbiddenPaths, Refusal, selfCheck, target, withTripwire } from './isolated.mjs';
+import { ancestry, dockerArgs, forbiddenPaths, installRefusal, npmInstallsIn, Refusal, selfCheck, target, withTripwire } from './isolated.mjs';
 
 const home = '/local/home/u';
 const worktree = '/local/home/u/work/repo/worktree/a-1';
@@ -292,4 +292,127 @@ test('a listener that dies, or cannot write its record, fails closed', { skip: !
   assert.match(unwritable.r.stderr, /tripwire died|ended with status/, 'a failed record write fails closed');
   const quiet = tripped(`chmod 0400 "$TW_DIR/tw.count"; sleep 0.2`);
   assert.equal(quiet.r.status, 97, `a final record that cannot be written is never a clean run: ${quiet.r.stderr}`);
+});
+
+// ---- board #514: refuse while the worktree's npm install is incomplete ----
+// Sentinel directories only; the process scan is injected, except the rows
+// that read the real /proc: stand-ins in each argv shape, and a REAL `npm ci`
+// held in its root install script by a sentinel file.
+
+function installTree(opts: { pkg?: boolean; marker?: boolean; markerOlder?: boolean }) {
+  const t = realpathSync(mkdtempSync(join(tmpdir(), 'tmm-isolated-install-')));
+  if (opts.pkg !== false) writeFileSync(join(t, 'package.json'), '{}');
+  writeFileSync(join(t, 'package-lock.json'), '{}');
+  if (opts.marker !== false) {
+    mkdirSync(join(t, 'node_modules'));
+    writeFileSync(join(t, 'node_modules', '.package-lock.json'), '{}');
+    if (opts.markerOlder) utimesSync(join(t, 'node_modules', '.package-lock.json'), new Date(1000), new Date(1000));
+  }
+  return t;
+}
+const none = () => [];
+
+test('a complete install runs; a missing marker, a stale marker and a running install each refuse', () => {
+  const ok = installTree({});
+  const missing = installTree({ marker: false });
+  const stale = installTree({ markerOlder: true });
+  const nopkg = installTree({ pkg: false, marker: false });
+  try {
+    assert.equal(installRefusal({ worktree: ok, installs: none }), null, 'a complete install is never refused');
+    assert.equal(installRefusal({ worktree: nopkg, installs: none }), null, 'nothing to install, nothing refused');
+    const fix = `run \`npm ci\` alone in ${missing}, wait for it to exit, then retry`;
+    assert.equal(installRefusal({ worktree: missing, installs: none }), `node_modules is missing or its install did not finish (no node_modules/.package-lock.json); ${fix}`, 'the refusal names the worktree and the fix');
+    assert.match(installRefusal({ worktree: stale, installs: none }) ?? '', /older than package-lock\.json.*run `npm ci` alone in /);
+    assert.equal(installRefusal({ worktree: ok, installs: () => [4242] }), `an npm install is still running in ${ok} (pid 4242); wait for it to exit, then retry`, 'a running install refuses even beside a marker');
+  } finally {
+    for (const d of [ok, missing, stale, nopkg]) rmSync(d, { recursive: true, force: true });
+  }
+});
+
+test('a marker that is not a regular file refuses; an unreadable lock refuses, an absent one does not', () => {
+  const dirMarker = installTree({ marker: false });
+  const badLock = installTree({});
+  const noLock = installTree({});
+  try {
+    mkdirSync(join(dirMarker, 'node_modules', '.package-lock.json'), { recursive: true });
+    assert.match(installRefusal({ worktree: dirMarker, installs: none }) ?? '', /^node_modules\/\.package-lock\.json is not a regular file; run `npm ci` alone in /);
+    // A self-loop symlink: stat fails with ELOOP, not ENOENT, whoever runs it.
+    rmSync(join(badLock, 'package-lock.json'));
+    symlinkSync('package-lock.json', join(badLock, 'package-lock.json'));
+    assert.equal(installRefusal({ worktree: badLock, installs: none }), 'package-lock.json cannot be read (ELOOP), so the install cannot be judged; fix it, then retry');
+    rmSync(join(noLock, 'package-lock.json'));
+    assert.equal(installRefusal({ worktree: noLock, installs: none }), null, 'no lock: no staleness to judge');
+  } finally {
+    for (const d of [dirMarker, badLock, noLock]) rmSync(d, { recursive: true, force: true });
+  }
+});
+
+// Each stand-in leads its own process group: kill the group, its children too.
+function killGroup(pid: number | undefined) { try { process.kill(-pid!, 'SIGKILL'); } catch { /* already gone */ } }
+function waitFor(cond: () => boolean, ms: number) {
+  const deadline = Date.now() + ms;
+  while (Date.now() < deadline && !cond()) spawnSync('sleep', ['0.05']);
+  return cond();
+}
+
+test('the process scan finds an npm install by its cwd, in both argv shapes, and nothing else', () => {
+  const t = realpathSync(mkdtempSync(join(tmpdir(), 'tmm-isolated-npm-')));
+  const other = realpathSync(mkdtempSync(join(tmpdir(), 'tmm-isolated-other-')));
+  // Startup shape: argv `npm … ci`, one element per word (exec -a sets argv[0]).
+  const words = (cwd: string) => spawn('bash', ['-c', "exec -a npm bash -c 'sleep 30; :' ci"], { cwd, stdio: 'ignore', detached: true });
+  // npm 10's own title: ONE element `npm ci`, set the way lib/npm.js does,
+  // through process.title, which node writes over the argv area.
+  const title = (cwd: string) => spawn(process.execPath, ['-e', "process.title = 'npm ci'; setTimeout(() => {}, 30000)"], { cwd, stdio: 'ignore', detached: true });
+  // A shell whose argument string reads `npm ci`: several elements, not npm.
+  const shell = (cwd: string) => spawn('bash', ['-c', "exec -a sh bash -c 'sleep 30; :' 'npm ci'"], { cwd, stdio: 'ignore', detached: true });
+  const procs = [words(t), title(t), shell(t), words(other), title(other)];
+  const [here, titled, sh, ...there] = procs;
+  try {
+    let found: number[] = [];
+    waitFor(() => (found = npmInstallsIn(t)).includes(here.pid!) && found.includes(titled.pid!), 5000);
+    assert.ok(found.includes(here.pid!), `startup argv shape found: ${found}`);
+    assert.ok(found.includes(titled.pid!), `npm 10 title shape found: ${found}`);
+    assert.ok(!found.includes(sh.pid!), 'a shell string that mentions npm ci is not an install');
+    for (const p of there) assert.ok(!found.includes(p.pid!), 'another worktree\'s install is not this one\'s');
+    assert.deepEqual(npmInstallsIn(join(t, 'nope')), [], 'a directory with no install has none');
+  } finally {
+    for (const c of procs) killGroup(c.pid);
+    rmSync(t, { recursive: true, force: true }); rmSync(other, { recursive: true, force: true });
+  }
+});
+
+test('a REAL npm ci is refused while its root scripts run after the marker, and passes once it exits', () => {
+  const t = realpathSync(mkdtempSync(join(tmpdir(), 'tmm-isolated-realnpm-')));
+  const other = realpathSync(mkdtempSync(join(tmpdir(), 'tmm-isolated-other-')));
+  // A local file: dependency gives npm a node_modules to write (offline);
+  // the root install script holds npm until the sentinel `go` appears.
+  mkdirSync(join(t, 'dep'));
+  writeFileSync(join(t, 'dep', 'package.json'), '{"name":"dep","version":"1.0.0"}');
+  writeFileSync(join(t, 'package.json'), JSON.stringify({ name: 'sentinel', version: '1.0.0', dependencies: { dep: 'file:./dep' }, scripts: { install: 'while [ ! -e go ]; do sleep 0.1; done' } }));
+  const env = { ...process.env, npm_config_cache: join(t, '.npm-cache'), npm_config_offline: 'true', npm_config_audit: 'false', npm_config_fund: 'false', npm_config_update_notifier: 'false' };
+  const lock = spawnSync('npm', ['install', '--package-lock-only', '--ignore-scripts'], { cwd: t, env, stdio: 'ignore' });
+  assert.equal(lock.status, 0, 'the sentinel lockfile is written');
+  utimesSync(join(t, 'package-lock.json'), new Date(1000), new Date(1000));
+  const npm = spawn('npm', ['ci'], { cwd: t, env, stdio: 'ignore', detached: true });
+  let exited = false;
+  npm.on('exit', () => { exited = true; });
+  const marker = join(t, 'node_modules', '.package-lock.json');
+  try {
+    assert.ok(waitFor(() => existsSync(marker) && existsSync(join(t, 'node_modules', 'dep')) && npmInstallsIn(t).length > 0, 30000), 'npm wrote the marker and is still running');
+    assert.match(installRefusal({ worktree: t }) ?? '', /^an npm install is still running in /, 'the marker exists, npm runs its root script: refused');
+    assert.equal(npmInstallsIn(other).length, 0, 'another cwd sees no install');
+    writeFileSync(join(t, 'go'), '');
+    assert.ok(waitFor(() => npmInstallsIn(t).length === 0, 30000), 'npm exits once the sentinel is there');
+    assert.equal(installRefusal({ worktree: t }), null, 'after npm exits, the run goes ahead');
+  } finally {
+    if (!exited) killGroup(npm.pid);
+    rmSync(t, { recursive: true, force: true }); rmSync(other, { recursive: true, force: true });
+  }
+});
+
+test('the install check runs before any docker call, after the target check', () => {
+  const src = readFileSync(new URL('./isolated.mjs', import.meta.url), 'utf8');
+  const body = src.slice(src.indexOf('export function main('));
+  const at = (s: string) => body.indexOf(s);
+  assert.ok(at('target()') < at('installRefusal(') && at('installRefusal(') < at('ensureImage()') && at('ensureImage()') < at("spawnSync('docker'"));
 });

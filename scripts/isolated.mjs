@@ -31,7 +31,7 @@
 //     forbidden variable is set, or if 127.0.0.1:9899 or an outside address
 //     answers. It probes TCP only; it never opens the live socket.
 import { spawnSync } from 'node:child_process';
-import { existsSync, realpathSync } from 'node:fs';
+import { existsSync, readdirSync, readFileSync, readlinkSync, realpathSync, statSync } from 'node:fs';
 import { homedir } from 'node:os';
 import { basename, dirname, join, resolve } from 'node:path';
 
@@ -247,6 +247,70 @@ function ensureImage() {
   if (r.status !== 0) throw new Error(`could not create ${IMAGE}`);
 }
 
+/** The npm install processes running in `worktree` right now: an `npm` or
+ * `npm-cli.js` process whose argv names `ci`, `install`, `i` or `add` and
+ * whose cwd is the worktree. Two argv shapes, both measured with npm 10.9.9
+ * (2026-11-04): at startup `node …/npm-cli.js ci` (or `npm ci`), one element
+ * per word; once loaded, npm sets `process.title` to its positional args
+ * (`lib/npm.js`: `['npm', ...remain].join(' ')`), so /proc shows ONE element,
+ * `npm ci`. npm keeps that title while it runs the root scripts AFTER it has
+ * written `node_modules/.package-lock.json`, which is why this scan is needed
+ * beside the marker. Only a single element that starts with the word `npm`
+ * is split, so a shell string like `sh -c "npm ci"` (three elements) is not
+ * matched. Read from /proc; a process that ends meanwhile, or one this user
+ * cannot read, is skipped; the raw cmdline is never printed. */
+export function npmInstallsIn(worktree, proc = '/proc') {
+  const found = [];
+  let pids = [];
+  try { pids = readdirSync(proc).filter((n) => /^\d+$/.test(n)); } catch { return found; }
+  for (const pid of pids) {
+    let cwd, argv;
+    try {
+      cwd = readlinkSync(join(proc, pid, 'cwd'));
+      argv = readFileSync(join(proc, pid, 'cmdline'), 'latin1').split('\0').filter(Boolean);
+    } catch { continue; }
+    if (cwd !== worktree) continue;
+    const words = argv.length === 1 && /^npm /.test(argv[0]) ? argv[0].split(' ').filter(Boolean) : argv;
+    const npm = words.findIndex((a) => /(^|\/)npm(-cli\.js)?$/.test(a));
+    if (npm !== -1 && words.slice(npm + 1).some((a) => ['ci', 'install', 'i', 'add'].includes(a))) found.push(Number(pid));
+  }
+  return found;
+}
+
+/** Why the worktree's npm install is not complete, or null (board #514).
+ * A start-time preflight, NOT mutual exclusion for the whole run: an install
+ * that starts after the scan, or one this user cannot read in /proc, is not
+ * seen, so `npm ci` still runs alone and the test run starts after it exits.
+ * Refused: an `npm ci`/`install` still running in the worktree (npm writes
+ * `node_modules/.package-lock.json` after every package, then still runs the
+ * root scripts, and `npm ci` first removes node_modules, so a marker can exist
+ * while an install is running); a marker that is missing or not a regular
+ * file; a marker older than `package-lock.json` (a conservative staleness
+ * test, not proof the contents match); and a `package-lock.json` that cannot
+ * be stat'ed for any reason but absence. The marker is not proof npm exited
+ * successfully. A worktree with no package.json has nothing to install. One
+ * rule for every command: this is a workspace policy with a named fix, not a
+ * guess at which command needs node_modules (`test:rust` does not). A test
+ * run on a half-written node_modules gave a partial red run (validator,
+ * #511: 2978 tests, 20 fails, "Cannot find package …/jsdom"). */
+export function installRefusal({ worktree, installs = npmInstallsIn }) {
+  if (!existsSync(join(worktree, 'package.json'))) return null;
+  const fix = `run \`npm ci\` alone in ${worktree}, wait for it to exit, then retry`;
+  const running = installs(worktree);
+  if (running.length) return `an npm install is still running in ${worktree} (pid ${running.join(', ')}); wait for it to exit, then retry`;
+  const marker = join(worktree, 'node_modules', '.package-lock.json');
+  let m;
+  try { m = statSync(marker); } catch { return `node_modules is missing or its install did not finish (no node_modules/.package-lock.json); ${fix}`; }
+  if (!m.isFile()) return `node_modules/.package-lock.json is not a regular file; ${fix}`;
+  let lock;
+  try { lock = statSync(join(worktree, 'package-lock.json')); } catch (e) {
+    if (e?.code === 'ENOENT') return null;
+    return `package-lock.json cannot be read (${e?.code ?? 'error'}), so the install cannot be judged; fix it, then retry`;
+  }
+  if (m.mtimeMs < lock.mtimeMs) return `node_modules is older than package-lock.json (its .package-lock.json predates the lock); ${fix}`;
+  return null;
+}
+
 export function main(argv = process.argv.slice(2)) {
   const at = argv.indexOf('--');
   const command = at === -1 ? argv : argv.slice(at + 1);
@@ -263,6 +327,11 @@ export function main(argv = process.argv.slice(2)) {
     return 97;
   }
   const { worktree, common, own, main: checkout } = t;
+  const install = installRefusal({ worktree });
+  if (install) {
+    console.error(`[isolated] REFUSED before docker: ${install}`);
+    return 97;
+  }
   const home = homedir();
   for (const p of [join(home, '.cargo', 'bin'), join(home, '.rustup')]) {
     if (!existsSync(p)) { console.error(`[isolated] missing toolchain dir ${p}`); return 2; }

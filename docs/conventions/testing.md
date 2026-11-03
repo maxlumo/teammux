@@ -281,6 +281,16 @@ A self-check runs first and refuses to start the command (exit 97), in this orde
 
 It tests the socket only with `[ -e ]` and never opens it. Every refusal that a test triggers on the host comes before the TCP probes, so no test probes the real 9899.
 
+**An incomplete npm install refuses the run** (board #514). Before any docker call, after the target checks, a worktree with a `package.json` must have a finished install. If it doesn't, the runner exits 97 with a fixed reason that names the worktree and the fix: run `npm ci` alone there, wait for it to exit, then retry. It refuses when:
+- an `npm ci`, `install`, `i` or `add` process is running with the worktree as its cwd, read from `/proc`. npm 10 shows two argv shapes, measured with npm 10.9.9: `node …/npm-cli.js ci` at startup, then ONE element `npm ci` once it sets `process.title` (`lib/npm.js`). npm keeps running the root scripts (`preinstall`, `install`, `postinstall`, `prepare`, …) after it has written the marker, and `npm ci` first removes `node_modules`, so a marker alone does not show that npm has exited. Only a single element that starts with the word `npm` is split into words, so a shell string such as `sh -c "npm ci"` does not match, and the raw cmdline is never printed;
+- `node_modules/.package-lock.json` is missing or is not a regular file. npm writes it after every package: measured with `npm ci`, npm 10, 2026-11-04, where jsdom's files were in place before it. It is not proof that npm exited successfully;
+- that file is older than `package-lock.json`. This is a conservative staleness test, not proof that the contents match;
+- `package-lock.json` cannot be stat'ed for any reason other than being absent. An absent lock only skips the staleness test.
+
+This is a start-time preflight, not mutual exclusion for the whole run. An install that starts after the scan, or a process this user cannot read in `/proc`, is not seen. So the rule stands: run `npm ci` alone, and start the run only after it has exited.
+
+The incident: a test run that started while `npm ci` was still writing gave a partial red run (validator, #511: 2978 tests, 20 fails, `Cannot find package …/jsdom`). The trigger was an install and a run issued as parallel tool calls. The rule is one check for every command. `test:rust` itself loads only node built-ins, so this is a workspace policy with a named fix, not a guess at which command needs `node_modules`.
+
 **The tripwire.** After the self-check, the container holds 127.0.0.1:9899, where a live gateway listens on a real host, with a listener that reads NO peer bytes. On each accept it counts the connection, stamps the time, writes its record and destroys the socket, synchronously and first. So a connection that sends nothing, sends half a request, or arrives at the very end is still counted, and nothing a test sends (a token, a cookie, a signed path) can reach the output. When the command ends, the shell asks the listener to stop, and it drains what is pending and writes a final record marked `ok`.
 - Any counted connection fails the run with exit 98, printing only the count and the times.
 - A listener that could not start, died, did not stop or ended non-zero, and a record that cannot be read or has no final marker, all fail closed with 97.
