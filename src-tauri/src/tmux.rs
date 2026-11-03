@@ -269,21 +269,134 @@ pub(crate) fn run_tmux(args: &[&str]) -> Result<String, String> {
 /// it to `None`, and the developer's default server died with every session
 /// on the host).
 pub(crate) fn run_tmux_on(socket: Option<&str>, args: &[&str]) -> Result<String, String> {
-    let mut cmd = Command::new(find_tmux());
-    if let Some(socket) = socket {
-        cmd.args(["-S", socket]);
-    }
-    let output = cmd
-        .args(args)
-        .output()
-        .map_err(|e| format!("Failed to run tmux: {}", e))?;
-
+    let output = run_tmux_raw(socket, args).map_err(|e| format!("Failed to run tmux: {}", e))?;
     if output.status.success() {
         Ok(String::from_utf8_lossy(&output.stdout).to_string())
     } else {
         let stderr = String::from_utf8_lossy(&output.stderr).to_string();
         Err(format!("tmux error: {}", stderr))
     }
+}
+
+/// ONE tmux execution, its whole answer kept (status, stdout AND stderr):
+/// the command `run_tmux_on` runs, built the same way (the same binary, the
+/// same `-S` choice, the inherited env). For a caller that must read what
+/// tmux said on a "success" (board #508: tmux 3.6a exits 0 when it cannot
+/// create an explicit `-S` socket).
+pub(crate) fn run_tmux_raw(socket: Option<&str>, args: &[&str]) -> std::io::Result<std::process::Output> {
+    let mut cmd = Command::new(find_tmux());
+    if let Some(socket) = socket {
+        cmd.args(["-S", socket]);
+    }
+    cmd.args(args).output()
+}
+
+/// The errno text of tmux's own "could not create the socket" diagnostic for
+/// exactly `socket`, or `None` (board #508). Only a stderr that is, trimmed,
+/// ONE line `error creating <socket> (<errno text>)` matches: the path
+/// byte-equal to `socket`, one pair of parentheses closing the line, the text
+/// inside at most 120 characters with no parenthesis of its own. Anything
+/// else (another path, a second line, extra text) is not this diagnostic.
+pub(crate) fn socket_create_error(stderr: &str, socket: &str) -> Option<String> {
+    let line = stderr.trim();
+    if line.contains('\n') || line.contains('\r') {
+        return None;
+    }
+    let text = line.strip_prefix("error creating ")?.strip_prefix(socket)?.strip_prefix(" (")?.strip_suffix(')')?;
+    (!text.is_empty() && text.chars().count() <= 120 && !text.contains(['(', ')'])).then(|| text.to_string())
+}
+
+/// Test seam: the uid the socket directory must belong to (we cannot chown).
+#[cfg(test)]
+pub(crate) static SOCKET_DIR_OWNER: std::sync::Mutex<Option<u32>> = std::sync::Mutex::new(None);
+
+/// Test seam: runs after the directory was seen absent and before the
+/// `mkdirat` (a concurrent creator's window).
+#[cfg(test)]
+pub(crate) type BeforeMkdir = Box<dyn FnMut(&std::path::Path) + Send>;
+#[cfg(test)]
+pub(crate) static BEFORE_SOCKET_MKDIR: std::sync::Mutex<Option<BeforeMkdir>> = std::sync::Mutex::new(None);
+
+/// Make sure tmux can create `socket`: its DIRECT parent exists, is a real
+/// directory of this user and no other user can reach it (board #508).
+/// tmux creates `/tmp/tmux-<uid>` only for its OWN default path; with an
+/// explicit `-S` it does not, and on a host whose /tmp is a tmpfs the
+/// directory is gone after every reboot.
+/// - a relative socket refuses; so does a missing grandparent (one level is
+///   created, never more);
+/// - the grandparent prefix is canonicalized once (a legitimate alias, as
+///   `safe_fs::trusted_parent` does), held, and it and every ancestor must
+///   pass the ancestor trust rule (`safe_fs::trusted`: root or ours; group or
+///   other write only with the sticky bit). /tmp passes and is never changed;
+/// - the directory, through the held handle: absent → `mkdirat` 0700; an
+///   existing one (or one a concurrent creator made: EEXIST) must be a
+///   directory, not a link, ours, with no group/other bits. Anything else
+///   REFUSES with the reason; nothing is chmodded, chowned or removed.
+///
+/// Verified on every call; the answer is never cached.
+pub(crate) fn ensure_socket_dir(socket: &str) -> Result<(), String> {
+    use crate::safe_fs::{self, Dir};
+    use std::os::unix::fs::MetadataExt;
+    let path = std::path::Path::new(socket);
+    if !path.is_absolute() {
+        return Err("the socket path is relative".into());
+    }
+    let dir = path.parent().filter(|p| !p.as_os_str().is_empty()).ok_or("the socket path has no directory")?;
+    let name = dir.file_name().and_then(|n| n.to_str()).filter(|n| safe_fs::plain_name(n)).ok_or("the socket directory has no plain name")?;
+    let above = dir.parent().filter(|p| !p.as_os_str().is_empty()).ok_or("the socket directory has no parent")?;
+    let canonical = match std::fs::canonicalize(above) {
+        Ok(c) => c,
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Err(format!("its parent {} does not exist", above.display())),
+        Err(e) => return Err(format!("{}: {e}", above.display())),
+    };
+    let held = Dir::open(&canonical).map_err(|e| format!("{}: {e}", canonical.display()))?;
+    let me = safe_fs::euid();
+    let st = held.stat().map_err(|e| format!("{}: {e}", canonical.display()))?;
+    if !safe_fs::is_dir(&st) || !safe_fs::trusted(st.st_uid, st.st_mode as u32, me, false) {
+        return Err(format!("{} can be changed by another user", canonical.display()));
+    }
+    for a in canonical.ancestors().skip(1) {
+        let m = std::fs::metadata(a).map_err(|e| format!("{}: {e}", a.display()))?;
+        if !safe_fs::trusted(m.uid(), m.mode(), me, false) {
+            return Err(format!("{} can be changed by another user", a.display()));
+        }
+    }
+    #[cfg(test)]
+    let owner = SOCKET_DIR_OWNER.lock().unwrap().unwrap_or(me);
+    #[cfg(not(test))]
+    let owner = me;
+    let link = |st: &libc::stat| st.st_mode & libc::S_IFMT == libc::S_IFLNK;
+    match held.stat_at(name).map_err(|e| e.to_string())? {
+        None => {
+            #[cfg(test)]
+            if let Some(f) = BEFORE_SOCKET_MKDIR.lock().unwrap().as_mut() {
+                f(dir);
+            }
+            match held.mkdir(name, 0o700) {
+                Err(e) if e.raw_os_error() != Some(libc::EEXIST) => return Err(format!("cannot create it: {e}")),
+                _ => {}
+            }
+        }
+        Some(st) if link(&st) => return Err("it is a link".into()),
+        Some(st) if !safe_fs::is_dir(&st) => return Err("it is not a directory".into()),
+        Some(_) => {}
+    }
+    let opened = held.open_dir(name).map_err(|e| match e.raw_os_error() {
+        Some(libc::ELOOP) => "it is a link".to_string(),
+        Some(libc::ENOTDIR) => "it is not a directory".to_string(),
+        _ => e.to_string(),
+    })?;
+    let st = opened.stat().map_err(|e| e.to_string())?;
+    if !safe_fs::is_dir(&st) {
+        return Err("it is not a directory".into());
+    }
+    if st.st_uid != owner {
+        return Err(format!("it belongs to uid {}, not this user", st.st_uid));
+    }
+    if st.st_mode & 0o077 != 0 {
+        return Err(format!("its mode is {:o}; other users can reach it (tmux's own is 700)", st.st_mode & 0o7777));
+    }
+    Ok(())
 }
 
 /// Where a bare `tmux` (no `-S`, no `-L`) would go from this process: the
@@ -1942,6 +2055,156 @@ pub(crate) mod test_support {
             drop(self.server.take());
             self.guard.set(self.previous.take());
         }
+    }
+}
+
+#[cfg(test)]
+mod socket_dir_tests {
+    //! Board #508: `ensure_socket_dir` and tmux's socket diagnostic. No tmux
+    //! is run here; every directory is a private scratch one.
+    use super::*;
+    use std::os::unix::fs::PermissionsExt;
+    use std::path::{Path, PathBuf};
+
+    fn mode(p: &Path) -> u32 {
+        std::fs::symlink_metadata(p).unwrap().permissions().mode() & 0o7777
+    }
+
+    /// `<scratch>/sockdir/tmm.sock` with `<scratch>` made 0700, `sockdir` absent.
+    fn fixture(tag: &str) -> (PathBuf, PathBuf, String) {
+        let grand = crate::config::test_scratch(&format!("tmm-sockdir-{tag}"));
+        std::fs::create_dir_all(&grand).unwrap();
+        std::fs::set_permissions(&grand, std::fs::Permissions::from_mode(0o700)).unwrap();
+        let dir = grand.join("sockdir");
+        let socket = dir.join("tmm.sock").to_string_lossy().to_string();
+        (grand, dir, socket)
+    }
+
+    fn with_umask<T>(m: libc::mode_t, f: impl FnOnce() -> T) -> T {
+        let old = unsafe { libc::umask(m) };
+        let r = f();
+        unsafe { libc::umask(old) };
+        r
+    }
+
+    #[test]
+    fn a_missing_socket_dir_is_made_private_and_verified_again_at_every_call() {
+        let (grand, dir, socket) = fixture("make");
+        assert!(!dir.exists());
+        with_umask(0o022, || ensure_socket_dir(&socket)).unwrap();
+        assert!(std::fs::symlink_metadata(&dir).unwrap().is_dir());
+        assert_eq!(mode(&dir), 0o700);
+        assert_eq!(mode(&grand), 0o700, "the parent above is never changed");
+        ensure_socket_dir(&socket).unwrap();
+        // Verified again, never remembered: the same path made wide is refused now.
+        std::fs::set_permissions(&dir, std::fs::Permissions::from_mode(0o755)).unwrap();
+        assert!(ensure_socket_dir(&socket).is_err());
+        std::fs::remove_dir_all(&grand).ok();
+    }
+
+    #[test]
+    fn an_existing_socket_dir_that_is_not_private_is_refused_and_left_as_it_is() {
+        // 0755: refused, mode unchanged.
+        let (grand, dir, socket) = fixture("wide");
+        std::fs::create_dir(&dir).unwrap();
+        std::fs::set_permissions(&dir, std::fs::Permissions::from_mode(0o755)).unwrap();
+        let e = ensure_socket_dir(&socket).unwrap_err();
+        assert_eq!(e, "its mode is 755; other users can reach it (tmux's own is 700)");
+        assert_eq!(mode(&dir), 0o755);
+        std::fs::remove_dir_all(&grand).ok();
+
+        // A link to a private directory of ours: refused, link and target unchanged.
+        let (grand, dir, socket) = fixture("link");
+        let target = grand.join("real");
+        std::fs::create_dir(&target).unwrap();
+        std::fs::set_permissions(&target, std::fs::Permissions::from_mode(0o700)).unwrap();
+        std::os::unix::fs::symlink(&target, &dir).unwrap();
+        assert_eq!(ensure_socket_dir(&socket).unwrap_err(), "it is a link");
+        assert_eq!(std::fs::read_link(&dir).unwrap(), target);
+        assert_eq!((mode(&target), std::fs::read_dir(&target).unwrap().count()), (0o700, 0));
+        std::fs::remove_dir_all(&grand).ok();
+
+        // A regular file: refused, content unchanged.
+        let (grand, dir, socket) = fixture("file");
+        std::fs::write(&dir, "not a dir").unwrap();
+        std::fs::set_permissions(&dir, std::fs::Permissions::from_mode(0o600)).unwrap();
+        assert_eq!(ensure_socket_dir(&socket).unwrap_err(), "it is not a directory");
+        assert_eq!((std::fs::read_to_string(&dir).unwrap().as_str(), mode(&dir)), ("not a dir", 0o600));
+        std::fs::remove_dir_all(&grand).ok();
+
+        // Another owner (the seam stands in for a chown we cannot do): refused, unchanged.
+        let (grand, dir, socket) = fixture("owner");
+        std::fs::create_dir(&dir).unwrap();
+        std::fs::set_permissions(&dir, std::fs::Permissions::from_mode(0o700)).unwrap();
+        let other = crate::safe_fs::euid() + 1;
+        *SOCKET_DIR_OWNER.lock().unwrap() = Some(other);
+        let r = ensure_socket_dir(&socket);
+        *SOCKET_DIR_OWNER.lock().unwrap() = None;
+        assert_eq!(r.unwrap_err(), format!("it belongs to uid {}, not this user", crate::safe_fs::euid()));
+        assert_eq!(mode(&dir), 0o700);
+        ensure_socket_dir(&socket).unwrap();
+        std::fs::remove_dir_all(&grand).ok();
+    }
+
+    #[test]
+    fn a_missing_grandparent_or_a_relative_socket_is_refused_and_nothing_is_made() {
+        let (grand, _, _) = fixture("grand");
+        let missing = grand.join("gone");
+        let socket = missing.join("sockdir/tmm.sock").to_string_lossy().to_string();
+        assert_eq!(ensure_socket_dir(&socket).unwrap_err(), format!("its parent {} does not exist", missing.display()));
+        assert!(!missing.exists(), "nothing was created");
+        // A relative path whose parent exists (the test's working directory):
+        // refused before anything is resolved.
+        let name = format!("tmm-rel-{}", &uuid::Uuid::new_v4().simple().to_string()[..12]);
+        let rel = format!("./{name}/tmm.sock");
+        let made = std::env::current_dir().unwrap().join(&name);
+        let r = ensure_socket_dir(&rel);
+        let created = made.exists();
+        std::fs::remove_dir(&made).ok();
+        assert_eq!(r.unwrap_err(), "the socket path is relative");
+        assert!(!created, "nothing was created under the working directory");
+        std::fs::remove_dir_all(&grand).ok();
+    }
+
+    #[test]
+    fn a_dir_a_concurrent_creator_made_first_is_verified_not_assumed() {
+        for (m, ok) in [(0o700, true), (0o755, false)] {
+            let (grand, dir, socket) = fixture("race");
+            *BEFORE_SOCKET_MKDIR.lock().unwrap() = Some(Box::new(move |d: &Path| {
+                std::fs::create_dir(d).unwrap();
+                std::fs::set_permissions(d, std::fs::Permissions::from_mode(m)).unwrap();
+            }));
+            let r = ensure_socket_dir(&socket);
+            *BEFORE_SOCKET_MKDIR.lock().unwrap() = None;
+            assert_eq!(r.is_ok(), ok, "mode {m:o}: {r:?}");
+            assert_eq!(mode(&dir), m, "left as the other creator made it");
+            std::fs::remove_dir_all(&grand).ok();
+        }
+    }
+
+    #[test]
+    fn only_tmuxs_exact_socket_diagnostic_for_this_socket_is_classified() {
+        let s = "/tmp/tmux-1000/default";
+        let enoent = Some("No such file or directory".to_string());
+        assert_eq!(socket_create_error("error creating /tmp/tmux-1000/default (No such file or directory)\n", s), enoent);
+        assert_eq!(socket_create_error("  error creating /tmp/tmux-1000/default (Permission denied)  ", s), Some("Permission denied".into()));
+        for other in [
+            "",
+            "error creating /tmp/tmux-1000/other (No such file or directory)",
+            "error creating /tmp/tmux-1000/default (No such file or directory)\nsomething else",
+            "warning\nerror creating /tmp/tmux-1000/default (No such file or directory)",
+            "error creating /tmp/tmux-1000/default (No such file or directory) trailing",
+            "error creating /tmp/tmux-1000/default (a (b) c)",
+            "error creating /tmp/tmux-1000/default ()",
+            "error creating /tmp/tmux-1000/defaultX (No such file or directory)",
+            "no server running on /tmp/tmux-1000/default",
+        ] {
+            assert_eq!(socket_create_error(other, s), None, "{other:?}");
+        }
+        let long = format!("error creating {s} ({})", "x".repeat(121));
+        assert_eq!(socket_create_error(&long, s), None);
+        let edge = format!("error creating {s} ({})", "x".repeat(120));
+        assert_eq!(socket_create_error(&edge, s), Some("x".repeat(120)));
     }
 }
 

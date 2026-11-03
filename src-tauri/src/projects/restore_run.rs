@@ -1308,7 +1308,26 @@ fn step_project(b: &mut Batch, pi: usize) -> Result<(), String> {
 
 /// The claim: ONE `new-session` that makes the session with our batch in
 /// its environment and the holder as its first window.
+///
+/// First, tmux's socket directory (board #508): with an explicit `-S`
+/// tmux does not create it, and after a reboot that wiped /tmp it is gone.
+/// Made or verified HERE, at every claim, and nowhere else: only a project
+/// past the lease, the gates and its block re-read is about to start a
+/// server. A directory that cannot be made or trusted fails the project and
+/// tmux is not run.
+///
+/// Then the ONE `new-session`, its whole answer kept, read in this order:
+/// a valid receipt on stdout is today's path (stderr ignored); without one
+/// the session is read back (`takeover`): ours is adopted, another's
+/// skipped, an unreadable answer stays indeterminate; only when it is ABSENT
+/// and stderr is exactly tmux's own "error creating <this socket> (…)" line
+/// is the reason that one; anything else stays "indeterminate: new-session".
+/// No branch re-issues the create or says it never happened.
 fn claim(b: &mut Batch, pi: usize) -> Result<(), String> {
+    if let Err(why) = tmux::ensure_socket_dir(&b.socket) {
+        let dir = std::path::Path::new(&b.socket).parent().map(|d| d.display().to_string()).unwrap_or_default();
+        return set_project(b, pi, ProjectState::Failed, Some(format!("cannot prepare tmux's socket directory {dir}: {why}")), None);
+    }
     set_project(b, pi, ProjectState::CreatingSession, None, Some(BatchOp::Claim))?;
     let p = b.projects[pi].clone();
     let step = Step { op: "claim", project: p.id.clone(), ord: None };
@@ -1316,14 +1335,22 @@ fn claim(b: &mut Batch, pi: usize) -> Result<(), String> {
     halt_check(m)?;
     let env = format!("TMM_RESTORE_BATCH={}", b.batch);
     let holder = holder_name(&b.batch);
-    let out = tmux::run_tmux_on(
-        Some(&b.socket),
-        &["new-session", "-d", "-s", &p.session, "-c", &p.path, "-e", &env, "-n", &holder, "-P", "-F", &format!("#{{pid}}{SEP}#{{start_time}}{SEP}#{{socket_path}}{SEP}#{{session_id}}{SEP}#{{window_id}}")],
-    );
+    let args = ["new-session", "-d", "-s", &p.session, "-c", &p.path, "-e", &env, "-n", &holder, "-P", "-F", &format!("#{{pid}}{SEP}#{{start_time}}{SEP}#{{socket_path}}{SEP}#{{session_id}}{SEP}#{{window_id}}")];
+    let raw = claim_raw(&b.socket, &args);
     if m == Mangle::RunThenHalt {
         return Err(HALTED.into());
     }
-    let out = if m == Mangle::DropReceipt { Err("the answer was lost".to_string()) } else { out };
+    // tmux's own diagnostic for THIS socket, kept for the Absent read-back only.
+    let socket_error = match &raw {
+        Ok(o) => tmux::socket_create_error(&String::from_utf8_lossy(&o.stderr), &b.socket),
+        Err(_) => None,
+    };
+    let out = match raw {
+        Ok(o) if o.status.success() => Ok(String::from_utf8_lossy(&o.stdout).to_string()),
+        Ok(o) => Err(format!("tmux error: {}", String::from_utf8_lossy(&o.stderr))),
+        Err(e) => Err(format!("Failed to run tmux: {e}")),
+    };
+    let (out, socket_error) = if m == Mangle::DropReceipt { (Err("the answer was lost".to_string()), None) } else { (out, socket_error) };
     match out {
         Ok(line) => {
             let f: Vec<&str> = line.trim_end_matches('\n').split(SEP).collect();
@@ -1339,15 +1366,35 @@ fn claim(b: &mut Batch, pi: usize) -> Result<(), String> {
                     return tag_session(b, pi);
                 }
             }
-            takeover(b, pi)
+            takeover_after(b, pi, socket_error)
         }
         Err(e) if e.contains("duplicate session") => match observe_session(&b.socket, &p.session, &b.batch) {
             SessionSeen::Ours { .. } => takeover(b, pi),
             SessionSeen::Unknown(e) => set_project(b, pi, ProjectState::CreatingSession, Some(format!("indeterminate: {e}")), Some(BatchOp::Claim)),
             _ => set_project(b, pi, ProjectState::Skipped, Some("session exists".into()), None),
         },
-        Err(_) => takeover(b, pi),
+        Err(_) => takeover_after(b, pi, socket_error),
     }
+}
+
+/// Test seams on the claim's one `new-session`: the sockets it ran on, and
+/// an answer to use instead of tmux's (the fake may run tmux itself).
+#[cfg(test)]
+pub(crate) static CLAIM_RAN: std::sync::Mutex<Vec<String>> = std::sync::Mutex::new(Vec::new());
+#[cfg(test)]
+pub(crate) type ClaimFake = Box<dyn FnMut(&str, &[&str]) -> std::io::Result<std::process::Output> + Send>;
+#[cfg(test)]
+pub(crate) static CLAIM_FAKE: std::sync::Mutex<Option<ClaimFake>> = std::sync::Mutex::new(None);
+
+fn claim_raw(socket: &str, args: &[&str]) -> std::io::Result<std::process::Output> {
+    #[cfg(test)]
+    {
+        CLAIM_RAN.lock().unwrap().push(socket.to_string());
+        if let Some(f) = CLAIM_FAKE.lock().unwrap().as_mut() {
+            return f(socket, args);
+        }
+    }
+    tmux::run_tmux_raw(Some(socket), args)
 }
 
 /// Record the batch's server on its first creation, or check it; `false`
@@ -1371,6 +1418,13 @@ fn adopt_instance(b: &mut Batch, inst: &TmuxInstance) -> Result<bool, String> {
 /// only when the session carries our FULL batch in its environment, read in
 /// the same connection as the server identity, in the batch's own boot.
 fn takeover(b: &mut Batch, pi: usize) -> Result<(), String> {
+    takeover_after(b, pi, None)
+}
+
+/// `takeover`, with tmux's exact "could not create its socket" diagnostic
+/// from the claim's own answer, when there was one: it names the reason of
+/// an ABSENT read-back only, and changes no other branch.
+fn takeover_after(b: &mut Batch, pi: usize, socket_error: Option<String>) -> Result<(), String> {
     let p = b.projects[pi].clone();
     match observe_session(&b.socket, &p.session, &b.batch) {
         // The batch is this boot's: `run` continues an open batch only when
@@ -1391,7 +1445,13 @@ fn takeover(b: &mut Batch, pi: usize) -> Result<(), String> {
             p.holder_id = holder_id;
             tag_session(b, pi)
         }
-        SessionSeen::Absent => set_project(b, pi, ProjectState::Failed, Some("indeterminate: new-session".into()), None),
+        SessionSeen::Absent => {
+            let why = match socket_error {
+                Some(errno) => format!("tmux could not create its socket ({errno})"),
+                None => "indeterminate: new-session".into(),
+            };
+            set_project(b, pi, ProjectState::Failed, Some(why), None)
+        }
         SessionSeen::NotOurs => set_project(b, pi, ProjectState::Skipped, Some("session exists".into()), None),
         SessionSeen::Unknown(e) => set_project(b, pi, ProjectState::CreatingSession, Some(format!("indeterminate: {e}")), Some(BatchOp::Claim)),
     }
@@ -2287,6 +2347,12 @@ mod tests {
 
     fn publish(socket: &str, projects: &[&Proj]) {
         fast_shell(socket);
+        publish_cold(socket, projects);
+    }
+
+    /// `publish` without starting the server: the evidence of the boot
+    /// before, with nothing running on the socket (board #508's cold boot).
+    fn publish_cold(socket: &str, projects: &[&Proj]) {
         *super::super::restore::TICK_BOOT.lock().unwrap() = Some("boot-after".into());
         // This boot is decided, as a gateway start's prepare would have it,
         // so the test's own capture ticks commit; a test of the undecided
@@ -6165,5 +6231,364 @@ mod tests {
         assert_eq!((lines_with(&room, &id0), lines_with(&room, &id1)), (1, 1));
         let page = super::super::rooms::history_page(&room, None, 200).to_string();
         assert!(page.contains("restored by `tmm project restore` (attempt 1): 2 windows created"), "{page}");
+    }
+
+    // ---- board #508: a cold boot (no socket directory, no server) --------
+
+    /// A socket of its own whose directory does NOT exist yet:
+    /// `<scratch>/sockdir/tmm-test-<tag>.sock` under a 0700 scratch dir (the
+    /// prefix under the temp dir makes it a private test server's, so the
+    /// drop may kill it by its socket).
+    struct ColdSocket {
+        grand: PathBuf,
+        dir: PathBuf,
+        socket: String,
+    }
+
+    impl ColdSocket {
+        fn new(tag: &str) -> Self {
+            use std::os::unix::fs::PermissionsExt;
+            let grand = crate::config::test_scratch(&format!("cold-{tag}"));
+            std::fs::create_dir_all(&grand).unwrap();
+            std::fs::set_permissions(&grand, std::fs::Permissions::from_mode(0o700)).unwrap();
+            let dir = grand.join("sockdir");
+            let socket = dir.join(format!("{}{tag}.sock", crate::tmux::test_support::PRIVATE_PREFIX)).to_string_lossy().to_string();
+            ColdSocket { grand, dir, socket }
+        }
+
+        fn absent(&self) -> bool {
+            std::fs::symlink_metadata(&self.dir).is_err()
+        }
+    }
+
+    impl Drop for ColdSocket {
+        fn drop(&mut self) {
+            use std::os::unix::fs::PermissionsExt;
+            if std::fs::symlink_metadata(&self.dir).is_ok_and(|m| m.is_dir()) {
+                let _ = std::fs::set_permissions(&self.dir, std::fs::Permissions::from_mode(0o700));
+            }
+            let _ = crate::tmux::test_support::destroy_private_server(&self.socket);
+            let _ = std::fs::remove_dir_all(&self.grand);
+        }
+    }
+
+    fn dir_mode(p: &Path) -> u32 {
+        use std::os::unix::fs::PermissionsExt;
+        std::fs::symlink_metadata(p).unwrap().permissions().mode() & 0o7777
+    }
+
+    fn names_on(socket: &str, session: &str) -> Vec<String> {
+        let out = tmux::run_tmux_on(Some(socket), &["list-windows", "-t", &format!("={session}:"), "-F", "#{window_name}"]).unwrap_or_default();
+        let mut v: Vec<String> = out.lines().map(str::to_string).collect();
+        v.sort();
+        v
+    }
+
+    /// How many times the claim's `new-session` ran on `socket`.
+    fn claim_ran(socket: &str) -> usize {
+        CLAIM_RAN.lock().unwrap().iter().filter(|s| *s == socket).count()
+    }
+
+    /// Run until the first project step, so the batch is planned and open
+    /// and nothing of the project has been done.
+    fn plan_only(socket: &str, p: &Proj) {
+        set_hook(Some(once(&p.id, "project", None, Mangle::HaltBefore)));
+        let r = run(&inputs(socket));
+        set_hook(None);
+        assert!(matches!(r, Ok(RunOutcome::Ran { closed: None, .. })), "{:?}", r.map(|_| ()));
+    }
+
+    /// The gate row: after a reboot that wiped a tmpfs /tmp, the socket's
+    /// directory and the server are both gone. The restore makes the
+    /// directory (0700) and brings everything back. Red without
+    /// `ensure_socket_dir`: tmux 3.6a exits 0 on the missing directory.
+    #[test]
+    fn a_cold_boot_with_no_socket_dir_and_no_server_restores_every_window() {
+        use_test_store();
+        let scope = GlobalSocket::hold();
+        let cold = ColdSocket::new("cold");
+        scope.set(Some(cold.socket.clone()));
+        assert!(cold.absent(), "the socket's directory does not exist");
+        assert_eq!(restore::tmux_now_on(Some(&cold.socket)), restore::TmuxNow::Absent, "no server");
+        let p = declare("cold", vec![agent_slot("dev"), shell_slot("sh1")]);
+        publish_cold(&cold.socket, &[&p]);
+        let got = run(&inputs(&cold.socket)).unwrap();
+        let state = project_state(&cold.socket, &p.id);
+        assert_eq!(state.0, ProjectState::Done, "{state:?}");
+        assert_eq!(got, RunOutcome::Ran { batch: batch_of(&cold.socket).batch, closed: Some("done".into()) });
+        assert_eq!(names_on(&cold.socket, &p.session), ["dev", "sh1"]);
+        assert_eq!(wait_starts(&p, "dev", 1), 1);
+        assert_eq!(dir_mode(&cold.dir), 0o700);
+        assert_eq!(claim_ran(&cold.socket), 1, "one new-session");
+    }
+
+    /// Off, an unknown boot, another owner: nothing is created.
+    #[test]
+    fn no_socket_dir_is_made_when_restore_is_off_the_boot_is_unknown_or_another_owner_holds_it() {
+        use_test_store();
+        let scope = GlobalSocket::hold();
+        let cold = ColdSocket::new("gates");
+        scope.set(Some(cold.socket.clone()));
+        let p = declare("gates", vec![shell_slot("sh1")]);
+        publish_cold(&cold.socket, &[&p]);
+        let off = RunInputs { enabled: false, ..inputs(&cold.socket) };
+        assert_eq!(run(&off).unwrap(), RunOutcome::Nothing("restore on start is off".into()));
+        assert!(cold.absent(), "off");
+        let unknown = RunInputs { boot_now: None, ..inputs(&cold.socket) };
+        assert_eq!(run(&unknown).unwrap(), RunOutcome::Nothing("the host's boot identity is unknown".into()));
+        assert!(cold.absent(), "unknown boot");
+        let held = OwnerLock::try_acquire().unwrap().expect("the lock is free");
+        assert_eq!(run(&inputs(&cold.socket)).unwrap(), RunOutcome::Busy);
+        assert!(cold.absent(), "busy");
+        drop(held);
+        assert_eq!(claim_ran(&cold.socket), 0);
+        // Control: past every gate, the claim makes it.
+        run(&inputs(&cold.socket)).unwrap();
+        assert_eq!(dir_mode(&cold.dir), 0o700);
+        assert_eq!(names_on(&cold.socket, &p.session), ["sh1"]);
+    }
+
+    /// A project its block skips, and one already past its claim (a
+    /// successor re-observes and never creates): nothing is created.
+    #[test]
+    fn no_socket_dir_is_made_for_a_project_its_block_skips_or_one_past_its_claim() {
+        use_test_store();
+        let scope = GlobalSocket::hold();
+        let cold = ColdSocket::new("block");
+        scope.set(Some(cold.socket.clone()));
+        let p = declare("block", vec![shell_slot("sh1")]);
+        publish_cold(&cold.socket, &[&p]);
+        plan_only(&cold.socket, &p);
+        std::fs::remove_dir_all(&p.ws).unwrap();
+        run(&inputs(&cold.socket)).unwrap();
+        assert_eq!(project_state(&cold.socket, &p.id), (ProjectState::Skipped, Some("the project's directory is gone".into())));
+        assert!(cold.absent(), "skipped by its block");
+        assert_eq!(claim_ran(&cold.socket), 0);
+
+        let past = ColdSocket::new("past");
+        scope.set(Some(past.socket.clone()));
+        let q = declare("past", vec![shell_slot("sh1")]);
+        publish_cold(&past.socket, &[&q]);
+        plan_only(&past.socket, &q);
+        let mut b = with_store(|s| s.restore_batch(&past.socket)).unwrap().expect("open");
+        (b.projects[0].state, b.projects[0].op) = (ProjectState::CreatingSession, Some(BatchOp::Claim));
+        with_store(|s| s.save_batch(&mut b)).unwrap();
+        run(&inputs(&past.socket)).unwrap();
+        assert_eq!(project_state(&past.socket, &q.id), (ProjectState::Failed, Some("indeterminate: new-session".into())));
+        assert!(past.absent(), "past its claim");
+        assert_eq!(claim_ran(&past.socket), 0);
+    }
+
+    /// An existing directory that is not a private directory of ours (wide,
+    /// a link, a file, another owner) or a missing grandparent: the project
+    /// fails with the reason, the object is unchanged, tmux never runs.
+    #[test]
+    fn a_socket_dir_that_cannot_be_trusted_fails_the_project_unchanged_and_tmux_never_runs() {
+        use std::os::unix::fs::PermissionsExt;
+        use_test_store();
+        let scope = GlobalSocket::hold();
+        let me = crate::safe_fs::euid();
+        for case in ["wide", "link", "file", "owner", "grandparent"] {
+            let cold = ColdSocket::new(case);
+            let socket = if case == "grandparent" {
+                cold.grand.join("gone/sockdir").join(format!("{}gp.sock", crate::tmux::test_support::PRIVATE_PREFIX)).to_string_lossy().to_string()
+            } else {
+                cold.socket.clone()
+            };
+            scope.set(Some(socket.clone()));
+            let p = declare(case, vec![shell_slot("sh1")]);
+            publish_cold(&socket, &[&p]);
+            plan_only(&socket, &p);
+            let target = cold.grand.join("real");
+            let reason = match case {
+                "wide" => {
+                    std::fs::create_dir(&cold.dir).unwrap();
+                    std::fs::set_permissions(&cold.dir, std::fs::Permissions::from_mode(0o755)).unwrap();
+                    "its mode is 755; other users can reach it (tmux's own is 700)".to_string()
+                }
+                "link" => {
+                    std::fs::create_dir(&target).unwrap();
+                    std::fs::set_permissions(&target, std::fs::Permissions::from_mode(0o700)).unwrap();
+                    std::os::unix::fs::symlink(&target, &cold.dir).unwrap();
+                    "it is a link".to_string()
+                }
+                "file" => {
+                    std::fs::write(&cold.dir, "not a dir").unwrap();
+                    "it is not a directory".to_string()
+                }
+                "owner" => {
+                    std::fs::create_dir(&cold.dir).unwrap();
+                    std::fs::set_permissions(&cold.dir, std::fs::Permissions::from_mode(0o700)).unwrap();
+                    *tmux::SOCKET_DIR_OWNER.lock().unwrap() = Some(me + 1);
+                    format!("it belongs to uid {me}, not this user")
+                }
+                _ => format!("its parent {} does not exist", cold.grand.join("gone").display()),
+            };
+            let r = run(&inputs(&socket));
+            *tmux::SOCKET_DIR_OWNER.lock().unwrap() = None;
+            r.unwrap();
+            let dir = Path::new(&socket).parent().unwrap();
+            assert_eq!(project_state(&socket, &p.id), (ProjectState::Failed, Some(format!("cannot prepare tmux's socket directory {}: {reason}", dir.display()))), "{case}");
+            assert_eq!(claim_ran(&socket), 0, "{case}: tmux was not run");
+            assert!(std::fs::symlink_metadata(&socket).is_err(), "{case}: no socket");
+            match case {
+                "wide" => assert_eq!(dir_mode(&cold.dir), 0o755),
+                "link" => {
+                    assert_eq!(std::fs::read_link(&cold.dir).unwrap(), target);
+                    assert_eq!((dir_mode(&target), std::fs::read_dir(&target).unwrap().count()), (0o700, 0));
+                }
+                "file" => assert_eq!(std::fs::read_to_string(&cold.dir).unwrap(), "not a dir"),
+                "owner" => assert_eq!(dir_mode(&cold.dir), 0o700),
+                _ => assert!(!cold.grand.join("gone").exists(), "nothing was created"),
+            }
+        }
+    }
+
+    /// A custom socket's directory is made where it is declared; the default
+    /// directories (the host's /tmp one and this process's implicit one) are
+    /// the same before and after.
+    #[test]
+    fn a_custom_socket_dir_is_made_where_declared_and_the_default_ones_are_untouched() {
+        use std::os::unix::fs::MetadataExt;
+        use_test_store();
+        let scope = GlobalSocket::hold();
+        // SAFETY: getuid has no preconditions.
+        let defaults = [PathBuf::from(format!("/tmp/tmux-{}", unsafe { libc::getuid() })), tmux::implicit_socket().parent().unwrap().to_path_buf()];
+        let seen = || defaults.iter().map(|d| std::fs::symlink_metadata(d).ok().map(|m| (m.ino(), m.mode()))).collect::<Vec<_>>();
+        let before = seen();
+        let cold = ColdSocket::new("custom");
+        scope.set(Some(cold.socket.clone()));
+        let p = declare("custom", vec![shell_slot("sh1")]);
+        publish_cold(&cold.socket, &[&p]);
+        run(&inputs(&cold.socket)).unwrap();
+        assert_eq!(names_on(&cold.socket, &p.session), ["sh1"]);
+        assert_eq!(dir_mode(&cold.dir), 0o700);
+        {
+            use std::os::unix::fs::FileTypeExt;
+            assert!(std::fs::symlink_metadata(&cold.socket).unwrap().file_type().is_socket(), "the server listens where declared");
+        }
+        assert_eq!(seen(), before, "the default directories: {defaults:?}");
+    }
+
+    fn output(code: i32, stdout: Vec<u8>, stderr: String) -> std::process::Output {
+        use std::os::unix::process::ExitStatusExt;
+        std::process::Output { status: std::process::ExitStatus::from_raw(code << 8), stdout, stderr: stderr.into_bytes() }
+    }
+
+    fn set_fake(f: Option<ClaimFake>) {
+        *CLAIM_FAKE.lock().unwrap() = f;
+    }
+
+    fn diagnostic(socket: &str) -> String {
+        format!("error creating {socket} (No such file or directory)\n")
+    }
+
+    /// The claim's one answer, read in order: a valid receipt, then the
+    /// read-back, and only an ABSENT read-back with tmux's exact diagnostic
+    /// for this socket gets that reason. Never a second create. One row
+    /// per test, so each runs alone.
+    fn claim_answer_row(case: &str) {
+        use_test_store();
+        let scope = GlobalSocket::hold();
+        {
+            let server = PrivateTmux::start(&scope, &format!("r508-{case}"));
+            let socket = server.socket().to_string();
+            let p = declare(&format!("m508{}", case.replace('-', "")), vec![shell_slot("sh1")]);
+            publish(&socket, &[&p]);
+            let diag = diagnostic(&socket);
+            let fake: ClaimFake = match case {
+                "absent" => Box::new(move |_: &str, _: &[&str]| Ok(output(0, Vec::new(), diag.clone()))),
+                "other-path" => Box::new(|_: &str, _: &[&str]| Ok(output(0, Vec::new(), "error creating /elsewhere/tmm.sock (No such file or directory)\n".into()))),
+                "extra-line" => Box::new(move |_: &str, _: &[&str]| Ok(output(0, Vec::new(), format!("{diag}one more line\n")))),
+                "ours" => Box::new(move |s: &str, a: &[&str]| {
+                    tmux::run_tmux_raw(Some(s), a)?;
+                    Ok(output(0, Vec::new(), diag.clone()))
+                }),
+                _ => Box::new(move |s: &str, a: &[&str]| {
+                    let real = tmux::run_tmux_raw(Some(s), a)?;
+                    Ok(output(0, real.stdout, diag.clone()))
+                }),
+            };
+            set_fake(Some(fake));
+            let r = run(&inputs(&socket));
+            set_fake(None);
+            r.unwrap();
+            let want = match case {
+                "absent" => (ProjectState::Failed, Some("tmux could not create its socket (No such file or directory)".to_string())),
+                "other-path" | "extra-line" => (ProjectState::Failed, Some("indeterminate: new-session".to_string())),
+                _ => (ProjectState::Done, None),
+            };
+            let got = project_state(&socket, &p.id);
+            assert_eq!(got.0, want.0, "{case}: {got:?}");
+            if want.0 == ProjectState::Failed {
+                assert_eq!(got.1, want.1, "{case}");
+                assert!(names(&server, &p.session).is_empty(), "{case}: nothing made");
+            } else {
+                assert_eq!(names(&server, &p.session), ["sh1"], "{case}: restored");
+            }
+            assert_eq!(claim_ran(&socket), 1, "{case}: one new-session");
+        }
+    }
+
+    #[test]
+    fn claim_answer_exact_diagnostic_and_absent_fails_with_the_reason() {
+        claim_answer_row("absent");
+    }
+
+    #[test]
+    fn claim_answer_diagnostic_for_another_path_stays_indeterminate() {
+        claim_answer_row("other-path");
+    }
+
+    #[test]
+    fn claim_answer_diagnostic_with_an_extra_line_stays_indeterminate() {
+        claim_answer_row("extra-line");
+    }
+
+    #[test]
+    fn claim_answer_exact_diagnostic_with_our_session_read_back_is_adopted() {
+        claim_answer_row("ours");
+    }
+
+    #[test]
+    fn claim_answer_exact_diagnostic_with_a_valid_receipt_takes_the_receipt() {
+        claim_answer_row("receipt");
+    }
+
+    /// The exact diagnostic with a read-back that cannot be judged (the
+    /// directory unreadable: Permission denied) stays indeterminate, op
+    /// Claim; the successor re-observes, never creates, and without that
+    /// answer's diagnostic says "indeterminate", never "not created".
+    #[test]
+    fn an_exact_diagnostic_never_overrides_a_read_back_that_cannot_be_judged() {
+        use std::os::unix::fs::PermissionsExt;
+        use_test_store();
+        let scope = GlobalSocket::hold();
+        let cold = ColdSocket::new("unknown");
+        std::fs::create_dir(&cold.dir).unwrap();
+        std::fs::set_permissions(&cold.dir, std::fs::Permissions::from_mode(0o700)).unwrap();
+        scope.set(Some(cold.socket.clone()));
+        fast_shell(&cold.socket);
+        let p = declare("unknown", vec![shell_slot("sh1")]);
+        publish_cold(&cold.socket, &[&p]);
+        let (dir, diag) = (cold.dir.clone(), diagnostic(&cold.socket));
+        set_fake(Some(Box::new(move |_: &str, _: &[&str]| {
+            std::fs::set_permissions(&dir, std::fs::Permissions::from_mode(0o000)).unwrap();
+            Ok(output(0, Vec::new(), diag.clone()))
+        })));
+        let r = run(&inputs(&cold.socket));
+        set_fake(None);
+        std::fs::set_permissions(&cold.dir, std::fs::Permissions::from_mode(0o700)).unwrap();
+        r.unwrap();
+        let b = batch_of(&cold.socket);
+        let q = b.projects.iter().find(|x| x.id == p.id).unwrap();
+        assert_eq!((q.state, q.op), (ProjectState::CreatingSession, Some(BatchOp::Claim)), "{:?}", q.reason);
+        let why = q.reason.clone().unwrap_or_default();
+        assert!(why.starts_with("indeterminate: ") && why.contains("Permission denied"), "{why}");
+        assert!(b.closed.is_none(), "left open for a successor");
+        run(&inputs(&cold.socket)).unwrap();
+        assert_eq!(project_state(&cold.socket, &p.id), (ProjectState::Failed, Some("indeterminate: new-session".into())));
+        assert_eq!(claim_ran(&cold.socket), 1, "never a second new-session");
+        assert!(names_on(&cold.socket, &p.session).is_empty());
     }
 }

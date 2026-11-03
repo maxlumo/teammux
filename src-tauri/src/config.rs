@@ -321,12 +321,23 @@ pub fn fresh_process_dir(prefix: &str) -> PathBuf {
 /// the temp dir by every run (`tmm-r2-*`, `tmm-review-*`, …), never removed.
 /// The suffix is 12 hex digits, not a full uuid: some of these paths are tmux
 /// SOCKETS, and a Unix socket path is capped at ~108 bytes (a private
-/// `TMPDIR` plus the root plus a full uuid crossed it).
+/// `TMPDIR` plus the root plus a full uuid crossed it). The root is 0700, as
+/// a socket's directory must be for the restore to start tmux there (board
+/// #508: `tmux::ensure_socket_dir` refuses a directory others can reach).
 #[doc(hidden)]
 pub fn test_scratch(name: &str) -> PathBuf {
     static ROOT: std::sync::OnceLock<PathBuf> = std::sync::OnceLock::new();
     let id = uuid::Uuid::new_v4().simple().to_string();
-    ROOT.get_or_init(|| fresh_process_dir("tmm-scratch")).join(format!("{name}-{}", &id[..12]))
+    ROOT.get_or_init(|| {
+        let root = fresh_process_dir("tmm-scratch");
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            std::fs::set_permissions(&root, std::fs::Permissions::from_mode(0o700)).expect("make the per-process scratch root private");
+        }
+        root
+    })
+    .join(format!("{name}-{}", &id[..12]))
 }
 
 /// `kill(pid, 0)`: alive, or alive but not ours (EPERM). Nonsense pids count

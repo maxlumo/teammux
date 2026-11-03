@@ -1436,6 +1436,86 @@ validator's surviving controls (`only_the_exact_markers_classify_and_an_error_is
 are both refused AT the door), `u7_a_refused_window_tag_is_not_redone`,
 `l10_…`, `c4_…`).
 
+### The claim makes tmux's socket directory first; a missing receipt stays unknown (2026-11-04, #508)
+
+The incident: reboot restore brought back NOTHING after both host reboots
+(2026-11-01 03:08, "0 windows created, 7 not finished"; 2026-11-02 18:18,
+"0 windows created, 9 not finished"). Every project failed
+`indeterminate: new-session` and every window stayed pending, until a person
+restarted the projects by hand about 29 hours later. On this host /tmp is a
+tmpfs, so a reboot removes `/tmp/tmux-<uid>/`. The claim runs
+`tmux -S <batch socket> new-session …`. With an EXPLICIT `-S`, tmux does not
+create the socket's directory; it creates `/tmp/tmux-<uid>` only for its own
+default path. On 11-02 the directory's birth time is 18:18:47, 20 s after
+the restore ran (18:18:27); that is consistent with this mechanism, but the
+stderr of the two past failures was not kept, so it does not by itself rule
+out another cause for them.
+
+Measured by kiro in the isolated runner (private /tmp, tmux 3.6a): with the
+directory absent, `tmux -S /tmp/tmux-<uid>/default new-session -d -s probe`
+prints `error creating /tmp/tmux-<uid>/default (No such file or directory)`
+and EXITS 0. With the directory present it works. A bare `tmux new-session`
+creates the directory (0700). So `run_tmux_on` returned an empty "success",
+the `-P -F` receipt did not parse, the read-back found no server (Absent),
+and the project was failed as indeterminate.
+
+The rule:
+- **The directory, in `claim()` only**, as its first step: past the owner
+  lease, the enabled and boot gates and the project's block re-read, for a
+  project about to start a session on the batch's frozen socket.
+  `tmux::ensure_socket_dir(socket)` creates ONLY the socket's direct parent,
+  and only when it is absent, 0700 through a held handle of the grandparent
+  (`mkdirat`). A relative socket refuses, and so does a missing grandparent.
+  The grandparent, canonicalized once (the same alias rule as
+  `safe_fs::trusted_parent`), and every ancestor must pass `safe_fs::trusted`'s
+  ancestor rule, so /tmp (root, 1777) passes and is never changed. An
+  existing directory, or one a concurrent creator made (EEXIST), is verified
+  on its opened handle: a directory, not a link, ours, with no group or other
+  bits. Anything else fails the project with
+  `cannot prepare tmux's socket directory <dir>: <reason>`, nothing is
+  chmodded, chowned or removed, and tmux is not run. It is verified at every
+  claim; nothing remembers that it was good.
+- **The claim's one answer** (`tmux::run_tmux_raw`, the same command
+  `run_tmux_on` builds, which is now a thin wrapper over it) is read in this
+  order: (1) a valid receipt on stdout takes today's path, and stderr is
+  ignored; (2) without one, the session is read back as before: ours is
+  adopted, another's is skipped, an unreadable answer stays
+  `CreatingSession`, indeterminate, op Claim; (3) only an ABSENT read-back
+  whose stderr is, trimmed, exactly ONE line
+  `error creating <batch socket> (<errno text>)` (the path byte-equal, the
+  text at most 120 characters in one pair of parentheses, nothing after)
+  fails as `tmux could not create its socket (<errno text>)`; (4) anything
+  else stays `indeterminate: new-session`. No branch re-issues the create,
+  says that it never happened, or quotes unknown stderr.
+
+Why not a `mkdir` before every `-S` (in `run_tmux_on`): it would make reads
+write. `list`, `status`, the restore's own observation, and a restore that is
+off, of an unknown boot or Busy would create directories. Only the claim
+starts a server on purpose. Why the existing directory is refused, not
+fixed: it may be the person's own; `safe_fs::private_dir` would chmod it.
+Why the diagnostic is read so narrowly: "absent now" does not prove that
+nothing was created (a server that started and died looks the same), so a
+reason is attached only to the one failure tmux names for this socket.
+
+Test fixtures follow from the rule: the per-process scratch root
+(`config::test_scratch`) is 0700, because every private test server's
+socket lives directly in it.
+
+Pinned by `a_cold_boot_with_no_socket_dir_and_no_server_restores_every_window`
+(a real restore from an old-boot checkpoint, the socket's directory and the
+server both absent),
+`no_socket_dir_is_made_when_restore_is_off_the_boot_is_unknown_or_another_owner_holds_it`,
+`no_socket_dir_is_made_for_a_project_its_block_skips_or_one_past_its_claim`,
+`a_socket_dir_that_cannot_be_trusted_fails_the_project_unchanged_and_tmux_never_runs`,
+`a_custom_socket_dir_is_made_where_declared_and_the_default_ones_are_untouched`,
+the `claim_answer_…` rows (the exact diagnostic with an absent read-back,
+with our session read back, with a valid receipt; a diagnostic for another
+path or with an extra line),
+`an_exact_diagnostic_never_overrides_a_read_back_that_cannot_be_judged`
+(restore_run), and `tmux::socket_dir_tests` (made 0700 and verified at every
+call, refusals left unchanged, missing grandparent and relative path, the
+concurrent create, the exact diagnostic's shapes).
+
 ### A fresh pane is typed into only after its shell shows a prompt (2026-10-09, #325)
 
 Every line typed into a pane tmm just created — `up`'s first-window `cd` and
