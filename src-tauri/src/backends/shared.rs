@@ -373,12 +373,22 @@ pub(crate) fn claude_user_env() -> Value {
 
 /// The user's Claude settings file: the ONE path the renderer carries from
 /// and model discovery reads (board #511).
+#[cfg(not(test))]
 pub(crate) fn claude_user_settings() -> PathBuf {
     std::env::var_os("HOME")
         .map(PathBuf::from)
         .unwrap_or_default()
         .join(".claude")
         .join("settings.json")
+}
+
+/// Under test the user's Claude home is a per-process temp dir (the kimi,
+/// grok and codex pattern, board #515): a render or a model list never reads
+/// the developer's real `~/.claude/settings.json`.
+#[cfg(test)]
+pub(crate) fn claude_user_settings() -> PathBuf {
+    static DIR: std::sync::OnceLock<PathBuf> = std::sync::OnceLock::new();
+    DIR.get_or_init(|| crate::config::fresh_process_dir("tmm-claude-user-home")).join(".claude").join("settings.json")
 }
 
 /// Claude Code's official statusLine extension point. The colocated `tmm`
@@ -568,6 +578,17 @@ pub(crate) fn confirm_startup_prompt(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// Board #515: under test the user's Claude settings are a per-process
+    /// temp file, never the developer's `~/.claude/settings.json` (the path
+    /// both the renderer's carry and claude's model discovery read).
+    #[test]
+    fn the_users_claude_settings_are_a_per_process_path_under_test() {
+        let path = claude_user_settings();
+        let home = path.parent().and_then(Path::parent).and_then(|d| d.file_name()).and_then(|d| d.to_str()).unwrap_or_default().to_string();
+        assert_eq!(home, format!("tmm-claude-user-home-{}", std::process::id()), "{}", path.display());
+        assert!(path.ends_with(".claude/settings.json"), "{}", path.display());
+    }
 
     /// The waiter's decision, on kimi's measured screens (board #224): the
     /// trust dialog is accepted once, a lingering dialog after the accept is

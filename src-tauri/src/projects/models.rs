@@ -394,14 +394,15 @@ mod tests {
     }
 
     /// When the CLI IS there, the exact typo class this module exists for must
-    /// be rejected — and the real id it was a typo OF must be accepted.
+    /// be rejected — and the real id it was a typo OF must be accepted. The
+    /// CLI is the stand-in kiro-cli (board #515), so this always runs.
     #[test]
     fn a_one_character_typo_is_rejected_when_the_cli_can_tell_us() {
-        let Some(models) = list("kiro") else {
-            eprintln!("kiro-cli unavailable — validation degrades to accept-all, covered above");
-            return;
-        };
-        assert!(models.iter().any(|m| m == "auto"), "got {models:?}");
+        let models = list("kiro").expect("the stand-in kiro-cli answers; this test never skips");
+        assert_eq!(models, crate::backends::kiro::stand_in_models(), "the list is the stand-in's, not a host CLI's");
+        let cli = crate::backends::kiro::models_cli();
+        let dir = cli.parent().and_then(|d| d.file_name()).and_then(|d| d.to_str()).unwrap_or_default().to_string();
+        assert_eq!(dir, format!("tmm-kiro-cli-{}", std::process::id()), "the program run is the per-process stand-in, never `kiro-cli` on PATH: {}", cli.display());
         let real = models
             .iter()
             .find(|m| m.contains("sonnet"))

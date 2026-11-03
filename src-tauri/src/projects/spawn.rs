@@ -2765,10 +2765,9 @@ hooks = [ { type = "command", command = "/opt/guard.sh" } ]
     /// on its next restart, so it is dropped — the line is still cleaned up.
     #[test]
     fn a_launch_line_model_the_backend_rejects_is_dropped_not_migrated() {
-        if super::super::models::list("kiro").is_none() {
-            eprintln!("kiro-cli unavailable — nothing can be rejected, skipping");
-            return;
-        }
+        // The stand-in kiro-cli (board #515) supplies the list, so the
+        // rejection always has something to reject against; never a skip.
+        assert!(super::super::models::list("kiro").is_some(), "the stand-in kiro-cli answers");
         let ws = crate::config::test_scratch("tmm-modelbad");
         let home = ws.join(".tmm/agents/dev");
         std::fs::create_dir_all(home.join("agents")).unwrap();

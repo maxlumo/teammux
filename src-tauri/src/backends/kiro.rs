@@ -145,6 +145,25 @@ pub(crate) fn effort_values() -> &'static [&'static str] {
     &["low", "medium", "high", "xhigh", "max"]
 }
 
+/// The kiro-cli `model_list` runs: the one on PATH.
+#[cfg(all(not(test), not(any(target_os = "android", target_os = "ios"))))]
+fn models_cli() -> std::path::PathBuf {
+    std::path::PathBuf::from("kiro-cli")
+}
+
+/// Under test, a per-process stand-in with a fixed catalogue (board #515),
+/// written by the `stand_in` module: the host kiro-cli is never run.
+#[cfg(test)]
+pub(crate) fn models_cli() -> std::path::PathBuf {
+    stand_in::cli()
+}
+
+/// The stand-in kiro-cli's catalogue (board #515).
+#[cfg(test)]
+pub(crate) fn stand_in_models() -> &'static [&'static str] {
+    stand_in::MODELS
+}
+
 /// `kiro-cli chat --list-models -f json` enumerates real model ids.
 /// It is the account's WHOLE catalogue (authoritative), so it is read whole
 /// or not at all (board #511): an entry without a string `model_id` makes the
@@ -152,7 +171,7 @@ pub(crate) fn effort_values() -> &'static [&'static str] {
 #[cfg(not(any(target_os = "android", target_os = "ios")))]
 pub(crate) fn model_list() -> Result<(Vec<String>, super::ModelKind), super::ModelReason> {
     use super::ModelReason::CliFailed;
-    let out = std::process::Command::new("kiro-cli")
+    let out = std::process::Command::new(models_cli())
         .args(["chat", "--list-models", "-f", "json"])
         .output()
         .map_err(|_| CliFailed)?;
@@ -1787,6 +1806,32 @@ fn wrapped_turn_line(run: &str) -> bool {
 
 /// The program whose `--version` names the kiro-cli a pane runs.
 pub(crate) const VERSION_PROGRAM: &str = "kiro-cli";
+
+#[cfg(test)]
+mod stand_in {
+    /// The stand-in kiro-cli's catalogue (board #515): `auto` and the ids the
+    /// suite's kiro definitions save.
+    pub(super) const MODELS: &[&str] = &["auto", "claude-sonnet-4.5", "claude-haiku-4.5"];
+
+    /// The stand-in kiro-cli `models_fetch` runs under test (board #515). The
+    /// host kiro-cli is never run: in a bare `cargo test` it wrote the real
+    /// kiro state, and inside the isolated runner it is not on PATH, so the
+    /// tests that need a list skipped and could not fail. It answers only
+    /// `chat --list-models -f json`; anything else exits 2.
+    pub(super) fn cli() -> std::path::PathBuf {
+        static CLI: std::sync::OnceLock<std::path::PathBuf> = std::sync::OnceLock::new();
+        CLI.get_or_init(|| {
+            use std::os::unix::fs::PermissionsExt;
+            let cli = crate::config::fresh_process_dir("tmm-kiro-cli").join("kiro-cli");
+            let catalogue = MODELS.iter().map(|m| format!("{{\"model_id\":\"{m}\"}}")).collect::<Vec<_>>().join(",");
+            std::fs::write(&cli, format!("#!/bin/sh\n[ \"$*\" = 'chat --list-models -f json' ] || exit 2\necho '{{\"models\":[{catalogue}]}}'\n"))
+                .expect("write the stand-in kiro-cli");
+            std::fs::set_permissions(&cli, std::fs::Permissions::from_mode(0o755)).expect("make the stand-in executable");
+            cli
+        })
+        .clone()
+    }
+}
 
 #[cfg(test)]
 mod tests {

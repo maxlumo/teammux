@@ -807,6 +807,23 @@ flaky wall-clock assertions in the test.
   `tmm-root-*` 13, `tmm-handoff-ws-*` 9, `tmm-dl-*` 1), and the host had
   ~2400 `tmm-*` entries. Measure it the same way: run the suite with
   `TMPDIR` set to an empty directory and list what is left.
+- **No suite test runs a host agent CLI or reads the real user's CLI
+  config** (board #515). Where production code asks a CLI or a user file,
+  the `#[cfg(test)]` twin of that door points at a per-process stand-in:
+  `kiro::models_cli()` is a `kiro-cli` written into
+  `fresh_process_dir("tmm-kiro-cli")` that answers only
+  `chat --list-models -f json` with a fixed catalogue (`auto`,
+  `claude-sonnet-4.5`, `claude-haiku-4.5`); `kimi_user_home()`,
+  `grok_user_home()`, `codex_user_home()` and `claude_user_settings()`
+  (`shared.rs`) are per-process temp paths. So a test
+  that needs the CLI's answer RUNS and can fail in every environment,
+  never `return`s early on "CLI unavailable". Before this, two model-list
+  tests ran the host `kiro-cli` in a bare `cargo test` (builder-2, #511:
+  it touches the real kiro state) and skipped silently inside the isolated
+  runner, where no `kiro-cli` is on PATH (kiro, 2026-11-04, main 302bfd8a:
+  both printed "kiro-cli unavailable" and passed). `grok models` has the
+  same shape, but a search of the suite (kiro, 2026-11-04) found no grok
+  definition that saves a model, and an empty model is never validated.
 
 ## Current source-contract inventory
 
