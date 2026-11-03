@@ -791,7 +791,14 @@ slots for a closed one — wrapping in `.side-wins`; the hover card adds the
 live/stopped split. There is no chip cap: the four-chip cap it had hid a
 project's fifth agent behind a hover count, so tmux-mobile's archivist and
 blog's last two members read as absent (owner, 2026-09-28, board #261). Live
-chip states use the window-name keys introduced by #120. Agent detection/icons and conversation-first time
+chip states use the window-name keys introduced by #120. **A chip's identity is
+its name plus its occurrence** (`RowAgent.key`, `0:omp`, `1:omp`), never the
+name alone: tmux auto-names a window after its command, so an adopted session
+running two `omp` windows produced two chips with one name, Svelte threw
+`each_key_duplicate` on load and the whole app stopped responding (owner
+report, 2026-11-03, a live gateway behind CloudFront). The occurrence, not the
+window number, keeps #120's rule that renumbering windows changes nothing.
+Two same-named windows still share one state-map entry. Agent detection/icons and conversation-first time
 still use the shared helpers, not another formatter or backend table.
 `Sidebar.svelte` owns the unchanged aside/scrim/rows/trash markup and private
 styles. It stays mounted with Hub, so its private trash-fold state survives

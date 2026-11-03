@@ -153,7 +153,7 @@
             {#if e.tag}<span class="p-source"><ServerTag name={e.tag} /></span>{/if}
             {#if agents.length}
               <span class="side-wins" class:dim={!row.live}>
-                {#each agents as a (a.name)}
+                {#each agents as a (a.key)}
                   <span class="side-win">
                     {#if a.icon}<img src={a.icon} alt="" width="11" height="11" />{/if}
                     <span class="side-win-name">{a.name}</span>
