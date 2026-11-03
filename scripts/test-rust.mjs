@@ -101,6 +101,15 @@ export function isolatedEnv(base, dir) {
 export function runTestRust({ extra = process.argv.slice(2), spawn = spawnSync, env = process.env, log = console.error } = {}) {
   const dir = mkdtempSync(join(tmpdir(), 'tmm-test-rust-'));
   log(`[test:rust] isolated tmux: TMUX_TMPDIR=${dir}, XDG_{CONFIG,DATA,STATE}_HOME under it (TMUX/TMUX_PANE/TMM_*/TOKEN unset), --test-threads=1`);
+  // The suite's directories must not be group/other-writable, whatever the
+  // caller's umask (2026-11-03): on an Ubuntu host with the user-private-group
+  // umask 002 every test dir was 775, and the store's trust rule
+  // (safe_fs::trusted) refused a state.db under it — 414 of 449 failures in
+  // one run, `Permission denied: … other users can write to it`. The rule is
+  // right for production; the runner gives cargo the umask the suite assumes,
+  // keeping any stricter bits the caller already had.
+  const callerUmask = process.umask(0o022);
+  process.umask(callerUmask | 0o022);
   try {
     const result = spawn('cargo', cargoArgs(extra), { cwd: repoRoot, env: isolatedEnv(env, dir), stdio: 'inherit' });
     if (result.error) {
@@ -117,6 +126,7 @@ export function runTestRust({ extra = process.argv.slice(2), spawn = spawnSync, 
       spawn('tmux', ['-S', socket, 'kill-server'], { stdio: 'ignore' });
     }
     rmSync(dir, { recursive: true, force: true });
+    process.umask(callerUmask);
   }
 }
 

@@ -117,6 +117,26 @@ test('a run creates the dir, hands it to cargo, kills only servers under it by -
   assert.ok(!existsSync(dirSeen), 'the dir is removed afterwards');
 });
 
+test('cargo runs under a umask that writes no group/other bits, and the caller\'s comes back (2026-11-03)', () => {
+  for (const caller of [0o002, 0o077]) {
+    const before = process.umask(caller);
+    let seen = -1;
+    try {
+      runTestRust({
+        extra: [], env: {}, log: () => {},
+        spawn: ((cmd: string) => {
+          if (cmd === 'cargo') seen = process.umask();
+          return { status: 0 };
+        }) as unknown as typeof import('node:child_process').spawnSync,
+      });
+      assert.equal(seen, caller | 0o022, `caller umask ${caller.toString(8)}`);
+      assert.equal(process.umask(), caller, 'the caller\'s umask is restored');
+    } finally {
+      process.umask(before);
+    }
+  }
+});
+
 test('serverSocketsUnder finds tmux-<uid>/<name> sockets only', async () => {
   const { mkdtempSync, mkdirSync, writeFileSync, rmSync } = await import('node:fs');
   const { tmpdir } = await import('node:os');
