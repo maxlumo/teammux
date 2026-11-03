@@ -193,7 +193,12 @@ test('identity, readiness and motion retain their existing authorities', () => {
   assert.doesNotMatch(source, /<span>\{stateLabel\(a\.state\)\}<\/span>|agent-state|stateNeedsYou/u,
     'owner 07:09 retains state wording in accessible/hover facts only');
   assert.match(source, /\{#each groups as group \(group\.key\)\}/u);
-  assert.match(source, /\{#each group\.members as a \(a\.name\)\}/u);
+  // The card's DOM identity is the name plus its occurrence, not the bare
+  // name (board #509): two managed windows tmux named `omp` were two cards
+  // with one key, and each_key_duplicate froze the whole app. Every action on
+  // a card still addresses the agent by name.
+  assert.match(source, /\{#each group\.members as a, i \(group\.keys\[i\]\)\}/u);
+  assert.doesNotMatch(source, /\{#each group\.members as a \(a\.name\)\}/u, 'never the bare name again');
   // Live groups, their cards, stopped teams (#287), and each place a stopped
   // card sits: the each's own child, as svelte requires.
   assert.equal([...source.matchAll(/animate:flip=\{\{ duration: moveMs\(\) \}\}/gu)].length, 5);

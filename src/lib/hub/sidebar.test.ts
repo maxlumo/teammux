@@ -48,6 +48,18 @@ test('renumbering windows does not change name-keyed chip states (#120)', () => 
   assert.equal(after[0]!.state, 'working');
 });
 
+test('two live windows with the same name are two chips with distinct keys', () => {
+  // An adopted session may run two windows tmux auto-named after the same
+  // command (`omp`, `omp`); keying the chips by name alone made Svelte throw
+  // each_key_duplicate and froze the whole sidebar.
+  const panes = [pane('omp', 0, { agent: 'omp' }), pane('omp', 1, { agent: 'omp' }), pane('kiro', 2)];
+  const chips = rowAgents(row, panes, {}, catalog);
+  assert.deepEqual(chips.map((a) => a.name), ['omp', 'omp', 'kiro']);
+  assert.equal(new Set(chips.map((a) => a.key)).size, 3);
+  const renumbered = rowAgents(row, panes.map((p) => ({ ...p, window: p.window + 100 })), {}, catalog);
+  assert.deepEqual(renumbered.map((a) => a.key), chips.map((a) => a.key), 'keys follow names, not window numbers (#120)');
+});
+
 test('closed chips list every declared agent with its backend and no live state (#261)', () => {
   const closed = {
     ...row, live: false,
@@ -57,7 +69,7 @@ test('closed chips list every declared agent with its backend and no live state 
       slot('carol', 3), slot('dave', 4), slot('erin', 5),
     ],
   };
-  assert.deepEqual(rowAgents(closed, live, { 'alpha:alice': 'working' }, catalog), [
+  assert.deepEqual(rowAgents(closed, live, { 'alpha:alice': 'working' }, catalog).map(({ key: _, ...chip }) => chip), [
     { name: 'alice', icon: '/assets/codex.svg', state: '' },
     { name: 'unknown', icon: null, state: '' },
     { name: 'carol', icon: '/assets/kiro.svg', state: '' },

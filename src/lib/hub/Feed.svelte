@@ -959,7 +959,7 @@
                      markdown: arguments are data): the recipients in the
                      mention dialect, the name in the rendered inline-
                      code dialect, the arguments wrapping in full. -->
-                <p>{#each b.command.to as n, k (n)}<span class="m-to" style:--who-ink={agentHue(n)}>@{n}</span>{k < b.command.to.length - 1 ? ' ' : ''}{/each}{b.command.to.length ? ' ' : ''}<code>{b.command.name}</code>{#if b.command.args}{' '}{folded ? cmdFold : b.command.args}{/if}</p>
+                <p>{#each b.command.to as n, k (`${k}-${n}`)}<span class="m-to" style:--who-ink={agentHue(n)}>@{n}</span>{k < b.command.to.length - 1 ? ' ' : ''}{/each}{b.command.to.length ? ' ' : ''}<code>{b.command.name}</code>{#if b.command.args}{' '}{folded ? cmdFold : b.command.args}{/if}</p>
               {:else if parts.text}
                 {#if rawOpen === key}
                   <pre class="raw">{m.body}</pre>

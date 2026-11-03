@@ -248,26 +248,48 @@ export function sortAgentsForRoster(agents: readonly HubAgent[]): HubAgent[] {
     || a.window - b.window);
 }
 
+/** A key for each entry of a list whose names may REPEAT, for a keyed
+ * `{#each}`: the name plus its occurrence (`0:omp`, `1:omp`). tmux names a
+ * window after its command, so a session can hold two windows called `omp`,
+ * and a keyed each over the bare name threw each_key_duplicate and froze the
+ * whole app (owner, 2026-11-03; GitHub PR #2, board #509). The occurrence,
+ * not the window number, so renumbering windows changes no key (#120).
+ * Agent names never contain `:`, so no key equals another name's. It is a
+ * DOM identity only: every action still addresses the agent by name. */
+export function occurrenceKeys(names: readonly string[]): string[] {
+  const seen = new Map<string, number>();
+  return names.map((name) => {
+    const n = seen.get(name) ?? 0;
+    seen.set(name, n + 1);
+    return `${n}:${name}`;
+  });
+}
+
 /** Keep a launched team together without inventing another activity rank.
  * Call with the already sorted (or hover-held) list: the first member fixes
- * the group's position, and members retain their relative recency order. */
-export function rosterGroups(agents: readonly HubAgent[]): { key: string; team: string | null; members: HubAgent[] }[] {
-  const groups: { key: string; team: string | null; members: HubAgent[] }[] = [];
+ * the group's position, and members retain their relative recency order.
+ * `keys` runs parallel to `members` (`occurrenceKeys`, counted over the
+ * whole list): two managed windows with one name are two cards, standalone
+ * or in one team, and each group's key stays distinct (board #509). */
+export function rosterGroups(agents: readonly HubAgent[]): { key: string; team: string | null; members: HubAgent[]; keys: string[] }[] {
+  const groups: { key: string; team: string | null; members: HubAgent[]; keys: string[] }[] = [];
   const teams = new Map<string, (typeof groups)[number]>();
-  for (const agent of agents) {
+  const keys = occurrenceKeys(agents.map((a) => a.name));
+  agents.forEach((agent, i) => {
     const team = teamRoot(agent.team);
     if (!team) {
-      groups.push({ key: `agent:${agent.name}`, team: null, members: [agent] });
-      continue;
+      groups.push({ key: `agent:${keys[i]}`, team: null, members: [agent], keys: [keys[i]!] });
+      return;
     }
     let group = teams.get(team);
     if (!group) {
-      group = { key: `team:${team}`, team, members: [] };
+      group = { key: `team:${team}`, team, members: [], keys: [] };
       teams.set(team, group);
       groups.push(group);
     }
     group.members.push(agent);
-  }
+    group.keys.push(keys[i]!);
+  });
   return groups;
 }
 
@@ -1244,7 +1266,10 @@ export function mentionPalette(text: string, candidates: readonly PaletteItem[])
   const m = /(^|\s)@([\w.-]*)$/u.exec(text ?? '');
   if (!m || !candidates.length) return null;
   const query = m[2]!;
-  const items = fuzzyPick(query, candidates, (c) => c.value).map((c) => ({ value: `@${c.value}`, hint: c.hint }));
+  // An address is offered ONCE (board #509): two managed windows sharing a
+  // name are one `@name`, and the palette is keyed by the value it inserts.
+  const unique = candidates.filter((c, i) => candidates.findIndex((d) => d.value === c.value) === i);
+  const items = fuzzyPick(query, unique, (c) => c.value).map((c) => ({ value: `@${c.value}`, hint: c.hint }));
   if (!items.length) return null;
   // `more`: the accepted mention takes its separating space, like a command.
   return { stage: 'mention', items, from: (text ?? '').length - query.length - 1, more: true };

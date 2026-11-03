@@ -423,7 +423,7 @@
             <span class="team-name">{group.team}</span>
           </button>
         {/if}
-      {#each group.members as a (a.name)}
+      {#each group.members as a, i (group.keys[i])}
         {@const mentioned = extras.includes(a.name) || extras.includes(ALL_TARGET)}
         {@const pending = interrupting.includes(a.name)}
         <!-- Selection and interruption are sibling native targets, never nested buttons. -->

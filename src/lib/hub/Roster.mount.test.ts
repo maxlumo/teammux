@@ -321,3 +321,31 @@ test('the strip resizing mid-drag (expanded, a split pane, the window) cancels i
     assert.deepEqual(moves, [], 'and nothing drops');
   } finally { await app.close(); }
 });
+
+// Board #509 (GitHub PR #2's residual, reviewer P1-A): a project whose
+// declared slot `omp` and a second window tmux also named `omp` are BOTH
+// managed. The keyed {#each} over the cards threw each_key_duplicate and the
+// selected project's Hub froze, standalone and inside one team alike.
+for (const [label, team] of [['standalone', undefined], ['in one team', 'squad']] as const) {
+  test(`two managed agents with one name mount as two cards, ${label} (#509)`, async (context) => {
+    const twins = [
+      { name: 'omp', window: 1, managed: true, agent: 'omp', state: 'idle', since: 20, team },
+      { name: 'omp', window: 4, managed: true, agent: 'omp', state: 'idle', since: 10, team },
+    ];
+    const app = await (await compiled).mount(context, {
+      props: {
+        selected: 'room', roomReady: true, managedAgents: twins, managedNames: ['omp', 'omp'],
+        recipient: 'omp', selectedRow: { project: { path: '/room' }, slots: [] },
+      },
+      modules: [],
+      setup(win) {
+        win.Element.prototype.getAnimations = () => [];
+        win.Element.prototype.animate = function () { return { cancel() {}, finish() {}, onfinish: null, finished: Promise.resolve() } as unknown as Animation; };
+      },
+    });
+    try {
+      const cards = [...app.document.querySelectorAll('.acard[data-agent="omp"]')];
+      assert.equal(cards.length, 2, 'both windows are cards');
+    } finally { await app.close(); }
+  });
+}

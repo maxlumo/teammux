@@ -422,3 +422,21 @@ test('an agent s quoted message still renders in full (#496 scope)', async (cont
     assert.equal(quote.closest('.msg')!.querySelector('.m-unfold'), null);
   } finally { await app.close(); }
 });
+
+// Board #509: a /command typed into two windows that share a name is recorded
+// `[tmm] /compact → omp, omp` (hub_command names each window it typed into).
+// The bubble's recipient list was keyed by the bare name.
+test('a command bubble naming the same window name twice renders both recipients (#509)', async (context) => {
+  const blocks = feedBlocks([{ id: 'c', ts: 100, from: 'human', body: '[tmm] /compact → omp, omp' }], [], 'tools', (n) => n);
+  const app = await (await compiled).mount(context, {
+    props: { selected: 'fixture', roomReady: true, visible: true, blocks, managedNames: ['omp'], stepsRows: 3,
+      agents: [{ name: 'omp', window: 0, managed: true, agent: 'omp', state: 'idle' }, { name: 'omp', window: 1, managed: true, agent: 'omp', state: 'idle' }] },
+    setup(window) { window.Element.prototype.getAnimations = () => []; window.HTMLCanvasElement.prototype.getContext = () => null; },
+    modules: [],
+  });
+  try {
+    for (let i = 0; i < 4; i++) await app.flush();
+    const to = [...app.document.querySelectorAll('.m-to')].map((el) => el.textContent);
+    assert.deepEqual(to, ['@omp', '@omp']);
+  } finally { await app.close(); }
+});

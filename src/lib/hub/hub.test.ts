@@ -6,7 +6,7 @@ import type { FeedBlock } from './hub.ts';
 import { needsPerson, PERSON_DETAILS, wakeLine, localWhen, listWhen, gapWalkStep, TAIL_GAP, bottomGap, tailAfterScroll, uploadImagePath, uploadFilePath, imageId, pastedFiles, textIsThePaste, isSessionStart, STEPS_ROWS, clampStepsRows, markMentions, mergeMessages, stateDotColor, stateIsLive, stateNeedsYou, feedBlocks, systemLine, sysParts, sysVerbColor, pickLead, pickDrawerAgent, addressed, addressedTeam, isSelfReport, toolEventParts, splitImages, isDirectUrl, fmtElapsed, agoShort, unreadSenders, stoppedAgents, toolColor, pickAnchor, elideTail, ELIDE, slashCommand, commandPalette, KIRO_COMMANDS, OFFERED_COMMANDS, DSH_COMMANDS, ctxColor, statusNote, noteStateColor, fuzzyRank, sameDay, draftUpdate, DRAFT_MAX, readlineEdit, squashWs, mentionsAgent, mentionTokens, mentionedAgents, chipExtras, filterBlocks, HUMAN, parseQuote, quotePreview, foldLines, PHONE_FOLD_LINES, mergeStates, mergeEvents , boardLine, boardStatusColor, promptParts, perLineOf, modelLabel, runtimeLabel, agentHue, AGENT_HUES, echoContains, echoTruncated, PROMPT_ECHO_MAX, sentCommand, foldedCommandArgs, inputModeSwitch, continuesRun, RUN_GAP_MS } from './hub.ts';
 import type { HubActivityEvent, HubAgent } from '../core/ws.ts';
 import { renderMarkdown } from '../core/markdown.ts';
-import { drawerWindowPills, mentionPalette, rosterGroups, rosterMarker, sortAgentsForRoster, stoppedGroups } from './hub.ts';
+import { drawerWindowPills, mentionPalette, occurrenceKeys, rosterGroups, rosterMarker, sortAgentsForRoster, stoppedGroups } from './hub.ts';
 
 const ev = (e: Partial<HubActivityEvent>): HubActivityEvent => ({
   ts: 0, window: 'w1', kind: 'tool', text: '', ...e,
@@ -134,11 +134,11 @@ test('rosterGroups: team and sub-team stay together at their most active member'
   const ranked = sortAgentsForRoster(agents);
   const groups = rosterGroups(ranked);
   assert.deepEqual(groups.map(({ key, team, members }) => [key, team, members.map(({ name }) => name)]), [
-    ['agent:solo-busy', null, ['solo-busy']],
+    ['agent:0:solo-busy', null, ['solo-busy']],
     ['team:dev', 'dev', ['reviewer', 'dev-lead']],
-    ['agent:another-busy', null, ['another-busy']],
+    ['agent:0:another-busy', null, ['another-busy']],
     ['team:ops', 'ops', ['ops']],
-    ['agent:solo-idle', null, ['solo-idle']],
+    ['agent:0:solo-idle', null, ['solo-idle']],
   ]);
   assert.deepEqual(ranked, sortAgentsForRoster(agents), 'grouping never changes the sorting authority');
   assert.equal(groups[1]?.members[0], agents[1], 'the group holds the original agent objects');
@@ -152,12 +152,40 @@ test('stoppedGroups: a team with nobody running keeps a group of its stopped mem
   assert.deepEqual(stoppedGroups([], teams, live), []);
 });
 
+// Board #509 (GitHub PR #2's residual, reviewer P1-A): tmux names a window
+// after its command, so a project can hold two MANAGED windows called `omp`
+// (a declared slot plus a second omp the person opened). Every key a keyed
+// {#each} reads must stay distinct, standalone and inside one team.
+test('occurrenceKeys: a repeated name gets one key per occurrence, stable under renumbering', () => {
+  assert.deepEqual(occurrenceKeys(['omp', 'kiro', 'omp', 'omp']), ['0:omp', '0:kiro', '1:omp', '2:omp']);
+  assert.deepEqual(occurrenceKeys([]), []);
+});
+
+test('rosterGroups: two managed windows with one name are two groups or two members, never one key (#509)', () => {
+  const loose = rosterGroups([ag({ name: 'omp', window: 1 }), ag({ name: 'omp', window: 4 })]);
+  assert.deepEqual(loose.map((g) => g.key), ['agent:0:omp', 'agent:1:omp']);
+  assert.deepEqual(loose.map((g) => g.members.length), [1, 1]);
+  const team = rosterGroups([ag({ name: 'omp', team: 'squad', window: 1 }), ag({ name: 'omp', team: 'squad/sub', window: 4 })]);
+  assert.equal(team.length, 1, 'one team group');
+  assert.deepEqual(team[0]!.keys, ['0:omp', '1:omp']);
+  assert.equal(team[0]!.keys.length, team[0]!.members.length, 'keys run parallel to members');
+  // A standalone and a team member sharing a name are counted over the whole
+  // list, so no key is reused across groups either.
+  const mixed = rosterGroups([ag({ name: 'omp', window: 1 }), ag({ name: 'omp', team: 'squad', window: 2 })]);
+  assert.deepEqual(mixed.flatMap((g) => g.keys), ['0:omp', '1:omp']);
+});
+
+test('mentionPalette: one @name per address, however many windows share it (#509)', () => {
+  const p = mentionPalette('hi @o', [{ value: 'omp', hint: 'omp' }, { value: 'omp', hint: 'omp' }, { value: 'all', hint: '' }]);
+  assert.deepEqual(p?.items.map((i) => i.value), ['@omp']);
+});
+
 test('rosterGroups: empty or missing team paths do not create false groups', () => {
   const agents = Object.freeze([
     Object.freeze(ag({ name: 'a', team: '' })),
     Object.freeze(ag({ name: 'b', team: null })),
   ]);
-  assert.deepEqual(rosterGroups(agents).map((g) => g.key), ['agent:a', 'agent:b']);
+  assert.deepEqual(rosterGroups(agents).map((g) => g.key), ['agent:0:a', 'agent:0:b']);
   assert.equal(rosterGroups([ag({ name: 'only', team: 'dev/review' })])[0]?.key, 'team:dev',
     'a one-member team keeps its group key as a second member joins');
   assert.equal(rosterGroups([]).length, 0);

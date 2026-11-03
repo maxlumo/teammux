@@ -1,6 +1,7 @@
 import { paneAgent, type BackendCatalog } from '../core/agents.ts';
 import type { TmuxPane } from '../core/ws.ts';
 import type { ProjectRow } from '../projects/projects.ts';
+import { occurrenceKeys } from './hub.ts';
 
 export type SidebarPane = Pick<TmuxPane,
   'session' | 'window' | 'window_name' | 'active' | 'current_command' | 'agent'>;
@@ -9,6 +10,10 @@ interface RowAgent {
   icon: string | null;
   name: string;
   state: string;
+  /** Identity for a keyed {#each}: the name plus its occurrence, so two windows
+   * with one name (tmux auto-names each after its command) stay two chips, and
+   * renumbering windows keeps every key (#120). */
+  key: string;
 }
 
 /** Live rows show every active agent window; closed rows show every declared
@@ -16,24 +21,26 @@ interface RowAgent {
  * fifth agent behind a hover count read as if that agent were not there
  * (owner, 2026-09-28: tmux-mobile's archivist, blog's two last members). */
 export function rowAgents(row: ProjectRow, panes: readonly SidebarPane[], agentStates: Readonly<Record<string, string>>, catalog: Pick<BackendCatalog, 'icon'>): RowAgent[] {
+  const chips: Omit<RowAgent, 'key'>[] = [];
   if (row.live) {
-    const out: RowAgent[] = [];
     const seen = new Set<number>();
     for (const p of panes) {
       if (p.session !== row.project.session || !p.active || seen.has(p.window)) continue;
       seen.add(p.window);
       const agent = paneAgent(p);
       if (!agent) continue;
-      out.push({
+      chips.push({
         icon: agent.icon, name: p.window_name,
         state: agentStates[`${row.project.session}:${p.window_name}`] ?? 'idle',
       });
     }
-    return out;
+  } else {
+    for (const s of row.slots ?? []) {
+      if (s.kind === 'agent') chips.push({ icon: catalog.icon(s.command), name: s.window_name, state: '' });
+    }
   }
-  return (row.slots ?? [])
-    .filter((s) => s.kind === 'agent')
-    .map((s) => ({ icon: catalog.icon(s.command), name: s.window_name, state: '' }));
+  const keys = occurrenceKeys(chips.map((chip) => chip.name));
+  return chips.map((chip, i) => ({ ...chip, key: keys[i]! }));
 }
 
 /** Hover counts the roster split into live and stopped. */
