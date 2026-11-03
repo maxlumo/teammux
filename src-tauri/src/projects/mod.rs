@@ -52,7 +52,7 @@ pub use board::{BOARD_STATUSES, ISSUE_REF_CHARS, board_counts, board_delete, boa
 pub use rooms::{archive_msg, archived_ids, archived_msgs, unarchive_msgs};
 pub use registry::{global_prompt_get, global_prompt_set, registry_delete, registry_get, registry_list, registry_save, registry_set_model_effort, team_get, teams_delete, teams_list, teams_save};
 pub(crate) use registry::{with_registry_mcp, with_registry_skills};
-pub use managed::{agent_remove, deliver_chat_line, is_managed_in, joined_team, managed_home, member_of, spawned_by, team_of};
+pub use managed::{agent_remove, deliver_chat_line, deliver_chat_line_found, is_managed_in, joined_team, managed_home, managed_names_in, member_of, spawned_by, team_of};
 #[cfg(unix)]
 pub use managed::tighten_existing;
 pub use skills::{managed_skills_dir, mcp_delete, mcp_list, mcp_save, seed_builtin_skills, skill_delete, skill_file, skill_files, skill_import, skill_load, skill_read, skill_refresh, skill_save, skills_list};

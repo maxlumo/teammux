@@ -73,6 +73,9 @@ USAGE (agent):
   tmm board assign <id> <name|->      hand it to someone else; `-` clears the assignee
   tmm board move <id> <todo|doing|review|done>
   tmm board note <id> <text> [--image <path|url>]  progress/decisions ON the issue
+                    [--notify @name[,@name|@all|@human]]   …and announce it in the room in
+                                      the SAME call: one line pointing at the note, so the
+                                      note and its announcement cannot be sent out of order
   tmm merge <issue> <branch> --expect <tip>  squash-merge a reviewed branch onto the branch checked
                     [--message-file <f>]  out HERE, prove the squash diff is byte-for-byte the branch
                     [--dry-run]       diff, and post the issue note from this process's own reads.
@@ -1000,7 +1003,51 @@ async fn main() {
                             if text.trim().is_empty() {
                                 fail(EXIT_USAGE, "board note needs text or an image: tmm board note 3 \"blocked on the schema question\" [--image shot.png]");
                             }
-                            rpc(&ctx, "hub_board_note", json!({ "session": session, "id": id, "body": text, "who": who })).await
+                            // `--notify` (board #507): the note and the room
+                            // line that announces it in ONE call, so the pair
+                            // an agent used to type as two commands — and
+                            // kept batching in the wrong order — has nothing
+                            // left to batch. Without the flag this is the
+                            // same single call it always was.
+                            if !flags.contains_key("notify") {
+                                rpc(&ctx, "hub_board_note", json!({ "session": session, "id": id, "body": text, "who": who })).await
+                            } else {
+                                let names = notify_names(flags.get("notify").cloned().flatten().as_deref())
+                                    .unwrap_or_else(|e| fail(EXIT_USAGE, &e));
+                                let params = json!({ "session": session, "id": id, "body": text, "who": who, "notify": names });
+                                // The capability is checked on the connection
+                                // that would carry the flag: an older gateway
+                                // refuses BEFORE the note is written, rather
+                                // than storing it and announcing nothing.
+                                let sent = std::cell::Cell::new(false);
+                                let r = match try_rpc_tracked(&ctx, "hub_board_note", params, Some("board_notify"), Some(&sent)).await {
+                                    Ok(v) => v,
+                                    // The call may have reached the server
+                                    // (board #445's `sent`): then BOTH halves
+                                    // may exist and the only honest answer is
+                                    // unknown. Never "re-run" — that would
+                                    // add a second note.
+                                    Err((code, msg)) if code == EXIT_NET && sent.get() => {
+                                        fail(EXIT_ERR, &note_notify_unknown(id, &msg))
+                                    }
+                                    Err((code, msg)) => fail(code, &msg),
+                                };
+                                // ONE reading of the answer for both formats
+                                // (board #507 review P1-A): JSON prints the
+                                // answer as it came, text prints the stages,
+                                // and the exit status is the same either way.
+                                let outcome = note_notify_outcome(&r);
+                                if ctx.json {
+                                    println!("{r}");
+                                } else if let NoteNotify::Recorded { .. } = &outcome {
+                                    say_note_notify(id, &outcome);
+                                    say_offline(&r);
+                                }
+                                if let Some(msg) = note_notify_failure(id, &outcome) {
+                                    fail(EXIT_ERR, &msg);
+                                }
+                                return;
+                            }
                         }
                     };
                     if ctx.json { println!("{r}"); } else { println!("✓ #{id}"); }
@@ -2455,7 +2502,7 @@ fn file_line(f: &Value, with_room: bool) -> String {
 /// Flags that take a value: `--name value` or `--name=value`. Everything else is a switch.
 const VALUED: &[&str] = &["project", "agent", "server", "output", "since", "limit", "brief",
                           "name", "session", "with-agent", "backend", "model", "effort", "input-mode", "system", "skills", "mcp",
-                          "ref", "source", "description", "def", "grep", "image", "body", "assignee", "team", "join", "file",
+                          "ref", "source", "description", "def", "grep", "image", "notify", "body", "assignee", "team", "join", "file",
                           "in", "at", "to", "code", "signal", "re", "as", "from", "before", "lines", "cols", "note", "args-json", "test",
                           "expect", "message-file"];
 
@@ -2586,7 +2633,7 @@ const VERB_FLAGS: &[VerbFlags] = &[
     VerbFlags { key: "board assign", ctx: true, flags: &[] },
     VerbFlags { key: "board take", ctx: true, flags: &[] },
     VerbFlags { key: "board move", ctx: true, flags: &[] },
-    VerbFlags { key: "board note", ctx: true, flags: &["image"] },
+    VerbFlags { key: "board note", ctx: true, flags: &["image", "notify"] },
     VerbFlags { key: "merge", ctx: true, flags: &["expect", "message-file", "dry-run"] },
     VerbFlags { key: "spawn", ctx: true, flags: &["brief", "join", "team"] },
     VerbFlags { key: "teams", ctx: true, flags: &[] },
@@ -3450,6 +3497,164 @@ fn team_move_notes(name: &str, r: &Value) -> Vec<String> {
 /// `tmm send`'s answer and a board hand-off's (board #377) both carry the
 /// rows, and this is the one place that words them. Not an error: the line IS
 /// in the room, and nothing is queued for the absent agent.
+/// `--notify`'s recipients as the user typed them (board #507): one `@name`
+/// per comma or space. The ASCII `@` is required, as `tmm send` requires it —
+/// the feed renders mentions with the full-width `＠`, and a name copied out
+/// of it would otherwise be read as a stranger. Resolving (`all`, the author,
+/// who this project actually has) belongs to the SERVER's one door; this is
+/// only the shape.
+fn notify_names(raw: Option<&str>) -> Result<Vec<String>, String> {
+    let usage = "--notify needs a recipient: tmm board note 3 \"...\" --notify @name[,@name|@all|@human]";
+    let raw = raw.unwrap_or("").trim();
+    if raw.is_empty() {
+        return Err(usage.to_string());
+    }
+    let mut out: Vec<String> = Vec::new();
+    for token in raw.split([',', ' ', '\t']).filter(|t| !t.trim().is_empty()) {
+        let token = token.trim();
+        let Some(name) = token.strip_prefix('@') else {
+            if token.starts_with('＠') {
+                return Err(format!(
+                    "'{token}' uses the full-width ＠ the feed renders mentions with — type the ASCII @: {usage}"
+                ));
+            }
+            return Err(format!("'{token}' needs its @: {usage}"));
+        };
+        if name.is_empty() {
+            return Err(format!("a bare @ names nobody: {usage}"));
+        }
+        if !out.iter().any(|n| n == name) {
+            out.push(name.to_string());
+        }
+    }
+    if out.is_empty() {
+        return Err(usage.to_string());
+    }
+    Ok(out)
+}
+
+/// A `board note --notify` answer, read ONCE and WHOLE (board #507 review
+/// P1-A). `Recorded` and `RoomFailed` are the two answers the server gives
+/// once the note is stored; anything else — `{}`, `ok: false`, an unknown
+/// room state, a recorded row without its seq or id, a stage missing — is
+/// `Malformed`, and a malformed answer proves nothing about either half, so
+/// it is reported as UNKNOWN exactly like a lost one.
+#[derive(Debug, PartialEq)]
+enum NoteNotify {
+    Recorded { recipients: Vec<String>, seq: i64, attempted: Vec<String>, notice: Vec<String> },
+    RoomFailed { recipients: Vec<String>, line: String, error: String, notice_targets: Vec<String>, notice: Vec<String> },
+    Malformed(String),
+}
+
+fn note_notify_outcome(r: &Value) -> NoteNotify {
+    let names = |v: &Value| -> Option<Vec<String>> {
+        v.as_array()?.iter().map(|n| n.as_str().map(str::to_string)).collect()
+    };
+    let bad = |why: &str| NoteNotify::Malformed(format!("{why} (answer: {r})"));
+    if r.get("ok").and_then(|v| v.as_bool()) != Some(true) || r.get("note").and_then(|v| v.as_str()) != Some("stored") {
+        return bad("the answer does not confirm the note was stored");
+    }
+    let (Some(recipients), Some(line)) = (r.get("recipients").and_then(names), r.get("line").and_then(|v| v.as_str())) else {
+        return bad("the answer does not carry the recipients and the line");
+    };
+    let (Some(notice_targets), Some(notice)) = (
+        r.pointer("/notice/targets").and_then(names),
+        r.pointer("/notice/attempted").and_then(names),
+    ) else {
+        return bad("the answer does not say what became of the issue's own notice");
+    };
+    match r.pointer("/room/state").and_then(|v| v.as_str()) {
+        Some("recorded") => {
+            let (Some(seq), Some(_id), Some(attempted)) = (
+                r.pointer("/room/seq").and_then(|v| v.as_i64()).filter(|seq| *seq > 0),
+                r.pointer("/room/id").and_then(|v| v.as_str()).filter(|id| !id.is_empty()),
+                r.pointer("/announce/attempted").and_then(names),
+            ) else {
+                return bad("the room row is said recorded without its seq, id or attempts");
+            };
+            let _ = notice_targets;
+            NoteNotify::Recorded { recipients, seq, attempted, notice }
+        }
+        Some("failed") => match r.pointer("/room/error").and_then(|v| v.as_str()) {
+            Some(error) => NoteNotify::RoomFailed {
+                recipients,
+                line: line.to_string(),
+                error: error.to_string(),
+                notice_targets,
+                notice,
+            },
+            None => bad("the room write is said failed without a reason"),
+        },
+        _ => bad("the answer does not say whether the room line was recorded"),
+    }
+}
+
+/// The success line: what is RECORDED and what was ATTEMPTED, in those words
+/// (review P1-D). Never "announced to", "typed" or "notified" for the whole
+/// request: `human` is recorded only, an offline name was not attempted (its
+/// own note follows from `say_offline`), and an attempt may still be held for
+/// a busy turn or refused by the pane — the receipts and the feed say which.
+fn say_note_notify(id: i64, outcome: &NoteNotify) {
+    let NoteNotify::Recorded { recipients, seq, attempted, notice } = outcome else { return };
+    let at = |v: &[String]| v.iter().map(|n| format!("@{n}")).collect::<Vec<_>>().join(", ");
+    // Nothing attempted is not "nobody is there": tmux may not have answered,
+    // and the offline notes below say which (review P2).
+    let tried = if attempted.is_empty() { "none (see the offline notes)".to_string() } else { at(attempted) };
+    println!("✓ #{id} noted; room line recorded for {} (seq {seq}); delivery attempted: {tried}", at(recipients));
+    if !notice.is_empty() {
+        println!("  the issue's own notice: attempted for {}", at(notice));
+    }
+}
+
+/// What a non-success says (board #507 review), or `None` for `Recorded`:
+/// FACTS, never a command to run. A printed command would have to carry the
+/// original call's gateway, project, config root, transport AND credentials
+/// to be safe to replay, and four review rounds each found one more it could
+/// not (the last: a replaying shell's `$TMM_TOKEN` overriding the original
+/// call's config token). So the executable recovery was cut (orchestrator's
+/// restraint ruling, 2026-11-04 03:10): the room-failure case names the note
+/// that IS stored, says the room line was NOT recorded, and gives the exact
+/// line the SERVER built, to be resent by hand once the person is sure of the
+/// original gateway, project and credentials. It never says nobody received
+/// anything: the issue's own notice ran unsuppressed.
+fn note_notify_failure(id: i64, outcome: &NoteNotify) -> Option<String> {
+    match outcome {
+        NoteNotify::Recorded { .. } => None,
+        NoteNotify::Malformed(why) => Some(note_notify_unknown(id, why)),
+        NoteNotify::RoomFailed { line, error, notice_targets, notice, .. } => {
+            let notice = match (notice_targets.is_empty(), notice.is_empty()) {
+                (true, _) => "the issue has nobody else on it for its own notice".to_string(),
+                (false, true) => format!(
+                    "the issue's own notice found no live pane for {}",
+                    notice_targets.iter().map(|n| format!("@{n}")).collect::<Vec<_>>().join(", ")
+                ),
+                (false, false) => format!(
+                    "the issue's own notice was attempted for {} and is not confirmed",
+                    notice.iter().map(|n| format!("@{n}")).collect::<Vec<_>>().join(", ")
+                ),
+            };
+            Some(format!(
+                "the note IS stored on #{id}; the room line was NOT recorded ({error}), so it was never delivered — {notice}.\n\
+                 the line, exactly as the server built it:\n\
+                 {line}\n\
+                 resend it by hand once you are sure of the original gateway, project and credentials; \
+                 do not re-run `board note --notify` — it would add a second note"
+            ))
+        }
+    }
+}
+
+/// A lost or unreadable answer: either half may exist, and nothing here can
+/// say which. Check first, then resend only what is absent; never "re-run",
+/// which would add a second note, and no command to paste.
+fn note_notify_unknown(id: i64, why: &str) -> String {
+    format!(
+        "unknown whether the note was stored on #{id} or announced: {why}\n\
+         check issue #{id}'s notes and the room for its \"board #{id}\" line on the original gateway and project first, \
+         then resend only what is absent (a second note or a second line would duplicate)"
+    )
+}
+
 fn say_offline(r: &Value) {
     for row in r.get("offline").and_then(|v| v.as_array()).into_iter().flatten() {
         let name = row.get("name").and_then(|v| v.as_str()).unwrap_or("");
@@ -3505,6 +3710,130 @@ fn managed_names(agents: &Value) -> Vec<String> {
 
 #[cfg(test)]
 mod tests {
+    /// `--notify`'s recipients, as the CLI reads them (board #507). Resolving
+    /// belongs to the server's one door; this is the SHAPE, and the one trap
+    /// it must catch is the full-width `＠` the feed renders mentions with —
+    /// copying a name out of the room and pasting it as a recipient is how
+    /// `tmm send` gets refused today.
+    #[test]
+    fn notify_names_reads_at_names_and_refuses_the_full_width_sigil() {
+        use super::notify_names;
+        assert_eq!(notify_names(Some("@orchestrator")).unwrap(), vec!["orchestrator".to_string()]);
+        // Commas, spaces and both together; duplicates collapse, order kept.
+        assert_eq!(
+            notify_names(Some("@orchestrator,@validator")).unwrap(),
+            vec!["orchestrator".to_string(), "validator".to_string()]
+        );
+        assert_eq!(
+            notify_names(Some("@orchestrator @validator, @orchestrator")).unwrap(),
+            vec!["orchestrator".to_string(), "validator".to_string()]
+        );
+        assert_eq!(notify_names(Some("@all")).unwrap(), vec!["all".to_string()]);
+        assert_eq!(notify_names(Some("@human")).unwrap(), vec!["human".to_string()]);
+
+        // Nothing to announce to: the flag was given and names nobody.
+        assert!(notify_names(None).unwrap_err().contains("needs a recipient"));
+        assert!(notify_names(Some("   ")).unwrap_err().contains("needs a recipient"));
+        assert!(notify_names(Some("@")).unwrap_err().contains("names nobody"));
+        // A name without its @, said plainly rather than read as a stranger.
+        assert!(notify_names(Some("orchestrator")).unwrap_err().contains("needs its @"));
+        let wide = notify_names(Some("＠orchestrator")).unwrap_err();
+        assert!(wide.contains("full-width"), "{wide}");
+    }
+
+    /// The answer is read once, whole (board #507 review P1-A): only the two
+    /// shapes the server gives after storing the note are outcomes; anything
+    /// short of them is malformed, never a success.
+    #[test]
+    fn note_notify_outcome_accepts_only_the_two_server_answers() {
+        use super::{note_notify_outcome, NoteNotify};
+        let recorded = serde_json::json!({
+            "ok": true, "note": "stored", "recipients": ["dev", "human"], "line": "@dev @human board #7: x (tmm board show 7)",
+            "room": { "state": "recorded", "seq": 41, "id": "m-41" },
+            "announce": { "attempted": ["dev"] },
+            "notice": { "targets": ["lead"], "attempted": ["lead"] },
+        });
+        assert_eq!(
+            note_notify_outcome(&recorded),
+            NoteNotify::Recorded { recipients: vec!["dev".into(), "human".into()], seq: 41, attempted: vec!["dev".into()], notice: vec!["lead".into()] }
+        );
+        let failed = serde_json::json!({
+            "ok": true, "note": "stored", "recipients": ["dev"], "line": "@dev board #7: x (tmm board show 7)",
+            "room": { "state": "failed", "error": "disk full" },
+            "notice": { "targets": ["dev", "lead"], "attempted": ["lead"] },
+        });
+        assert!(matches!(note_notify_outcome(&failed), NoteNotify::RoomFailed { ref error, .. } if error == "disk full"));
+
+        // Everything short of those is malformed.
+        let mut cases: Vec<serde_json::Value> = vec![
+            serde_json::json!({}),
+            serde_json::json!({ "ok": false }),
+            serde_json::json!({ "ok": true }),
+        ];
+        for (path, value) in [
+            ("/note", serde_json::json!("maybe")),
+            ("/room/state", serde_json::json!("pending")),
+            ("/room/seq", serde_json::Value::Null),
+            ("/room/id", serde_json::Value::Null),
+            // An empty placeholder identity is not a recorded row (review P2).
+            ("/room/seq", serde_json::json!(0)),
+            ("/room/id", serde_json::json!("")),
+            ("/announce/attempted", serde_json::json!("dev")),
+            ("/recipients", serde_json::json!(["dev", 3])),
+            ("/notice/attempted", serde_json::Value::Null),
+        ] {
+            let mut r = recorded.clone();
+            *r.pointer_mut(path).unwrap() = value;
+            cases.push(r);
+        }
+        let mut no_reason = failed.clone();
+        no_reason["room"].as_object_mut().unwrap().remove("error");
+        cases.push(no_reason);
+        for case in cases {
+            assert!(matches!(note_notify_outcome(&case), NoteNotify::Malformed(_)), "{case}");
+        }
+    }
+
+    /// The failure words (board #507 review, after the restraint cut): a
+    /// room failure names the stored note and gives the SERVER's exact line,
+    /// as text and not as a command; it never says nobody was reached. A
+    /// malformed answer is unknown, with no command to paste and no "re-run".
+    #[test]
+    fn note_notify_failure_states_facts_and_prints_no_command() {
+        use super::{note_notify_failure, NoteNotify};
+        let line = "@dev board #7: $(touch /tmp/pwn) `id` it's (tmm board show 7)";
+        let failed = NoteNotify::RoomFailed {
+            recipients: vec!["dev".into()],
+            line: line.into(),
+            error: "disk full".into(),
+            notice_targets: vec!["dev".into(), "lead".into()],
+            notice: vec!["lead".into()],
+        };
+        let msg = note_notify_failure(7, &failed).unwrap();
+        assert!(msg.contains("the note IS stored on #7") && msg.contains("disk full"), "{msg}");
+        assert!(msg.contains("attempted for @lead and is not confirmed"), "{msg}");
+        assert!(msg.lines().any(|l| l == line), "the server's exact line, on its own line: {msg}");
+        assert!(msg.contains("do not re-run") && msg.contains("once you are sure of the original gateway, project and credentials"), "{msg}");
+        assert!(!msg.contains("nothing was typed") && !msg.contains("nobody"), "no global not-delivered claim: {msg}");
+        for cmd in ["tmm send", "--project", "--server", "TMM_SOCKET", "XDG_CONFIG_HOME"] {
+            assert!(!msg.contains(cmd), "no command to paste ({cmd}): {msg}");
+        }
+
+        let nobody = NoteNotify::RoomFailed {
+            recipients: vec!["dev".into()], line: "@dev board #7: x".into(), error: "e".into(),
+            notice_targets: vec![], notice: vec![],
+        };
+        assert!(note_notify_failure(7, &nobody).unwrap().contains("nobody else on it for its own notice"));
+
+        let unknown = note_notify_failure(7, &NoteNotify::Malformed("{}".into())).unwrap();
+        assert!(unknown.starts_with("unknown whether the note was stored on #7"), "{unknown}");
+        assert!(unknown.contains("check issue #7's notes and the room"), "{unknown}");
+        for cmd in ["tmm ", "--project", "re-run"] {
+            assert!(!unknown.contains(cmd), "{cmd}: {unknown}");
+        }
+        assert!(note_notify_failure(7, &NoteNotify::Recorded { recipients: vec![], seq: 1, attempted: vec![], notice: vec![] }).is_none());
+    }
+
     /// Board #438: what `gateway install` says it did is only what was confirmed. An in-place
     /// upgrade claims OOMPolicy only when the manager read it back; on a systemd that has no
     /// such property it says the protection does not exist there.

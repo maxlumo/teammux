@@ -199,6 +199,15 @@ pub fn quote_token(sender: &str, hhmm: &str, body: &str) -> String {
     format!("[re {sender} {hhmm}: 「{excerpt}」] ")
 }
 
+/// A word the room reads as a ROUTE rather than an agent (board #507 review
+/// P1-B): `@all` broadcasts and `@human` is the person. Nothing that EXPANDS
+/// to agent names may ever produce one, or the expansion would be read as a
+/// second, wider address. Case-insensitive, like `board_assignee`'s refusal
+/// of `all`: a narrower rule here only ever drops a name.
+pub fn is_routing_word(name: &str) -> bool {
+    name.eq_ignore_ascii_case("all") || name.eq_ignore_ascii_case("human")
+}
+
 /// Text we QUOTE inside a line we are about to post carries no routing:
 /// `@` → `＠`. Every mention parser reads ASCII `@` only (`mention_names`
 /// here, `mentionTokens` on the client), so a quoted "@lead please" is read

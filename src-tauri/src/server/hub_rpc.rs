@@ -555,6 +555,23 @@ fn dispatch_hub(req: &Request, notifications: Option<&crate::agent_notifications
             };
             let body = p.get("body").and_then(|v| v.as_str()).unwrap_or("");
             let author = p.get("who").and_then(|v| v.as_str()).unwrap_or("human");
+            // `--notify` (board #507) is its own path: the note AND the room
+            // line that announces it, in ONE call. Without the key this arm
+            // is exactly what it always was.
+            if let Some(notify) = p.get("notify") {
+                let ws = crate::projects::project_for_session(session).ok().flatten().map(|proj| proj.path);
+                return board_note_notify(session, issue_id, author, body, notify, &NoteIo {
+                    read: &|session, id| crate::projects::board_get(session, id),
+                    all: &|| match ws.as_deref() {
+                        Some(ws) => crate::projects::managed_names_in(ws),
+                        None => Err("this session belongs to no project, so @all names nobody".into()),
+                    },
+                    managed: &|name| crate::projects::is_managed_in(ws.as_deref(), name),
+                    store: &|session, id, author, body| crate::projects::board_note(session, id, author, body),
+                    post: &|from, line| post_and_deliver_found(session, &room, from, line, false),
+                    notice: &|target, line| crate::projects::deliver_chat_line_found(session, target, line).is_some(),
+                });
+            }
             crate::projects::board_note(session, issue_id, author, body).map_err(RpcError::InvalidParams)?;
             // A Board reply is communication, not just storage (board
             // #26, #255): after the note is durable, wake the issue's
@@ -1778,13 +1795,22 @@ fn board_assign_brief(id: i64, issue: &serde_json::Value, who: &str, name: &str)
 /// pane.
 #[cfg(not(any(target_os = "android", target_os = "ios")))]
 fn post_and_deliver(session: &str, room: &str, from: &str, body: &str, detached: bool) -> Result<serde_json::Value, String> {
+    post_and_deliver_found(session, room, from, body, detached).map(|(msg, _found)| msg)
+}
+
+/// `post_and_deliver`, also returning the names a live managed pane was FOUND
+/// for — the line was handed to the one delivery path for each (board #507
+/// review P1-D). Kept out of `hub_post`'s answer, whose shape is a contract;
+/// `board note --notify` reports it as what it ATTEMPTED.
+#[cfg(not(any(target_os = "android", target_os = "ios")))]
+fn post_and_deliver_found(session: &str, room: &str, from: &str, body: &str, detached: bool) -> Result<(serde_json::Value, Vec<String>), String> {
     use crate::projects::rooms;
 
     let recipients = crate::address::mention_names(body);
     let mut msg = rooms::post_routed(room, from, body, &recipients)?;
     let seq = msg.get("seq").and_then(|v| v.as_i64());
     let id = msg.get("id").and_then(|v| v.as_str()).unwrap_or_default().to_string();
-    let offline = deliver_mentions(session, from, body, room, seq, &id, detached);
+    let (found, offline) = deliver_mentions(session, from, body, room, seq, &id, detached);
     if !offline.is_empty() {
         // The answer carries it so the CALLER can say it where its user is
         // looking — `tmm send` on stderr (#347).
@@ -1796,7 +1822,7 @@ fn post_and_deliver(session: &str, room: &str, from: &str, body: &str, detached:
             obj.insert("offline".into(), serde_json::Value::Array(rows));
         }
     }
-    Ok(msg)
+    Ok((msg, found))
 }
 
 /// Pure half of the assignee notification (owner, 2026-08-30): given the
@@ -1901,6 +1927,234 @@ fn board_note_notice(
 /// wall of text. The `…` is the truncation signal — an agent that sees it
 /// knows `tmm board show N` has the rest; a message without it is complete.
 const NOTICE_EXCERPT: usize = 400;
+
+/// The I/O `board_note_notify` performs, injected — the `HandOff` pattern
+/// (board #377) — so the paths a real store and tmux cannot stage are tested
+/// on the handler itself: a room write that fails, an issue read that fails,
+/// an agents directory that cannot be listed (board #507 review).
+#[cfg(not(any(target_os = "android", target_os = "ios")))]
+struct NoteIo<'a> {
+    /// Read the issue — the ONE snapshot, taken before anything is written.
+    read: &'a dyn Fn(&str, i64) -> Result<serde_json::Value, String>,
+    /// Every agent this project declares as managed. Asked only for `all`.
+    all: &'a dyn Fn() -> Result<Vec<String>, String>,
+    /// Does this project declare `name` as a managed agent?
+    managed: &'a dyn Fn(&str) -> bool,
+    /// Store the note (`board_note`).
+    store: &'a dyn Fn(&str, i64, &str, &str) -> Result<(), String>,
+    /// Record the announcement and hand it to the one delivery path
+    /// (`post_and_deliver_found`): the stored row, and the names a live
+    /// managed pane was FOUND for.
+    post: &'a dyn Fn(&str, &str) -> Result<(serde_json::Value, Vec<String>), String>,
+    /// Hand the issue's reply notice to one name: `true` when a live managed
+    /// pane was found and the line went to the delivery path.
+    notice: &'a dyn Fn(&str, &str) -> bool,
+}
+
+/// `notify` as the request carries it: a list of strings and nothing else,
+/// read WHOLE (board #507 review P1-B). An item of another type refuses the
+/// request — a partial read would announce to fewer people than were asked
+/// for and call it success.
+#[cfg(not(any(target_os = "android", target_os = "ios")))]
+fn notify_param(v: &serde_json::Value) -> Result<Vec<String>, String> {
+    let Some(items) = v.as_array() else {
+        return Err(format!("notify must be a list of names, not {v}"));
+    };
+    items
+        .iter()
+        .map(|n| n.as_str().map(str::to_string).ok_or_else(|| format!("notify must be a list of names; {n} is not a name")))
+        .collect()
+}
+
+/// `hub_board_note` with `notify` (board #507): store the note, then record
+/// and deliver ONE room line that points at it. An ORDERING guarantee, not a
+/// transaction (orchestrator's ruling, 2026-11-02): the note is the durable
+/// record of work, so it is stored first and never rolled back for an
+/// announcement that failed, and an announcement never exists without it.
+///
+/// Every input is decided BEFORE the write, from one snapshot: the request's
+/// recipients (read whole, frozen, `all` expanded once), the issue as it is
+/// now (whose declared parties the reply notice reaches), and the line itself.
+/// Anything that refuses, refuses there, and nothing is written.
+///
+/// After the write, nothing leaves through `?`: a stored note is never an
+/// error (the #377 model). The answer carries only what there is evidence for
+/// (review P1-C/P1-D): the frozen `recipients` and the exact `line`, so a
+/// recovery never rebuilds either; the room row's seq/id or why it failed;
+/// `announce.attempted`, the names the delivery path FOUND a live pane for —
+/// never `human`, never an offline name, and never a claim that a line was
+/// typed, since a found pane may still hold it (#257) or refuse it (#250);
+/// the existing `offline` rows; and the reply notice's own targets and
+/// attempts. The announcement replaces that notice for the names it carries;
+/// when the room write FAILED it reached nobody, so the notice runs on its
+/// full unsuppressed set — suppression never swallows a notification.
+#[cfg(not(any(target_os = "android", target_os = "ios")))]
+fn board_note_notify(
+    session: &str,
+    issue_id: i64,
+    author: &str,
+    body: &str,
+    notify: &serde_json::Value,
+    io: &NoteIo,
+) -> Result<serde_json::Value, RpcError> {
+    let asked = notify_param(notify).map_err(RpcError::InvalidParams)?;
+    let issue = (io.read)(session, issue_id).map_err(RpcError::InvalidParams)?;
+    let targets = notify_targets(&asked, author, io.all, io.managed).map_err(RpcError::InvalidParams)?;
+    let line = notify_line(issue_id, body, &targets);
+    // The line must route to EXACTLY the frozen set (review P1-B): the room
+    // reads its addresses back with `mention_names`, so anything that reads
+    // differently — a name that splits, a routing word — would deliver to
+    // someone this call never resolved. Refused before anything is written.
+    if crate::address::mention_names(&line) != targets {
+        return Err(RpcError::InvalidParams(format!(
+            "the recipients do not read back as themselves in the announcement ({}), so nothing was written",
+            targets.iter().map(|t| format!("@{t}")).collect::<Vec<_>>().join(" ")
+        )));
+    }
+    (io.store)(session, issue_id, author, body).map_err(RpcError::InvalidParams)?;
+
+    let mut answer = serde_json::json!({ "ok": true, "note": "stored", "recipients": targets, "line": line });
+    let recorded = match (io.post)(author, &line) {
+        Ok((msg, found)) => {
+            answer["room"] = serde_json::json!({
+                "state": "recorded",
+                "seq": msg.get("seq").cloned().unwrap_or(serde_json::Value::Null),
+                "id": msg.get("id").cloned().unwrap_or(serde_json::Value::Null),
+            });
+            answer["announce"] = serde_json::json!({ "attempted": found });
+            if let Some(offline) = msg.get("offline") {
+                answer["offline"] = offline.clone();
+            }
+            true
+        }
+        Err(e) => {
+            answer["room"] = serde_json::json!({ "state": "failed", "error": e });
+            false
+        }
+    };
+    let (notice_targets, notice_line) = match board_note_notice(&issue, author, body) {
+        Some((all, notice)) => (
+            all.into_iter().filter(|t| !(recorded && targets.contains(t))).collect::<Vec<_>>(),
+            Some(format!("[tmm chat {}] {author}: {notice}", stamp_now())),
+        ),
+        None => (Vec::new(), None),
+    };
+    let attempted: Vec<&String> = match &notice_line {
+        Some(l) => notice_targets.iter().filter(|t| (io.notice)(t, l)).collect(),
+        None => Vec::new(),
+    };
+    answer["notice"] = serde_json::json!({ "targets": notice_targets, "attempted": attempted });
+    Ok(answer)
+}
+
+/// The FROZEN recipient set of `tmm board note --notify` (board #507), decided
+/// once, before the note is stored. `declared` answers whether this project
+/// HAS a managed home for a name — the identity check (`is_managed_in`), not
+/// liveness, so a legitimate teammate that is STOPPED stays in the set and is
+/// reported offline by the delivery path instead of being refused as a typo.
+///
+/// `all` is the DECLARED set (design v3, kept by the CLEARed v5: every agent
+/// the project declares, live or stopped), asked for ONLY when `all` is
+/// written — so no explicit name, and no `human`, ever depends on reading it
+/// (review P1-B). It is expanded HERE and only here: nothing may re-expand it
+/// later, or a name that appeared after validation would receive a line the
+/// caller never asked for. `human` is a valid target and is RECORD-ONLY (it has no pane);
+/// the author is dropped wherever it appears, because this command exists to
+/// tell someone else and a line is never typed back into its own sender.
+///
+/// Everything that can refuse is here, so a refusal leaves NOTHING behind:
+/// an empty value, a name this project does not have, and a set that resolves
+/// to nobody all fail before the write.
+#[cfg(not(any(target_os = "android", target_os = "ios")))]
+fn notify_targets(
+    asked: &[String],
+    author: &str,
+    all: &dyn Fn() -> Result<Vec<String>, String>,
+    declared: &dyn Fn(&str) -> bool,
+) -> Result<Vec<String>, String> {
+    if asked.is_empty() {
+        return Err("--notify needs a recipient: --notify @name[,@name|@all|@human]".into());
+    }
+    let mut out: Vec<String> = Vec::new();
+    let mut push = |name: &str, out: &mut Vec<String>| {
+        if name != author && !out.iter().any(|n| n == name) {
+            out.push(name.to_string());
+        }
+    };
+    let mut expanded = false;
+    for raw in asked {
+        let name = raw.trim().trim_start_matches('@');
+        if name.is_empty() {
+            return Err("--notify names an empty recipient: --notify @name[,@name|@all|@human]".into());
+        }
+        if name == "all" {
+            // ONE expansion per call, however many times `all` is written,
+            // and only when it is: explicit names never depend on it.
+            if !expanded {
+                expanded = true;
+                for member in all()? {
+                    push(&member, &mut out);
+                }
+            }
+            continue;
+        }
+        if name == "human" {
+            push("human", &mut out);
+            continue;
+        }
+        // The full-width `＠` the room renders mentions with is a different
+        // character: every parser here reads ASCII `@` only, so a name copied
+        // out of the feed must be refused by its own message rather than
+        // read as a stranger.
+        if name.contains('＠') {
+            return Err(format!(
+                "'{name}' carries the full-width ＠ the feed renders mentions with; type the ASCII @ instead"
+            ));
+        }
+        if crate::projects::agents::valid_name(name).is_err() {
+            return Err(format!("'{name}' is not an agent name: --notify @name[,@name|@all|@human]"));
+        }
+        if !declared(name) {
+            return Err(format!(
+                "no managed agent named {name} in this project (tmm agent list); \
+                 notify one of those, @all, or @human"
+            ));
+        }
+        push(name, &mut out);
+    }
+    if out.is_empty() {
+        return Err(format!(
+            "--notify resolved to nobody but {author}: a note announces itself to someone else \
+             (the note alone is recorded without the flag)"
+        ));
+    }
+    Ok(out)
+}
+
+/// The announcement `--notify` posts: ONE plain mention line, the message an
+/// agent used to type by hand (board #507).
+///
+/// Deliberately NOT a `[board #N …]` shape: `promptParts` anchors that marker
+/// at the body's start, so `@name [board #N reply] …` would not match it and
+/// the reader would show the raw marker — the regression owner reported on
+/// 2026-09-11 (board #172). A plain mention needs no new render branch.
+///
+/// It carries a POINTER, never a second copy of the note: the first non-empty
+/// text line, cut by `excerpt` on a char boundary, with every `@` in it
+/// escaped (`unaddressed`) so routing comes from the resolved set alone and a
+/// note reading "ask @all" cannot broadcast (board #367 review P1-A). A note
+/// that is only an image has no text line to carry, and says so.
+#[cfg(not(any(target_os = "android", target_os = "ios")))]
+fn notify_line(id: i64, body: &str, targets: &[String]) -> String {
+    let to = targets.iter().map(|t| format!("@{t}")).collect::<Vec<_>>().join(" ");
+    let pointer = body
+        .lines()
+        .map(str::trim)
+        .find(|l| !l.is_empty() && !(l.starts_with("![](") && l.ends_with(')')))
+        .map(|l| crate::address::unaddressed(&excerpt(l, NOTICE_EXCERPT)))
+        .unwrap_or_else(|| "(image)".to_string());
+    format!("{to} board #{id}: {pointer} (tmm board show {id})")
+}
 
 /// First `max` chars, cut on a char boundary, `…`-marked when shortened.
 fn excerpt(s: &str, max: usize) -> String {
@@ -2113,7 +2367,7 @@ fn deliver_mentions(
     before_seq: Option<i64>,
     msg_id: &str,
     to_sender: bool,
-) -> Vec<(String, &'static str)> {
+) -> (Vec<String>, Vec<(String, &'static str)>) {
     deliver_mentions_with(session, from, body, room, before_seq, msg_id, to_sender, crate::tmux::list_panes)
 }
 
@@ -2134,12 +2388,12 @@ fn deliver_mentions_with(
     msg_id: &str,
     to_sender: bool,
     list_panes: impl FnOnce(&str) -> Result<Vec<crate::tmux::TmuxPane>, String>,
-) -> Vec<(String, &'static str)> {
+) -> (Vec<String>, Vec<(String, &'static str)>) {
     use crate::projects::agents;
 
     let mentions = crate::address::mention_names(body);
     if mentions.is_empty() {
-        return Vec::new();
+        return (Vec::new(), Vec::new());
     }
     let ws = crate::projects::project_for_session(session).ok().flatten().map(|p| p.path);
     // A session we cannot list is a session that typed NOTHING, so every
@@ -2154,7 +2408,7 @@ fn deliver_mentions_with(
         // stopped, only `unchecked`.
         Err(e) => {
             let checked = crate::tmux::session_confirmed_absent(&e);
-            return offline_report(session, room, from, &mentions, &[], ws.as_deref(), checked);
+            return (Vec::new(), offline_report(session, room, from, &mentions, &[], ws.as_deref(), checked));
         }
     };
     let managed_names: Vec<String> = panes
@@ -2243,7 +2497,8 @@ fn deliver_mentions_with(
     // returns. The `declared` half inside it — which of these names this
     // project HAS a managed home for — is what separates a stopped teammate
     // from a name that was never here.
-    offline_report(session, room, from, &mentions, &found, ws.as_deref(), true)
+    let offline = offline_report(session, room, from, &mentions, &found, ws.as_deref(), true);
+    (found, offline)
 }
 
 /// Say which mentions matched no live managed agent, and return them for the
@@ -3444,9 +3699,210 @@ mod tests {
         assert_eq!(super::board_note_notice(&own, "builder", "done"), None);
         let (once, _) = super::board_note_notice(&own, "validator", "SHIP").unwrap();
         assert_eq!(once, vec!["builder".to_string()]);
+    }
 
-        // A TITLELESS issue (board #31) is named by its body through the
-        // shared issue_ref fallback — never an empty head + dangling dash.
+    /// `--notify`'s door (board #507): the set is frozen HERE, and everything
+    /// that can refuse refuses here, before the note is stored.
+    #[test]
+    fn notify_targets_freezes_one_set_and_refuses_before_the_write() {
+        let declared_set = ["orchestrator", "validator", "builder-2", "stopped-mate"];
+        let declared = |name: &str| declared_set.contains(&name);
+        let all = || Ok(declared_set.iter().map(|n| n.to_string()).collect::<Vec<_>>());
+        let targets = |asked: &[&str], author: &str| {
+            super::notify_targets(&asked.iter().map(|a| a.to_string()).collect::<Vec<_>>(), author, &all, &declared)
+        };
+
+        assert_eq!(targets(&["@orchestrator"], "builder-2").unwrap(), vec!["orchestrator".to_string()]);
+        assert_eq!(targets(&["validator"], "builder-2").unwrap(), vec!["validator".to_string()]);
+        // Duplicates collapse, and the author is dropped wherever it appears.
+        assert_eq!(targets(&["@validator", "@validator", "@builder-2"], "builder-2").unwrap(), vec!["validator".to_string()]);
+        // `all` is the DECLARED set (stopped included), minus the author, and
+        // a name already asked for is not repeated.
+        assert_eq!(
+            targets(&["@validator", "@all"], "builder-2").unwrap(),
+            vec!["validator".to_string(), "orchestrator".to_string(), "stopped-mate".to_string()]
+        );
+        assert_eq!(targets(&["@human"], "builder-2").unwrap(), vec!["human".to_string()]);
+        // A DECLARED teammate that is not live stays in the set (review P1-B).
+        assert_eq!(targets(&["@stopped-mate"], "builder-2").unwrap(), vec!["stopped-mate".to_string()]);
+
+        // `all` is read ONLY when written, and once however often it is:
+        // explicit names and `human` never depend on it.
+        let calls = std::cell::Cell::new(0);
+        let broken = || { calls.set(calls.get() + 1); Err("the agents directory cannot be listed".to_string()) };
+        let explicit = super::notify_targets(&["stopped-mate".into(), "human".into()], "builder-2", &broken, &declared);
+        assert_eq!(explicit.unwrap(), vec!["stopped-mate".to_string(), "human".to_string()]);
+        assert_eq!(calls.get(), 0, "no explicit name reads the agents list");
+        let counted = || { calls.set(calls.get() + 1); all() };
+        super::notify_targets(&["all".into(), "@all".into()], "builder-2", &counted, &declared).unwrap();
+        assert_eq!(calls.get(), 1, "all is expanded once");
+        let refused = super::notify_targets(&["all".into()], "builder-2", &broken, &declared).unwrap_err();
+        assert!(refused.contains("cannot be listed"), "{refused}");
+
+        // Refusals.
+        assert!(targets(&[], "builder-2").unwrap_err().contains("needs a recipient"));
+        assert!(targets(&["@"], "builder-2").unwrap_err().contains("empty recipient"));
+        assert!(targets(&["  "], "builder-2").unwrap_err().contains("empty recipient"));
+        assert!(targets(&["@nobody"], "builder-2").unwrap_err().contains("no managed agent named nobody"));
+        assert!(targets(&["@not a name"], "builder-2").unwrap_err().contains("is not an agent name"));
+        assert!(targets(&["＠orchestrator"], "builder-2").unwrap_err().contains("full-width"));
+        assert!(targets(&["@builder-2"], "builder-2").unwrap_err().contains("resolved to nobody but builder-2"));
+        let solo = super::notify_targets(&["all".into()], "solo", &|| Ok(vec!["solo".to_string()]), &|n: &str| n == "solo").unwrap_err();
+        assert!(solo.contains("resolved to nobody but solo"), "{solo}");
+    }
+
+    /// The handler's own I/O, scripted (board #507 review): every path a real
+    /// store and tmux cannot stage. `log` records the order the I/O ran in.
+    struct Script {
+        log: std::cell::RefCell<Vec<String>>,
+        issue: Result<serde_json::Value, String>,
+        all: Result<Vec<String>, String>,
+        post: Result<(serde_json::Value, Vec<String>), String>,
+        live: Vec<String>,
+    }
+
+    impl Script {
+        fn new() -> Self {
+            Script {
+                log: Default::default(),
+                issue: Ok(serde_json::json!({ "id": 7, "title": "T", "assignee": "dev", "created_by": "lead" })),
+                all: Ok(vec!["dev".into(), "lead".into(), "qa".into(), "validator".into()]),
+                post: Ok((serde_json::json!({ "seq": 41, "id": "m-41" }), vec!["dev".into()])),
+                live: vec!["dev".into(), "lead".into()],
+            }
+        }
+        fn run(&self, notify: serde_json::Value) -> Result<serde_json::Value, super::RpcError> {
+            let log = |s: String| self.log.borrow_mut().push(s);
+            super::board_note_notify("p", 7, "validator", "the fix is in", &notify, &super::NoteIo {
+                read: &|_, _| { log("read".into()); self.issue.clone() },
+                all: &|| { log("all".into()); self.all.clone() },
+                managed: &|n| ["dev", "lead", "qa", "validator"].contains(&n),
+                store: &|_, _, _, _| { log("store".into()); Ok(()) },
+                post: &|_, line| { log(format!("post {line}")); self.post.clone() },
+                notice: &|t, _| { log(format!("notice {t}")); self.live.iter().any(|l| l == t) },
+            })
+        }
+        fn log(&self) -> Vec<String> {
+            self.log.borrow().clone()
+        }
+    }
+
+    /// The announcement routes to EXACTLY the frozen set (review P1-B): an
+    /// expanded name that would read back as more than itself — `dev @all`
+    /// from a hostile directory — refuses before anything is written.
+    #[test]
+    fn an_expansion_that_would_widen_the_routing_writes_nothing() {
+        let mut s = Script::new();
+        s.all = Ok(vec!["dev".into(), "dev @all".into()]);
+        let refused = s.run(serde_json::json!(["all"])).unwrap_err();
+        assert!(format!("{refused:?}").contains("do not read back as themselves"), "{refused:?}");
+        assert!(!s.log().iter().any(|l| l == "store" || l.starts_with("post")), "{:?}", s.log());
+        // The ordinary expansion reads back exactly.
+        let s = Script::new();
+        let r = s.run(serde_json::json!(["all"])).unwrap();
+        assert_eq!(r["recipients"], serde_json::json!(["dev", "lead", "qa"]));
+        assert_eq!(crate::address::mention_names(r["line"].as_str().unwrap()), vec!["dev".to_string(), "lead".to_string(), "qa".to_string()]);
+    }
+
+    /// A bad `notify` refuses the whole request with nothing stored.
+    #[test]
+    fn a_bad_notify_value_writes_nothing() {
+        for bad in [serde_json::json!("dev"), serde_json::json!(["dev", 123]), serde_json::json!([]), serde_json::json!({ "dev": true })] {
+            let s = Script::new();
+            assert!(s.run(bad.clone()).is_err(), "{bad}");
+            assert!(!s.log().iter().any(|l| l == "store"), "{bad}: {:?}", s.log());
+        }
+        // An issue that cannot be read, and an agents list that cannot be
+        // read for `all`: refused before the write, too.
+        let mut s = Script::new();
+        s.issue = Err("no issue #7 on this board".into());
+        assert!(s.run(serde_json::json!(["dev"])).is_err());
+        assert!(!s.log().iter().any(|l| l == "store"));
+        let mut s = Script::new();
+        s.all = Err("cannot be listed".into());
+        assert!(s.run(serde_json::json!(["all"])).is_err());
+        assert!(!s.log().iter().any(|l| l == "store"));
+    }
+
+    /// The order and the snapshot: read and resolve BEFORE the store, the
+    /// line built from the frozen set, nothing re-read afterwards; `attempted`
+    /// is what the delivery path FOUND, and the notice skips the names the
+    /// room line carries.
+    #[test]
+    fn a_recorded_announcement_reports_what_was_found_and_replaces_the_notice() {
+        let s = Script::new();
+        let r = s.run(serde_json::json!(["dev", "human", "qa"])).unwrap();
+        assert_eq!(
+            s.log(),
+            vec![
+                "read".to_string(),
+                "store".to_string(),
+                "post @dev @human @qa board #7: the fix is in (tmm board show 7)".to_string(),
+                "notice lead".to_string(),
+            ],
+            "one read before the write, no `all` read, and the notice only for the party the line does not carry"
+        );
+        assert_eq!(r["recipients"], serde_json::json!(["dev", "human", "qa"]));
+        assert_eq!(r["room"], serde_json::json!({ "state": "recorded", "seq": 41, "id": "m-41" }));
+        assert_eq!(r["announce"]["attempted"], serde_json::json!(["dev"]), "not human, not the absent qa: only what was found");
+        assert_eq!(r["notice"], serde_json::json!({ "targets": ["lead"], "attempted": ["lead"] }));
+        for word in ["notified", "delivered", "typed"] {
+            assert!(!r.to_string().contains(word), "{word}: {r}");
+        }
+    }
+
+    /// A room write that FAILS reached nobody, so the issue's own notice runs
+    /// on its FULL set — the assignee named in `notify` included — and the
+    /// answer says the room failed, with the exact line for the recovery.
+    #[test]
+    fn a_failed_room_write_restores_the_unsuppressed_notice() {
+        let mut s = Script::new();
+        s.post = Err("database is locked".into());
+        let r = s.run(serde_json::json!(["dev"])).unwrap();
+        assert_eq!(r["note"], "stored");
+        assert_eq!(r["room"], serde_json::json!({ "state": "failed", "error": "database is locked" }));
+        assert!(r.get("announce").is_none(), "nothing was attempted for a line that was never written");
+        assert_eq!(r["line"], "@dev board #7: the fix is in (tmm board show 7)");
+        assert_eq!(r["notice"]["targets"], serde_json::json!(["dev", "lead"]), "dev is NOT suppressed: the room line never existed");
+        assert!(s.log().contains(&"notice dev".to_string()), "{:?}", s.log());
+    }
+
+    /// The announcement is a PLAIN mention line that points at the note
+    /// (board #507): no `[board #N …]` marker, because `promptParts` anchors
+    /// that marker at the body's start and would show it raw (#172).
+    #[test]
+    fn notify_line_points_at_the_note_and_carries_no_address_of_its_own() {
+        let line = super::notify_line(507, "design v5 is on the card\nsecond paragraph", &["orchestrator".to_string(), "human".to_string()]);
+        assert_eq!(line, "@orchestrator @human board #507: design v5 is on the card (tmm board show 507)");
+        assert!(!line.contains("[board #"), "no bracket marker: promptParts would show it raw");
+
+        // Only the FIRST non-empty line, and only the resolved recipients
+        // route: every `@` the note itself carries is escaped, so "ask @all"
+        // cannot broadcast (board #367 review P1-A).
+        let quoted = super::notify_line(1, "  \n\nask @all and @validator to re-read", &["lead".to_string()]);
+        assert_eq!(quoted, "@lead board #1: ask ＠all and ＠validator to re-read (tmm board show 1)");
+        assert_eq!(crate::address::mention_names(&quoted), vec!["lead".to_string()]);
+
+        // A long note is cut on a char boundary with the `…` marker: the
+        // line is a pointer, never a second copy.
+        let long = "字".repeat(600);
+        let cut = super::notify_line(2, &long, &["lead".to_string()]);
+        assert!(cut.contains('…'), "a long note is pointed at, not repeated: {cut}");
+        assert!(cut.chars().count() < 600, "{}", cut.chars().count());
+
+        // An image-only note has no text line to point at and says so
+        // instead of carrying a markdown ref into the room.
+        let image = super::notify_line(3, "![](/tmp/shot.png)", &["lead".to_string()]);
+        assert_eq!(image, "@lead board #3: (image) (tmm board show 3)");
+        // Text plus an image points at the text.
+        let both = super::notify_line(4, "![](/tmp/a.png)\nthe failing row", &["lead".to_string()]);
+        assert_eq!(both, "@lead board #4: the failing row (tmm board show 4)");
+    }
+
+    /// A TITLELESS issue (board #31) is named by its body through the shared
+    /// `issue_ref` fallback — never an empty head + dangling dash.
+    #[test]
+    fn a_titleless_issues_reply_notice_is_named_by_its_body() {
         let titleless = serde_json::json!({
             "id": 31, "title": "", "body": "issue标题可以为空，截前几个字显示", "assignee": "builder",
         });
@@ -4036,10 +4492,11 @@ mod tests {
         crate::projects::tests::use_test_store();
         let run = |error: &str| {
             let (session, room) = unique("unchecked");
-            let offline = deliver_mentions_with(
+            let (found, offline) = deliver_mentions_with(
                 &session, "lead", "@dev @ghost hi", &room, None, "m1", false,
                 |_| Err(error.to_string()),
             );
+            assert!(found.is_empty(), "a session tmux cannot list found nobody: {found:?}");
             let rows: Vec<String> = rooms::history_page(&room, None, 20)["messages"].as_array().unwrap().iter()
                 .map(|m| m["body"].as_str().unwrap_or_default().to_string()).collect();
             (offline, rows)
@@ -5669,8 +6126,127 @@ while True:
         let _ = std::fs::remove_dir_all(&ws);
     }
 
-    /// Stop/restart act on a process, so the gate is the same one delivery and
-    /// auto-post use: only agents this app started. The room records the act.
+    /// `--notify` (board #507) records the note and announces it in ONE call,
+    /// in that order, and the announcement REPLACES the issue's own reply
+    /// notice for the names it carries — one note is one line per recipient.
+    /// The flagless call is left exactly as it was.
+    #[test]
+    fn a_notified_note_announces_once_and_leaves_the_flagless_note_alone() {
+        crate::projects::tests::use_test_store();
+        let session = format!("tmm-note-notify-{}", uuid::Uuid::new_v4());
+        let ws = crate::config::test_scratch("tmm-note-notify-ws");
+        // `qa` is DECLARED and has no window: a stopped teammate.
+        for name in ["dev", "lead", "qa"] {
+            let home = ws.join(".tmm/agents").join(name);
+            std::fs::create_dir_all(&home).unwrap();
+            std::fs::write(
+                home.join("launch.json"),
+                format!(r#"{{"backend":"kiro","cmd":"kiro-cli chat --agent {name}"}}"#),
+            )
+            .unwrap();
+        }
+        let created = std::process::Command::new("tmux")
+            .args(["new-session", "-d", "-s", &session, "-n", "dev", "-c", &ws.to_string_lossy(), "cat"])
+            .status()
+            .map(|s| s.success())
+            .unwrap_or(false);
+        if !created {
+            eprintln!("no tmux server — skipping");
+            let _ = std::fs::remove_dir_all(&ws);
+            return;
+        }
+        std::process::Command::new("tmux")
+            .args(["new-window", "-d", "-t", &session, "-n", "lead", "-c", &ws.to_string_lossy(), "cat"])
+            .status()
+            .unwrap();
+        crate::projects::adopt(&session, Some("note-notify-test")).expect("adopt test project");
+        let id = crate::projects::board_save(&session, None, Some("Notify"), Some("b"), None, Some("dev"), "human").unwrap();
+
+        // 1. No flag: the answer and the reply notice are what they have
+        //    always been. The assignee hears about it once.
+        let plain = handle_hub_request(
+            &req("hub_board_note", serde_json::json!({
+                "session": session, "id": id, "who": "validator", "body": "first note",
+            })),
+            None,
+        );
+        assert!(plain.error.is_none(), "{:?}", plain.error.map(|e| e.message));
+        assert_eq!(plain.result.unwrap(), serde_json::json!({ "ok": true }), "the flagless answer gains no field");
+        let dev_rows = |marker: &str| {
+            crate::projects::telemetry::owed_rows(&session, "dev")
+                .into_iter()
+                .filter(|r| r.line.contains(marker))
+                .count()
+        };
+        assert_eq!(dev_rows(&format!("[board #{id} reply]")), 1, "the assignee's own notice still fires");
+
+        // 2. With `--notify @dev @human @qa`: the note is stored, the room
+        //    row exists, delivery was ATTEMPTED for the one live pane only —
+        //    `human` is recorded, the stopped `qa` is reported offline — and
+        //    the assignee gets the announcement INSTEAD of a second reply
+        //    notice for this note.
+        let notified = handle_hub_request(
+            &req("hub_board_note", serde_json::json!({
+                "session": session, "id": id, "who": "validator", "body": "second note",
+                "notify": ["dev", "human", "qa"],
+            })),
+            None,
+        );
+        assert!(notified.error.is_none(), "{:?}", notified.error.map(|e| e.message));
+        let answer = notified.result.unwrap();
+        assert_eq!(answer["note"], "stored");
+        assert_eq!(answer["room"]["state"], "recorded");
+        assert!(answer["room"]["seq"].as_i64().is_some(), "the room row is named by its seq: {answer}");
+        assert_eq!(answer["recipients"], serde_json::json!(["dev", "human", "qa"]));
+        assert_eq!(answer["announce"]["attempted"], serde_json::json!(["dev"]), "only the pane that was found: {answer}");
+        assert_eq!(answer["offline"], serde_json::json!([{ "name": "qa", "why": "stopped" }]), "{answer}");
+        // The word the answer must NOT carry (review P1-C): an attempt is not
+        // a delivery, and nothing here claims one.
+        assert!(!answer.to_string().contains("notified"), "{answer}");
+
+        // Both notes are on the card, in order.
+        let issue = crate::projects::board_get(&session, id).unwrap();
+        assert_eq!(issue["notes"][0]["body"], "first note");
+        assert_eq!(issue["notes"][1]["body"], "second note");
+
+        // The announcement is in the ROOM — the half the pane notice never
+        // had — as a plain mention line with no bracket marker.
+        let room = project_room(&session);
+        let page = crate::projects::rooms::history_page(&room, None, 50);
+        let posted = page["messages"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .filter_map(|m| m["body"].as_str())
+            .find(|b| b.contains("second note"))
+            .expect("the announcement is recorded in the room");
+        assert_eq!(posted, format!("@dev @human @qa board #{id}: second note (tmm board show {id})"));
+        assert!(!posted.contains("[board #"), "a plain mention line, not a bracket shape");
+
+        // The DEDUPE: still exactly one reply notice for the first note, and
+        // none for the second — the announcement is the assignee's one line.
+        assert_eq!(dev_rows(&format!("[board #{id} reply]")), 1, "no second reply notice beside the announcement");
+        assert_eq!(dev_rows("second note"), 1, "the assignee's one line for this note is the announcement");
+
+        // 3. A live pane that REFUSES the line (copy mode, #250) was found,
+        //    so it is ATTEMPTED — not offline, and nothing claims it landed.
+        crate::tmux::run_tmux(&["copy-mode", "-t", &format!("{session}:lead")]).unwrap();
+        let refused = handle_hub_request(
+            &req("hub_board_note", serde_json::json!({
+                "session": session, "id": id, "who": "validator", "body": "third note", "notify": ["lead"],
+            })),
+            None,
+        );
+        let refused = refused.result.expect("a refusing pane is not an error");
+        assert_eq!(refused["announce"]["attempted"], serde_json::json!(["lead"]), "{refused}");
+        assert!(refused.get("offline").is_none(), "a live pane in copy mode is not offline: {refused}");
+        for word in ["notified", "delivered", "typed"] {
+            assert!(!refused.to_string().contains(word), "{word}: {refused}");
+        }
+
+        let _ = std::process::Command::new("tmux").args(["kill-session", "-t", &session]).status();
+        let _ = std::fs::remove_dir_all(&ws);
+    }
     #[test]
     fn stopping_a_managed_agent_kills_the_window_and_says_so() {
         crate::projects::tests::use_test_store();

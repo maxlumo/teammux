@@ -42,7 +42,7 @@ pub type NotificationHub = Arc<AgentNotificationHub>;
 /// needs one refuses the write instead of saving a label nobody acts on. The
 /// phone's server has no Hub, so it announces none.
 #[cfg(not(any(target_os = "android", target_os = "ios")))]
-pub(crate) const LOGIN_CAPS: &[&str] = &["board_dispatch", "spawn_join", "agent_team", "hub_files", "mcp_masked", "backends_check"];
+pub(crate) const LOGIN_CAPS: &[&str] = &["board_dispatch", "board_notify", "spawn_join", "agent_team", "hub_files", "mcp_masked", "backends_check"];
 #[cfg(any(target_os = "android", target_os = "ios"))]
 pub(crate) const LOGIN_CAPS: &[&str] = &[];
 

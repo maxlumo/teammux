@@ -9,7 +9,7 @@ JSON-RPC over WebSocket (`ws://` or `wss://`).
 ```
 ← {"server_nonce": "<hex>", "e2e": 2}                // nonce + newest handshake version
 → {"method": "auth", "params": {"client_nonce": "<hex>", "proof": "<hex>", "e2e": 2}}
-← <binary AES-GCM frame: {"result": {"authenticated": true, "machine_id", "hostname", "e2e": 2, "build": {…}, "caps": ["board_dispatch", "spawn_join", "agent_team", "hub_files", "mcp_masked", "backends_check"]}}>
+← <binary AES-GCM frame: {"result": {"authenticated": true, "machine_id", "hostname", "e2e": 2, "build": {…}, "caps": ["board_dispatch", "board_notify", "spawn_join", "agent_team", "hub_files", "mcp_masked", "backends_check"]}}>
 ```
 - The client accepts exactly one first frame: the nonce, `server_nonce` = 32 hex digits (16 bytes). The server sends nothing before it;
   a client ends the attempt on any other first frame or any other length, and delivers nothing (pushes, answers) until the login completes
@@ -40,15 +40,15 @@ JSON-RPC over WebSocket (`ws://` or `wss://`).
 ```
 ← {"server_nonce": "<hex>"}
 → {"method": "auth", "params": {"token": "..."}}
-← {"result": {"authenticated": true, "machine_id": "uuid", "hostname": "my-mac", "build": {…}, "caps": ["board_dispatch", "spawn_join", "agent_team", "hub_files", "mcp_masked", "backends_check"]}}
+← {"result": {"authenticated": true, "machine_id": "uuid", "hostname": "my-mac", "build": {…}, "caps": ["board_dispatch", "board_notify", "spawn_join", "agent_team", "hub_files", "mcp_masked", "backends_check"]}}
 ```
 `build` (board #368) is the build the server runs, `{"version": "1.0.0", "commit": "46392f16", "built": "2026-10-14 07:40"}`:
 the package version, the source commit (`git --short=8`: AT LEAST 8 hex characters, so two sides compare by prefix; `dev` when git was unavailable) and the UTC minute the build ran
 (`unknown` when the clock was). It rides the login answer, not a new RPC, in both paths. A server older than #368 sends
 none; a client reads that as "unknown", never as a mismatch.
 
-`caps` (board #377) lists what the server can do that a client must know BEFORE it asks (a write, or a read an older server answers wrongly). Today six: `board_dispatch` —
-`hub_board_save` with `dispatch: true` hands the issue to its assignee; `spawn_join` (board #382) — `hub_spawn` with `join`
+`caps` (board #377) lists what the server can do that a client must know BEFORE it asks (a write, or a read an older server answers wrongly). Today seven: `board_dispatch` —
+`hub_board_save` with `dispatch: true` hands the issue to its assignee; `board_notify` (board #507) — `hub_board_note` with `notify` records the note AND announces it in the room in the same call, in that order. An older server ignores the key, which would store the note and announce nothing, so `tmm board note --notify` checks the cap on the connection that would carry the flag and refuses before anything is written (the Hub sends no `notify` today; any client that does must check it the same way); `spawn_join` (board #382) — `hub_spawn` with `join`
 puts the agent in that team, one present in this project (a member home here, live or stopped) (an older server ignores the key and spawns it standalone, so the page and `tmm spawn
 --join` refuse a join unsent without it; a standalone spawn is not gated); `agent_team` (board #384) — `hub_agent_set_team`
 exists (an older server answers method-not-found after the card was dropped, so the page disables the drag and the Move items and
@@ -196,7 +196,7 @@ humans) and the desktop hub UI. See
 | `hub_board_counts` | — (no `session`, like `hub_rooms`) | `{counts: {"<session>": {todo, doing, review, done, total}}}` — issue counts for EVERY board in one grouped read; the four statuses are zero-filled server-side, `total` is explicit, and a project with an empty board is ABSENT (absence = hide) |
 | `hub_board_get` | `session`, `id` | The issue with its full `notes` thread and server-computed `editable` (`true` only while unassigned and before any Agent save/note activity) |
 | `hub_board_save` | `session`, `id?`, `title?`, `body?`, `status?`, `assignee?`, `dispatch?`, `who?` | Create (no id) or PATCH (id + only the changed fields — COALESCE, so a `move` cannot erase a body edited meanwhile). Once assigned or touched by an Agent, title/body are immutable server-side; workflow fields remain patchable. `assignee` is `""` (clear), `human`, or ONE valid agent name — anything else (`all`, `dev @all`, whitespace) is `-32602` with nothing saved. `dispatch: true` (sent only by clients that read `board_dispatch` in the login answer) also hands the issue to the assignee: the brief goes to a managed agent of THIS project, once per save that names one (not the actor, not `human`). Without the flag nothing is posted (an older client posts its own brief). `{ok, id}`, plus `dispatch: "sent" \| "offline" \| "failed"` when a hand-off was asked and there was somebody to tell (`sent`: posted, and a live pane was found for the name — not proof it was typed), `dispatch_error` with `offline`/`failed`, and `offline` (as `hub_post`'s) when no pane received it. The save is committed BEFORE the telling, and everything after the commit (the read-back, the brief, the post) is part of the answer: `failed` is an answer, never an error, and the id always comes back |
-| `hub_board_note` | `session`, `id`, `body`, `who?` | Appends to the issue's own thread, bumps `updated_at` |
+| `hub_board_note` | `session`, `id`, `body`, `who?`, `notify?` | Appends to the issue's own thread, bumps `updated_at`, and wakes the assignee AND reporter (minus the author and `human`) with the `[board #N reply]` pane line. `notify` (board #507, sent only by clients that read `board_notify` in the login answer) also ANNOUNCES it in the room. It must be a list of strings — agent names, `all`, `human` — read whole: anything else is `-32602` with nothing written. Resolved BEFORE the note is stored, with the issue read in the same step: `all` is the project's DECLARED managed agents (live or stopped), read only when written and expanded once; the author is dropped, duplicates collapse; an explicit name is checked by declaration, never liveness; a name this project has no managed home for, an unreadable issue, or an unlistable agents directory for `all` is `-32602` with nothing written. Then one plain mention line pointing at the note (`@name board #N: <first text line> (tmm board show N)`). An ORDERING guarantee, not a transaction: note first, then the room row, then delivery; a committed note is never rolled back and is never an error. The announcement replaces the pane notice for the names it carries; if the room write fails that notice runs unsuppressed. `{ok}` without the key; with it `{ok, note: "stored", recipients: [name], line, room: {state: "recorded", seq, id} \| {state: "failed", error}, announce?: {attempted: [name]}, offline?, notice: {targets: [name], attempted: [name]}}` — `announce.attempted` is the names a live managed pane was FOUND for (never `human`, never an offline name); `notice.attempted` the same for the reply notice. An attempt is never a delivery: a found pane may hold or refuse the line, and the receipts and the feed settle it |
 | `hub_board_delete` | `session`, `id` | `{ok}` — deletes the issue and cascades its notes |
 
 ### Registry, skills & MCP defs (desktop-only)

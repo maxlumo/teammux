@@ -288,16 +288,75 @@ pub fn spawned_by(workspace: Option<&str>, window_name: &str) -> Option<String> 
 /// prompt TYPED (kimi): all DELIVERIES the server decides on, never mention
 /// scans, so the record-only invariant of hook-sourced posts stays intact.
 pub fn deliver_chat_line(session: &str, target_name: &str, line: &str) -> bool {
-    match crate::projects::delivery::agent_target(session, target_name) {
-        Some(target) => crate::projects::delivery::deliver(session, target_name, &target, line, 0, ""),
-        None => false,
+    deliver_chat_line_found(session, target_name, line).unwrap_or(false)
+}
+
+/// `deliver_chat_line`, keeping apart the two facts its `bool` merges (board
+/// #507 review P1-D): `None` — no live managed pane was found for the name,
+/// so nothing went to the delivery path; `Some(accepted)` — the line WAS
+/// handed to the one delivery path, which typed or held it (`true`) or had
+/// the pane refuse it (`false`, copy mode). A caller that reports what it
+/// attempted reads the first fact, never the second as a delivery.
+pub fn deliver_chat_line_found(session: &str, target_name: &str, line: &str) -> Option<bool> {
+    let target = crate::projects::delivery::agent_target(session, target_name)?;
+    Some(crate::projects::delivery::deliver(session, target_name, &target, line, 0, ""))
+}
+
+/// Every agent this workspace DECLARES as managed, live or stopped, sorted
+/// (board #507). The set `tmm board note --notify @all` expands to —
+/// declaration, not liveness, so a stopped teammate is named and then
+/// reported offline by the delivery path. No agents directory is an empty
+/// list; one that cannot be listed is an error, because guessing the set
+/// would announce to the wrong people.
+///
+/// Each directory passes the SAME identity entry every other reader uses
+/// (`is_managed_in`: `agents::home_dir`'s `valid_name`, then the marker), so
+/// an entry is an agent NAME before it is anything else (review P1-B: a
+/// directory called `dev @all` carrying a marker would otherwise have been
+/// expanded into two addresses, one of them a broadcast). A routing word
+/// (`all`, `human`) is never an expansion result, whatever is on disk.
+pub fn managed_names_in(workspace: &str) -> Result<Vec<String>, String> {
+    let agents = std::path::Path::new(workspace).join(".tmm").join("agents");
+    let entries = match std::fs::read_dir(&agents) {
+        Ok(entries) => entries,
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(Vec::new()),
+        Err(e) => return Err(format!("the project's agents ({}) cannot be listed: {e}", agents.display())),
+    };
+    let mut out = Vec::new();
+    for entry in entries {
+        let entry = entry.map_err(|e| format!("the project's agents ({}) cannot be read: {e}", agents.display()))?;
+        let Some(name) = entry.file_name().to_str().map(str::to_string) else { continue };
+        if !crate::address::is_routing_word(&name) && is_managed_in(Some(workspace), &name) {
+            out.push(name);
+        }
     }
+    out.sort();
+    Ok(out)
 }
 
 #[cfg(test)]
 mod tests {
     use super::super::tests::use_test_store;
     use super::*;
+
+    /// Board #507 review P1-B: `@all` expands over directories, so each one
+    /// must be an agent NAME through the same identity entry every reader
+    /// uses, and a routing word is never a result. Each sentinel carries the
+    /// marker, so only the name check can keep it out.
+    #[test]
+    fn managed_names_in_names_only_valid_non_routing_managed_homes() {
+        let ws = crate::config::test_scratch("tmm-managed-names");
+        for name in ["dev", "lead", "dev @all", "all", "Human", "has.dot", "-dash", "plain"] {
+            let home = ws.join(".tmm/agents").join(name);
+            std::fs::create_dir_all(&home).unwrap();
+            if name != "plain" {
+                std::fs::write(home.join("launch.json"), "{}").unwrap();
+            }
+        }
+        assert_eq!(managed_names_in(ws.to_str().unwrap()).unwrap(), vec!["dev".to_string(), "lead".to_string()]);
+        let empty = crate::config::test_scratch("tmm-managed-names-none");
+        assert_eq!(managed_names_in(empty.to_str().unwrap()).unwrap(), Vec::<String>::new(), "no agents directory is nobody");
+    }
 
     /// Board #382: a join is a team in the recipe and no member; a member the
     /// definition placed, and a solo agent, are not joined.
