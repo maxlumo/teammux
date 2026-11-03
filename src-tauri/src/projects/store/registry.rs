@@ -273,17 +273,23 @@ impl Store {
                 input_mode: mode("codex"),
                 system: "You are a powerful 10x developer running on Codex who can handle any task with decisive execution and minimal words.".into(),
                 skills: r#"["tmm-cli","mem","mcp-cli"]"#.into(),
-                mcp: r#"[{"name":"kiro-web-search","command":"uvx","args":["kiro-web-search==0.1.3"]}]"#.into(),
+                mcp: "[]".into(),
             },
             RegAgent {
                 name: "claude".into(),
                 backend: "claude".into(),
-                model: "global.anthropic.claude-fable-5-1[1m]".into(),
+                // Empty = the carried `settings.json` env's ANTHROPIC_MODEL, or
+                // the CLI's own default (`render_claude` passes no --model).
+                // The 2026-09-02 pin `global.anthropic.claude-fable-5-1[1m]`
+                // was a Bedrock inference profile only some accounts and
+                // regions have; on first-party Anthropic or another Bedrock
+                // account every turn of the seeded agent failed (board #511).
+                model: String::new(),
                 effort: String::new(),
                 input_mode: mode("claude"),
                 system: "You are a powerful 10x developer running on Claude Code who can handle any task with decisive execution and minimal words.".into(),
                 skills: r#"["tmm-cli","mem","mcp-cli"]"#.into(),
-                mcp: r#"[{"name":"kiro-web-search","command":"uvx","args":["kiro-web-search==0.1.3"]}]"#.into(),
+                mcp: "[]".into(),
             },
             RegAgent {
                 name: "grok".into(),
@@ -293,7 +299,7 @@ impl Store {
                 input_mode: mode("grok"),
                 system: "You are a powerful 10x developer running on Grok who can handle any task with decisive execution and minimal words.".into(),
                 skills: r#"["tmm-cli","mem","mcp-cli"]"#.into(),
-                mcp: r#"[{"name":"kiro-web-search","command":"uvx","args":["kiro-web-search==0.1.3"]}]"#.into(),
+                mcp: "[]".into(),
             },
             RegAgent {
                 name: "omp".into(),
@@ -319,9 +325,7 @@ impl Store {
                 input_mode: mode("kimi"),
                 system: DEFAULT_KIMI_SYSTEM.into(),
                 skills: r#"["tmm-cli","mem","mcp-cli"]"#.into(),
-                // kimi's built-in search is the Moonshot service (a Kimi API
-                // key); on Bedrock it has none, so the MCP shim like codex.
-                mcp: r#"[{"name":"kiro-web-search","command":"uvx","args":["kiro-web-search==0.1.3"]}]"#.into(),
+                mcp: "[]".into(),
             },
         ];
         // backend-seeds:end
@@ -443,11 +447,16 @@ mod tests {
             }
             assert!(a.system.starts_with("You are a powerful 10x developer running on "), "{}: {}", a.name, a.system);
         }
-        assert_eq!(seeded[0].mcp, "[]", "Kiro uses its built-in web search");
-        assert_eq!(seeded[4].mcp, "[]", "OMP ships its own web_search tool");
-        assert!(seeded[1..4].iter().all(|a| a.mcp.contains("kiro-web-search")));
-        assert!(seeded[5].mcp.contains("kiro-web-search"), "Bedrock K3 has no built-in search");
-        assert_eq!(seeded[5].model, "", "kimi's model is the user's own default_model");
+        // The seed rule (board #511, owner 2026-11-04 00:28): a shipped
+        // default names NO host-specific value. No model, so the CLI's or the
+        // user's own default applies (the claude Bedrock pin and the omp
+        // bedrock-extra pin both failed on every other host), and no inline
+        // MCP, since the one it carried needed a credential only one install
+        // had (kiro-web-search wants KIRO_API_KEY). Checked over all six.
+        for a in &seeded {
+            assert_eq!(a.model, "", "the {} seed names no model", a.name);
+            assert_eq!(a.mcp, "[]", "the {} seed carries no inline MCP", a.name);
+        }
         assert!(!seeded.iter().any(|a| matches!(a.name.as_str(), "docs" | "reviewer")));
 
         // Seeding twice must not duplicate.

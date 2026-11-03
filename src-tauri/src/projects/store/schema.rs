@@ -627,14 +627,14 @@ impl Store {
             // v22 (board #224): the `kimi` default joins EXISTING installs
             // exactly once — the v18 mechanism (rows > 0 gates out fresh
             // databases, NOT EXISTS respects a user's own `kimi` def, the
-            // stamp makes a later delete stick). Same skills as its siblings
-            // and the kiro-web-search shim (Bedrock K3 has no built-in
-            // search); model empty = the user's own default_model.
+            // stamp makes a later delete stick). Same skills as its siblings,
+            // model empty = the user's own default_model, and no inline MCP:
+            // a backfill follows the seed rule (board #511).
             self.conn
                 .execute(
                     "INSERT INTO reg_agents (name, backend, model, effort, system, skills, mcp, created_at, updated_at)
                      SELECT 'kimi', 'kimi', '', '', ?1, '[\"tmm-cli\",\"mem\",\"mcp-cli\"]',
-                            '[{\"name\":\"kiro-web-search\",\"command\":\"uvx\",\"args\":[\"kiro-web-search==0.1.3\"]}]',
+                            '[]',
                             CAST(strftime('%s','now') AS INTEGER), CAST(strftime('%s','now') AS INTEGER)
                      WHERE (SELECT COUNT(*) FROM reg_agents) > 0
                        AND NOT EXISTS (SELECT 1 FROM reg_agents WHERE name = 'kimi')",
@@ -1227,6 +1227,7 @@ mod tests {
             let omp = store.reg_get("omp").unwrap().expect("v18 backfills the omp default");
             assert_eq!(omp.system, DEFAULT_OMP_SYSTEM);
             assert_eq!(omp.model, "", "the backfill leaves the model to the user's roles, like the seed");
+            assert_eq!(omp.mcp, "[]", "a backfill follows the seed rule: no inline MCP (board #511)");
             assert_eq!(omp.skills, r#"["tmm-cli","mem","mcp-cli"]"#);
             // Deleting the default now sticks: the stamp is v18, the insert
             // is history.
@@ -1278,7 +1279,7 @@ mod tests {
             assert_eq!(kimi.system, DEFAULT_KIMI_SYSTEM);
             assert_eq!(kimi.model, "", "empty = the user's own default_model, carried into the home");
             assert_eq!(kimi.skills, r#"["tmm-cli","mem","mcp-cli"]"#);
-            assert!(kimi.mcp.contains("kiro-web-search"), "Bedrock K3 has no built-in search");
+            assert_eq!(kimi.mcp, "[]", "a backfill follows the seed rule: no inline MCP");
             assert_eq!(
                 store.reg_list().unwrap().iter().map(|a| a.name.as_str()).collect::<Vec<_>>(),
                 ["kiro", "codex", "claude", "grok", "omp", "kimi"]
