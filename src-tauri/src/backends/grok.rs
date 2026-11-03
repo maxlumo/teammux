@@ -17,23 +17,78 @@ pub(crate) fn effort_values() -> &'static [&'static str] {
 ///   Available models:
 ///     - grok-4.6
 ///     * bedrock-grok46 (default)
-/// The `*` marks the default; a custom model may carry a "(default)" or
-/// description suffix — the id is the first token after the bullet.
-pub(crate) fn models_fetch() -> Option<Vec<String>> {
-    let out = std::process::Command::new("grok").arg("models").output().ok()?;
+/// The `*` marks the default and is the only entry with a suffix, ` (default)`
+/// (the format strings `"  - "`, `"  * "`, `" (default)"` in grok-native
+/// 1.0.52; no other suffix exists there).
+#[cfg(not(any(target_os = "android", target_os = "ios")))]
+pub(crate) fn model_list() -> Result<(Vec<String>, super::ModelKind), super::ModelReason> {
+    let out = std::process::Command::new("grok").arg("models").output().map_err(|_| super::ModelReason::CliFailed)?;
     if !out.status.success() {
-        return None;
+        return Err(super::ModelReason::CliFailed);
     }
-    let text = String::from_utf8_lossy(&out.stdout);
-    let models: Vec<String> = text
-        .lines()
-        .filter_map(|l| {
-            let l = l.trim();
-            let rest = l.strip_prefix("- ").or_else(|| l.strip_prefix("* "))?;
-            rest.split_whitespace().next().map(str::to_string)
-        })
-        .collect();
-    (!models.is_empty()).then_some(models)
+    model_list_from(&out.stdout)
+}
+
+/// The pure half, WHOLE or nothing (board #511 P2 review P1-B): the stdout
+/// must be UTF-8, and every non-blank line after `Available models:` must be
+/// an entry — `- id` or `* id`, optionally ` (default)`, the id one token.
+/// A line that breaks that makes the whole answer `CliFailed`, never a
+/// shorter catalogue that would refuse the id it dropped. Lines before the
+/// header (`You are not authenticated.`, `Default model: …`) are not entries.
+#[cfg(not(any(target_os = "android", target_os = "ios")))]
+pub(crate) fn model_list_from(stdout: &[u8]) -> Result<(Vec<String>, super::ModelKind), super::ModelReason> {
+    let text = std::str::from_utf8(stdout).map_err(|_| super::ModelReason::CliFailed)?;
+    let mut lines = text.lines().map(str::trim);
+    if !lines.any(|l| l == "Available models:") {
+        return Err(super::ModelReason::CliFailed);
+    }
+    let mut models = Vec::new();
+    for line in lines.filter(|l| !l.is_empty()) {
+        models.push(catalogue_entry(line).ok_or(super::ModelReason::CliFailed)?.to_string());
+    }
+    if models.is_empty() {
+        return Err(super::ModelReason::CliFailed);
+    }
+    Ok((models, super::ModelKind::Authoritative))
+}
+
+/// One catalogue line's id, or `None` when the line is not exactly an entry.
+#[cfg(not(any(target_os = "android", target_os = "ios")))]
+fn catalogue_entry(line: &str) -> Option<&str> {
+    let rest = line.strip_prefix("- ").or_else(|| line.strip_prefix("* "))?;
+    let id = rest.strip_suffix(" (default)").unwrap_or(rest);
+    (!id.is_empty() && !id.contains(char::is_whitespace)).then_some(id)
+}
+
+/// What the isolated home inherits of the user's grok config: `[models]` and
+/// `[model.*]`, the auth-bearing catalog (board #511 lifted it out of
+/// `grok_config_toml_from`, so the renderer and the baseline default read the
+/// SAME carry).
+pub(crate) fn grok_carried(user: &toml::Table) -> toml::Table {
+    let mut out = toml::Table::new();
+    for key in ["models", "model"] {
+        if let Some(v) = user.get(key) {
+            out.insert(key.into(), v.clone());
+        }
+    }
+    out
+}
+
+/// The baseline default: the carried `[models].default`.
+#[cfg(not(any(target_os = "android", target_os = "ios")))]
+pub(crate) fn baseline_model() -> Result<Option<String>, super::ModelReason> {
+    baseline_model_in(&grok_user_home())
+}
+
+#[cfg(not(any(target_os = "android", target_os = "ios")))]
+pub(crate) fn baseline_model_in(home: &std::path::Path) -> Result<Option<String>, super::ModelReason> {
+    let Some(text) = super::read_model_source(&home.join("config.toml"))? else { return Ok(None) };
+    let user = text.parse::<toml::Table>().map_err(|_| super::ModelReason::Invalid)?;
+    Ok(grok_carried(&user)
+        .get("models")
+        .and_then(|m| m.get("default"))
+        .and_then(toml::Value::as_str)
+        .map(str::to_string))
 }
 
 #[cfg(not(any(target_os = "android", target_os = "ios")))]
@@ -259,11 +314,7 @@ pub(crate) fn grok_config_toml_from(mcps: &[shared::McpDef], user_config: Option
     trust.insert("enabled".into(), toml::Value::Boolean(false));
     root.insert("folder_trust".into(), toml::Value::Table(trust));
     if let Some(user) = user_config.and_then(|t| t.parse::<toml::Table>().ok()) {
-        for key in ["models", "model"] {
-            if let Some(v) = user.get(key) {
-                root.insert(key.into(), v.clone());
-            }
-        }
+        root.extend(grok_carried(&user));
     }
     let mut servers = toml::value::Table::new();
     for m in mcps {

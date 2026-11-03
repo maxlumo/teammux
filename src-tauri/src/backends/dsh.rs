@@ -66,11 +66,6 @@ pub(crate) fn effort_values() -> &'static [&'static str] {
     &["off", "low", "high", "max"]
 }
 
-/// The route lists its models from the account service or its own catalog;
-/// there is no CLI to ask without a request, so the model is free text.
-pub(crate) fn models_fetch() -> Option<Vec<String>> {
-    None
-}
 
 /// The shipped default model of the deepseek-official route
 /// (`agent-default-model` in dsh-base), used when the definition names none.
@@ -1571,7 +1566,7 @@ pub(crate) fn known_models() -> &'static [&'static str] {
 /// (`models::validate`, so the editor, `tmm registry save`, a team member and
 /// `/model` agree): one token of letters, digits and `._:/-`, at most 100 long.
 /// The route passes the id to the wire and nothing here parses it, so no list
-/// is consulted (`models_fetch` is `None`: dsh has nothing to ask without a
+/// is consulted (`model_list` is `NotListed`: dsh has nothing to ask without a
 /// request).
 pub(crate) fn model_id_error(model: &str) -> Option<String> {
     let ok = model.len() <= 100 && model.chars().all(|c| c.is_ascii_alphanumeric() || matches!(c, '.' | '_' | ':' | '/' | '-'));

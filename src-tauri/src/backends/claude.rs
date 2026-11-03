@@ -20,10 +20,63 @@ pub(crate) fn effort_values() -> &'static [&'static str] {
     &["low", "medium", "high", "xhigh", "max"]
 }
 
-/// Claude takes model aliases nobody can enumerate — no authoritative list,
-/// so no validation (soft degradation, models.rs module doc).
-pub(crate) fn models_fetch() -> Option<Vec<String>> {
-    None
+/// The model fields of the user's `settings.json` that may leave as data
+/// (board #511, an EXACT allow-list): the carried env's model variables
+/// that Claude Code documents, then the top-level `model`. No wildcard, no
+/// name a caller chooses; every other key — credentials included — is
+/// never output.
+#[cfg(not(any(target_os = "android", target_os = "ios")))]
+pub(crate) const MODEL_ENV: &[&str] = &[
+    "ANTHROPIC_MODEL",
+    "ANTHROPIC_DEFAULT_OPUS_MODEL",
+    "ANTHROPIC_DEFAULT_SONNET_MODEL",
+    "ANTHROPIC_DEFAULT_HAIKU_MODEL",
+];
+
+/// Claude takes aliases nobody can enumerate, so what this host DECLARES is
+/// offered as SUGGESTIONS: never a whitelist, and free text stays valid.
+#[cfg(not(any(target_os = "android", target_os = "ios")))]
+pub(crate) fn model_list() -> Result<(Vec<String>, super::ModelKind), super::ModelReason> {
+    let Some(settings) = user_settings()? else { return Err(super::ModelReason::NotListed) };
+    let ids = declared_models(&settings);
+    if ids.is_empty() {
+        return Err(super::ModelReason::NotListed);
+    }
+    Ok((ids, super::ModelKind::Suggestions))
+}
+
+/// The baseline default: the CARRIED env's `ANTHROPIC_MODEL`, read through
+/// the same `claude_env_of` `render_claude` copies from. The top-level
+/// `model` is not carried into the home, so it is a suggestion, never this.
+#[cfg(not(any(target_os = "android", target_os = "ios")))]
+pub(crate) fn baseline_model() -> Result<Option<String>, super::ModelReason> {
+    Ok(user_settings()?.and_then(|s| carried_model(&s)))
+}
+
+#[cfg(not(any(target_os = "android", target_os = "ios")))]
+fn user_settings() -> Result<Option<serde_json::Value>, super::ModelReason> {
+    let Some(text) = super::read_model_source(&shared::claude_user_settings())? else { return Ok(None) };
+    serde_json::from_str(&text).map(Some).map_err(|_| super::ModelReason::Invalid)
+}
+
+/// Pure: the allow-listed ids, de-duplicated, in that order.
+#[cfg(not(any(target_os = "android", target_os = "ios")))]
+pub(crate) fn declared_models(settings: &serde_json::Value) -> Vec<String> {
+    let env = shared::claude_env_of(settings);
+    let mut out: Vec<String> = Vec::new();
+    let named = MODEL_ENV.iter().map(|k| env.get(*k)).chain(std::iter::once(settings.get("model")));
+    for id in named.flatten().filter_map(serde_json::Value::as_str) {
+        if !out.iter().any(|o| o == id) {
+            out.push(id.to_string());
+        }
+    }
+    out
+}
+
+/// Pure: the carried env's `ANTHROPIC_MODEL`.
+#[cfg(not(any(target_os = "android", target_os = "ios")))]
+pub(crate) fn carried_model(settings: &serde_json::Value) -> Option<String> {
+    shared::claude_env_of(settings).get("ANTHROPIC_MODEL").and_then(serde_json::Value::as_str).map(str::to_string)
 }
 
 #[cfg(not(any(target_os = "android", target_os = "ios")))]
@@ -515,3 +568,46 @@ pub(crate) const RECOVERY_SHAPES: &[super::Measured] = &[
 
 /// The program whose `--version` names the Claude Code a pane runs.
 pub(crate) const VERSION_PROGRAM: &str = "claude";
+
+#[cfg(all(test, not(any(target_os = "android", target_os = "ios"))))]
+mod tests {
+    use super::*;
+
+    const SENTINEL: &str = "SENTINEL-511";
+
+    /// Board #511 review P1-C: only the allow-listed model fields leave, and
+    /// the baseline default is the CARRIED env's ANTHROPIC_MODEL (P1-B). Every
+    /// other key sits beside them carrying a sentinel.
+    #[test]
+    fn only_the_allow_listed_model_fields_leave_and_the_default_is_the_carried_env() {
+        let settings = serde_json::json!({
+            "model": "top-model",
+            "apiKeyHelper": SENTINEL,
+            "env": {
+                "ANTHROPIC_MODEL": "env-model",
+                "ANTHROPIC_DEFAULT_OPUS_MODEL": "opus-id",
+                "ANTHROPIC_DEFAULT_SONNET_MODEL": "sonnet-id",
+                "ANTHROPIC_DEFAULT_HAIKU_MODEL": "haiku-id",
+                "ANTHROPIC_FOO_MODEL": SENTINEL,
+                "ANTHROPIC_API_KEY": SENTINEL,
+                "AWS_SECRET_ACCESS_KEY": SENTINEL,
+                "CLAUDE_CODE_USE_BEDROCK": "1",
+            },
+        });
+        let ids = declared_models(&settings);
+        assert_eq!(ids, ["env-model", "opus-id", "sonnet-id", "haiku-id", "top-model"]);
+        assert_eq!(carried_model(&settings).as_deref(), Some("env-model"));
+        assert!(!format!("{ids:?}{:?}", carried_model(&settings)).contains(SENTINEL));
+        // The renderer carries exactly the env the default reads.
+        assert_eq!(shared::claude_env_of(&settings)["ANTHROPIC_MODEL"], "env-model");
+
+        // Conflicting sources: the top-level model is NOT carried into the
+        // home, so with only it set there is no default, just a suggestion.
+        let top_only = serde_json::json!({ "model": "top-model", "env": { "AWS_REGION": "us-west-2" } });
+        assert_eq!(carried_model(&top_only), None);
+        assert_eq!(declared_models(&top_only), ["top-model"]);
+        // Nothing declared; a non-string value is not an id.
+        assert!(declared_models(&serde_json::json!({})).is_empty());
+        assert_eq!(carried_model(&serde_json::json!({ "env": { "ANTHROPIC_MODEL": 7 } })), None);
+    }
+}

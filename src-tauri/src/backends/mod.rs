@@ -197,7 +197,7 @@ impl Backend {
     }
 
     /// A syntax rule for a model id that holds even when the CLI cannot be
-    /// asked for a list (`models_fetch` is `None`), checked at the shared
+    /// asked for a list (`model_list` is `NotListed`), checked at the shared
     /// validation door so the editor, `tmm registry save`, a team member and a
     /// command agree. `None` = no extra rule. Declared in the backend's file.
     pub fn model_id_error(self, model: &str) -> Option<String> {
@@ -730,20 +730,114 @@ impl Backend {
         }
     }
 
-    /// Ask the backend's own CLI for its model ids. `None` = no authoritative
-    /// list exists (claude/codex/omp aliases) or the CLI is unavailable —
-    /// validation then degrades to accept-all (models.rs module doc).
-    pub fn models_fetch(self) -> Option<Vec<String>> {
+    /// The model ids this host declares for the backend, and whether that
+    /// list is the backend's WHOLE catalogue or only suggestions (board #511).
+    /// Raw: `projects::models` bounds and caches it. An `Err` says why there
+    /// is no list — `NotListed` is a fact (nothing enumerable), the rest are
+    /// failures to read one.
+    #[cfg(not(any(target_os = "android", target_os = "ios")))]
+    pub fn model_list(self) -> Result<(Vec<String>, ModelKind), ModelReason> {
         match self {
-            Backend::Kiro => kiro::models_fetch(),
-            Backend::Claude => claude::models_fetch(),
-            Backend::Codex => codex::models_fetch(),
-            Backend::Grok => grok::models_fetch(),
-            Backend::Omp => omp::models_fetch(),
-            Backend::Kimi => kimi::models_fetch(),
-            Backend::Dsh => dsh::models_fetch(),
+            Backend::Kiro => kiro::model_list(),
+            Backend::Claude => claude::model_list(),
+            Backend::Codex => codex::model_list(),
+            Backend::Grok => grok::model_list(),
+            Backend::Omp => omp::model_list(),
+            Backend::Kimi => kimi::model_list(),
+            Backend::Dsh => Err(ModelReason::NotListed),
         }
     }
+
+    /// The BASELINE default (board #511): what a NEW agent with an empty model
+    /// is declared or derived to start on, through the SAME pure parse or
+    /// inherit function its renderer uses — never through the discovery
+    /// cache, and never feeding a launch. `Ok(None)`: the source was read and
+    /// declares none. Says nothing about a project config, environment
+    /// overrides, an existing home or a resumed session.
+    #[cfg(not(any(target_os = "android", target_os = "ios")))]
+    pub fn baseline_model(self) -> Result<Option<String>, ModelReason> {
+        match self {
+            Backend::Kiro => Err(ModelReason::NotDerivable),
+            Backend::Claude => claude::baseline_model(),
+            Backend::Codex => codex::baseline_model(),
+            Backend::Grok => grok::baseline_model(),
+            Backend::Omp => omp::baseline_model(),
+            Backend::Kimi => kimi::baseline_model(),
+            Backend::Dsh => Ok(Some(dsh::DEFAULT_MODEL.to_string())),
+        }
+    }
+}
+
+/// Whether a backend's model list is its whole catalogue (an id outside it is
+/// refused at save) or only what this host declares (board #511).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ModelKind {
+    Authoritative,
+    Suggestions,
+}
+
+impl ModelKind {
+    pub fn word(self) -> &'static str {
+        match self {
+            ModelKind::Authoritative => "authoritative",
+            ModelKind::Suggestions => "suggestions",
+        }
+    }
+}
+
+/// Why a model list or a baseline default is absent: a fixed word, never the
+/// source's text (board #511). `NotListed` and `NotDerivable` are facts, the
+/// rest are failures to read.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ModelReason {
+    NotListed,
+    NotDerivable,
+    Unreadable,
+    Invalid,
+    TooLarge,
+    Overflow,
+    CliFailed,
+}
+
+impl ModelReason {
+    pub fn word(self) -> &'static str {
+        match self {
+            ModelReason::NotListed => "not_listed",
+            ModelReason::NotDerivable => "not_derivable",
+            ModelReason::Unreadable => "unreadable",
+            ModelReason::Invalid => "invalid",
+            ModelReason::TooLarge => "too_large",
+            ModelReason::Overflow => "overflow",
+            ModelReason::CliFailed => "cli_failed",
+        }
+    }
+
+    /// A failure is something a Retry may fix; a fact is not.
+    pub fn is_failure(self) -> bool {
+        !matches!(self, ModelReason::NotListed | ModelReason::NotDerivable)
+    }
+
+    /// `readiness::read_small`'s fixed words, as a reason.
+    pub fn of_read(word: &str) -> ModelReason {
+        match word {
+            "config_too_large" => ModelReason::TooLarge,
+            "config_invalid" | "config_not_regular" => ModelReason::Invalid,
+            _ => ModelReason::Unreadable,
+        }
+    }
+}
+
+/// dsh's baseline default, for tests outside the backend files.
+#[cfg(all(test, not(any(target_os = "android", target_os = "ios"))))]
+pub(crate) fn dsh_default_model() -> &'static str {
+    dsh::DEFAULT_MODEL
+}
+
+/// Read a user config file through the readiness reader (1 MiB cap, fixed
+/// error words): `Ok(None)` when it is absent.
+#[cfg(not(any(target_os = "android", target_os = "ios")))]
+pub(crate) fn read_model_source(path: &std::path::Path) -> Result<Option<String>, ModelReason> {
+    readiness::read_small(path).map_err(ModelReason::of_read)
 }
 
 /// Lowercase alphanumerics only: the pane wraps the error blob at arbitrary

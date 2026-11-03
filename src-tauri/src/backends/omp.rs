@@ -16,9 +16,67 @@ pub(crate) fn effort_values() -> &'static [&'static str] {
     &["off", "minimal", "low", "medium", "high", "xhigh", "max", "auto"]
 }
 
-/// omp models ride its own catalog files; no authoritative list to ask.
-pub(crate) fn models_fetch() -> Option<Vec<String>> {
-    None
+/// What this host DECLARES for omp (board #511), offered as SUGGESTIONS:
+/// the selector `<provider>/<id>` of every model under `models.yml`
+/// `providers.<p>.models[].id`, then the `config.yml` `modelRoles` values.
+/// Files only — `omp models` is NOT run (it rewrites omp's own catalogue
+/// cache); omp's bundled catalogue stays reachable as free text.
+#[cfg(not(any(target_os = "android", target_os = "ios")))]
+pub(crate) fn model_list() -> Result<(Vec<String>, super::ModelKind), super::ModelReason> {
+    let dir = omp_user_agent_dir();
+    let models = super::read_model_source(&dir.join("models.yml"))?;
+    let config = super::read_model_source(&dir.join("config.yml"))?;
+    let ids = declared_models(models.as_deref(), config.as_deref())?;
+    if ids.is_empty() {
+        return Err(super::ModelReason::NotListed);
+    }
+    Ok((ids, super::ModelKind::Suggestions))
+}
+
+/// The baseline default: `omp_model_roles(config, "")`'s `default` — the
+/// SAME function `render_omp` uses for an empty definition.
+#[cfg(not(any(target_os = "android", target_os = "ios")))]
+pub(crate) fn baseline_model() -> Result<Option<String>, super::ModelReason> {
+    let config = super::read_model_source(&omp_user_agent_dir().join("config.yml"))?;
+    if let Some(text) = config.as_deref() {
+        serde_yaml_ng::from_str::<serde_yaml_ng::Mapping>(text).map_err(|_| super::ModelReason::Invalid)?;
+    }
+    Ok(omp_model_roles(config.as_deref(), "").get("default").and_then(serde_yaml_ng::Value::as_str).map(str::to_string))
+}
+
+/// Pure: the allow-listed ids from the two files' text, de-duplicated. A
+/// file present but not YAML is `Invalid`; nothing else of either file is
+/// read (api keys, headers and base URLs sit beside these fields).
+#[cfg(not(any(target_os = "android", target_os = "ios")))]
+pub(crate) fn declared_models(models_yml: Option<&str>, config_yml: Option<&str>) -> Result<Vec<String>, super::ModelReason> {
+    use serde_yaml_ng::{Mapping, Value};
+    let parse = |t: &str| serde_yaml_ng::from_str::<Mapping>(t).map_err(|_| super::ModelReason::Invalid);
+    let mut out: Vec<String> = Vec::new();
+    let mut push = |id: String, out: &mut Vec<String>| {
+        if !out.contains(&id) {
+            out.push(id);
+        }
+    };
+    if let Some(text) = models_yml {
+        let doc = parse(text)?;
+        for (provider, body) in doc.get("providers").and_then(Value::as_mapping).into_iter().flatten() {
+            let Some(provider) = provider.as_str() else { continue };
+            for m in body.get("models").and_then(Value::as_sequence).into_iter().flatten() {
+                if let Some(id) = m.get("id").and_then(Value::as_str) {
+                    push(format!("{provider}/{id}"), &mut out);
+                }
+            }
+        }
+    }
+    if let Some(text) = config_yml {
+        parse(text)?;
+        for (_, v) in omp_model_roles(Some(text), "") {
+            if let Some(id) = v.as_str() {
+                push(id.to_string(), &mut out);
+            }
+        }
+    }
+    Ok(out)
 }
 
 use serde_json::Value;

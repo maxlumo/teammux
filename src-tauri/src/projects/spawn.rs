@@ -2555,6 +2555,65 @@ mod tests {
         std::fs::remove_dir_all(&dir).ok();
     }
 
+    /// Board #511 review P1-B: discovery is a PROJECTION, never a launch
+    /// source. The renderer reads the user's config at materialize time, not
+    /// the discovery cache, so a config changed AFTER a discovery is what an
+    /// empty definition launches on, and the baseline default, never cached,
+    /// says the same thing.
+    #[test]
+    fn a_config_changed_after_discovery_is_what_an_empty_omp_definition_launches_on() {
+        use super::super::models::{default_fact, list_fact};
+        let user = crate::backends::omp::omp_user_agent_dir();
+        std::fs::create_dir_all(&user).unwrap();
+        let cfg = user.join("config.yml");
+        std::fs::write(&cfg, "modelRoles:\n  default: prov/first\n").unwrap();
+        assert!(list_fact("omp").is_ok(), "discovered (and cached)");
+        assert_eq!(default_fact("omp"), Ok(Some("prov/first".into())));
+        std::fs::write(&cfg, "modelRoles:\n  default: prov/second\n").unwrap();
+        let dir = crate::config::test_scratch("tmm-spawn-omp-511");
+        let r = render_omp(&def("omp"), "t511", &dir, "prompt", &[]).unwrap();
+        assert!(r.cmd.contains(" --model prov/second"), "the launch reads the source, not the cache: {}", r.cmd);
+        assert!(std::fs::read_to_string(dir.join("config.yml")).unwrap().contains("default: prov/second"));
+        assert_eq!(default_fact("omp"), Ok(Some("prov/second".into())), "the default is never cached");
+        std::fs::remove_file(&cfg).ok();
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    #[test]
+    fn a_config_changed_after_discovery_is_what_an_empty_grok_definition_launches_on() {
+        use super::super::models::default_fact;
+        let user = crate::backends::grok::grok_user_home();
+        std::fs::create_dir_all(&user).unwrap();
+        let cfg = user.join("config.toml");
+        std::fs::write(&cfg, "[models]\ndefault = \"first\"\n").unwrap();
+        assert_eq!(default_fact("grok"), Ok(Some("first".into())));
+        std::fs::write(&cfg, "[models]\ndefault = \"second\"\n").unwrap();
+        let dir = crate::config::test_scratch("tmm-spawn-grok-511");
+        render_grok(&def("grok"), "t511", &dir, "prompt", &[]).unwrap();
+        let home: toml::Table = std::fs::read_to_string(dir.join("config.toml")).unwrap().parse().unwrap();
+        assert_eq!(home["models"]["default"].as_str(), Some("second"), "the carry is the renderer's, read now");
+        assert_eq!(default_fact("grok"), Ok(Some("second".into())));
+        std::fs::remove_file(&cfg).ok();
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    /// omp's declared ids (board #511 review P1-C): ONLY providers.<p>.models[].id
+    /// as `<p>/<id>` and the modelRoles values leave; every key beside them —
+    /// keys, headers, base URLs, display names — never does.
+    #[test]
+    fn omp_discovery_returns_only_the_allow_listed_fields() {
+        use crate::backends::{omp::declared_models, ModelReason};
+        let s = "SENTINEL-511";
+        let models = format!("providers:\n  p1:\n    apiKey: {s}\n    baseUrl: https://{s}.example\n    headers:\n      Authorization: {s}\n    models:\n      - id: a\n        name: {s}-display\n      - id: b\n  p2:\n    models:\n      - id: c\n");
+        let config = format!("apiKey: {s}\nmodelRoles:\n  default: p1/a\n  smol: p9/z\n");
+        let ids = declared_models(Some(&models), Some(&config)).unwrap();
+        assert_eq!(ids, ["p1/a", "p1/b", "p2/c", "p9/z"], "selectors, then roles, de-duplicated");
+        assert!(!format!("{ids:?}").contains(s), "{ids:?}");
+        assert_eq!(declared_models(Some("providers: [unclosed"), None), Err(ModelReason::Invalid));
+        assert_eq!(declared_models(None, Some(": : :")), Err(ModelReason::Invalid));
+        assert_eq!(declared_models(None, None), Ok(vec![]), "nothing declared");
+    }
+
     /// No model, no effort: the config stays absent (omp default) and the
     /// launch line carries no --thinking.
     #[test]

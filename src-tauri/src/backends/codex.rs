@@ -43,10 +43,45 @@ pub(crate) fn effort_values() -> &'static [&'static str] {
 /// a bare slug is rejected at save time. `None` when the config names no
 /// catalog — stock codex takes aliases nobody can enumerate, and validation
 /// degrades to accept-all (models.rs module doc).
-pub(crate) fn models_fetch() -> Option<Vec<String>> {
-    let config = std::fs::read_to_string(codex_user_home().join("config.toml")).ok()?;
-    let catalog = std::fs::read_to_string(catalog_path(&config)?).ok()?;
-    let slugs = catalog_slugs(&catalog);
+#[cfg(not(any(target_os = "android", target_os = "ios")))]
+pub(crate) fn model_list() -> Result<(Vec<String>, super::ModelKind), super::ModelReason> {
+    use super::ModelReason::{Invalid, NotListed, Unreadable};
+    let Some(config) = super::read_model_source(&codex_user_home().join("config.toml"))? else { return Err(NotListed) };
+    config.parse::<toml::Table>().map_err(|_| Invalid)?;
+    // A stock codex names no catalogue: nothing enumerable, a fact.
+    let Some(path) = catalog_path(&config) else { return Err(NotListed) };
+    // A catalogue that IS named but cannot be read is a failure, not stock.
+    let catalog = super::read_model_source(&path)?.ok_or(Unreadable)?;
+    let slugs = catalog_slugs_whole(&catalog).ok_or(Invalid)?;
+    Ok((slugs, super::ModelKind::Authoritative))
+}
+
+/// The baseline default: the user's `config.toml` `model` — the file the
+/// isolated home links, whose model applies when the profile names none
+/// (`codex_profile` omits it for an empty definition).
+#[cfg(not(any(target_os = "android", target_os = "ios")))]
+pub(crate) fn baseline_model() -> Result<Option<String>, super::ModelReason> {
+    let Some(config) = super::read_model_source(&codex_user_home().join("config.toml"))? else { return Ok(None) };
+    let table = config.parse::<toml::Table>().map_err(|_| super::ModelReason::Invalid)?;
+    Ok(codex_user_model(&table))
+}
+
+/// The pure half of the baseline: the top-level `model` string.
+pub(crate) fn codex_user_model(config: &toml::Table) -> Option<String> {
+    config.get("model").and_then(toml::Value::as_str).map(str::to_string)
+}
+
+/// The catalogue's slugs, ALL of them or `None` (board #511): it is
+/// authoritative, so an entry without a string slug makes it unusable rather
+/// than a shorter whitelist.
+pub(crate) fn catalog_slugs_whole(json: &str) -> Option<Vec<String>> {
+    let v = serde_json::from_str::<serde_json::Value>(json).ok()?;
+    let slugs = v
+        .get("models")?
+        .as_array()?
+        .iter()
+        .map(|m| m.get("slug").and_then(serde_json::Value::as_str).map(str::to_string))
+        .collect::<Option<Vec<_>>>()?;
     (!slugs.is_empty()).then_some(slugs)
 }
 
@@ -56,20 +91,6 @@ fn catalog_path(config: &str) -> Option<std::path::PathBuf> {
     table.get("model_catalog_json").and_then(toml::Value::as_str).map(std::path::PathBuf::from)
 }
 
-/// The `models[].slug` values of a codex model catalog, in file order.
-pub(crate) fn catalog_slugs(json: &str) -> Vec<String> {
-    let Ok(v) = serde_json::from_str::<serde_json::Value>(json) else { return Vec::new() };
-    v.get("models")
-        .and_then(serde_json::Value::as_array)
-        .map(|models| {
-            models
-                .iter()
-                .filter_map(|m| m.get("slug").and_then(serde_json::Value::as_str))
-                .map(str::to_string)
-                .collect()
-        })
-        .unwrap_or_default()
-}
 
 /// Where the user's own codex lives — `CODEX_HOME` when the user set it,
 /// else `~/.codex`. Only read, never written.
@@ -871,16 +892,18 @@ mod tests {
     /// exact class the runtime endpoint rejects — fails at save time, and a
     /// home with no catalog degrades to accept-all. The home is the
     /// per-process test dir, never the developer's real `~/.codex`. Asserted
-    /// on `models_fetch` directly: `models::list` caches per backend (600 s),
+    /// on `model_list` directly: `models::list` caches per backend (600 s),
     /// and warming that cache here would couple test order.
     #[test]
     fn models_are_the_catalog_slugs_of_the_users_config() {
         let home = codex_user_home();
-        assert!(models_fetch().is_none(), "no config yet — no authoritative list");
+        assert_eq!(model_list(), Err(super::super::ModelReason::NotListed), "no config yet — no list");
 
         // A config with no catalog is stock codex — aliases, accept-all.
         std::fs::write(home.join("config.toml"), "model = \"gpt-5.6-sol\"\n").unwrap();
-        assert!(models_fetch().is_none());
+        assert_eq!(model_list(), Err(super::super::ModelReason::NotListed), "stock codex: nothing enumerable");
+        // ...but its model IS the baseline default (board #511).
+        assert_eq!(baseline_model(), Ok(Some("gpt-5.6-sol".to_string())));
 
         let catalog = home.join("models.json");
         std::fs::write(
@@ -894,12 +917,17 @@ mod tests {
         )
         .unwrap();
         assert_eq!(
-            models_fetch(),
-            Some(vec!["global.openai.gpt-6-astra".into(), "global.openai.gpt-5.6-sol".into()])
+            model_list(),
+            Ok((vec!["global.openai.gpt-6-astra".into(), "global.openai.gpt-5.6-sol".into()], super::super::ModelKind::Authoritative))
         );
+        // A catalogue named but missing is a FAILURE, not stock codex.
+        std::fs::write(home.join("config.toml"), format!("model_catalog_json = {:?}\n", home.join("gone.json"))).unwrap();
+        assert_eq!(model_list(), Err(super::super::ModelReason::Unreadable));
 
-        assert_eq!(catalog_slugs("not json"), Vec::<String>::new());
-        assert_eq!(catalog_slugs(r#"{"models":"nope"}"#), Vec::<String>::new());
+        // Authoritative, so read whole or not at all (board #511).
+        assert_eq!(catalog_slugs_whole("not json"), None);
+        assert_eq!(catalog_slugs_whole(r#"{"models":"nope"}"#), None);
+        assert_eq!(catalog_slugs_whole(r#"{"models":[{"slug":"a"},{"name":"no slug"}]}"#), None, "one bad entry, no list");
 
         // Leave the home catalog-less: sibling tests share the per-process
         // dir and must keep seeing "no authoritative list".

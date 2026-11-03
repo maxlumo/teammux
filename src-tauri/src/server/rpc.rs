@@ -723,10 +723,7 @@ fn handle_project_request(method: &str, p: &serde_json::Value) -> Result<serde_j
             // Absent backend = the documented default (board #127); the literal
             // lived inline here and was invisible to the backend map.
             let backend = p.get("backend").and_then(|v| v.as_str()).unwrap_or(crate::backends::Backend::DEFAULT.name());
-            Ok(serde_json::json!({
-                "backend": backend,
-                "models": projects::models::list(backend),
-            }))
+            Ok(projects::models::answer(backend))
         }
         // Central skills / MCP assets (owner: "集中化管理") — referenced from
         // agent defs by name, resolved at spawn.

@@ -91,6 +91,7 @@ const REASON_KEY: Record<string, string> = {
   no_auth: 'backendsReasonNoAuth',
   first_run: 'backendsReasonFirstRun',
   empty_catalogue: 'backendsReasonEmptyCatalogue',
+  needs_zsh: 'backendsReasonNeedsZsh',
 };
 export const REASON_CODES = Object.keys(REASON_KEY);
 

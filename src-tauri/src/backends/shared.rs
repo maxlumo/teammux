@@ -368,12 +368,17 @@ pub(crate) fn claude_env_of(settings: &Value) -> Value {
 /// only this block: Bedrock auth selection, region and model pins travel with
 /// the agent, while plugins and unrelated user preferences do not.
 pub(crate) fn claude_user_env() -> Value {
-    let path = std::env::var_os("HOME")
+    claude_user_env_from(&claude_user_settings())
+}
+
+/// The user's Claude settings file: the ONE path the renderer carries from
+/// and model discovery reads (board #511).
+pub(crate) fn claude_user_settings() -> PathBuf {
+    std::env::var_os("HOME")
         .map(PathBuf::from)
         .unwrap_or_default()
         .join(".claude")
-        .join("settings.json");
-    claude_user_env_from(&path)
+        .join("settings.json")
 }
 
 /// Claude Code's official statusLine extension point. The colocated `tmm`

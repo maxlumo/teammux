@@ -287,6 +287,21 @@ pub fn installed(program: &str, path: &str, deadline: Instant) -> Installed {
     }
 }
 
+/// A backend whose managed pane runs ANOTHER program it cannot start without
+/// (board #511): dsh's whole CLI is a zsh rc (`dsh::LAUNCH` is `exec zsh -i`),
+/// so a host with dsh but no zsh got a pane that died at start while this
+/// check said "installed". The CLI being present is not enough there.
+pub fn needs_programs(b: Backend, found: Installed, path: &str) -> Installed {
+    if found.state != State::Present || b != Backend::Dsh {
+        return found;
+    }
+    match crate::tmux::find_on_path("zsh", path.as_ref()) {
+        Ok(Some(_)) => found,
+        Ok(None) => Installed { state: State::Missing, reason: Some("needs_zsh".into()), ..found },
+        Err(_) => Installed { state: State::Unknown, reason: Some("path_unreadable".into()), ..found },
+    }
+}
+
 /// The version in a `--version` answer: the first word of its first line
 /// (split at spaces and `/`) that starts with a digit and has a dot, of
 /// version characters only, at most 32. Measured shapes (2026-11-01):
@@ -624,7 +639,7 @@ fn kiro_whoami(overlay: &str, limit: Duration) -> WhoamiAnswer {
 }
 
 /// kiro's model catalogue (`chat --list-models`, the free authenticated
-/// query `models_fetch` already uses): answers when it lists a model.
+/// query `kiro::model_list` already uses): answers when it lists a model.
 fn kiro_catalogue(overlay: &str, limit: Duration) -> CatalogueAnswer {
     let mut cmd = std::process::Command::new("kiro-cli");
     cmd.args(["chat", "--list-models", "-f", "json"]).env("PATH", overlay);
@@ -680,6 +695,7 @@ pub fn reason_text(code: &str) -> &'static str {
         "no_auth" => "no auth.json and no config: run grok's login or add a [model.*] with env_key",
         "first_run" => "known at its first run",
         "empty_catalogue" => "it listed no models",
+        "needs_zsh" => "its managed shell is zsh, which is not on the managed PATH",
         _ => "unknown reason",
     }
 }
@@ -774,7 +790,7 @@ fn helper() -> Option<PathBuf> {
 /// The user's Claude settings, the file `shared::claude_user_env` reads.
 #[cfg(not(test))]
 fn claude_settings_path() -> PathBuf {
-    std::env::var_os("HOME").map(PathBuf::from).unwrap_or_default().join(".claude").join("settings.json")
+    super::shared::claude_user_settings()
 }
 
 /// Under test, an empty PATH: a Refresh in a unit test finds no CLI and
@@ -906,7 +922,8 @@ pub fn refresh(deadline: Instant) -> Value {
                 let (program, path) = (b.launch_program(), path.as_str());
                 #[cfg(test)]
                 test_seam::spawned();
-                scope.spawn(move || installed(program, path, deadline))
+                let b = *b;
+                scope.spawn(move || needs_programs(b, installed(program, path, deadline), path))
             })
             .collect();
         #[cfg(test)]
@@ -1052,6 +1069,27 @@ pub fn check(test_of: Option<&str>) -> Result<Value, String> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// Board #511: dsh's pane IS zsh, so dsh present without zsh on the
+    /// managed PATH is not a usable install; every other backend is as found.
+    #[test]
+    fn dsh_without_zsh_on_the_managed_path_is_missing() {
+        use std::os::unix::fs::PermissionsExt;
+        let present = || Installed { state: State::Present, path: Some("/x/dsh".into()), version: Some("0.2.0".into()), reason: None };
+        let empty = crate::config::fresh_process_dir("tmm-rdy-nozsh");
+        let path = empty.to_string_lossy().to_string();
+        let got = needs_programs(Backend::Dsh, present(), &path);
+        assert_eq!((got.state, got.reason.as_deref()), (State::Missing, Some("needs_zsh")));
+        assert_eq!(got.version.as_deref(), Some("0.2.0"), "what was found is kept");
+        assert_eq!(needs_programs(Backend::Kiro, present(), &path), present(), "only dsh needs zsh");
+        let with = crate::config::fresh_process_dir("tmm-rdy-zsh");
+        let zsh = with.join("zsh");
+        std::fs::write(&zsh, "#!/bin/sh\n").unwrap();
+        std::fs::set_permissions(&zsh, std::fs::Permissions::from_mode(0o755)).unwrap();
+        assert_eq!(needs_programs(Backend::Dsh, present(), &with.to_string_lossy()), present());
+        let missing = Installed { state: State::Missing, path: None, version: None, reason: Some("not_found".into()) };
+        assert_eq!(needs_programs(Backend::Dsh, missing.clone(), &path), missing, "a missing dsh stays not_found");
+    }
 
     fn s(v: &[&str]) -> Vec<String> {
         v.iter().map(|x| x.to_string()).collect()

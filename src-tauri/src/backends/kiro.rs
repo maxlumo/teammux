@@ -146,22 +146,38 @@ pub(crate) fn effort_values() -> &'static [&'static str] {
 }
 
 /// `kiro-cli chat --list-models -f json` enumerates real model ids.
-pub(crate) fn models_fetch() -> Option<Vec<String>> {
+/// It is the account's WHOLE catalogue (authoritative), so it is read whole
+/// or not at all (board #511): an entry without a string `model_id` makes the
+/// answer unusable rather than a shorter whitelist.
+#[cfg(not(any(target_os = "android", target_os = "ios")))]
+pub(crate) fn model_list() -> Result<(Vec<String>, super::ModelKind), super::ModelReason> {
+    use super::ModelReason::CliFailed;
     let out = std::process::Command::new("kiro-cli")
         .args(["chat", "--list-models", "-f", "json"])
         .output()
-        .ok()?;
+        .map_err(|_| CliFailed)?;
     if !out.status.success() {
-        return None;
+        return Err(CliFailed);
     }
-    let parsed: serde_json::Value = serde_json::from_slice(&out.stdout).ok()?;
-    let models: Vec<String> = parsed
-        .get("models")?
-        .as_array()?
+    model_list_from(&out.stdout)
+}
+
+/// The pure half: `--list-models -f json`'s `models[].model_id`, all of them.
+#[cfg(not(any(target_os = "android", target_os = "ios")))]
+pub(crate) fn model_list_from(stdout: &[u8]) -> Result<(Vec<String>, super::ModelKind), super::ModelReason> {
+    use super::ModelReason::CliFailed;
+    let parsed: serde_json::Value = serde_json::from_slice(stdout).map_err(|_| CliFailed)?;
+    let models = parsed
+        .get("models")
+        .and_then(serde_json::Value::as_array)
+        .ok_or(CliFailed)?
         .iter()
-        .filter_map(|m| m.get("model_id")?.as_str().map(str::to_string))
-        .collect();
-    (!models.is_empty()).then_some(models)
+        .map(|m| m.get("model_id").and_then(serde_json::Value::as_str).map(str::to_string).ok_or(CliFailed))
+        .collect::<Result<Vec<_>, _>>()?;
+    if models.is_empty() {
+        return Err(CliFailed);
+    }
+    Ok((models, super::ModelKind::Authoritative))
 }
 
 #[cfg(not(any(target_os = "android", target_os = "ios")))]

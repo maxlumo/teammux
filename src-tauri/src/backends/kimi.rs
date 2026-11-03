@@ -52,21 +52,45 @@ pub(crate) fn effort_values() -> &'static [&'static str] {
 /// (`default_model` and `-m` both name one). An alias kimi does not know is a
 /// `config.invalid` error at startup, so the list is authoritative — a typo
 /// is rejected at save time. `None` when there is no config to read.
-pub(crate) fn models_fetch() -> Option<Vec<String>> {
-    let text = std::fs::read_to_string(kimi_user_home().join("config.toml")).ok()?;
-    let aliases = model_aliases(&text);
-    (!aliases.is_empty()).then_some(aliases)
-}
-
-/// The alias keys of a kimi `config.toml`, in table order.
-pub(crate) fn model_aliases(config: &str) -> Vec<String> {
-    let Ok(table) = config.parse::<toml::Table>() else { return Vec::new() };
-    table
+#[cfg(not(any(target_os = "android", target_os = "ios")))]
+pub(crate) fn model_list() -> Result<(Vec<String>, super::ModelKind), super::ModelReason> {
+    let Some(text) = super::read_model_source(&kimi_user_home().join("config.toml"))? else {
+        return Err(super::ModelReason::NotListed);
+    };
+    let user = text.parse::<toml::Table>().map_err(|_| super::ModelReason::Invalid)?;
+    let aliases: Vec<String> = kimi_carried(&user)
         .get("models")
         .and_then(toml::Value::as_table)
         .map(|m| m.keys().cloned().collect())
-        .unwrap_or_default()
+        .unwrap_or_default();
+    if aliases.is_empty() {
+        return Err(super::ModelReason::NotListed);
+    }
+    Ok((aliases, super::ModelKind::Authoritative))
 }
+
+/// The baseline default: the carried `default_model`.
+#[cfg(not(any(target_os = "android", target_os = "ios")))]
+pub(crate) fn baseline_model() -> Result<Option<String>, super::ModelReason> {
+    let Some(text) = super::read_model_source(&kimi_user_home().join("config.toml"))? else { return Ok(None) };
+    let user = text.parse::<toml::Table>().map_err(|_| super::ModelReason::Invalid)?;
+    Ok(kimi_carried(&user).get("default_model").and_then(toml::Value::as_str).map(str::to_string))
+}
+
+/// What the isolated home inherits of the user's kimi config:
+/// `default_model`, `providers` and `models` (board #511 lifted it out of
+/// `kimi_config_toml_from`, so the renderer and the baseline default read the
+/// SAME carry).
+pub(crate) fn kimi_carried(user: &toml::Table) -> toml::Table {
+    let mut out = toml::Table::new();
+    for key in ["default_model", "providers", "models"] {
+        if let Some(v) = user.get(key) {
+            out.insert(key.into(), v.clone());
+        }
+    }
+    out
+}
+
 
 /// Where the user's own Kimi Code lives — `KIMI_CODE_HOME` when the user set
 /// it, else `~/.kimi-code`. Only read, never written.
@@ -223,11 +247,7 @@ pub(crate) fn kimi_hooks(notify: &str) -> toml::value::Array {
 pub(crate) fn kimi_config_toml_from(user_config: Option<&str>, effort: &str, notify: &str) -> String {
     let mut root = toml::value::Table::new();
     if let Some(user) = user_config.and_then(|t| t.parse::<toml::Table>().ok()) {
-        for key in ["default_model", "providers", "models"] {
-            if let Some(v) = user.get(key) {
-                root.insert(key.into(), v.clone());
-            }
-        }
+        root.extend(kimi_carried(&user));
     }
     root.insert("default_permission_mode".into(), toml::Value::String("auto".into()));
     root.insert("telemetry".into(), toml::Value::Boolean(false));
@@ -327,7 +347,7 @@ pub(crate) fn render_kimi(
 
     // `-m <alias>` only when the registry pins one; empty = the user's own
     // `default_model`, carried in the config above. The alias was validated
-    // against the user's `[models]` at save time (`models_fetch`).
+    // against the user's `[models]` at save time (`model_list`).
     let mut cmd = String::from("command kimi --auto");
     let model = def.model.trim();
     if !model.is_empty() {
@@ -703,8 +723,9 @@ pattern = "Bash(rm -rf*)"
         assert_eq!(hooks.len(), HOOK_EVENTS.len(), "the user's Notification hook is replaced by ours");
         assert!(hooks.iter().all(|h| h["command"].as_str() == Some("/bin/sh helper kimi # tmm")));
         assert!(hooks.iter().any(|h| h["event"].as_str() == Some("Interrupt")));
-        assert_eq!(model_aliases(user), vec!["bedrock-kimi-k3".to_string()]);
-        assert!(model_aliases("not = [toml").is_empty());
+        let carried = kimi_carried(&user.parse::<toml::Table>().unwrap());
+        assert_eq!(carried["models"].as_table().unwrap().keys().cloned().collect::<Vec<_>>(), vec!["bedrock-kimi-k3".to_string()]);
+        assert!(carried.get("permission").is_none(), "only the three keys carry");
         let plain = kimi_config_toml_from(None, "", "x");
         let t: toml::Table = plain.parse().unwrap();
         assert!(t.get("thinking").is_none() && t.get("models").is_none());
@@ -726,10 +747,27 @@ pattern = "Bash(rm -rf*)"
         assert_eq!(workspace_trust_key("/local/home/cfu"), "wd_cfu_b1525dd5ffa6");
     }
 
+    /// An over-cap config is TooLarge for the WHOLE list (authoritative), never
+    /// a partial one; a malformed one is Invalid; both validate softly
+    /// (board #511 review P1-A).
+    #[test]
+    fn an_unreadable_kimi_config_is_no_list_with_a_fixed_reason() {
+        let cfg = kimi_user_home().join("config.toml");
+        let big = format!("default_model = \"m\"\n# {}\n", "x".repeat(1024 * 1024 + 8));
+        std::fs::write(&cfg, big).unwrap();
+        assert_eq!(model_list(), Err(super::super::ModelReason::TooLarge));
+        std::fs::write(&cfg, "not = [toml").unwrap();
+        assert_eq!(model_list(), Err(super::super::ModelReason::Invalid));
+        assert_eq!(baseline_model(), Err(super::super::ModelReason::Invalid));
+        std::fs::remove_file(&cfg).ok();
+        assert_eq!(model_list(), Err(super::super::ModelReason::NotListed));
+        assert_eq!(baseline_model(), Ok(None), "no file: read, nothing declared");
+    }
+
     /// `render_kimi` end to end against a fake user home: the isolated home
     /// carries the catalog, the prompt, the MCP shim, the quiet tui.toml and a
     /// preseeded trust file; the launch line pins the alias and Never Ask;
-    /// `models_fetch` validates against the same fake catalog.
+    /// `model_list` validates against the same fake catalog.
     #[test]
     fn render_writes_the_isolated_home_and_the_launch_line() {
         std::fs::write(
@@ -737,7 +775,9 @@ pattern = "Bash(rm -rf*)"
             "default_model = \"bedrock-kimi-k3\"\n[providers.bedrock]\ntype = \"openai\"\napi_key_env = \"KIMI_API_KEY\"\n[models.bedrock-kimi-k3]\nprovider = \"bedrock\"\nmodel = \"global.moonshotai.kimi-k3\"\nmax_context_size = 1048576\n",
         )
         .unwrap();
-        assert_eq!(models_fetch(), Some(vec!["bedrock-kimi-k3".to_string()]));
+        assert_eq!(model_list(), Ok((vec!["bedrock-kimi-k3".to_string()], super::super::ModelKind::Authoritative)));
+        // The baseline default is the carried default_model (board #511).
+        assert_eq!(baseline_model(), Ok(Some("bedrock-kimi-k3".to_string())));
 
         let ws = crate::config::test_scratch("tmm-kimi-render-ws");
         std::fs::create_dir_all(&ws).unwrap();
