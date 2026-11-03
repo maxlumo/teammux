@@ -2531,7 +2531,8 @@ mod tests {
         assert!(r.cmd.contains("--auto-approve"), "no interactive approval prompts: {}", r.cmd);
         assert!(r.cmd.contains("--append-system-prompt"), "prompt rides a file, APPENDED: {}", r.cmd);
         assert!(r.cmd.contains("--thinking high"), "effort is omp's own knob: {}", r.cmd);
-        assert!(!r.cmd.contains("--model"), "the model lives in config.yml, not the line: {}", r.cmd);
+        assert!(r.cmd.contains(" --model anthropic/claude-opus-4-6"),
+            "the config's default role also rides the line: a resumed session restores its own model otherwise: {}", r.cmd);
         assert!(!r.cmd.contains("--system-prompt "), "never REPLACE omp's builtin prompt: {}", r.cmd);
 
         let prompt = std::fs::read_to_string(dir.join("system-prompt.md")).unwrap();
@@ -2562,6 +2563,7 @@ mod tests {
         let d = def("omp");
         let r = render_omp(&d, "t2", &dir, "prompt", &[]).unwrap();
         assert!(!r.cmd.contains("--thinking"), "{}", r.cmd);
+        assert!(!r.cmd.contains("--model"), "no role, no flag: omp's own default: {}", r.cmd);
         assert!(!dir.join("config.yml").exists(), "empty model writes no config.yml");
         std::fs::remove_dir_all(&dir).ok();
     }
@@ -2574,12 +2576,14 @@ mod tests {
         let dir = crate::config::test_scratch("tmm-spawn-omp-rr");
         let mut d = def("omp");
         d.model = "anthropic/claude-opus-4-6".into();
-        render_omp(&d, "t3", &dir, "prompt", &[]).unwrap();
+        let r = render_omp(&d, "t3", &dir, "prompt", &[]).unwrap();
         assert!(dir.join("config.yml").is_file() && dir.join("mcp.json").is_file(), "first render declares both");
+        assert!(r.cmd.contains("--model"), "{}", r.cmd);
         d.model = String::new();
         d.mcp = "[]".into();
-        render_omp(&d, "t3", &dir, "prompt", &[]).unwrap();
-        assert!(!dir.join("config.yml").exists(), "an unpinned model falls back to omp's default");
+        let r = render_omp(&d, "t3", &dir, "prompt", &[]).unwrap();
+        assert!(!r.cmd.contains("--model"), "the restart line follows the definition too: {}", r.cmd);
+        assert!(!dir.join("config.yml").exists(), "an unpinned model with no user roles falls back to omp's default");
         assert!(!dir.join("mcp.json").exists(), "a revoked MCP server is gone");
         std::fs::remove_dir_all(&dir).ok();
     }
@@ -2591,7 +2595,8 @@ mod tests {
     /// the `default` role and keeps the user's other roles.
     #[test]
     fn omp_config_carries_the_user_model_roles_and_nothing_else() {
-        use crate::backends::omp::omp_config_yml_from;
+        use crate::backends::omp::{omp_config_yml, omp_model_roles};
+        let from = |user: Option<&str>, model: &str| omp_config_yml(&omp_model_roles(user, model));
         let user = "setupVersion: 2\ntheme: dark\nmodelRoles:\n  default: ust/claude-opus-5-5-kiro\n  smol: ust/claude-haiku-5-5-kiro\n";
         let roles = |yml: &str| -> serde_yaml_ng::Mapping {
             let root: serde_yaml_ng::Mapping = serde_yaml_ng::from_str(yml).unwrap();
@@ -2599,18 +2604,18 @@ mod tests {
             root["modelRoles"].as_mapping().unwrap().clone()
         };
 
-        let r = roles(&omp_config_yml_from(Some(user), "").unwrap());
+        let r = roles(&from(Some(user), "").unwrap());
         assert_eq!(r["default"].as_str(), Some("ust/claude-opus-5-5-kiro"), "unpinned = the user's default");
         assert_eq!(r["smol"].as_str(), Some("ust/claude-haiku-5-5-kiro"));
 
-        let r = roles(&omp_config_yml_from(Some(user), " anthropic/claude-opus-4-6 ").unwrap());
+        let r = roles(&from(Some(user), " anthropic/claude-opus-4-6 ").unwrap());
         assert_eq!(r["default"].as_str(), Some("anthropic/claude-opus-4-6"), "a pin wins the default role");
         assert_eq!(r["smol"].as_str(), Some("ust/claude-haiku-5-5-kiro"), "the user's other roles stay");
 
-        assert_eq!(omp_config_yml_from(None, ""), None, "no user file, no pin: omp's own default");
-        assert_eq!(omp_config_yml_from(Some("theme: dark\n"), ""), None, "no roles to carry");
-        assert_eq!(omp_config_yml_from(Some(": not yaml ["), ""), None, "an unreadable file carries nothing");
-        assert!(omp_config_yml_from(None, "x/y").unwrap().contains("default: x/y"));
+        assert_eq!(from(None, ""), None, "no user file, no pin: omp's own default");
+        assert_eq!(from(Some("theme: dark\n"), ""), None, "no roles to carry");
+        assert_eq!(from(Some(": not yaml ["), ""), None, "an unreadable file carries nothing");
+        assert!(from(None, "x/y").unwrap().contains("default: x/y"));
     }
 
     /// The model catalog is what makes an ISOLATED grok home able to answer at
