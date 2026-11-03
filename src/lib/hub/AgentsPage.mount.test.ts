@@ -1036,3 +1036,177 @@ test('phone: the Backends section is the section alone, its path selectable on t
     assert.equal(app.document.querySelector('.fact-path')?.textContent, '/home/u/.local/bin/kiro-cli');
   } finally { await app.close(); }
 });
+
+// Board #511 P3: the model field's label, Retry and request scoping.
+const modelField = (app: App) => app.document.querySelector<HTMLInputElement>('.editor input[aria-label="Model"]')!;
+const hints = (app: App) => [...app.document.querySelectorAll('.editor .hint')].map((p) => p.textContent ?? '');
+const answer = (extra: Record<string, unknown> = {}) => ({ backend: 'codex', models: ['m1', 'm2'], kind: 'authoritative', complete: true,
+  list_reason: null, default: 'gpt-base', default_reason: null, ...extra });
+
+test('the empty model field wears the baseline default, and a stored model is never replaced by it (#511)', async context => {
+  const stored = { ...alpha, name: 'beta', model: 'my-pin' };
+  const app = await (await compiled).mount(context, { props: { visible: true, section: 'agents' }, modules: [rpc({
+    registryList: async () => ({ agents: [alpha, stored] }),
+    modelsList: async () => answer(),
+  })] });
+  try {
+    await openAgent(app);
+    for (let i = 0; i < 4; i++) await app.flush();
+    assert.equal(modelField(app).value, '', 'the field stays empty');
+    assert.equal(modelField(app).placeholder, 'default: gpt-base', 'only the label says the default');
+    await openAgent(app, 'beta');
+    for (let i = 0; i < 4; i++) await app.flush();
+    assert.equal(modelField(app).value, 'my-pin', 'a stored model is kept as stored');
+  } finally { await app.close(); }
+});
+
+test('a failed model list offers Retry, a list that does not exist does not (#511)', async context => {
+  let calls = 0;
+  const app = await (await compiled).mount(context, { props: { visible: true, section: 'agents' }, modules: [rpc({
+    modelsList: async () => { calls++; if (calls === 1) throw new Error('lost'); return answer(); },
+  })] });
+  try {
+    await openAgent(app);
+    for (let i = 0; i < 4; i++) await app.flush();
+    assert.ok(hints(app).some((h) => h.includes('could not be read')), `failure said: ${hints(app)}`);
+    assert.equal(modelField(app).placeholder, 'default unknown', 'a failure is not an empty catalogue with a default');
+    command(app, 'Retry').click();
+    for (let i = 0; i < 4; i++) await app.flush();
+    assert.equal(calls, 2, 'Retry asked again');
+    assert.ok(!hints(app).some((h) => h.includes('could not be read')), 'and the failure is gone');
+    assert.equal(modelField(app).placeholder, 'default: gpt-base');
+  } finally { await app.close(); }
+
+  const none = await (await compiled).mount(context, { props: { visible: true, section: 'agents' }, modules: [rpc({
+    modelsList: async () => answer({ models: null, kind: null, list_reason: 'not_listed', default: 'deepseek-flash' }),
+  })] });
+  try {
+    await openAgent(none);
+    for (let i = 0; i < 4; i++) await none.flush();
+    assert.equal(none.document.querySelector('.editor [aria-label="Retry"]'), null, 'no list is a fact: no Retry');
+    assert.equal(modelField(none).placeholder, 'default: deepseek-flash', 'the default survives without a list');
+  } finally { await none.close(); }
+
+  const old = await (await compiled).mount(context, { props: { visible: true, section: 'agents' }, modules: [rpc({
+    modelsList: async () => ({ backend: 'codex', models: ['m1'] }),
+  })] });
+  try {
+    await openAgent(old);
+    for (let i = 0; i < 4; i++) await old.flush();
+    assert.equal(modelField(old).placeholder, 'backend default', 'an older server: the generic label');
+    assert.equal(old.document.querySelector('.editor [aria-label="Retry"]'), null);
+  } finally { await old.close(); }
+});
+
+test('a late answer after switching backend lands on its own backend, never on the one shown (#511)', async context => {
+  const pending: Record<string, (r: unknown) => void> = {};
+  const kiroDef = { ...alpha, name: 'beta', backend: 'kiro' };
+  const app = await (await compiled).mount(context, { props: { visible: true, section: 'agents' }, modules: [rpc({
+    registryList: async () => ({ agents: [alpha, kiroDef] }),
+    modelsList: (backend: string) => new Promise((resolve) => { pending[backend] = resolve; }),
+  })] });
+  try {
+    await openAgent(app);            // codex: asked, unanswered
+    await openAgent(app, 'beta');    // kiro: asked, unanswered
+    for (let i = 0; i < 4; i++) await app.flush();
+    pending.codex!(answer({ default: 'codex-base' }));   // the late answer
+    for (let i = 0; i < 4; i++) await app.flush();
+    assert.equal(modelField(app).placeholder, 'backend default', 'codex\'s answer does not paint kiro\'s field');
+    pending.kiro!(answer({ backend: 'kiro', default: null, default_reason: 'not_derivable' }));
+    for (let i = 0; i < 4; i++) await app.flush();
+    assert.equal(modelField(app).placeholder, 'backend default', 'kiro has no derivable default');
+    await openAgent(app);
+    for (let i = 0; i < 4; i++) await app.flush();
+    assert.equal(modelField(app).placeholder, 'default: codex-base', 'and codex kept its own answer');
+  } finally { await app.close(); }
+});
+
+// P3 review P1-A: a default that could not be read is its own failure beside a
+// good list, with Retry, and never the generic "backend default".
+test('a default that could not be read beside a good list says so and offers Retry (#511)', async context => {
+  let calls = 0;
+  const app = await (await compiled).mount(context, { props: { visible: true, section: 'agents' }, modules: [rpc({
+    modelsList: async () => { calls++; return calls === 1 ? answer({ default: null, default_reason: 'unreadable' }) : answer(); },
+  })] });
+  try {
+    await openAgent(app);
+    for (let i = 0; i < 4; i++) await app.flush();
+    assert.equal(modelField(app).placeholder, 'default unknown');
+    assert.ok(hints(app).some((h) => h.includes('default model this server would start')), `the default's failure: ${hints(app)}`);
+    assert.ok(!hints(app).some((h) => h.includes('model list could not be read')), 'the list itself is fine');
+    command(app, 'Retry').click();
+    for (let i = 0; i < 4; i++) await app.flush();
+    assert.equal(calls, 2, 'Retry asked again');
+    assert.equal(modelField(app).placeholder, 'default: gpt-base');
+    assert.equal(app.document.querySelector('.editor [aria-label="Retry"]'), null);
+  } finally { await app.close(); }
+});
+
+// P3 review P2-C: a new visit to the editor reads the default afresh; it is
+// never kept as a startup fact for the page's life.
+test('a new editor visit reads the models afresh, and the field stays empty (#511)', async context => {
+  let baseline = 'first';
+  const app = await (await compiled).mount(context, { props: { visible: true, section: 'agents' }, modules: [rpc({
+    modelsList: async () => answer({ default: baseline }),
+  })] });
+  try {
+    await openAgent(app);
+    for (let i = 0; i < 4; i++) await app.flush();
+    assert.equal(modelField(app).placeholder, 'default: first');
+    baseline = 'second';
+    await openAgent(app, 'beta');
+    for (let i = 0; i < 4; i++) await app.flush();
+    assert.equal(modelField(app).placeholder, 'default: second', 'the next visit asked again');
+    assert.equal(modelField(app).value, '', 'and the label is never written into the field');
+  } finally { await app.close(); }
+});
+
+// P3 review P1-B: a team member's model field gets the same notes and Retry.
+// A derived member's empty field inherits its BASE definition, so it never
+// wears the backend's baseline and the default's failure is not its fact.
+test('team members show a failed or cut model list with Retry, and a derived member still inherits (#511)', async context => {
+  const team = { name: 'squad', description: '', members: JSON.stringify([
+    { name: 'raw', base: '', role: 'Raw', agent: { name: 'raw', backend: 'kiro', model: '', effort: '', input_mode: 'queue', system: 'Bare.', skills: '[]', mcp: '[]' } },
+    { name: 'dev', base: 'alpha', role: 'Implement', model: 'pinned' },
+    { name: 'rev', base: 'alpha', role: 'Review' },
+  ]) };
+  const calls: Record<string, number> = {};
+  const app = await (await compiled).mount(context, { props: { visible: true, section: 'teams' }, modules: [rpc({
+    teamsList: async () => ({ teams: [team] }),
+    modelsList: async (backend: string) => {
+      calls[backend] = (calls[backend] ?? 0) + 1;
+      if (calls[backend] === 1) throw new Error('lost');
+      return backend === 'kiro'
+        ? answer({ backend, kind: 'suggestions', complete: false, list_reason: 'overflow', default: 'k-base' })
+        : answer({ backend, default: null, default_reason: 'unreadable' });
+    },
+  })] });
+  const body = (i: number) => app.document.querySelectorAll<HTMLElement>('.member')[i]!;
+  const notes = (i: number) => [...body(i).querySelectorAll('.hint')].map((h) => h.textContent ?? '');
+  const field = (i: number) => body(i).querySelector<HTMLInputElement>('input[aria-label="Model"]')!;
+  const open = async (i: number) => { app.document.querySelectorAll<HTMLButtonElement>('.member-summary')[i]!.click(); await app.flush(); };
+  try {
+    await openAgent(app, 'squad');
+    for (let i = 0; i < 4; i++) await app.flush();
+    // The bare member: both facts failed with the call.
+    assert.ok(notes(0).some((h) => h.includes('model list could not be read')), `bare failure: ${notes(0)}`);
+    assert.equal(field(0).placeholder, 'default unknown');
+    body(0).querySelector<HTMLButtonElement>('[aria-label="Retry"]')!.click();
+    for (let i = 0; i < 4; i++) await app.flush();
+    assert.equal(calls.kiro, 2, 'Retry asked again');
+    assert.ok(notes(0).some((h) => h.includes('Only part of the declared models')), `cut list said: ${notes(0)}`);
+    assert.equal(field(0).placeholder, 'default: k-base');
+    // The derived members: the same list failure and Retry, but the field inherits.
+    await open(1);
+    assert.ok(notes(1).some((h) => h.includes('model list could not be read')), `derived failure: ${notes(1)}`);
+    assert.equal(field(1).value, 'pinned', 'a stored override is kept');
+    body(1).querySelector<HTMLButtonElement>('[aria-label="Retry"]')!.click();
+    for (let i = 0; i < 4; i++) await app.flush();
+    assert.equal(calls.codex, 2);
+    assert.deepEqual(notes(1).filter((h) => h.includes('could not be read')), [], 'the backend default is not a derived member\'s fact');
+    assert.equal(body(1).querySelector('[aria-label="Retry"]'), null);
+    await open(2);
+    assert.equal(field(2).value, '', 'an empty override stays empty');
+    assert.equal(field(2).placeholder, 'same as base', 'and inherits its base, never the backend default');
+  } finally { await app.close(); }
+});

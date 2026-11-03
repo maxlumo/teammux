@@ -24,6 +24,7 @@
   import { activeModal } from '../ui/modal.ts';
   import { configFingerprint, configPayload, configValid } from './config-draft.ts';
   import BackendsSection from './BackendsSection.svelte';
+  import { FAILED_MODELS, NO_MODELS, defaultLabel, readModels } from './models-view.ts';
   import { watchBackendsCap } from './backends-cap.svelte.ts';
 
   // The backends a registry agent can run on and the effort levels each
@@ -434,15 +435,51 @@
   function pickMode(draft) {
     if (draft.modeFollowsDefault) draft.modeFollowsDefault = false;
   }
-  let models = $state([]);
-  $effect(() => {
-    const backend = editing?.backend;
-    if (!backend) { models = []; return; }
-    let live = true;
+  // ONE store for every model field on this page (board #511 P3), keyed by
+  // backend: each answer is read once (`readModels`), and only the request
+  // still current for THAT backend may write its entry, so a late answer
+  // after a fast switch lands on its own backend, never on the one now shown.
+  // The page is bound to one server for life (`guardOwner`), so a server
+  // switch is another page with its own store. A failure is never kept as an
+  // empty list: Retry asks again. Nothing is kept as a startup fact either
+  // (P3 review P2-C): each editor VISIT (a new draft) reads every backend it
+  // shows once afresh, keeping the last answer on screen until the new one.
+  let modelInfo = $state({});
+  const modelAsk = {};
+  let modelsAlive = true;
+  $effect(() => () => { modelsAlive = false; });
+  function askModels(backend) {
+    if (!backend) return;
+    const known = untrack(() => modelInfo[backend]);
+    const ticket = (modelAsk[backend] = (modelAsk[backend] ?? 0) + 1);
+    if (!known || known.status === 'failed' || known.defaultStatus === 'failed') modelInfo[backend] = NO_MODELS;
+    const current = () => modelsAlive && modelAsk[backend] === ticket;
     modelsList(backend)
-      .then((r) => { if (live) models = r.models ?? []; })
-      .catch(() => { if (live) models = []; });
-    return () => { live = false; };
+      .then((r) => { if (current()) modelInfo[backend] = readModels(r); })
+      .catch(() => { if (current()) modelInfo[backend] = FAILED_MODELS; });
+  }
+  const modelsOf = (backend) => modelInfo[backend] ?? NO_MODELS;
+  /** The backends one visit (a draft object) has already asked for: once
+   *  each, so a failure stays on screen until Retry or the next visit. */
+  const visitAsked = new WeakMap();
+  function askForVisit(visit, backend) {
+    if (!visit || !backend) return;
+    let asked = visitAsked.get(visit);
+    if (!asked) visitAsked.set(visit, (asked = new Set()));
+    if (asked.has(backend)) return;
+    asked.add(backend);
+    askModels(backend);
+  }
+  // The readiness mark on a backend choice (board #511 P3): the LAST Refresh
+  // this page's Backends section reported, never a probe of its own. No
+  // Refresh yet, or an unknown state, marks nothing; only a CLI the check
+  // found missing (needs_zsh included) says so.
+  let readiness = $state.raw(null);
+  const notInstalled = (backend) => readiness?.backends?.find((b) => b.name === backend)?.installed?.state === 'missing';
+  $effect(() => {
+    const visit = editing;
+    const backend = visit?.backend;
+    if (backend) untrack(() => askForVisit(visit, backend));
   });
 
   /** The list unfolds on its FIRST paint only (motion.md principle 15,
@@ -642,14 +679,9 @@
   /** Teams offerable as a member: every OTHER team (the server also refuses
    * cycles through longer chains). */
   const subTeams = $derived(teams.filter((x) => x.name !== editingTeam?.name));
-  // Model suggestions per backend for CUSTOM members (the same models_list the
-  // agent editor asks); fetched once per backend.
-  let modelsByBackend = $state({});
-  function ensureModels(backend) {
-    if (!backend || backend in modelsByBackend) return;
-    modelsByBackend[backend] = [];
-    modelsList(backend).then((r) => { modelsByBackend[backend] = r.models ?? []; }).catch(() => {});
-  }
+  // Model suggestions for every member come from the same store as the
+  // agent editor's (`askModels` above), read afresh once per team visit.
+  const ensureModels = (backend) => untrack(() => askForVisit(editingTeam, backend));
   const baseBackend = (m) => defs.find((d) => d.name === m.base)?.backend ?? '';
   /** The base's own input mode, which an empty member override inherits (#254). */
   const baseInputMode = (m) => defs.find((d) => d.name === m.base)?.input_mode ?? 'queue';
@@ -808,6 +840,20 @@
         ]}
         ariaLabel={t('agentsInputMode')} />
     </label>
+  {/if}
+{/snippet}
+<!-- What a model field's answer could not say (board #511 P3), ONE snippet
+     for the three model fields. A list that does not exist (dsh, stock codex)
+     is a fact and says nothing; a FAILURE of either fact offers Retry, and a
+     cut suggestions list says it is cut. A derived member's empty field
+     inherits its base definition, so the backend default is not its fact. -->
+{#snippet modelNotes(backend, withDefault = true)}
+  {@const view = modelsOf(backend)}
+  {#if view.status === 'failed' || (withDefault && view.defaultStatus === 'failed')}
+    <p class="hint">{#if view.status === 'failed'}{t('agentsModelsFailed')} {/if}{#if withDefault && view.defaultStatus === 'failed'}{t('agentsModelDefaultFailed')}{/if}
+      <CommandButton variant="secondary" label={t('configRetry')} disabled={saving || removing} onclick={() => askModels(backend)} /></p>
+  {:else if view.status === 'ok' && !view.complete}
+    <p class="hint">{t('agentsModelsIncomplete')}</p>
   {/if}
 {/snippet}
 {#snippet inputModeHint(draft, inherited = null)}
@@ -1126,7 +1172,7 @@
                       <div class="member-section-title">{t('teamsOverrides')}</div>
                       <div class="config-row">
                         <label class="config-field"><span class="config-field-label">{t('agentsModel')}</span>
-                          <Select bind:value={m.model} editable disabled={saving || removing} options={modelsByBackend[baseBackend(m)] ?? []}
+                          <Select bind:value={m.model} editable disabled={saving || removing} options={modelsOf(baseBackend(m)).ids}
                             placeholder={t('teamsInherit')} ariaLabel={t('agentsModel')} />
                         </label>
                         <label class="config-field"><span class="config-field-label">{t('agentsEffort')}</span>
@@ -1136,6 +1182,7 @@
                         </label>
                         {@render inputModeField(m, baseBackend(m), baseInputMode(m))}
                       </div>
+                      {@render modelNotes(baseBackend(m), false)}
                       {@render inputModeHint(m, baseInputMode(m))}
                     </section>
                   {/if}
@@ -1149,11 +1196,11 @@
                         <label class="config-field"><span class="config-field-label">{t('agentsBackend')}</span>
                           <Select bind:value={m.agent.backend} disabled={saving || removing} ariaLabel={t('agentsBackend')}
                             onchange={(b) => pickBackend(m.agent, b)}
-                            options={backends.map((b) => ({ value: b, icon: backendIcon(b) ?? undefined }))} />
+                            options={backends.map((b) => ({ value: b, icon: backendIcon(b) ?? undefined, hint: notInstalled(b) ? t('agentsBackendNotInstalled') : undefined }))} />
                         </label>
                         <label class="config-field"><span class="config-field-label">{t('agentsModel')}</span>
-                          <Select bind:value={m.agent.model} editable disabled={saving || removing} options={modelsByBackend[m.agent.backend] ?? []}
-                            placeholder={t('agentsModelDefault')} ariaLabel={t('agentsModel')} />
+                          <Select bind:value={m.agent.model} editable disabled={saving || removing} options={modelsOf(m.agent.backend).ids}
+                            placeholder={defaultLabel(modelsOf(m.agent.backend), t)} ariaLabel={t('agentsModel')} />
                         </label>
                         <label class="config-field"><span class="config-field-label">{t('agentsEffort')}</span>
                           <Select bind:value={m.agent.effort} disabled={saving || removing}
@@ -1162,6 +1209,7 @@
                         </label>
                         {@render inputModeField(m.agent)}
                       </div>
+                      {@render modelNotes(m.agent.backend)}
                       {@render inputModeHint(m.agent)}
                       <label class="config-field"><span class="config-field-label">{t('agentsSystem')}</span>
                         <textarea class="config-input" rows="12" bind:value={m.agent.system}
@@ -1216,7 +1264,7 @@
           <label class="config-field"><span class="config-field-label">{t('agentsBackend')}</span>
             <Select bind:value={editing.backend} disabled={saving || removing} ariaLabel={t('agentsBackend')}
               onchange={(b) => pickBackend(editing, b)}
-              options={backends.map((b) => ({ value: b, icon: backendIcon(b) ?? undefined }))} />
+              options={backends.map((b) => ({ value: b, icon: backendIcon(b) ?? undefined, hint: notInstalled(b) ? t('agentsBackendNotInstalled') : undefined }))} />
           </label>
           <label class="config-field"><span class="config-field-label">{t('agentsModel')}</span>
             <!-- Editable Select, not a native <datalist>: the OS suggestion
@@ -1224,8 +1272,8 @@
                  2026-08-24: "模型选择下拉框明显不对"). The value stays free
                  text — an id we cannot enumerate is still typeable, and
                  registry_save remains the authority that rejects a bad one. -->
-            <Select bind:value={editing.model} editable disabled={saving || removing} options={models}
-              placeholder={t('agentsModelDefault')} ariaLabel={t('agentsModel')} />
+            <Select bind:value={editing.model} editable disabled={saving || removing} options={modelsOf(editing.backend).ids}
+              placeholder={defaultLabel(modelsOf(editing.backend), t)} ariaLabel={t('agentsModel')} />
           </label>
           <label class="config-field"><span class="config-field-label">{t('agentsEffort')}</span>
             <!-- A fixed enum per backend (the CLI's own levels), so a Select,
@@ -1238,6 +1286,7 @@
           </label>
           {@render inputModeField(editing)}
         </div>
+        {@render modelNotes(editing.backend)}
         {@render inputModeHint(editing)}
         <label class="config-field"><span class="config-field-label">{t('agentsSystem')}</span>
           <textarea class="config-input" rows="6" bind:value={editing.system} placeholder={t('agentsSystemPh')}></textarea>
@@ -1267,7 +1316,7 @@
         </div>
       </fieldset></div>
     {:else if showsBackends}
-      <BackendsSection runtime={guardOwner} active={backendsActive} cap={backendsCap.state} head={!section}
+      <BackendsSection runtime={guardOwner} active={backendsActive} cap={backendsCap.state} head={!section} onReport={(r) => { readiness = r; }}
         tag={scope?.tag} icon={backendIcon} onBack={backendsDrill ? () => categoryOpen = false : null} />
     {:else if !section}
       <!-- Desktop, nothing being edited: the rows live in their own column

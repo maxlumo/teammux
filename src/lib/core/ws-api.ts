@@ -575,11 +575,13 @@ export function createWsApi(connection: Connection) {
    * sit above the server's own 15 s / 30 s budgets, which answer first. */
   const backendsCheck = (test?: string) =>
     call<unknown>('backends_check', test ? { test } : {}, test ? 35000 : 20000);
-  /** The model ids a backend accepts. `models` is null where the backend cannot
-   * enumerate them (claude/codex take aliases), and the editor keeps the field as
-   * free text in that case. */
+  /** One backend's model catalogue (board #511): the declared ids with their
+   * kind, and the baseline default, each with a fixed reason when absent. An
+   * older server answers `{backend, models}` only (no `kind` key); the page
+   * reads either through `models-view.ts`. */
   const modelsList = (backend: string) =>
-    call<{ backend: string; models: string[] | null }>('models_list', { backend });
+    call<{ backend: string; models: string[] | null; kind?: 'authoritative' | 'suggestions' | null; complete?: boolean;
+      list_reason?: string | null; default?: string | null; default_reason?: string | null }>('models_list', { backend });
   const skillsList = () => call<{ skills: RegSkill[] }>('skills_list');
   const skillsSave = (def: RegSkill) => call('skills_save', { def });
   const skillsDelete = (name: string) => call('skills_delete', { name });

@@ -127,6 +127,8 @@ USAGE (human or agent — self-management):
   tmm ui [--open]                     the web UI this machine's gateway serves: its URL, or
                                       why there is none (--open: the default browser)
   tmm agent list                      agents in this project and their states
+  tmm agent backends --models         the model ids each CLI declares on this server, their kind
+                                      and the baseline default (the agent editor's own list)
   tmm agent backends [--test kiro]    which agent CLIs a NEW agent on this server could use:
                                       installed (on the managed PATH), set up (what its
                                       default provider needs), answers (kiro only, on --test:
@@ -1162,6 +1164,23 @@ async fn main() {
         // Board #492: the readiness the Agents page's Backends section shows,
         // for an agent choosing a backend before `tmm spawn`. No project:
         // it is a fact of the server host.
+        ("agent", rest) if rest.first().map(String::as_str) == Some("backends") && flags.contains_key("models") => {
+            // The model catalogue (board #511 P3): the SAME models_list the
+            // agent editor reads, one answer per spawnable backend, so an
+            // agent can see what a person picking a model sees.
+            if flags.contains_key("test") {
+                fail(EXIT_USAGE, "--models lists each CLI's declared models; --test runs one CLI's check. Give one of them");
+            }
+            let mut answers = Vec::new();
+            for backend in tmux_mobile::projects::agents::SPAWNABLE_BACKENDS {
+                answers.push(rpc(&ctx, "models_list", json!({ "backend": backend })).await);
+            }
+            if ctx.json {
+                println!("{}", json!({ "models": answers }));
+            } else {
+                print!("{}", models_text(&answers));
+            }
+        }
         ("agent", rest) if rest.first().map(String::as_str) == Some("backends") => {
             let test = flags.get("test").cloned().flatten();
             let params = match &test {
@@ -2646,7 +2665,7 @@ const VERB_FLAGS: &[VerbFlags] = &[
     VerbFlags { key: "registry delete", ctx: true, flags: &[] },
     VerbFlags { key: "agent", ctx: true, flags: &[] },
     VerbFlags { key: "agent list", ctx: true, flags: &[] },
-    VerbFlags { key: "agent backends", ctx: true, flags: &["test"] },
+    VerbFlags { key: "agent backends", ctx: true, flags: &["test", "models"] },
     VerbFlags { key: "agent stop", ctx: true, flags: &[] },
     VerbFlags { key: "agent restart", ctx: true, flags: &["team"] },
     VerbFlags { key: "agent remove", ctx: true, flags: &[] },
@@ -3226,6 +3245,51 @@ fn wake_shell(name: &str, to: &str, exe: &str, env: &[(String, String)]) -> Stri
 
 /// What `tmm agent list` prints after an agent's state: ` — <detail>`, and
 /// for a detail that needs a person its remedy too (board #362 c).
+/// What `tmm agent backends --models` prints (board #511 P3): one line per
+/// backend — its list and its kind, or why it has none, then its baseline
+/// default — in the words the reasons mean. An answer without a `kind` key is
+/// an older server that knows only `models`.
+fn models_text(answers: &[Value]) -> String {
+    let reason = |r: &str| -> &'static str {
+        match r {
+            "not_listed" => "nothing to list",
+            "not_derivable" => "not derivable from its config",
+            "unreadable" => "its config could not be read",
+            "invalid" => "its config or list is invalid",
+            "too_large" => "its config is larger than 1 MiB",
+            "overflow" => "larger than the list budget",
+            "cli_failed" => "its CLI gave no list",
+            _ => "unknown reason",
+        }
+    };
+    let mut out = String::new();
+    for a in answers {
+        let name = a.get("backend").and_then(|v| v.as_str()).unwrap_or("?");
+        let ids = a.get("models").and_then(|v| v.as_array()).map(|v| v.iter().filter_map(|x| x.as_str()).collect::<Vec<_>>());
+        if a.get("kind").is_none() {
+            let list = ids.map_or_else(|| "none".to_string(), |v| v.join(", "));
+            out.push_str(&format!("{name:<7} models: {list} (an older server: kind and default unknown)\n"));
+            continue;
+        }
+        let list = match (ids, a.get("kind").and_then(|v| v.as_str())) {
+            (Some(v), Some(kind)) => {
+                let cut = if a.get("complete").and_then(|v| v.as_bool()) == Some(false) { ", incomplete" } else { "" };
+                format!("models ({kind}{cut}, {}): {}", v.len(), v.join(", "))
+            }
+            _ => format!("models: none ({})", reason(a.get("list_reason").and_then(|v| v.as_str()).unwrap_or(""))),
+        };
+        let default = match (a.get("default").and_then(|v| v.as_str()), a.get("default_reason").and_then(|v| v.as_str())) {
+            (Some(id), _) => format!("default: {id}"),
+            (None, Some(r)) => format!("default: unknown ({})", reason(r)),
+            (None, None) => "default: none declared".to_string(),
+        };
+        out.push_str(&format!("{name:<7} {list} · {default}\n"));
+    }
+    out.push_str("Kind: authoritative = an id outside it is refused at save; suggestions = any id may be typed. \
+                  Default = what a NEW agent with no model starts on, not a project's or a resumed session's.\n");
+    out
+}
+
 /// What `tmm agent backends` prints (board #492): one line per backend, the
 /// three facts in words, then the scope. A Test's answer is its own block,
 /// with what the Test wrote.
@@ -3868,6 +3932,31 @@ mod tests {
         assert!(super::restore_text("run", &run).starts_with("✓ restore u2 accepted (new, attempt 1); it runs in the gateway's background"));
         assert_eq!(super::restore_text("abandon", &serde_json::json!({ "abandoned": true, "batch": "u2" })), "✓ restore u2 abandoned; no window was touched\n");
         assert_eq!(super::restore_text("abandon", &serde_json::json!({ "abandoned": false, "reason": "no restore is open" })), "nothing to abandon: no restore is open\n");
+    }
+
+    /// Board #511 P3: `--models` says each backend's list, kind and baseline
+    /// default in words, and a reason for each absence; an older server's
+    /// answer (no `kind` key) is said as such.
+    #[test]
+    fn agent_backends_models_prints_the_list_its_kind_and_the_default() {
+        let answers = vec![
+            serde_json::json!({ "backend": "kiro", "models": ["auto", "claude-opus-5.5"], "kind": "authoritative", "complete": true,
+                "list_reason": null, "default": null, "default_reason": "not_derivable" }),
+            serde_json::json!({ "backend": "claude", "models": ["opus-id"], "kind": "suggestions", "complete": false,
+                "list_reason": "overflow", "default": "opus-id", "default_reason": null }),
+            serde_json::json!({ "backend": "dsh", "models": null, "kind": null, "complete": false,
+                "list_reason": "not_listed", "default": "deepseek-flash", "default_reason": null }),
+            serde_json::json!({ "backend": "codex", "models": null, "kind": null, "complete": false,
+                "list_reason": "unreadable", "default": null, "default_reason": null }),
+            serde_json::json!({ "backend": "grok", "models": ["g"] }),
+        ];
+        let t = super::models_text(&answers);
+        assert!(t.contains("kiro    models (authoritative, 2): auto, claude-opus-5.5 · default: unknown (not derivable from its config)\n"), "{t}");
+        assert!(t.contains("claude  models (suggestions, incomplete, 1): opus-id · default: opus-id\n"), "{t}");
+        assert!(t.contains("dsh     models: none (nothing to list) · default: deepseek-flash\n"), "{t}");
+        assert!(t.contains("codex   models: none (its config could not be read) · default: none declared\n"), "{t}");
+        assert!(t.contains("grok    models: g (an older server: kind and default unknown)\n"), "{t}");
+        assert!(t.contains("suggestions = any id may be typed"), "{t}");
     }
 
     /// Board #492: `tmm agent backends` says each fact in words, names a

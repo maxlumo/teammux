@@ -228,6 +228,15 @@ completion).
   installed". The scope line says the facts are about a new agent on each
   CLI's default provider and model, and that whether it can run a task is
   known at its first run. Also `tmm agent backends`.
+  The agent editor's Model field offers the model ids this server's CLI
+  declares, and any id can still be typed. The empty field reads
+  "default: <id>" when the server knows what a new agent would start on, and
+  "default unknown" when it could not read that; a list or a default that
+  could not be read says so and offers Retry, on a team member's model field
+  too (a member built on a registry agent still says "same as base"); each
+  visit to the editor reads the answer afresh; a backend the last
+  Backends check found missing is marked "not installed on this server"
+  (board #511). Also `tmm agent backends --models`.
   Teams are configured on the Agents page (Teams section). Each member chooses
   one source: a bare coding agent configured here (backend/model/effort,
   prompt, Skills, MCP), a custom registry agent inherited whole, or a sub-team

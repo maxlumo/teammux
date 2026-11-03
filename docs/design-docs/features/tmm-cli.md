@@ -80,6 +80,7 @@ tmm review feedback <path>           the [Document feedback on …] block, every
 # teammates and projects
 tmm agent list                       windows + agent detection + derived state
 tmm agent backends [--test kiro]     backend readiness on this server: installed / set up / answers (#492)
+tmm agent backends --models          each CLI's declared model ids, their kind and the baseline default (#511)
 tmm agent interrupt|stop|restart|remove <name>
 tmm agent mode <name> queue|steer    kiro only: its Ctrl+S, this session (#271)
 tmm agent fork <name> [--as <new>]   a NEW agent from a running one's definition (#383)
@@ -674,6 +675,7 @@ a teammate:
 | Agent | `tmm agent interrupt\|stop\|restart\|remove <name>` | roster card/context menu: Watch / Interrupt / Restart / Stop / Remove |
 | Fork | `tmm agent fork <name> [--as <new>]` | agent card/context menu: Fork (zh 复制一个), running agents only, one tap (#383) |
 | Backend readiness | `tmm agent backends [--test kiro] [--output json]` | Agents page, Backends section: Refresh, and kiro's Test (phase 2 of #492) |
+| Model catalogue | `tmm agent backends --models [--output json]` | the agent editor's Model field: its list, the empty field's "default: <id>" label, and Retry (#511) |
 | Input mode | `tmm agent mode <name> queue\|steer` | kiro card context menu: Switch to Steer / Switch to Queue (#271) |
 | Runtime team | `tmm agent team <name> <team\|->` | drag the card onto a team (mouse/pen); card menu: Move to team t / Leave team t (#384) |
 | CLI command | `tmm send "@name /compact"` (`@all` = everyone else) | composer: `@name /compact` (#274, one rule: `address::slash_command` ⇄ `slashCommand`) |

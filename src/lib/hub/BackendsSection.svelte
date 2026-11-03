@@ -25,7 +25,7 @@
   import { untrack } from 'svelte';
   import { clock, factDot, hintKey, mergeFact, mergeRow, reasonKey, readRefresh, readTest, refreshFailed, rowHints, testFailed, testable } from './backends-view.ts';
 
-  let { runtime, active = false, cap = 'unknown', head = true, tag = null, icon = () => '', onBack = null } = $props();
+  let { runtime, active = false, cap = 'unknown', head = true, tag = null, icon = () => '', onBack = null, onReport = null } = $props();
 
   let report = $state.raw(null);   // { backends, baseline, at }: the last Refresh answer
   let tested = $state.raw(null);   // { name, set_up, answers, at }: a Test since that Refresh
@@ -112,6 +112,9 @@
         const before = new Map((report?.backends ?? []).map((b) => [b.name, b]));
         const prevAt = report?.at ?? 0;
         report = { backends: read.backends.map((b) => mergeRow(before.get(b.name), b, prevAt)), baseline: read.baseline, at: Date.now() };
+        // The agent editor marks a backend whose CLI this Refresh found
+        // missing (board #511 P3): the same rows, never a second probe.
+        onReport?.(report);
         // A Test's facts stay while the new row still leaves them to a Test.
         if (tested && !report.backends.some((b) => b.name === tested.name && testable(b))) tested = null;
       } else {
