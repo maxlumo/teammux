@@ -73,6 +73,14 @@ and the rest in `tmux::test_support`:
   `TMUX_TMPDIR`. The cleanup claim is for the wrapper's normal and error exit
   (its `finally`); a wrapper killed with SIGKILL leaves the dir, which the
   next run does not reuse.
+- **The wrapper runs cargo under a umask with no group/other write bits**
+  (`caller | 022`, restored afterwards; 2026-11-03). The store refuses a
+  `state.db` whose directory or any ancestor another user can write
+  (`safe_fs::trusted`), which is right for production; but the suite makes its
+  directories with the process umask, and on an Ubuntu host with the
+  user-private-group umask `002` every one was `775`: 449 of 1252 tests
+  failed in one run, 414 of them with `Permission denied: … other users can
+  write to it`. A hand-run cargo needs `umask 022` in front too.
 
 - **A destructive command names its server on the command line.**
   `destroy_private_server(socket)` runs `tmux -S <socket> kill-server` through

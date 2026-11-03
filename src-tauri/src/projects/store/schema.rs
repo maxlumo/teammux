@@ -5,7 +5,7 @@
 
 use super::*;
 // The v18 step backfills the omp default from the registry's own seed text.
-use super::registry::{DEFAULT_KIMI_SYSTEM, DEFAULT_OMP_MODEL, DEFAULT_OMP_SYSTEM};
+use super::registry::{DEFAULT_KIMI_SYSTEM, DEFAULT_OMP_SYSTEM};
 
 /// Bumped when the schema changes; `migrate` is the only place that knows the
 /// steps. Stored in SQLite's own `user_version` pragma.
@@ -561,11 +561,11 @@ impl Store {
             self.conn
                 .execute(
                     "INSERT INTO reg_agents (name, backend, model, effort, system, skills, mcp, created_at, updated_at)
-                     SELECT 'omp', 'omp', ?2, '', ?1, '[\"tmm-cli\",\"mem\",\"mcp-cli\"]', '[]',
+                     SELECT 'omp', 'omp', '', '', ?1, '[\"tmm-cli\",\"mem\",\"mcp-cli\"]', '[]',
                             CAST(strftime('%s','now') AS INTEGER), CAST(strftime('%s','now') AS INTEGER)
                      WHERE (SELECT COUNT(*) FROM reg_agents) > 0
                        AND NOT EXISTS (SELECT 1 FROM reg_agents WHERE name = 'omp')",
-                    rusqlite::params![DEFAULT_OMP_SYSTEM, DEFAULT_OMP_MODEL],
+                    rusqlite::params![DEFAULT_OMP_SYSTEM],
                 )
                 .map_err(|e| format!("migrate to 18: {e}"))?;
         }
@@ -1226,7 +1226,7 @@ mod tests {
             let store = Store::init(Connection::open(&path).unwrap()).unwrap();
             let omp = store.reg_get("omp").unwrap().expect("v18 backfills the omp default");
             assert_eq!(omp.system, DEFAULT_OMP_SYSTEM);
-            assert_eq!(omp.model, DEFAULT_OMP_MODEL, "the backfill pins Fable 5.1 like the seed");
+            assert_eq!(omp.model, "", "the backfill leaves the model to the user's roles, like the seed");
             assert_eq!(omp.skills, r#"["tmm-cli","mem","mcp-cli"]"#);
             // Deleting the default now sticks: the stamp is v18, the insert
             // is history.
