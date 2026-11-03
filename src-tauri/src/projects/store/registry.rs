@@ -10,15 +10,6 @@ use super::*;
 /// drift.
 pub(super) const DEFAULT_OMP_SYSTEM: &str = "You are a powerful 10x developer running on OMP (oh-my-pi) who can handle any task with decisive execution and minimal words.";
 
-/// The omp default's model (owner, 2026-09-07: "设定默认的 omp agent 模型为
-/// fable 5.1"). `bedrock-extra` is the provider the user's `~/.omp/agent/
-/// models.yml` declares (the bundled omp catalog lacks Fable 5.1 on Bedrock);
-/// `render_omp` carries that file into every isolated home, so the selector
-/// resolves for spawned agents. On a machine without the catalog entry, omp
-/// warns and falls back to its own default — the same soft degradation the
-/// claude seed's Bedrock pin relies on.
-pub(super) const DEFAULT_OMP_MODEL: &str = "bedrock-extra/global.anthropic.claude-fable-5-1";
-
 /// The `kimi` default's system text — shared by `reg_seed` and the v22
 /// backfill migration (board #224), so the two cannot drift. The model stays
 /// EMPTY: a kimi model is an alias of the user's own `[models]` table, which
@@ -307,7 +298,12 @@ impl Store {
             RegAgent {
                 name: "omp".into(),
                 backend: "omp".into(),
-                model: DEFAULT_OMP_MODEL.into(),
+                // Empty = the user's own `modelRoles.default`, carried into the
+                // home (`render_omp`). The 2026-09-07 pin
+                // `bedrock-extra/…fable-5-1` named a provider only the
+                // owner's `models.yml` declared; elsewhere omp fell back to
+                // its bundled default and answered 403 (2026-11-03).
+                model: String::new(),
                 effort: String::new(),
                 input_mode: mode("omp"),
                 system: DEFAULT_OMP_SYSTEM.into(),

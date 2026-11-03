@@ -122,7 +122,7 @@ The rules that came out of them, each in its own doc: tests reach tmux only thro
 
 ### Registry defaults are exactly the six backend-native agents
 
-`kiro`, `codex`, `claude`, `grok`, `omp`, `kimi` — six backend-native defaults (the Manager flag they once carried was retired 2026-09-26; spawning is every agent's ability) with built-in `tmm-cli`/`mem`/`mcp-cli`. All six ship the terse 10x-developer sentence for their own backend and NOTHING else (board #344, owner: "这个提示词是我们自己的 tmm 配置，发布版本的默认配置不应该有这些"): no worktree location, no Git author rule, no co-author trailer. Those are one person's conventions, and a release hands every fresh install the same neutral persona; workflow rules belong in the app-wide `<config>/AGENTS.md` (§ The app-wide instructions lead every prompt), which leads every managed agent's prompt on every backend, and in the definitions a person has saved themselves. `reg_seed` seeds an EMPTY table and does nothing else: a stored definition is the user's declaration (tenet 7), so it is never rewritten — it used to upgrade a stored `kiro` whose text equalled an older shipped default, and the newer one ADDED a Git workflow and a personal trailer to definitions nobody had asked to change. Pinned by `registry_seed_never_rewrites_a_stored_definition` (the original terse text, the first verbose Git version, the worktree-and-trailer version that briefly shipped, a custom persona and the current default all come through byte-identical, down to `updated_at`) and by the seed test, which fails if ANY of the six seeded prompts mentions a worktree, a trailer, a Git author or a commit. The `claude` seed pins `global.anthropic.claude-fable-5-1[1m]` (owner, 2026-09-02) and the `omp` seed pins `bedrock-extra/global.anthropic.claude-fable-5-1` (owner, 2026-09-07 — the provider the user's `models.yml` declares, carried into every isolated omp home; a machine without it degrades soft to omp's own default) while kiro/codex/grok/kimi leave the model empty (= backend default; for kimi that is the user's own `default_model`, carried into the home — see the kimi section); Kiro and OMP use their built-in search (omp ships a native `web_search` tool) and the other four seed pinned `kiro-web-search==0.1.3` inline (the local registry may replace it with its secret-bearing central def). `reg_list` fixes those names in that order before alphabetizing custom agents, so AgentsPage, spawn pickers and CLI all agree. Retired `docs`/`reviewer`, `*-default`, and `cc_builder` must not return as seeds or examples.
+`kiro`, `codex`, `claude`, `grok`, `omp`, `kimi` — six backend-native defaults (the Manager flag they once carried was retired 2026-09-26; spawning is every agent's ability) with built-in `tmm-cli`/`mem`/`mcp-cli`. All six ship the terse 10x-developer sentence for their own backend and NOTHING else (board #344, owner: "这个提示词是我们自己的 tmm 配置，发布版本的默认配置不应该有这些"): no worktree location, no Git author rule, no co-author trailer. Those are one person's conventions, and a release hands every fresh install the same neutral persona; workflow rules belong in the app-wide `<config>/AGENTS.md` (§ The app-wide instructions lead every prompt), which leads every managed agent's prompt on every backend, and in the definitions a person has saved themselves. `reg_seed` seeds an EMPTY table and does nothing else: a stored definition is the user's declaration (tenet 7), so it is never rewritten — it used to upgrade a stored `kiro` whose text equalled an older shipped default, and the newer one ADDED a Git workflow and a personal trailer to definitions nobody had asked to change. Pinned by `registry_seed_never_rewrites_a_stored_definition` (the original terse text, the first verbose Git version, the worktree-and-trailer version that briefly shipped, a custom persona and the current default all come through byte-identical, down to `updated_at`) and by the seed test, which fails if ANY of the six seeded prompts mentions a worktree, a trailer, a Git author or a commit. The `claude` seed pins `global.anthropic.claude-fable-5-1[1m]` (owner, 2026-09-02) while kiro/codex/grok/omp/kimi leave the model empty (= backend default; for kimi that is the user's own `default_model`, for omp the user's own `modelRoles`, each carried into the home — see their sections). The `omp` seed pinned `bedrock-extra/global.anthropic.claude-fable-5-1` from 2026-09-07 until 2026-11-03: that provider exists only in the owner's `models.yml`, and a host without it did NOT degrade soft — omp fell back to its bundled `anthropic/claude-opus-5-5`, which with no Anthropic key answers `403 Invalid API key`. A seed names no host-specific model; a pin belongs in the stored definition of the host that has it. Stored definitions are not rewritten (above), so an install seeded with the old pin keeps it until its owner clears the model; Kiro and OMP use their built-in search (omp ships a native `web_search` tool) and the other four seed pinned `kiro-web-search==0.1.3` inline (the local registry may replace it with its secret-bearing central def). `reg_list` fixes those names in that order before alphabetizing custom agents, so AgentsPage, spawn pickers and CLI all agree. Retired `docs`/`reviewer`, `*-default`, and `cc_builder` must not return as seeds or examples.
 
 ### Managed agent launch PATH is part of the recipe
 
@@ -240,13 +240,18 @@ directory. Four decisions, each measured rather than guessed:
 * **Auth carries as `agent.db`, the model catalog as `models.yml`** — the
   grok lessons (auth.json, config.toml catalog): an isolated home without
   the credential store is a logged-out agent, and one without the user's
-  `models.yml` cannot resolve a registry model that lives there. On this
-  host that file declares the Bedrock trio under `bedrock-extra`
+  `models.yml` cannot resolve a registry model that lives there. On the
+  owner's host that file declares the Bedrock trio under `bedrock-extra`
   (fable-5-1 / opus-5 / gpt-5.6-sol — the bundled catalog lacks Fable 5.1,
   and its own gpt-5.6 entries 400 on Bedrock because the converse-stream
   transport sends the Anthropic `thinking` block to reasoning-marked
   models, measured 2026-09-07; the gpt entry is `reasoning: false` for
-  exactly that reason). Env-keyed providers (Bedrock bearer tokens) need
+  exactly that reason). The user's `modelRoles` carry too, and nothing
+  else of their `config.yml` (`omp_config_yml_from`): an unpinned registry
+  model is the USER's default role, a pin overrides only `default`. Without
+  this, an empty model meant omp's bundled `anthropic/…` default, a 403 on
+  a host whose only provider lives in `models.yml` (2026-11-03, omp 18.15.0;
+  pinned by `omp_config_carries_the_user_model_roles_and_nothing_else`). Env-keyed providers (Bedrock bearer tokens) need
   nothing and lose nothing. UI prefs and hooks deliberately do NOT carry.
 * **The prompt is APPENDED, never replaced** — `--append-system-prompt
   <home>/system-prompt.md` (a file path; verified the contents reach the
@@ -260,7 +265,7 @@ directory. Four decisions, each measured rather than guessed:
   a fresh home without it shows "Setup step 1 of 5", with it the prompt).
   Auth already carries, so the wizard has nothing to add.
   `config.yml` and `mcp.json` are files the render OWNS
-  (`shared::write_owned`): an unpinned model or an empty MCP set REMOVES
+  (`shared::write_owned`): no model role to write or an empty MCP set REMOVES
   the file on the next spawn. Skipping the write kept the previous render's
   file, so a restarted omp stayed on the old model and kept loading a
   revoked server (#241, validator, 2026-09-27; kimi's `mcp.json` likewise).

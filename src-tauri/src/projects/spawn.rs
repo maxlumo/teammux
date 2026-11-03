@@ -2584,6 +2584,35 @@ mod tests {
         std::fs::remove_dir_all(&dir).ok();
     }
 
+    /// An unpinned model is the USER's default (2026-11-03): the home carried
+    /// `models.yml` but not the user's `modelRoles`, so omp fell back to its
+    /// bundled `anthropic/…` default and answered 403 on a host whose only
+    /// provider is in `models.yml`. Only `modelRoles` carry; a pin overrides
+    /// the `default` role and keeps the user's other roles.
+    #[test]
+    fn omp_config_carries_the_user_model_roles_and_nothing_else() {
+        use crate::backends::omp::omp_config_yml_from;
+        let user = "setupVersion: 2\ntheme: dark\nmodelRoles:\n  default: ust/claude-opus-5-5-kiro\n  smol: ust/claude-haiku-5-5-kiro\n";
+        let roles = |yml: &str| -> serde_yaml_ng::Mapping {
+            let root: serde_yaml_ng::Mapping = serde_yaml_ng::from_str(yml).unwrap();
+            assert_eq!(root.len(), 1, "only modelRoles carry: {yml}");
+            root["modelRoles"].as_mapping().unwrap().clone()
+        };
+
+        let r = roles(&omp_config_yml_from(Some(user), "").unwrap());
+        assert_eq!(r["default"].as_str(), Some("ust/claude-opus-5-5-kiro"), "unpinned = the user's default");
+        assert_eq!(r["smol"].as_str(), Some("ust/claude-haiku-5-5-kiro"));
+
+        let r = roles(&omp_config_yml_from(Some(user), " anthropic/claude-opus-4-6 ").unwrap());
+        assert_eq!(r["default"].as_str(), Some("anthropic/claude-opus-4-6"), "a pin wins the default role");
+        assert_eq!(r["smol"].as_str(), Some("ust/claude-haiku-5-5-kiro"), "the user's other roles stay");
+
+        assert_eq!(omp_config_yml_from(None, ""), None, "no user file, no pin: omp's own default");
+        assert_eq!(omp_config_yml_from(Some("theme: dark\n"), ""), None, "no roles to carry");
+        assert_eq!(omp_config_yml_from(Some(": not yaml ["), ""), None, "an unreadable file carries nothing");
+        assert!(omp_config_yml_from(None, "x/y").unwrap().contains("default: x/y"));
+    }
+
     /// The model catalog is what makes an ISOLATED grok home able to answer at
     /// all: grok auth is home-scoped, and custom [model.*] entries carry the
     /// api key wiring (env_key). The first cut parsed the user config with

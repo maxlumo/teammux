@@ -125,7 +125,9 @@ use super::shared;
 ///   (`auth_credentials` table), so it is copied in — grok's auth.json
 ///   lesson; env-keyed providers (Bedrock bearer tokens) need nothing.
 /// * the MODEL lives in `<home>/config.yml` under `modelRoles.default`
-///   (identity in config, never the launch line); EFFORT rides `--thinking`,
+///   (identity in config, never the launch line); the user's own
+///   `modelRoles` carry, so an unpinned model is the user's default; EFFORT
+///   rides `--thinking`,
 ///   omp's own knob, enumerated in `models::effort_values`.
 /// * the system prompt is a FILE handed to `--append-system-prompt` —
 ///   APPEND, deliberately not `--system-prompt`: omp's builtin prompt
@@ -159,9 +161,9 @@ pub(crate) fn render_omp(
     }
     // Model-catalog carry (grok's config.toml lesson, in omp's dialect): the
     // user's `models.yml` declares the custom providers/models the bundled
-    // catalog lacks — on this host the Bedrock trio (fable-5-1/opus/gpt-5.6)
-    // under `bedrock-extra` — and a registry def may name exactly such a
-    // model. An isolated home without the catalog cannot resolve it, so the
+    // catalog lacks (a Bedrock trio, a private gateway — whatever that host
+    // has), and the user's default role or a registry def names exactly such
+    // a model. An isolated home without the catalog cannot resolve it, so the
     // file carries; UI prefs and hooks deliberately do NOT (that is what
     // isolation is for).
     let user_models = omp_user_agent_dir().join("models.yml");
@@ -170,10 +172,13 @@ pub(crate) fn render_omp(
     }
 
     // config.yml: the model is identity, so it lives in the config the owner
-    // can read, not on the launch line (kiro's lesson). Empty = omp default,
-    // so an unpinned model removes the previous render's file.
-    let model = def.model.trim();
-    let config = (!model.is_empty()).then(|| format!("modelRoles:\n  default: {model}\n"));
+    // can read, not on the launch line (kiro's lesson). The user's own
+    // `modelRoles` carry (kimi's `default_model` lesson): an empty registry
+    // model is the USER's default, not omp's bundled one, which on a host
+    // without its provider key is a 403 (2026-11-03). Nothing to write
+    // removes the previous render's file.
+    let user_config = std::fs::read_to_string(omp_user_agent_dir().join("config.yml")).ok();
+    let config = omp_config_yml_from(user_config.as_deref(), &def.model);
     shared::write_owned(&home.join("config.yml"), config.as_deref())?;
 
     // mcp.json in this home's user scope — claude's local-stdio/http shape
@@ -223,6 +228,30 @@ pub(crate) fn render_omp(
         ),
         confirmation: None,
     })
+}
+
+/// The isolated home's `config.yml`: the user's `modelRoles` and nothing
+/// else of their file (UI prefs and hooks are what isolation is for), with a
+/// pinned registry model as the `default` role. `None` when no role is left,
+/// so omp falls back to its bundled default. An unreadable user file carries
+/// nothing rather than failing the spawn.
+#[cfg(not(any(target_os = "android", target_os = "ios")))]
+pub(crate) fn omp_config_yml_from(user_config: Option<&str>, model: &str) -> Option<String> {
+    use serde_yaml_ng::{Mapping, Value};
+    let mut roles = user_config
+        .and_then(|t| serde_yaml_ng::from_str::<Mapping>(t).ok())
+        .and_then(|m| m.get("modelRoles").and_then(Value::as_mapping).cloned())
+        .unwrap_or_default();
+    let model = model.trim();
+    if !model.is_empty() {
+        roles.insert("default".into(), model.into());
+    }
+    if roles.is_empty() {
+        return None;
+    }
+    let mut root = Mapping::new();
+    root.insert("modelRoles".into(), Value::Mapping(roles));
+    serde_yaml_ng::to_string(&root).ok()
 }
 
 /// Where the user's own omp agent state lives. Only read, never written.
