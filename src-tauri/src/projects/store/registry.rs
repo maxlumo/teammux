@@ -262,7 +262,7 @@ impl Store {
                 effort: String::new(),
                 input_mode: mode("kiro"),
                 system: DEFAULT_KIRO_SYSTEM.into(),
-                skills: r#"["tmm-cli","mem","mcp-cli"]"#.into(),
+                skills: r#"["tmm-cli","mcp-cli"]"#.into(),
                 mcp: "[]".into(),
             },
             RegAgent {
@@ -272,7 +272,7 @@ impl Store {
                 effort: String::new(),
                 input_mode: mode("codex"),
                 system: "You are a powerful 10x developer running on Codex who can handle any task with decisive execution and minimal words.".into(),
-                skills: r#"["tmm-cli","mem","mcp-cli"]"#.into(),
+                skills: r#"["tmm-cli","mcp-cli"]"#.into(),
                 mcp: "[]".into(),
             },
             RegAgent {
@@ -288,7 +288,7 @@ impl Store {
                 effort: String::new(),
                 input_mode: mode("claude"),
                 system: "You are a powerful 10x developer running on Claude Code who can handle any task with decisive execution and minimal words.".into(),
-                skills: r#"["tmm-cli","mem","mcp-cli"]"#.into(),
+                skills: r#"["tmm-cli","mcp-cli"]"#.into(),
                 mcp: "[]".into(),
             },
             RegAgent {
@@ -298,7 +298,7 @@ impl Store {
                 effort: String::new(),
                 input_mode: mode("grok"),
                 system: "You are a powerful 10x developer running on Grok who can handle any task with decisive execution and minimal words.".into(),
-                skills: r#"["tmm-cli","mem","mcp-cli"]"#.into(),
+                skills: r#"["tmm-cli","mcp-cli"]"#.into(),
                 mcp: "[]".into(),
             },
             RegAgent {
@@ -313,7 +313,7 @@ impl Store {
                 effort: String::new(),
                 input_mode: mode("omp"),
                 system: DEFAULT_OMP_SYSTEM.into(),
-                skills: r#"["tmm-cli","mem","mcp-cli"]"#.into(),
+                skills: r#"["tmm-cli","mcp-cli"]"#.into(),
                 // omp ships its own web_search tool — no MCP search shim needed.
                 mcp: "[]".into(),
             },
@@ -324,7 +324,7 @@ impl Store {
                 effort: String::new(),
                 input_mode: mode("kimi"),
                 system: DEFAULT_KIMI_SYSTEM.into(),
-                skills: r#"["tmm-cli","mem","mcp-cli"]"#.into(),
+                skills: r#"["tmm-cli","mcp-cli"]"#.into(),
                 mcp: "[]".into(),
             },
         ];
@@ -423,7 +423,7 @@ mod tests {
             ["kiro", "codex", "claude", "grok", "omp", "kimi"],
             "the six backend defaults are the fixed leading group"
         );
-        assert!(seeded.iter().all(|a| a.skills == r#"["tmm-cli","mem","mcp-cli"]"#));
+        assert!(seeded.iter().all(|a| a.skills == r#"["tmm-cli","mcp-cli"]"#));
         // Board #336: each seed starts in its backend's default mode.
         assert_eq!(
             seeded.iter().map(|a| (a.name.as_str(), a.input_mode.as_str())).collect::<Vec<_>>(),
@@ -526,7 +526,7 @@ mod tests {
             effort: "high".into(),
             input_mode: "queue".into(),
             system: String::new(),
-            skills: r#"["tmm-cli","mem","mcp-cli"]"#.into(),
+            skills: r#"["tmm-cli","mcp-cli"]"#.into(),
             mcp: "[]".into(),
         };
         // Every text the seed ever shipped, plus a custom one, plus the

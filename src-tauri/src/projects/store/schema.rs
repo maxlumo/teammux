@@ -561,7 +561,7 @@ impl Store {
             self.conn
                 .execute(
                     "INSERT INTO reg_agents (name, backend, model, effort, system, skills, mcp, created_at, updated_at)
-                     SELECT 'omp', 'omp', '', '', ?1, '[\"tmm-cli\",\"mem\",\"mcp-cli\"]', '[]',
+                     SELECT 'omp', 'omp', '', '', ?1, '[\"tmm-cli\",\"mcp-cli\"]', '[]',
                             CAST(strftime('%s','now') AS INTEGER), CAST(strftime('%s','now') AS INTEGER)
                      WHERE (SELECT COUNT(*) FROM reg_agents) > 0
                        AND NOT EXISTS (SELECT 1 FROM reg_agents WHERE name = 'omp')",
@@ -633,7 +633,7 @@ impl Store {
             self.conn
                 .execute(
                     "INSERT INTO reg_agents (name, backend, model, effort, system, skills, mcp, created_at, updated_at)
-                     SELECT 'kimi', 'kimi', '', '', ?1, '[\"tmm-cli\",\"mem\",\"mcp-cli\"]',
+                     SELECT 'kimi', 'kimi', '', '', ?1, '[\"tmm-cli\",\"mcp-cli\"]',
                             '[]',
                             CAST(strftime('%s','now') AS INTEGER), CAST(strftime('%s','now') AS INTEGER)
                      WHERE (SELECT COUNT(*) FROM reg_agents) > 0
@@ -1228,7 +1228,7 @@ mod tests {
             assert_eq!(omp.system, DEFAULT_OMP_SYSTEM);
             assert_eq!(omp.model, "", "the backfill leaves the model to the user's roles, like the seed");
             assert_eq!(omp.mcp, "[]", "a backfill follows the seed rule: no inline MCP (board #511)");
-            assert_eq!(omp.skills, r#"["tmm-cli","mem","mcp-cli"]"#);
+            assert_eq!(omp.skills, r#"["tmm-cli","mcp-cli"]"#);
             // Deleting the default now sticks: the stamp is v18, the insert
             // is history.
             assert!(store.reg_delete("omp").unwrap());
@@ -1278,7 +1278,7 @@ mod tests {
             let kimi = store.reg_get("kimi").unwrap().expect("v22 backfills the kimi default");
             assert_eq!(kimi.system, DEFAULT_KIMI_SYSTEM);
             assert_eq!(kimi.model, "", "empty = the user's own default_model, carried into the home");
-            assert_eq!(kimi.skills, r#"["tmm-cli","mem","mcp-cli"]"#);
+            assert_eq!(kimi.skills, r#"["tmm-cli","mcp-cli"]"#);
             assert_eq!(kimi.mcp, "[]", "a backfill follows the seed rule: no inline MCP");
             assert_eq!(
                 store.reg_list().unwrap().iter().map(|a| a.name.as_str()).collect::<Vec<_>>(),

@@ -198,9 +198,17 @@ pub(crate) fn parse_github(url: &str) -> Result<(String, String, String, String)
 /// is why save/delete refuse the reserved names instead.
 pub(crate) const BUILTIN_SKILLS: &[(&str, &str)] = &[
     ("tmm-cli", include_str!("../../../assets/skills/tmm-cli/SKILL.md")),
-    ("mem", include_str!("../../../assets/skills/mem/SKILL.md")),
     ("mcp-cli", include_str!("../../../assets/skills/mcp-cli/SKILL.md")),
 ];
+
+/// Built-ins a build no longer ships (owner, 2026-11-04: "mem内置的工具都去掉吧，
+/// 这个不需要了"). The server's start removes each one's store row and
+/// managed files, but only while the row is still the BUILT-IN's (source
+/// "builtin"): a skill a person imported under the same name is theirs. A
+/// definition that still names it skips it at spawn (`resolve_skills`: a
+/// name that resolves to nothing is warned about and left out), so nothing
+/// fails; it is simply not loaded.
+pub(crate) const RETIRED_BUILTIN_SKILLS: &[&str] = &["mem"];
 
 pub(crate) fn builtin_skill(name: &str) -> Option<&'static str> {
     BUILTIN_SKILLS.iter().find(|(n, _)| *n == name).map(|(_, md)| *md)
@@ -221,6 +229,12 @@ pub(super) fn builtin_description(md: &str) -> String {
 /// start (capture loop startup); fail-soft — a read-only disk must not stop
 /// the server, the skill just stays stale/absent.
 pub fn seed_builtin_skills() {
+    for name in RETIRED_BUILTIN_SKILLS {
+        let ours = with_store(|store| store.skill_get(name)).ok().flatten().is_some_and(|row| row.source == "builtin");
+        if ours && with_store(|store| store.skill_delete(name)).unwrap_or(false) {
+            let _ = std::fs::remove_dir_all(managed_skills_dir().join(name));
+        }
+    }
     for (name, md) in BUILTIN_SKILLS {
         let dir = managed_skills_dir().join(name);
         if std::fs::create_dir_all(&dir).is_err() {
@@ -978,18 +992,43 @@ mod tests {
             assert_eq!(&on_disk, *md, "{name}: managed copy matches the embedded one");
         }
         // Reserved: neither deletable nor overwritable from another source.
-        let err = skill_delete("mem").unwrap_err();
+        let err = skill_delete("mcp-cli").unwrap_err();
         assert!(err.contains("built-in"), "{err}");
-        let err = skill_save(&serde_json::json!({ "name": "mem", "source": "/tmp/elsewhere" })).unwrap_err();
+        let err = skill_save(&serde_json::json!({ "name": "mcp-cli", "source": "/tmp/elsewhere" })).unwrap_err();
         assert!(err.contains("built-in"), "{err}");
         // Refresh re-syncs from the BINARY: a drifted managed copy heals.
-        std::fs::write(managed_skills_dir().join("mem").join("SKILL.md"), "drifted").unwrap();
-        skill_refresh("mem").unwrap();
-        let healed = std::fs::read_to_string(managed_skills_dir().join("mem").join("SKILL.md")).unwrap();
-        assert_eq!(healed, builtin_skill("mem").unwrap());
+        std::fs::write(managed_skills_dir().join("mcp-cli").join("SKILL.md"), "drifted").unwrap();
+        skill_refresh("mcp-cli").unwrap();
+        let healed = std::fs::read_to_string(managed_skills_dir().join("mcp-cli").join("SKILL.md")).unwrap();
+        assert_eq!(healed, builtin_skill("mcp-cli").unwrap());
         // Reseeding is idempotent.
         seed_builtin_skills();
         assert_eq!(with_store(|st| st.skills_list()).unwrap().len(), listed.len());
+    }
+
+    /// Owner, 2026-11-04: `mem` is no longer a built-in. A store seeded by an
+    /// older build loses the built-in's row and files at the next start; a
+    /// `mem` the person imported themselves is theirs and stays.
+    #[test]
+    fn a_retired_builtin_leaves_the_store_but_an_imported_namesake_stays() {
+        use_test_store();
+        assert!(builtin_skill("mem").is_none(), "mem is not shipped");
+        let plant = |source: &str| {
+            let dir = managed_skills_dir().join("mem");
+            std::fs::create_dir_all(&dir).unwrap();
+            std::fs::write(dir.join("SKILL.md"), "---\nname: mem\n---\nold").unwrap();
+            let row = store::RegSkill { name: "mem".into(), source: source.into(), description: String::new(), synced_at: None };
+            with_store(|st| st.skill_save(&row, now())).unwrap();
+        };
+        plant("builtin");
+        seed_builtin_skills();
+        assert!(with_store(|st| st.skill_get("mem")).unwrap().is_none(), "the built-in row is gone");
+        assert!(!managed_skills_dir().join("mem").exists(), "and its files");
+        plant("/home/someone/skills/mem");
+        seed_builtin_skills();
+        assert!(with_store(|st| st.skill_get("mem")).unwrap().is_some(), "an imported mem is the person's");
+        assert!(managed_skills_dir().join("mem").join("SKILL.md").is_file());
+        assert!(skill_delete("mem").unwrap()["ok"].as_bool().unwrap(), "and deletable like any import");
     }
 
     #[test]
@@ -1027,11 +1066,11 @@ mod tests {
 
         // A built-in name inside an import is SKIPPED, not stolen.
         let clash = crate::config::test_scratch("tmm-clash");
-        std::fs::create_dir_all(clash.join("skills/mem")).unwrap();
-        std::fs::write(clash.join("skills/mem/SKILL.md"), "---\nname: mem\n---\nX").unwrap();
+        std::fs::create_dir_all(clash.join("skills/mcp-cli")).unwrap();
+        std::fs::write(clash.join("skills/mcp-cli/SKILL.md"), "---\nname: mcp-cli\n---\nX").unwrap();
         let r = skill_import(clash.to_str().unwrap()).unwrap();
         assert_eq!(r["imported"].as_array().unwrap().len(), 0);
-        assert!(r["skipped"][0].as_str().unwrap().contains("mem"));
+        assert!(r["skipped"][0].as_str().unwrap().contains("mcp-cli"));
 
         std::fs::remove_dir_all(&root).ok();
         std::fs::remove_dir_all(&clash).ok();
