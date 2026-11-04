@@ -145,12 +145,6 @@ pub(crate) fn effort_values() -> &'static [&'static str] {
     &["low", "medium", "high", "xhigh", "max"]
 }
 
-/// The kiro-cli `model_list` runs: the one on PATH.
-#[cfg(all(not(test), not(any(target_os = "android", target_os = "ios"))))]
-fn models_cli() -> std::path::PathBuf {
-    std::path::PathBuf::from("kiro-cli")
-}
-
 /// Under test, a per-process stand-in with a fixed catalogue (board #515),
 /// written by the `stand_in` module: the host kiro-cli is never run.
 #[cfg(test)]
@@ -168,7 +162,22 @@ pub(crate) fn stand_in_models() -> &'static [&'static str] {
 /// It is the account's WHOLE catalogue (authoritative), so it is read whole
 /// or not at all (board #511): an entry without a string `model_id` makes the
 /// answer unusable rather than a shorter whitelist.
-#[cfg(not(any(target_os = "android", target_os = "ios")))]
+///
+/// It is asked in the environment a PANE gets (the readiness login shell,
+/// `readiness::kiro_models`), never the gateway's own (2026-11-04): a kiro
+/// signed in by `KIRO_API_KEY` from the user's zsh rc answered nothing to
+/// the gateway, so the editor had no list and no Select.
+#[cfg(all(not(test), not(any(target_os = "android", target_os = "ios"))))]
+pub(crate) fn model_list() -> Result<(Vec<String>, super::ModelKind), super::ModelReason> {
+    let deadline = std::time::Instant::now() + super::readiness::MODELS_BUDGET;
+    super::readiness::kiro_models(deadline)
+        .map(|ids| (ids, super::ModelKind::Authoritative))
+        .map_err(|_| super::ModelReason::CliFailed)
+}
+
+/// Under test, the per-process stand-in (board #515): the host kiro-cli and
+/// the host's login shell are never run.
+#[cfg(test)]
 pub(crate) fn model_list() -> Result<(Vec<String>, super::ModelKind), super::ModelReason> {
     use super::ModelReason::CliFailed;
     let out = std::process::Command::new(models_cli())
@@ -432,10 +441,87 @@ pub(crate) fn kiro_cli_settings() -> Vec<(&'static str, Value)> {
 /// The one per-agent setting: v3 IGNORES the profile's `model` and reads
 /// `chat.defaultModel` from the home settings (board #207). The profile keeps
 /// `model` for v2; both come from the same definition, so they cannot
-/// disagree. An empty model means the backend default: the key is OMITTED,
-/// and a stale key is DELETED when the model is cleared — otherwise an old
-/// pin outlives the config.
+/// disagree. An empty model means the USER's default (their own
+/// `chat.defaultModel`, carried by `kiro_settings_from`), or kiro's when the
+/// user has none — the key is then OMITTED, and a stale key is DELETED when
+/// the model is cleared, so an old pin cannot outlive the config.
 pub(crate) const DEFAULT_MODEL_KEY: &str = "chat.defaultModel";
+
+/// The engine a home's settings name. Ours, never the user's: the app's
+/// workspace entry, resume dialect and reply reader all follow the engine
+/// door, so a home that ran another engine than the line was built for
+/// parked on v3's "Trust this workspace?" (2026-11-04, kiro-cli 2.37.1: a
+/// home with `"v3"` and a line without `--trust-workspace` asked; `"v2"`, no
+/// key, or the flag did not).
+pub(crate) const ENGINE_KEY: &str = "chat.agentEngine";
+
+/// Where the user's own kiro-cli settings live: `~/.kiro/settings/cli.json`.
+/// `KIRO_HOME` is deliberately NOT read: inside a managed pane it names that
+/// agent's isolated home, and a gateway restarted from one would take an
+/// agent's settings for the user's. Only read, never written.
+#[cfg(all(not(test), not(any(target_os = "android", target_os = "ios"))))]
+pub(crate) fn kiro_user_settings_path() -> std::path::PathBuf {
+    std::env::var_os("HOME").map(std::path::PathBuf::from).unwrap_or_default().join(".kiro").join("settings").join("cli.json")
+}
+
+/// Under test the user's kiro is a per-process temp dir (kimi's pattern): a
+/// render never reads the developer's real `~/.kiro`.
+#[cfg(test)]
+pub(crate) fn kiro_user_settings_path() -> std::path::PathBuf {
+    static DIR: std::sync::OnceLock<std::path::PathBuf> = std::sync::OnceLock::new();
+    DIR.get_or_init(|| crate::config::fresh_process_dir("tmm-kiro-user-home")).join("cli.json")
+}
+
+/// The user's settings object, through the one bounded reader. Absent,
+/// unreadable or not a JSON object is no carry: a spawn never fails on it.
+#[cfg(not(any(target_os = "android", target_os = "ios")))]
+pub(crate) fn kiro_user_settings() -> Result<Option<serde_json::Map<String, Value>>, super::ModelReason> {
+    let Some(text) = super::read_model_source(&kiro_user_settings_path())? else { return Ok(None) };
+    match serde_json::from_str::<Value>(&text) {
+        Ok(Value::Object(m)) => Ok(Some(m)),
+        _ => Err(super::ModelReason::Invalid),
+    }
+}
+
+/// A managed home's `settings/cli.json` (owner, 2026-11-04: "其他的配置你全部都
+/// fork 回来，我们只改上层"): the user's own settings, whole, with ours on
+/// top — the canonical keys, the engine of the door, the definition's input
+/// mode, and a pinned model. An unpinned model keeps the user's
+/// `chat.defaultModel`; kiro's own default applies only when the user has
+/// none. Pure: the caller reads the user's file.
+#[cfg(not(any(target_os = "android", target_os = "ios")))]
+pub(crate) fn kiro_settings_from(
+    user: Option<&serde_json::Map<String, Value>>, engine: &str, input_mode: &str, model: &str,
+) -> serde_json::Map<String, Value> {
+    let mut settings = user.cloned().unwrap_or_default();
+    for (k, v) in kiro_cli_settings() {
+        settings.insert(k.to_string(), v);
+    }
+    settings.insert(ENGINE_KEY.into(), json!(engine));
+    settings.insert(INTERRUPT_KEY.into(), json!(if input_mode == "steer" { "steer" } else { "queue" }));
+    let model = model.trim();
+    if !model.is_empty() {
+        settings.insert(DEFAULT_MODEL_KEY.into(), json!(model));
+    }
+    settings
+}
+
+/// The user's `chat.defaultModel`, the value an unpinned home carries, as a
+/// string or nothing.
+#[cfg(not(any(target_os = "android", target_os = "ios")))]
+fn user_default_model(user: Option<&serde_json::Map<String, Value>>) -> Option<String> {
+    user.and_then(|m| m.get(DEFAULT_MODEL_KEY)).and_then(Value::as_str).map(str::trim).filter(|s| !s.is_empty()).map(str::to_string)
+}
+
+/// The baseline default (board #511): what a NEW kiro with an empty model
+/// starts on — the user's carried `chat.defaultModel`, through the same carry
+/// the renderer uses. `None`: the user declares none (kiro's own default).
+#[cfg(not(any(target_os = "android", target_os = "ios")))]
+pub(crate) fn baseline_model() -> Result<Option<String>, super::ModelReason> {
+    let user = kiro_user_settings()?;
+    let settings = kiro_settings_from(user.as_ref(), "v2", "queue", "");
+    Ok(settings.get(DEFAULT_MODEL_KEY).and_then(Value::as_str).map(str::to_string))
+}
 
 /// Force the canonical CLI settings into a managed kiro home, leaving any
 /// other keys alone. Creates the file when it is missing (pre-settings homes),
@@ -465,12 +551,23 @@ pub(crate) fn ensure_kiro_settings(home: &Path, model: &str) -> Result<bool, Str
         obj.insert(INTERRUPT_KEY.into(), json!("queue"));
         changed = true;
     }
-    let model = model.trim();
-    if model.is_empty() {
-        changed |= obj.remove(DEFAULT_MODEL_KEY).is_some();
-    } else if obj.get(DEFAULT_MODEL_KEY).and_then(Value::as_str) != Some(model) {
-        obj.insert(DEFAULT_MODEL_KEY.into(), json!(model));
+    // The engine is the door's at every start, so a home cannot run another
+    // engine than the line was built for (2026-11-04).
+    let engine = json!(crate::config::kiro_engine());
+    if obj.get(ENGINE_KEY) != Some(&engine) {
+        obj.insert(ENGINE_KEY.into(), engine);
         changed = true;
+    }
+    // An unpinned model is the user's default (kiro_settings_from), else none.
+    let model = model.trim();
+    let want = if model.is_empty() { user_default_model(kiro_user_settings().ok().flatten().as_ref()) } else { Some(model.to_string()) };
+    match want {
+        None => changed |= obj.remove(DEFAULT_MODEL_KEY).is_some(),
+        Some(m) if obj.get(DEFAULT_MODEL_KEY).and_then(Value::as_str) != Some(m.as_str()) => {
+            obj.insert(DEFAULT_MODEL_KEY.into(), json!(m));
+            changed = true;
+        }
+        Some(_) => {}
     }
     if !changed {
         return Ok(false);
@@ -1003,13 +1100,11 @@ pub(crate) fn render_kiro(
     std::fs::create_dir_all(home.join("settings")).map_err(|e| e.to_string())?;
     // Fail-loud at spawn (a home without settings/cli.json would re-enable the
     // trust-all confirmation, which nobody is there to answer); refresh_hooks
-    // reuses the same canonical list fail-soft via ensure_kiro_settings.
-    let mut settings: serde_json::Map<String, Value> =
-        kiro_cli_settings().into_iter().map(|(k, v)| (k.to_string(), v)).collect();
-    settings.insert(INTERRUPT_KEY.into(), json!(if def.input_mode == "steer" { "steer" } else { "queue" }));
-    if !def.model.trim().is_empty() {
-        settings.insert(DEFAULT_MODEL_KEY.into(), json!(def.model.trim()));
-    }
+    // reuses the same canonical list fail-soft via ensure_kiro_settings. The
+    // user's own settings are the base (kiro_settings_from); an unreadable
+    // file carries nothing rather than failing the spawn.
+    let user = kiro_user_settings().ok().flatten();
+    let settings = kiro_settings_from(user.as_ref(), &crate::config::kiro_engine(), &def.input_mode, &def.model);
     shared::write_atomic(
         &home.join("settings").join("cli.json"),
         &serde_json::to_string_pretty(&Value::Object(settings)).unwrap(),
@@ -1860,6 +1955,65 @@ mod tests {
         assert!(!super::picker_open(""));
     }
     use super::*;
+
+    /// Owner, 2026-11-04: a new managed kiro ran `auto`, not the user's
+    /// `chat.defaultModel`, and other user settings were not there. The home
+    /// is the user's settings with ours on top; the engine is always the
+    /// door's, so a user's `v3` cannot make a v2 line park on "Trust this
+    /// workspace?" (measured on kiro-cli 2.37.1).
+    #[test]
+    fn a_home_forks_the_user_settings_and_ours_win() {
+        let user: serde_json::Map<String, Value> = serde_json::from_value(json!({
+            "chat.defaultModel": "claude-opus-5.5",
+            "chat.agentEngine": "v3",
+            "chat.disableTrustAllConfirmation": false,
+            "chat.modelPicker.lastUsed": { "claude-opus-5.5": 1 },
+            "chat.someUserPref": "kept",
+        })).unwrap();
+        let s = kiro_settings_from(Some(&user), "v2", "queue", "");
+        assert_eq!(s[DEFAULT_MODEL_KEY], json!("claude-opus-5.5"), "unpinned = the user's default");
+        assert_eq!(s[ENGINE_KEY], json!("v2"), "the engine is the door's, never the user's");
+        assert_eq!(s["chat.disableTrustAllConfirmation"], json!(true), "a canonical key wins");
+        assert_eq!(s["chat.someUserPref"], json!("kept"), "everything else is forked");
+        assert_eq!(s["chat.modelPicker.lastUsed"], json!({ "claude-opus-5.5": 1 }));
+        assert_eq!(s[INTERRUPT_KEY], json!("queue"));
+
+        let s = kiro_settings_from(Some(&user), "v3", "steer", " claude-sonnet-5.5 ");
+        assert_eq!(s[DEFAULT_MODEL_KEY], json!("claude-sonnet-5.5"), "a pin wins");
+        assert_eq!(s[ENGINE_KEY], json!("v3"));
+        assert_eq!(s[INTERRUPT_KEY], json!("steer"));
+
+        let s = kiro_settings_from(None, "v2", "queue", "");
+        assert!(s.get(DEFAULT_MODEL_KEY).is_none(), "no user default, no pin: kiro's own default");
+        assert_eq!(s[ENGINE_KEY], json!("v2"));
+    }
+
+    /// The baseline default reads the same carry; the repair path at every
+    /// start forces the door's engine and follows the user's default.
+    #[test]
+    fn the_baseline_and_the_repair_path_follow_the_user_default_and_the_door() {
+        let path = kiro_user_settings_path();
+        std::fs::write(&path, r#"{"chat.defaultModel":"claude-opus-5.5","chat.agentEngine":"v3"}"#).unwrap();
+        assert_eq!(baseline_model(), Ok(Some("claude-opus-5.5".into())));
+
+        let home = crate::config::test_scratch("tmm-kiro-fork-repair");
+        std::fs::create_dir_all(home.join("settings")).unwrap();
+        std::fs::write(home.join("settings/cli.json"), r#"{"chat.agentEngine":"v3"}"#).unwrap();
+        assert!(ensure_kiro_settings(&home, "").unwrap());
+        let s: Value = serde_json::from_str(&std::fs::read_to_string(home.join("settings/cli.json")).unwrap()).unwrap();
+        assert_eq!(s[ENGINE_KEY], json!(crate::config::kiro_engine()), "a home's v3 is put back to the door");
+        assert_eq!(s[DEFAULT_MODEL_KEY], json!("claude-opus-5.5"), "unpinned = the user's default");
+        assert!(!ensure_kiro_settings(&home, "").unwrap(), "idempotent");
+
+        std::fs::write(&path, "not json").unwrap();
+        assert_eq!(baseline_model(), Err(crate::backends::ModelReason::Invalid));
+        std::fs::remove_file(&path).unwrap();
+        assert_eq!(baseline_model(), Ok(None), "no user file: kiro's own default");
+        assert!(ensure_kiro_settings(&home, "").unwrap(), "the carried default goes with the user's");
+        let s: Value = serde_json::from_str(&std::fs::read_to_string(home.join("settings/cli.json")).unwrap()).unwrap();
+        assert!(s.get(DEFAULT_MODEL_KEY).is_none());
+        std::fs::remove_dir_all(&home).ok();
+    }
 
     /// Board #362 c, the SENTENCE alone (review P1-B: kept apart from the
     /// whole-screen evidence, `recovery::tests`): the image refusal is exactly

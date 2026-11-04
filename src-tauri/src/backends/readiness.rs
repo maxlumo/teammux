@@ -57,6 +57,13 @@ const HELPER_MARGIN: Duration = Duration::from_millis(1500);
 /// The worst frame (MAX_NAMES names of 128 bytes, each `"NAME":false,`, and
 /// the claude answer) is about 2.4 KB.
 const FRAME_CAP: u64 = 4 * 1024;
+/// The `kiro-models` frame's cap: the discovery budget's ids
+/// (`models::MAX_IDS` × `MAX_ID_CHARS`, each quoted with a comma) and the
+/// frame around them. Model ids are what the editor shows, not values.
+const MODELS_FRAME_CAP: u64 = 300 * 1024;
+/// How long the whole `kiro-models` probe may take: the login shell, then
+/// `chat --list-models` (~3 s measured, a network round trip).
+pub const MODELS_BUDGET: Duration = Duration::from_secs(25);
 /// The most of a user config file that is read; a larger one is unknown.
 const CONFIG_CAP: u64 = 1024 * 1024;
 /// The shells the baseline runs: one POSIX script. Anything else is unknown.
@@ -410,6 +417,10 @@ pub enum Ask {
     Refresh { names: Vec<String>, claude_dir: Option<PathBuf> },
     /// kiro's whoami, then its model catalogue.
     KiroTest,
+    /// kiro's model ids, in the environment a pane gets (2026-11-04: the
+    /// gateway's own environment has no `KIRO_API_KEY`, which the user's zsh
+    /// rc exports, so `--list-models` there opened a browser login and failed).
+    KiroModels,
 }
 
 /// Claude Code's answer to `auth status`, as words.
@@ -444,6 +455,7 @@ pub struct CatalogueAnswer {
 pub enum Frame {
     Refresh { env: BTreeMap<String, bool>, claude: Option<ClaudeAnswer> },
     KiroTest { whoami: WhoamiAnswer, models: CatalogueAnswer },
+    KiroModels { ids: Option<Vec<String>>, fail: Option<String> },
 }
 
 const CLAUDE_METHODS: &[&str] = &["oauth", "api_key", "third_party", "other"];
@@ -458,6 +470,7 @@ fn word_in(w: &Option<String>, set: &[&str]) -> bool {
 /// Read the helper's fd-3 text as exactly one frame for `ask`, or the
 /// reason class `probe_protocol`: one line, `<nonce> <json>`, the fields of
 /// the asked mode only, the asked names only, words from the lists only.
+#[cfg(not(any(target_os = "android", target_os = "ios")))]
 pub fn parse_frame(text: &str, nonce: &str, ask: &Ask) -> Result<Frame, &'static str> {
     const BAD: &str = "probe_protocol";
     let line = text.strip_suffix('\n').ok_or(BAD)?;
@@ -481,6 +494,15 @@ pub fn parse_frame(text: &str, nonce: &str, ask: &Ask) -> Result<Frame, &'static
         }
         (Frame::KiroTest { whoami, models }, Ask::KiroTest) => {
             if !word_in(&whoami.method, KIRO_METHODS) || !word_in(&whoami.fail, FAIL_WORDS) || !word_in(&models.fail, FAIL_WORDS) {
+                return Err(BAD);
+            }
+        }
+        // Ids XOR a failure word; the ids within the discovery budget.
+        (Frame::KiroModels { ids, fail }, Ask::KiroModels) => {
+            let ids_ok = ids.as_ref().is_none_or(|ids| {
+                !ids.is_empty() && crate::projects::models::bounded(ids.clone(), crate::backends::ModelKind::Authoritative).is_ok()
+            });
+            if ids.is_some() == fail.is_some() || !ids_ok || !word_in(fail, FAIL_WORDS) {
                 return Err(BAD);
             }
         }
@@ -511,8 +533,12 @@ pub fn shell_probe(base: &Baseline, helper: &Path, overlay_path: &str, ask: &Ask
         Ask::KiroTest => {
             cmd.args(["kiro-test", "-"]);
         }
+        Ask::KiroModels => {
+            cmd.args(["kiro-models", "-"]);
+        }
     }
-    let text = probe::run(cmd, remaining, Channel::Fd3, FRAME_CAP).map_err(|f| match f {
+    let cap = if *ask == Ask::KiroModels { MODELS_FRAME_CAP } else { FRAME_CAP };
+    let text = probe::run(cmd, remaining, Channel::Fd3, cap).map_err(|f| match f {
         Failure::Timeout => "probe_timeout",
         Failure::Overflow => "probe_protocol",
         _ => "probe_failed",
@@ -573,6 +599,7 @@ pub fn helper_frame(args: &[String], is_set: &dyn Fn(&str) -> bool) -> Option<St
             let models = kiro_catalogue(overlay, left(CATALOGUE_LIMIT));
             Frame::KiroTest { whoami, models }
         }
+        "kiro-models" if names.is_empty() && claude_dir == "-" => kiro_model_ids(overlay, left(CATALOGUE_LIMIT)),
         _ => return None,
     };
     Some(format!("{nonce} {}\n", serde_json::to_string(&frame).ok()?))
@@ -651,6 +678,35 @@ fn kiro_catalogue(overlay: &str, limit: Duration) -> CatalogueAnswer {
             None => CatalogueAnswer { answers: None, count: None, fail: Some("bad_answer".into()) },
         },
         Err(f) => CatalogueAnswer { answers: None, count: None, fail: Some(f.word().into()) },
+    }
+}
+
+/// kiro's model ids (`chat --list-models -f json`, read whole by the parser
+/// `kiro::model_list` has always used), or the failure class.
+fn kiro_model_ids(overlay: &str, limit: Duration) -> Frame {
+    let mut cmd = std::process::Command::new("kiro-cli");
+    cmd.args(["chat", "--list-models", "-f", "json"]).env("PATH", overlay);
+    let fail = |w: &str| Frame::KiroModels { ids: None, fail: Some(w.into()) };
+    match probe::run_status_as(cmd, limit, Channel::Stdout, MODELS_FRAME_CAP, probe::Group::Caller) {
+        Ok((_, code)) if code != Some(0) => fail("exit"),
+        Ok((out, _)) => match crate::backends::kiro::model_list_from(out.as_bytes()) {
+            Ok((ids, _)) => Frame::KiroModels { ids: Some(ids), fail: None },
+            Err(_) => fail("bad_answer"),
+        },
+        Err(f) => fail(f.word()),
+    }
+}
+
+/// kiro's model ids in the environment a pane gets: the baseline login shell
+/// (the same one readiness uses), the helper's `kiro-models` mode. Like
+/// Test, `--list-models` writes kiro's own `data.sqlite3`; it runs on a
+/// catalogue request, at most once per `models` cache period.
+pub fn kiro_models(deadline: Instant) -> Result<Vec<String>, &'static str> {
+    let base = baseline(deadline)?;
+    let helper = helper().ok_or("helper_missing")?;
+    match shell_probe(&base, &helper, &overlay_path(), &Ask::KiroModels, deadline)? {
+        Frame::KiroModels { ids: Some(ids), .. } => Ok(ids),
+        _ => Err("cli_failed"),
     }
 }
 
@@ -1462,6 +1518,46 @@ mod tests {
         let (set_up, answers) = decide_test(&Ok(Frame::KiroTest { whoami, models }));
         assert_eq!(set_up, SetUp::unknown("cli_exit").by_cli());
         assert_eq!(answers["state"], "yes");
+    }
+
+    /// The `kiro-models` mode (2026-11-04): the helper runs `--list-models`
+    /// with the overlay PATH and returns the ids, whole; a broken catalogue
+    /// or a failing CLI is a word. The frame holds ids XOR a word, within
+    /// the discovery budget.
+    #[test]
+    fn kiro_models_mode_returns_the_ids_whole_or_a_word() {
+        use std::os::unix::fs::PermissionsExt;
+        let dir = crate::config::fresh_process_dir("tmm-rdy-kiro-models");
+        let cli = dir.join("kiro-cli");
+        let run = |script: &str| {
+            std::fs::write(&cli, script).unwrap();
+            std::fs::set_permissions(&cli, std::fs::Permissions::from_mode(0o755)).unwrap();
+            let far = (std::time::SystemTime::now() + Duration::from_secs(20)).duration_since(std::time::UNIX_EPOCH).unwrap().as_millis().to_string();
+            let overlay = format!("{}:/usr/bin:/bin", dir.display());
+            let args: Vec<String> = [nonce().as_str(), far.as_str(), overlay.as_str(), "kiro-models", "-"].iter().map(|x| x.to_string()).collect();
+            let line = helper_frame(&args, &|_| false).expect("a frame");
+            parse_frame(&line, &nonce(), &Ask::KiroModels)
+        };
+        let ok = run("#!/bin/sh\n[ \"$*\" = 'chat --list-models -f json' ] || exit 2\necho '{\"models\":[{\"model_id\":\"auto\"},{\"model_id\":\"claude-opus-5.5\"}]}'\n");
+        assert_eq!(ok, Ok(Frame::KiroModels { ids: Some(vec!["auto".into(), "claude-opus-5.5".into()]), fail: None }));
+        let broken = run("#!/bin/sh\necho '{\"models\":[{\"model_id\":\"auto\"},{\"name\":\"no id\"}]}'\n");
+        assert_eq!(broken, Ok(Frame::KiroModels { ids: None, fail: Some("bad_answer".into()) }), "read whole or not at all");
+        let failing = run("#!/bin/sh\necho 'Failed to open browser for authentication.' >&2; exit 1\n");
+        assert_eq!(failing, Ok(Frame::KiroModels { ids: None, fail: Some("exit".into()) }));
+
+        let n = nonce();
+        for body in [
+            r#"{"mode":"kiro-models","ids":["a"],"fail":"exit"}"#,
+            r#"{"mode":"kiro-models","ids":null,"fail":null}"#,
+            r#"{"mode":"kiro-models","ids":[],"fail":null}"#,
+            r#"{"mode":"kiro-models","ids":["a\u0007b"],"fail":null}"#,
+            r#"{"mode":"kiro-models","ids":null,"fail":"a sentence"}"#,
+        ] {
+            assert_eq!(parse_frame(&format!("{n} {body}\n"), &n, &Ask::KiroModels), Err("probe_protocol"), "{body}");
+        }
+        let good = format!("{n} {}\n", r#"{"mode":"kiro-models","ids":["a"],"fail":null}"#);
+        assert!(parse_frame(&good, &n, &Ask::KiroModels).is_ok());
+        assert_eq!(parse_frame(&good, &n, &Ask::KiroTest), Err("probe_protocol"), "another mode's frame");
     }
 
     /// Orchestrator ruling on #492: a preparation that ran past the work's

@@ -757,7 +757,7 @@ impl Backend {
     #[cfg(not(any(target_os = "android", target_os = "ios")))]
     pub fn baseline_model(self) -> Result<Option<String>, ModelReason> {
         match self {
-            Backend::Kiro => Err(ModelReason::NotDerivable),
+            Backend::Kiro => kiro::baseline_model(),
             Backend::Claude => claude::baseline_model(),
             Backend::Codex => codex::baseline_model(),
             Backend::Grok => grok::baseline_model(),
