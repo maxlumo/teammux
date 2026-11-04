@@ -201,9 +201,10 @@ humans) and the desktop hub UI. See
 
 ### Registry, skills & MCP defs (desktop-only)
 Central definitions that `spawn` materializes into isolated agent homes. The
-skill store is app-owned files under `<state dir>/skills/<name>/`; three
-built-ins (`tmm-cli`, `mem`, `mcp-cli`) ship inside the binary and reseed at
-server start (`source = "builtin"`; save/delete refuse their names).
+skill store is app-owned files under `<state dir>/skills/<name>/`; two
+built-ins (`tmm-cli`, `mcp-cli`) ship inside the binary and reseed at
+server start (`source = "builtin"`; save/delete refuse their names). `mem`
+was a built-in until 2026-11-04; its built-in row is removed at start.
 
 | Method | Params | Response |
 |--------|--------|----------|
