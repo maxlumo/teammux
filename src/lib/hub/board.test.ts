@@ -233,12 +233,12 @@ test('assigneeView: an agent wears its backend icon; the dot only in doing, only
     { name: 'shell', state: 'working', managed: false, agent: 'claude' },
   ];
   assert.equal(assigneeView('', agents, 'doing', {}, catalog), null, 'unassigned: nothing');
-  assert.deepEqual(assigneeView('builder', agents, 'doing', {}, catalog), { name: 'builder', icon: '/assets/kiro.svg', live: true }, 'its own backend face, lit while working in DOING');
+  assert.deepEqual(assigneeView('builder', agents, 'doing', {}, catalog), { name: 'builder', icon: 'assets/kiro.svg', live: true }, 'its own backend face, lit while working in DOING');
   for (const col of ['todo', 'review', 'done']) {
-    assert.deepEqual(assigneeView('builder', agents, col, {}, catalog), { name: 'builder', icon: '/assets/kiro.svg', live: false }, `${col}: the face, never the working dot`);
+    assert.deepEqual(assigneeView('builder', agents, col, {}, catalog), { name: 'builder', icon: 'assets/kiro.svg', live: false }, `${col}: the face, never the working dot`);
   }
-  assert.deepEqual(assigneeView('validator', agents, 'doing', {}, catalog), { name: 'validator', icon: '/assets/codex.svg', live: false }, 'idle: no dot');
-  assert.deepEqual(assigneeView('reviewer', agents, 'doing', { reviewer: 'claude' }, catalog), { name: 'reviewer', icon: '/assets/claude.svg', live: false },
+  assert.deepEqual(assigneeView('validator', agents, 'doing', {}, catalog), { name: 'validator', icon: 'assets/codex.svg', live: false }, 'idle: no dot');
+  assert.deepEqual(assigneeView('reviewer', agents, 'doing', { reviewer: 'claude' }, catalog), { name: 'reviewer', icon: 'assets/claude.svg', live: false },
     'stopped: the remembered backend keeps its face');
   assert.deepEqual(assigneeView('ghost', agents, 'doing', {}, catalog), { name: 'ghost', icon: null, live: false }, 'never seen: no picture to wear, never an invented letter');
   assert.equal(assigneeView('shell', agents, 'doing', {}, catalog)?.live, false, 'a direct window is not a managed agent');

@@ -12,6 +12,14 @@ test('Vite proxies WebSocket and downloads to the same internal Rust server', ()
   });
 });
 
+// Board #517: the gateway's UI may live under a reverse proxy's path prefix
+// (the CloudFront secret path), so the build names every chunk, stylesheet
+// and public file relative to the page; dev keeps serving at the root.
+test('the build is page-relative, in build and in serve', () => {
+  assert.equal(createViteConfig('build', {}).base, './');
+  assert.equal(createViteConfig('serve', {}).base, './');
+});
+
 test('production build does not parse the development backend port', () => {
   const build = createViteConfig('build', { PORT: 'not-a-port' });
   assert.equal('proxy' in build.server, false);

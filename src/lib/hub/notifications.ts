@@ -2,7 +2,7 @@
 // 或者播放提示音提示，尤其桌面端播放提示音，看能不能和系统的消息通知结合上").
 //
 // Two channels, both fail-soft: a short audio cue (the PLACEHOLDER chime at
-// `/assets/notify.wav` — the owner will pick the real sound later, so swapping
+// `assets/notify.wav` — the owner will pick the real sound later, so swapping
 // the file is the whole change) and a system notification through the Web
 // Notification API where it exists and is permitted (browser/PWA; a webview
 // without the API silently keeps the sound, which is the half the owner called
@@ -57,7 +57,7 @@ export type FeedMsg = { id?: number | string; ts?: number; from?: string; body?:
 export type NotifyState = { seen: Set<string>; lastCueAt: number };
 
 /** The placeholder cue (owner will supply options later — see board #57). */
-export const CUE_SRC = '/assets/notify.wav';
+export const CUE_SRC = 'assets/notify.wav';
 
 /** One cue per burst: a poll batch plays ONE sound, and bursts closer than
  * this stay silent — a busy agent must not machine-gun the speaker. */

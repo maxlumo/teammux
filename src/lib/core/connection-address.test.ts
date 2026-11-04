@@ -21,10 +21,24 @@ test('standalone and non-browser defaults remain compatible', () => {
 
 // Board #323: a page the gateway served defaults to that gateway, same origin.
 test('a gateway-hosted page connects to its own origin, ws or wss by its protocol', () => {
-  assert.equal(defaultConnectionAddress({ protocol: 'http:', host: '192.168.1.5:19899' }, false, true), 'ws://192.168.1.5:19899');
-  assert.equal(defaultConnectionAddress({ protocol: 'https:', host: '[::1]:9899' }, false, true), 'wss://[::1]:9899');
-  assert.equal(defaultConnectionAddress({ protocol: 'http:', host: 'devbox:5173' }, true, true), 'ws://devbox:5173', 'the marker wins over the Vite proxy rule');
-  assert.equal(defaultConnectionAddress({ protocol: 'tauri:', host: 'localhost' }, false, true), STANDALONE_WS_DEFAULT, 'only an http(s) page');
+  assert.equal(defaultConnectionAddress({ protocol: 'http:', host: '192.168.1.5:19899', pathname: '/' }, false, true), 'ws://192.168.1.5:19899/ws');
+  assert.equal(defaultConnectionAddress({ protocol: 'https:', host: '[::1]:9899', pathname: '/' }, false, true), 'wss://[::1]:9899/ws');
+  assert.equal(defaultConnectionAddress({ protocol: 'http:', host: '192.168.1.5:19899' }, false, true), 'ws://192.168.1.5:19899/ws', 'no path is the root');
+  assert.equal(defaultConnectionAddress({ protocol: 'http:', host: 'devbox:5173', pathname: '/' }, true, true), 'ws://devbox:5173/ws', 'the marker wins over the Vite proxy rule');
+  assert.equal(defaultConnectionAddress({ protocol: 'tauri:', host: 'localhost', pathname: '/' }, false, true), STANDALONE_WS_DEFAULT, 'only an http(s) page');
+});
+
+// Board #517: a reverse proxy may serve the gateway's UI under a path prefix
+// (the CloudFront secret path) that only the page's URL knows. The default
+// keeps the page's own directory, so the socket goes where the page came from.
+test('a gateway-hosted page under a path prefix connects inside that prefix', () => {
+  const at = (pathname: string) => defaultConnectionAddress({ protocol: 'https:', host: 'cf.example', pathname }, false, true);
+  assert.equal(at('/api-0123/'), 'wss://cf.example/api-0123/ws');
+  assert.equal(at('/api-0123/index.html'), 'wss://cf.example/api-0123/ws', 'a file names its directory');
+  assert.equal(at('/a/b/'), 'wss://cf.example/a/b/ws', 'a deeper prefix');
+  assert.equal(at('/'), 'wss://cf.example/ws');
+  // The dev page lives at the root behind Vite's /ws proxy, unchanged.
+  assert.equal(defaultConnectionAddress({ protocol: 'http:', host: 'devbox:5173', pathname: '/' }, true), 'ws://devbox:5173/ws');
 });
 
 test('the marker is a meta tag, read from the document', async () => {

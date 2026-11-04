@@ -7,7 +7,7 @@
 // MACHINE's installed CLIs.
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { createBackendCatalog, type BackendInfo } from './agents.ts';
+import { createBackendCatalog, pageAsset, type BackendInfo } from './agents.ts';
 
 const info = (over: Partial<BackendInfo> & { name: string }): BackendInfo =>
   ({ icon: `/assets/${over.name}.svg`, color: `--backend-${over.name}`, efforts: [], ...over });
@@ -77,12 +77,23 @@ test('what the client SHIPS is not per server', () => {
   const a = createBackendCatalog();
   const b = createBackendCatalog();
   assert.deepEqual(a.spawnable(), b.spawnable(), 'the same frozen fallback for both');
-  assert.equal(a.icon('openclaw'), '/assets/openclaw.svg');
-  assert.equal(b.icon('openclaw'), '/assets/openclaw.svg', 'a detection-only CLI is the client s knowledge');
+  assert.equal(a.icon('openclaw'), 'assets/openclaw.svg');
+  assert.equal(b.icon('openclaw'), 'assets/openclaw.svg', 'a detection-only CLI is the client s knowledge');
   // A server's own icon still wins for that server.
   a.set([info({ name: 'kiro', icon: '/assets/custom.svg' })]);
-  assert.equal(a.icon('kiro'), '/assets/custom.svg');
-  assert.equal(b.icon('kiro'), '/assets/kiro.svg', 'and only for that server');
+  assert.equal(a.icon('kiro'), 'assets/custom.svg', 'a served path under the UI root is read relative to the page (#517)');
+  assert.equal(b.icon('kiro'), 'assets/kiro.svg', 'and only for that server');
+});
+
+// Board #517: only the wire's UI-root avatar form is read as a page asset;
+// anything else is not a file this client ships, and its own icon is used.
+test('a served icon is read relative to the page only in the wire form /assets/<name>', () => {
+  assert.equal(pageAsset('/assets/kiro.svg'), 'assets/kiro.svg');
+  for (const other of ['//cdn.example/kiro.svg', 'https://x.example/assets/kiro.svg', '/assets/a/b.svg', '/etc/passwd', 'assets/kiro.svg', ''])
+    assert.equal(pageAsset(other), null, other);
+  const c = createBackendCatalog();
+  c.set([info({ name: 'kiro', icon: '//cdn.example/kiro.svg' })]);
+  assert.equal(c.icon('kiro'), 'assets/kiro.svg', 'an unknown form falls back to the client s own');
 });
 
 test('a catalog keeps answering once a page destructures it (board #335 ②b-3)', () => {
@@ -97,5 +108,5 @@ test('a catalog keeps answering once a page destructures it (board #335 ②b-3)'
   assert.equal(known(), true);
   assert.deepEqual(spawnable(), ['grok']);
   assert.equal(defaultBackend(), 'grok', 'the server s first, through the destructured method');
-  assert.equal(icon('grok'), '/assets/grok.svg');
+  assert.equal(icon('grok'), 'assets/grok.svg');
 });

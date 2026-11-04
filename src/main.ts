@@ -28,7 +28,7 @@ const app = mount(App, { target: document.getElementById('app')! });
 // Service Worker API requires.
 if (!isTauri && 'serviceWorker' in navigator && window.isSecureContext) {
   window.addEventListener('load', () => {
-    navigator.serviceWorker.register('/sw.js').catch((err) => {
+    navigator.serviceWorker.register('sw.js').catch((err) => {
       console.warn('Service worker registration failed:', err);
     });
   });

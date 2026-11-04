@@ -25,7 +25,7 @@ test('every backend the server can name has a tag and an icon', () => {
   for (const backend of ['kiro', 'claude', 'codex', 'grok', 'omp', 'kimi', 'openclaw']) {
     const agent = agentByBackend(backend);
     assert.ok(agent, backend);
-    assert.equal(agent.icon, `/assets/${backend}.svg`);
+    assert.equal(agent.icon, `assets/${backend}.svg`, 'relative to the page (#517)');
   }
   assert.equal(agentByBackend('Kiro')?.tag, 'Kiro', 'case-insensitive, like a stored slot backend');
   assert.equal(agentByBackend('vim'), null);

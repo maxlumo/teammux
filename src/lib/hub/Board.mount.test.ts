@@ -222,7 +222,7 @@ test('a card shows its assignee\u2019s backend icon, lit only in doing while tha
     await flush(app);
     const who = () => app.document.querySelector('.card .c-who');
     assert.equal(who()?.querySelector('.c-assignee')?.textContent, 'builder');
-    assert.equal(who()?.querySelector('.c-tile img.ava')?.getAttribute('src'), '/assets/kiro.svg', 'the kiro icon, not a letter');
+    assert.equal(who()?.querySelector('.c-tile img.ava')?.getAttribute('src'), 'assets/kiro.svg', 'the kiro icon, not a letter');
     assert.equal(who()?.querySelector('.c-tile')?.textContent?.trim(), '', 'no invented lettered avatar');
     assert.ok(who()?.querySelector('.c-live.live-dot'), 'running in DOING: the dot is lit');
     state = 'idle';
@@ -297,7 +297,7 @@ test('a done card keeps the face and never the working dot (board #327)', async 
   try {
     await flush(app);
     const who = app.document.querySelector('.card .c-who');
-    assert.equal(who?.querySelector('img.ava')?.getAttribute('src'), '/assets/kiro.svg');
+    assert.equal(who?.querySelector('img.ava')?.getAttribute('src'), 'assets/kiro.svg');
     assert.equal(who?.querySelector('.c-live'), null, 'busy elsewhere is not working on THIS done issue');
   } finally { await app.close(); }
 });

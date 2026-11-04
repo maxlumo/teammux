@@ -20,7 +20,7 @@ a no-op service worker satisfy installability, and a small Svelte banner
 | `public/sw.js` | Service worker registered **only** to make the page installable. Network-passthrough `fetch` handler (no `respondWith`) — present purely because some Chromium versions gate installability on a fetch handler. `skipWaiting` + `clients.claim` so updates take over immediately. |
 | `public/pwa-192.png`, `pwa-512.png`, `pwa-maskable-512.png` | Generated from `src-tauri/icons/icon.png` (1024²) via `sips`. The maskable one scales the glyph to ~72% over an opaque black field so it survives Android's circular mask (the source icon has transparent rounded corners — unusable as maskable directly). |
 | `index.html` | `<link rel="manifest">` + `theme-color` + `apple-*` tags (iOS "Add to Home Screen" reads these; there's no JS install API on iOS). |
-| `src/main.ts` | Registers `/sw.js` — gated on `!isTauri && 'serviceWorker' in navigator && window.isSecureContext`. |
+| `src/main.ts` | Registers `sw.js`, relative to the page, so its scope is the page's directory (board #517) — gated on `!isTauri && 'serviceWorker' in navigator && window.isSecureContext`. |
 | `src/lib/ui/InstallPrompt.svelte` | The banner. Mounted once in `App.svelte`. |
 
 ## Why the manifest has no `orientation`
@@ -108,6 +108,22 @@ while a shortcut that took its name when it was added (an iOS Home Screen icon)
 keeps the old one until it is added again. So the honest statement is that the new
 name appears on a new install, and on an existing one when the platform updates it
 or the app is reinstalled.
+
+## The app lives in its page's directory (board #517, 2026-11-04)
+
+The gateway's UI may be served under a reverse proxy's path prefix (the
+CloudFront secret path), so the manifest's `start_url` and `scope` are `./` and
+its icons are page-relative: they resolve against the manifest's own URL, so the
+installed app's scope is the prefix directory. At the origin root `./` resolves
+to `/`, the URL it named before, so an app already installed there keeps its
+identity (no `id`; the identity is the resolved `start_url`). The service worker
+is registered as `sw.js`, relative to the page, so its default scope is the same
+directory, and two prefixes never contend for one scope. Nothing migrates: an
+install or a worker registered at the root stays there (its root entry now
+lands on the edge's 404) and is installed again from the prefix page if
+wanted; nothing unregisters another worker of the origin or clears its storage,
+and `sw.js` stays a pass-through that caches nothing. The whole rule is in
+tmm-cli.md § The UI under a path prefix.
 
 ## Gotchas / constraints
 - **HTTPS required.** Service workers + `beforeinstallprompt` only work on

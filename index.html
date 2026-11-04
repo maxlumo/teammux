@@ -2,21 +2,28 @@
 <html lang="en">
 <head>
   <meta charset="UTF-8" />
+  <!-- Board #517: every URL in this page is relative to the page, so the UI
+       works under any path prefix a reverse proxy strips. A proxy forwards
+       `/<prefix>` and `/<prefix>/` alike, and from `/<prefix>` a relative URL
+       resolves at the origin root, so a gateway-hosted page (the marker the
+       gateway injects right after <head>) gives its directory the slash before
+       anything loads. Only the pathname changes; `/index.html` is kept. -->
+  <script>(function () { var u = new URL(location.href); if (!document.querySelector('meta[name="tmm-gateway"]') || (u.protocol !== 'http:' && u.protocol !== 'https:') || /\/(index\.html)?$/.test(u.pathname)) return; u.pathname += '/'; location.replace(u.href); })();</script>
   <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no, interactive-widget=resizes-content, viewport-fit=cover" />
   <title>Teammux</title>
-  <link rel="icon" type="image/png" href="/favicon.png?v=2" />
+  <link rel="icon" type="image/png" href="favicon.png?v=2" />
   <!-- PWA: web app manifest + platform hints so the browser offers "install"
        (Chrome/Edge/Android fire `beforeinstallprompt`; iOS Safari uses these
        apple-* tags for "Add to Home Screen"). The in-app InstallPrompt
        component (browser-only) surfaces the offer; the service worker
        (registered in main.ts) satisfies installability. -->
-  <link rel="manifest" href="/manifest.webmanifest" />
+  <link rel="manifest" href="manifest.webmanifest" />
   <meta name="theme-color" content="#0a0a0f" />
   <meta name="mobile-web-app-capable" content="yes" />
   <meta name="apple-mobile-web-app-capable" content="yes" />
   <meta name="apple-mobile-web-app-status-bar-style" content="black-translucent" />
   <meta name="apple-mobile-web-app-title" content="Teammux" />
-  <link rel="apple-touch-icon" href="/pwa-192.png" />
+  <link rel="apple-touch-icon" href="pwa-192.png" />
   <!--
     Font strategy: system monospace + bundled SYMBOL fonts only.
 
@@ -44,16 +51,16 @@
   <style>
     @font-face {
       font-family: 'Noto Sans Symbols 2'; font-style: normal; font-weight: 400;
-      font-display: swap; src: url('/fonts/noto-symbols2-subset.woff2') format('woff2');
+      font-display: swap; src: url('fonts/noto-symbols2-subset.woff2') format('woff2');
     }
     @font-face {
       font-family: 'Symbols Nerd Font Mono'; font-style: normal; font-weight: 400;
-      font-display: swap; src: url('/fonts/symbols-nerd-mono.woff2') format('woff2');
+      font-display: swap; src: url('fonts/symbols-nerd-mono.woff2') format('woff2');
     }
   </style>
 </head>
 <body>
   <div id="app"></div>
-  <script type="module" src="/src/main.ts"></script>
+  <script type="module" src="./src/main.ts"></script>
 </body>
 </html>

@@ -46,7 +46,7 @@ test('Sidebar renders live/closed rows and the compact sheet without another wra
   assert.ok(alpha.querySelector('.side-win-dot.live-dot'));
   const closed = desktop.querySelector('.proj-row[aria-label="closed"]')!;
   assert.equal(closed.querySelector('.side-win-name')?.textContent, 'paused');
-  assert.equal(closed.querySelector('img')?.getAttribute('src'), '/assets/codex.svg');
+  assert.equal(closed.querySelector('img')?.getAttribute('src'), 'assets/codex.svg');
   assert.ok(closed.querySelector('.side-wins.dim'));
   assert.equal(closed.querySelector('.side-win-dot'), null);
   assert.ok(desktop.querySelector('.side-h'));

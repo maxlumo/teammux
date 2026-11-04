@@ -329,6 +329,10 @@ export function refuseProxied() {
 
 export function createViteConfig(command, env = process.env, identityDeps = {}) {
   return {
+    // Every built URL is relative to the page (board #517): the gateway's UI
+    // may live under any path prefix a reverse proxy adds, which only the
+    // page's own URL knows. Dev still serves at `/`.
+    base: './',
     cacheDir: viteCacheDir(),
     plugins: [refuseProxied(), allowCompactXtermLines(), quietDevReconnect(), svelte()],
     // esbuild dep pre-bundling bypasses plugin transforms, so the compact-lines

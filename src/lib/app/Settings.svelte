@@ -339,7 +339,7 @@
 <div class="wrapper">
   <div class="card">
     <div class="card-header">
-      <div class="icon"><img class="icon-dark" src="/assets/icon-dark.svg" alt="" width="72" height="72" /><img class="icon-light" src="/assets/icon-light.svg" alt="" width="72" height="72" /></div>
+      <div class="icon"><img class="icon-dark" src="assets/icon-dark.svg" alt="" width="72" height="72" /><img class="icon-light" src="assets/icon-light.svg" alt="" width="72" height="72" /></div>
       <h2>Team<span class="accent">mux</span></h2>
       <p class="subtitle">{t('connectTitle')}</p>
     </div>

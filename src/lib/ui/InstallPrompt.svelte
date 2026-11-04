@@ -148,7 +148,7 @@
 
 {#if visible}
   <div class="install-banner" role="dialog" aria-label={t('installTitle')} bind:this={banner}>
-    <img class="install-icon" src="/pwa-192.png" alt="" width="40" height="40" />
+    <img class="install-icon" src="pwa-192.png" alt="" width="40" height="40" />
     <div class="install-body">
       <div class="install-title">{t('installTitle')}</div>
       <div class="install-desc">

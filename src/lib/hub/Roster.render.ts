@@ -186,7 +186,7 @@ test('Roster renders the controlled destination strip (#168)', { timeout: RENDER
 
   await ctx.test('stopped context targets retain backend identity but cannot receive or interrupt', () => {
     const root = view({ acting: true });
-    assert.equal(card(root, 'paused').querySelector('img')?.getAttribute('src'), '/assets/codex.svg');
+    assert.equal(card(root, 'paused').querySelector('img')?.getAttribute('src'), 'assets/codex.svg');
     assert.ok(select(root, 'paused').hasAttribute('disabled'));
     assert.equal(select(root, 'paused').getAttribute('aria-pressed'), null);
     assert.equal(stop(root, 'paused'), null);

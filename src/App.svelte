@@ -1196,7 +1196,7 @@
     document.documentElement.setAttribute('data-theme', isDark ? 'dark' : 'light');
   }
 
-  let iconSrc = $derived(isDark ? '/assets/icon-dark.svg' : '/assets/icon-light.svg');
+  let iconSrc = $derived(isDark ? 'assets/icon-dark.svg' : 'assets/icon-light.svg');
 
   $effect(() => {
     applyTheme();

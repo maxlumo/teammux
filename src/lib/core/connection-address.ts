@@ -1,4 +1,4 @@
-export type LocationLike = { protocol: string; host: string };
+export type LocationLike = { protocol: string; host: string; pathname?: string };
 
 export const STANDALONE_WS_DEFAULT = 'ws://127.0.0.1:9899';
 
@@ -6,11 +6,16 @@ export const STANDALONE_WS_DEFAULT = 'ws://127.0.0.1:9899';
  * caller only asks when nothing is saved). Vite dev: its own origin's /ws
  * proxy. A page the GATEWAY served (it carries `<meta name="tmm-gateway">`,
  * board #323): that gateway, on the same origin — host, port and ws/wss
- * all come from the page's own URL, never from anything in the HTML. */
+ * all come from the page's own URL, never from anything in the HTML — and
+ * in the page's own DIRECTORY (board #517), so a reverse proxy's path prefix
+ * (`/<prefix>/`) is kept without the page knowing it. */
 export function defaultConnectionAddress(location: LocationLike, dev: boolean, hosted = false): string {
   if (!location.host) return STANDALONE_WS_DEFAULT;
   const scheme = location.protocol === 'https:' ? 'wss:' : 'ws:';
-  if (hosted && (location.protocol === 'http:' || location.protocol === 'https:')) return `${scheme}//${location.host}`;
+  if (hosted && (location.protocol === 'http:' || location.protocol === 'https:')) {
+    const path = location.pathname || '/';
+    return `${scheme}//${location.host}${path.slice(0, path.lastIndexOf('/') + 1) || '/'}ws`;
+  }
   if (!dev) return STANDALONE_WS_DEFAULT;
   return `${scheme}//${location.host}/ws`;
 }

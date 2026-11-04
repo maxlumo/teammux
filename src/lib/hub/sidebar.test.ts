@@ -37,7 +37,7 @@ test('live chips keep every active agent window in input order and exclude shell
   assert.deepEqual(chips.map((a) => [a.name, a.state]), [
     ['alice', 'working'], ['bob', 'waiting'], ['carol', 'idle'], ['dave', 'idle'], ['erin', 'idle'],
   ]);
-  assert.ok(chips.every((a) => a.icon === '/assets/kiro.svg'));
+  assert.ok(chips.every((a) => a.icon === 'assets/kiro.svg'));
 });
 
 test('renumbering windows does not change name-keyed chip states (#120)', () => {
@@ -70,11 +70,11 @@ test('closed chips list every declared agent with its backend and no live state 
     ],
   };
   assert.deepEqual(rowAgents(closed, live, { 'alpha:alice': 'working' }, catalog).map(({ key: _, ...chip }) => chip), [
-    { name: 'alice', icon: '/assets/codex.svg', state: '' },
+    { name: 'alice', icon: 'assets/codex.svg', state: '' },
     { name: 'unknown', icon: null, state: '' },
-    { name: 'carol', icon: '/assets/kiro.svg', state: '' },
-    { name: 'dave', icon: '/assets/kiro.svg', state: '' },
-    { name: 'erin', icon: '/assets/kiro.svg', state: '' },
+    { name: 'carol', icon: 'assets/kiro.svg', state: '' },
+    { name: 'dave', icon: 'assets/kiro.svg', state: '' },
+    { name: 'erin', icon: 'assets/kiro.svg', state: '' },
   ]);
 });
 

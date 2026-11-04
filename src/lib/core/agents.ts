@@ -1,5 +1,5 @@
 // Known coding-agent CLIs that Teammux treats as "AI sessions".
-// Adding a new agent = one entry here + the matching icon in /assets/.
+// Adding a new agent = one entry here + the matching icon in public/assets/.
 // Icons are lobehub-style AVATARS (visible on light AND dark themes):
 // @lobehub/icons is React-only and its static packages ship no avatar
 // files, so we compose them ourselves as static SVGs — circle filled with
@@ -31,14 +31,14 @@ export type PaneLike = {
 } | null | undefined;
 
 export const AGENTS: Agent[] = [
-  { tag: 'Kimi',     icon: '/assets/kimi.svg',     iconSize: 14 },
-  { tag: 'Kiro',     icon: '/assets/kiro.svg',     iconSize: 14 },
-  { tag: 'Claude',   icon: '/assets/claude.svg',   iconSize: 14 },
-  { tag: 'Codex',    icon: '/assets/codex.svg',    iconSize: 14 },
-  { tag: 'Grok',     icon: '/assets/grok.svg',     iconSize: 14 },
-  { tag: 'OpenClaw', icon: '/assets/openclaw.svg', iconSize: 14 },
-  { tag: 'OMP',      icon: '/assets/omp.svg',      iconSize: 14 },
-  { tag: 'DSH',      icon: '/assets/dsh.svg',      iconSize: 14 },
+  { tag: 'Kimi',     icon: 'assets/kimi.svg',     iconSize: 14 },
+  { tag: 'Kiro',     icon: 'assets/kiro.svg',     iconSize: 14 },
+  { tag: 'Claude',   icon: 'assets/claude.svg',   iconSize: 14 },
+  { tag: 'Codex',    icon: 'assets/codex.svg',    iconSize: 14 },
+  { tag: 'Grok',     icon: 'assets/grok.svg',     iconSize: 14 },
+  { tag: 'OpenClaw', icon: 'assets/openclaw.svg', iconSize: 14 },
+  { tag: 'OMP',      icon: 'assets/omp.svg',      iconSize: 14 },
+  { tag: 'DSH',      icon: 'assets/dsh.svg',      iconSize: 14 },
 ];
 
 // ── The server's backend list (board #130) ──────────────────────────────
@@ -53,7 +53,8 @@ export const AGENTS: Agent[] = [
 // list with board #224 and keeps its fallback row for older servers.
 export interface BackendInfo {
   name: string;
-  /** Avatar path, `/assets/<name>.svg`. */
+  /** Avatar path under the UI root, `/assets/<name>.svg`: read through
+   * `pageAsset`, never used as a URL as it is (board #517). */
   icon: string;
   /** Colour token NAME, `--backend-<name>` (values live in app.css). */
   color: string;
@@ -121,6 +122,15 @@ export interface BackendCatalog {
   icon(backend: string | null | undefined): string | null;
 }
 
+/** The wire's avatar path, `/assets/<name>`, a file under the UI root, as a
+ * URL relative to the PAGE (board #517): the UI may live under any path
+ * prefix a reverse proxy strips, and only the page's own URL knows it. Any
+ * other value is not a file this client ships: null, and the caller uses
+ * its own. */
+export function pageAsset(path: string): string | null {
+  return /^\/assets\/[^/]+$/u.test(path) ? path.slice(1) : null;
+}
+
 export function createBackendCatalog(): BackendCatalog {
   let served: BackendInfo[] | null = null;
   const listeners = new Set<() => void>();
@@ -146,7 +156,7 @@ export function createBackendCatalog(): BackendCatalog {
     defaultInputMode: (backend) => of(backend)?.default_input_mode === 'steer' ? 'steer' : 'queue',
     togglesInputMode: (backend) => of(backend)?.input_mode_toggle === true,
     colorToken: (backend) => of(backend)?.color ?? null,
-    icon: (backend) => of(backend)?.icon ?? shippedIcon(backend),
+    icon: (backend) => { const served = of(backend)?.icon; return (served && pageAsset(served)) || shippedIcon(backend); },
   };
 }
 
@@ -176,13 +186,13 @@ const FALLBACK_EFFORTS: Record<string, string[]> = {
  * older servers. */
 function shippedIcon(backend: string | null | undefined): string | null {
   switch ((backend ?? '').toLowerCase()) {
-    case 'kiro': return '/assets/kiro.svg';
-    case 'claude': return '/assets/claude.svg';
-    case 'codex': return '/assets/codex.svg';
-    case 'grok': return '/assets/grok.svg';
-    case 'kimi': return '/assets/kimi.svg';
-    case 'omp': return '/assets/omp.svg';
-    case 'openclaw': return '/assets/openclaw.svg';
+    case 'kiro': return 'assets/kiro.svg';
+    case 'claude': return 'assets/claude.svg';
+    case 'codex': return 'assets/codex.svg';
+    case 'grok': return 'assets/grok.svg';
+    case 'kimi': return 'assets/kimi.svg';
+    case 'omp': return 'assets/omp.svg';
+    case 'openclaw': return 'assets/openclaw.svg';
     default: return null;
   }
 }
