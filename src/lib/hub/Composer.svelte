@@ -215,7 +215,13 @@
     : recipient ? t('hubComposerDm').replace('{name}', recipient) : t('hubComposerRoom')));
 
   // Slash completion retains its backend cache and command/argument stages.
+  // Only a LIST is kept: an answer with no models (the server could not ask
+  // its CLI yet) is asked again like a failure, never remembered for the
+  // page's life (2026-11-04: kiro's list was empty until a deploy fixed the
+  // server, and the composer kept the empty answer until a reload).
   let cmdModels = $state({});
+  // One request per backend at a time, so typing does not pile them up.
+  const modelsAsking = new Set();
   let paletteIdx = $state(0);
   let paletteOff = $state(false);
   const paletteBackend = $derived(paletteBackendFor(composerText, recipient, agents));
@@ -242,8 +248,12 @@
     // The models are fetched for a command line whose table declares them,
     // not because a list is showing: the list for a typed `/model ` needs them
     // (board #398 review P1-A).
-    if (!wantsFetchedArgs(composerText, backend) || cmdModels[backend]) return;
-    modelsList(backend || 'kiro').then((r) => { cmdModels = { ...cmdModels, [backend]: r.models ?? [] }; }).catch(() => {});
+    if (!wantsFetchedArgs(composerText, backend) || cmdModels[backend] || modelsAsking.has(backend)) return;
+    modelsAsking.add(backend);
+    modelsList(backend || 'kiro')
+      .then((r) => { if (Array.isArray(r.models) && r.models.length) cmdModels = { ...cmdModels, [backend]: r.models }; })
+      .catch(() => {})
+      .finally(() => { modelsAsking.delete(backend); });
   });
 
   function acceptCompletion(item) {

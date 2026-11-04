@@ -1376,7 +1376,12 @@ and `wantsFetchedArgs`) and four `Hub.mount.test.ts` cases (#398). A cold
 grok `/model` with the fetch held: the list stays, the fetch is asked, Enter
 takes the argument level and sends nothing; a failed fetch sends nothing
 and the next keystroke asks again; once the models arrive the argument list
-completes and the finished argument sends. With `Bob` listed before `bob`,
+completes and the finished argument sends. An answer WITHOUT models is a
+failure too, never a cached empty list (2026-11-04: before a deploy fixed
+the server's kiro catalogue, the composer kept kiro's empty answer for the
+page's life, so `/model ` offered nothing until a reload), and one request
+per backend runs at a time, so typing while it is out asks nothing more
+("an answer without models is asked again by the next keystroke"). With `Bob` listed before `bob`,
 a typed `@bob` sends `@bob`, and a typed `test-model` with `Test-Model`
 listed first sends `test-model`. On the desktop a
 partial argument is completed and not sent; the completed argument, then

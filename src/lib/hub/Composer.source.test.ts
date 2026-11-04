@@ -107,8 +107,10 @@ test('/, @ and # are ONE palette: one derived value, one listbox, one accept (#2
   // one more source chained into the same `palette`; Hub owns the board read.
   assert.match(source, /const palette = \$derived\(paletteOff \? null : offeredPalette\(\s*commandPalette\(composerText, cmdModels\[paletteBackend\] \?\? \[\], paletteBackend\) \?\? mentionPalette\(composerText, mentionCandidates\)\s*\?\? issuePalette\(composerText, issues\), composerText\)\);/u,
     'every source chained into one value, through the one "would accepting change anything" rule (#398)');
-  assert.match(source, /if \(!wantsFetchedArgs\(composerText, backend\) \|\| cmdModels\[backend\]\) return;/u,
-    'the models are fetched by the declaration, never because a list is showing (#398 review P1-A)');
+  assert.match(source, /if \(!wantsFetchedArgs\(composerText, backend\) \|\| cmdModels\[backend\] \|\| modelsAsking\.has\(backend\)\) return;/u,
+    'the models are fetched by the declaration, never because a list is showing (#398 review P1-A), one request at a time');
+  assert.match(source, /if \(Array\.isArray\(r\.models\) && r\.models\.length\) cmdModels = /u,
+    'only a list is kept: an answer without models is asked again (2026-11-04)');
   assert.equal(source.split('role="listbox"').length - 1, 1, 'one listbox');
   assert.equal(source.split('class="cmd-menu').length - 1, 1, 'one menu');
   assert.match(source, /issues = \[\], onissues = \(\) => \{\}/u, 'the list and its refresh come from Hub');

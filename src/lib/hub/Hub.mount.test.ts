@@ -1329,6 +1329,33 @@ test('a typed command that declares arguments opens them before its values load;
   } finally { await app.close(); }
 });
 
+// 2026-11-04: an answer WITH NO MODELS (the server could not ask kiro yet)
+// was cached as an empty list for the page's life, so after the server was
+// fixed `/model ` still offered nothing until a reload. Only a list is kept.
+test('an answer without models is asked again by the next keystroke, and one request runs at a time', { timeout: 60000 }, async (context) => {
+  const asks: string[] = [];
+  const answers: ((r: unknown) => void)[] = [];
+  const app = await composerFixture(context, {
+    modelsList: (backend: string) => { asks.push(backend); return new Promise((resolve) => { answers.push(resolve); }); },
+  });
+  const options = () => [...app.document.querySelectorAll('.cmd-menu .cmd-opt .cmd-name')].map((n) => n.textContent);
+  try {
+    asks.length = 0;
+    await app.text('/model ');
+    await app.text('/model c');
+    assert.equal(asks.length, 1, 'a request in flight is not asked again');
+    answers.shift()!({ models: null });
+    for (let i = 0; i < 4; i++) await app.flush();
+    assert.ok(!options().includes('claude-opus-5.5'), 'no list yet');
+    await app.text('/model cl');
+    assert.equal(asks.length, 2, 'the next keystroke asks again');
+    answers.shift()!({ models: ['claude-opus-5.5'] });
+    await app.wait(() => options().includes('claude-opus-5.5'));
+    await app.text('/model cla');
+    assert.equal(asks.length, 2, 'a list is kept');
+  } finally { await app.close(); }
+});
+
 // Review P2-B on 1b9af621: two names (or two values) that differ only in case
 // are two different things, so the same spelling leads another case of it.
 test('the same spelling leads another case of it: a typed @bob or argument is sent, never rewritten (#398 review P2-B)', { timeout: 60000 }, async (context) => {
