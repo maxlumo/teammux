@@ -314,6 +314,59 @@ Measured on 2026-11-02: before the fix, `--test config_root_cli --test config_ro
 - a killed listener;
 - an unwritable record. The production journal is only ever READ to check that a run left nothing.
 
+## The known failures on this host (board #12)
+
+Every verification on 2026-11-05 rebuilt a clean-main baseline from scratch, about 6 minutes per Rust run, to tell this host's failures from a regression (#2, #3, #6, #7, both validators). This is that baseline, versioned. Compare a branch's isolated run with it instead.
+
+**Measured** on `49882cd0` (main after #11), 2026-11-05 08:34–08:42 UTC, with the default isolated command: `node scripts/isolated.mjs -- npm run test:rust` from a frozen linked worktree (no extra args: `--no-fail-fast` is the default since #11, so every target runs). Result: all 25 targets ran (self-check passed, tripwire silent, exit 101, about 8 minutes). The lib had 1273 passed and 34 failed, `tests/merge_cli.rs` 2 passed and 3 failed, every other target passed: the 36 fixed rows below plus the flaky `projects::scratch` row, which failed this time. Isolated `npm test` on the same commit: 3723 of 3723 passed, so the frontend has no entry.
+
+**It is not a pass list** (reviewer, #7, 07:33). A listed name that fails for a DIFFERENT reason is a failure: compare the failure message with the one below, not only the name. The ten `merge::tests` rows whose assertion prints no reason (for example `no_hook_runs`: `left: Refused, right: Landed`) were proven git-caused with a throwaway probe that printed the refusal reason (#12).
+
+**Re-measure** when a host fact changes (git, openssl, tmux, node, the kernel), or when a commit touches a listed test or the code it exercises, and replace the whole record with the new run.
+
+| test | target | cause (host fact, message) | flaky |
+|---|---|---|---|
+| `merge::tests::a_checkout_failure_is_classified_by_read_back` | lib | host git 2.34.1: `git merge-tree --write-tree` needs 2.38, message `git merge-tree failed (git 2.38 or newer is needed)` | no |
+| `merge::tests::a_clean_squash_lands_from_its_own_reads_and_notes_once` | lib | host git 2.34.1: `git merge-tree --write-tree` needs 2.38, message `git merge-tree failed (git 2.38 or newer is needed)` | no |
+| `merge::tests::a_crash_between_the_swap_and_its_record_is_read_from_git` | lib | host git 2.34.1: `git merge-tree --write-tree` needs 2.38, message `git merge-tree failed (git 2.38 or newer is needed)` | no |
+| `merge::tests::a_dry_run_and_a_refusal_leave_the_index_bytes_alone_with_a_stale_stat_cache` | lib | host git 2.34.1: `git merge-tree --write-tree` needs 2.38, message `git merge-tree failed (git 2.38 or newer is needed)` | no |
+| `merge::tests::a_file_appearing_at_a_new_path_after_the_swap_is_not_overwritten` | lib | host git 2.34.1: `git merge-tree --write-tree` needs 2.38, message `git merge-tree failed (git 2.38 or newer is needed)` | no |
+| `merge::tests::a_half_written_record_and_an_unreadable_lock_are_handled` | lib | host git 2.34.1: `git merge-tree --write-tree` needs 2.38, message `git merge-tree failed (git 2.38 or newer is needed)` | no |
+| `merge::tests::a_landed_merge_whose_note_record_is_lost_posts_nothing_and_fails` | lib | host git 2.34.1: `git merge-tree --write-tree` needs 2.38, message `git merge-tree failed (git 2.38 or newer is needed)` | no |
+| `merge::tests::a_multi_commit_branch_needs_a_message_file` | lib | host git 2.34.1: `git merge-tree --write-tree` needs 2.38, message `git merge-tree failed (git 2.38 or newer is needed)` | no |
+| `merge::tests::an_ignored_file_where_the_merge_adds_a_path_is_refused_and_kept` | lib | host git 2.34.1: `git merge-tree --write-tree` needs 2.38, message `git merge-tree failed (git 2.38 or newer is needed)` | no |
+| `merge::tests::an_ignored_file_with_a_quoted_or_non_utf8_name_is_still_found_and_kept` | lib | host git 2.34.1: `git merge-tree --write-tree` needs 2.38, message `git merge-tree failed (git 2.38 or newer is needed)` | no |
+| `merge::tests::an_interruption_after_the_checkout_leaves_the_recorded_phase` | lib | host git 2.34.1: `git merge-tree --write-tree` needs 2.38, message `git merge-tree failed (git 2.38 or newer is needed)` | no |
+| `merge::tests::a_note_that_was_refused_or_lost_is_said_and_the_merge_is_not_rerun` | lib | host git 2.34.1: `git merge-tree --write-tree` needs 2.38, message `git merge-tree failed (git 2.38 or newer is needed)` | no |
+| `merge::tests::an_unsettled_outcome_whose_record_is_lost_posts_nothing` | lib | host git 2.34.1: `git merge-tree --write-tree` needs 2.38, message `git merge-tree failed (git 2.38 or newer is needed)` | no |
+| `merge::tests::a_one_commit_branch_keeps_its_message_and_other_trailers_and_the_coauthor_set_is_replaced` | lib | host git 2.34.1: `git merge-tree --write-tree` needs 2.38, message `git merge-tree failed (git 2.38 or newer is needed)` | no |
+| `merge::tests::a_path_that_cannot_be_checked_refuses` | lib | host git 2.34.1: `git merge-tree --write-tree` needs 2.38, message `git merge-tree failed (git 2.38 or newer is needed)` | no |
+| `merge::tests::a_read_back_that_does_not_match_after_the_checkout_is_unconfirmed` | lib | host git 2.34.1: `git merge-tree --write-tree` needs 2.38, message `git merge-tree failed (git 2.38 or newer is needed)` | no |
+| `merge::tests::a_record_that_cannot_be_saved_after_the_swap_stops_with_the_previous_record` | lib | host git 2.34.1: `git merge-tree --write-tree` needs 2.38, message `git merge-tree failed (git 2.38 or newer is needed)` | no |
+| `merge::tests::a_record_write_cut_halfway_leaves_the_previous_record` | lib | host git 2.34.1: `git merge-tree --write-tree` needs 2.38, message `git merge-tree failed (git 2.38 or newer is needed)` | no |
+| `merge::tests::a_run_stopped_after_the_swap_or_the_checkout_is_reported_by_the_next_run` | lib | host git 2.34.1: `git merge-tree --write-tree` needs 2.38, message `git merge-tree failed (git 2.38 or newer is needed)` | no |
+| `merge::tests::a_submodule_change_is_refused` | lib | host git 2.34.1: `git merge-tree --write-tree` needs 2.38, message `git merge-tree failed (git 2.38 or newer is needed)` | no |
+| `merge::tests::a_swap_reported_as_failed_but_done_is_unconfirmed_and_touches_nothing` | lib | host git 2.34.1: `git merge-tree --write-tree` needs 2.38, message `git merge-tree failed (git 2.38 or newer is needed)` | no |
+| `merge::tests::a_takeover_after_the_swap_stops_before_any_index_or_file_write` | lib | host git 2.34.1: `git merge-tree --write-tree` needs 2.38, message `git merge-tree failed (git 2.38 or newer is needed)` | no |
+| `merge::tests::a_target_moved_after_the_re_read_is_never_overwritten` | lib | host git 2.34.1: `git merge-tree --write-tree` needs 2.38, message `git merge-tree failed (git 2.38 or newer is needed)` | no |
+| `merge::tests::before_the_swap_another_branch_at_the_same_oid_or_a_moved_target_refuses` | lib | host git 2.34.1: `git merge-tree --write-tree` needs 2.38, message `git merge-tree failed (git 2.38 or newer is needed)` | no |
+| `merge::tests::no_hook_runs` | lib | host git 2.34.1: `git merge-tree --write-tree` needs 2.38, message `git merge-tree failed (git 2.38 or newer is needed)` | no |
+| `merge::tests::refusals_before_landing_change_nothing` | lib | host git 2.34.1: `git merge-tree --write-tree` needs 2.38, message `git merge-tree failed (git 2.38 or newer is needed)` | no |
+| `merge::tests::the_dry_run_changes_no_ref_index_or_file_and_posts_nothing` | lib | host git 2.34.1: `git merge-tree --write-tree` needs 2.38, message `git merge-tree failed (git 2.38 or newer is needed)` | no |
+| `merge::tests::trailers_come_from_the_branch_in_first_seen_order_and_none_means_none` | lib | host git 2.34.1: `git merge-tree --write-tree` needs 2.38, message `git merge-tree failed (git 2.38 or newer is needed)` | no |
+| `merge::tests::whitespace_drift_next_to_a_hunk_refuses_where_stable_patch_id_would_match` | lib | host git 2.34.1: `git merge-tree --write-tree` needs 2.38, message `git merge-tree failed (git 2.38 or newer is needed)` | no |
+| `a_merge_reads_the_issue_first_and_posts_exactly_the_line_it_prints` | `tests/merge_cli.rs` | host git 2.34.1: `git merge-tree --write-tree` needs 2.38, message `git merge-tree failed (git 2.38 or newer is needed)` | no |
+| `a_refused_or_lost_note_is_said_and_fails_the_command` | `tests/merge_cli.rs` | host git 2.34.1: `git merge-tree --write-tree` needs 2.38, message `git merge-tree failed (git 2.38 or newer is needed)` | no |
+| `expect_is_required_and_the_dry_run_posts_nothing` | `tests/merge_cli.rs` | host git 2.34.1: `git merge-tree --write-tree` needs 2.38, message `git merge-tree failed (git 2.38 or newer is needed)` | no |
+| `gateway::probe::tests::a_tls_gateway_is_ours_only_for_the_configured_valid_leaf_naming_the_address` | lib | host openssl cannot make the TLS fixture, message `openssl could not make the fixture (req: Use -help for summary.)` | no |
+| `server::hub_rpc::tests::the_mode_toggle_and_the_interrupt_go_through_the_send_door` | lib | host-only, not diagnosed; message `one toggle, never an Enter` (the pane shows `Switched to steer mode`) | no |
+| `tasks::tests::expired_finished_tasks_are_reaped_and_nothing_else_is` | lib | host-only, not diagnosed; message `tmux reports the death time` | no |
+| `tasks::tests::stop_closes_the_window_with_its_tail_unless_kept` | lib | host-only, not diagnosed; message `the tail was read before closing` (the pane shows `Pane is dead (signal 2, …)`) | no |
+| `projects::scratch::tests::the_shell_can_exit_without_ending_the_session_and_a_dead_pane_is_repaired` | lib | timing of a dead pane; not diagnosed; message `the pane-died hook respawns the shell in place` | **yes**: failed on #8's isolated run, passed in two isolated runs on #11, failed again in this record's run |
+| `backends::dsh::tests::the_steer_reader_frames_bytes_and_hands_off_only_a_clean_state` | lib | node itself aborted (V8 `Lazy deopt`) while another isolated full run shared the host; not a code failure | **yes**: failed once in an overlapping run (validator-2, #7, 08:32), passed alone isolated (08:37) and 3 times for builder-3. Only that abort message counts as this flake; any other message is a failure |
+
+**Isolated and unisolated differ.** `server::local_socket::tests::a_dead_socket_is_reclaimed_a_live_one_or_a_foreign_node_never_is` fails only when run on the host next to the live gateway, and passes isolated (validator, #8). The frontend `npm test` had 21 failures in every UNISOLATED run on 2026-11-05 and none isolated (#10, #11). Neither belongs in this record: a full run on this host is isolated (§ above).
+
 ## The reboot restore has one live acceptance, and it gates the default (board #422 round 4)
 
 `scripts/restore-acceptance.sh <tmm>` runs a real gateway (`tmm gateway
