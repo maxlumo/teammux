@@ -69,7 +69,7 @@ export function forbiddenPaths({ home = homedir(), env = process.env, worktree =
  * (`chain`: [dir, allowed names]), the private HOME's setup (each step that
  * fails refuses), and only then the TCP probes, which therefore never run on
  * a host where an earlier check refuses. */
-export function selfCheck(forbidden, chain = []) {
+export function selfCheck(forbidden, chain = [], node = SYSTEM_NODE) {
   const lines = [
     'set -u',
     'fail() { echo "[isolated] REFUSED: $1" >&2; exit 97; }',
@@ -87,12 +87,16 @@ export function selfCheck(forbidden, chain = []) {
     // wizard, which swallows the first typed command (measured, 2026-11-02:
     // a_session_is_adopted_at_the_directory_it_was_made_in timed out on it).
     ': > "$HOME/.zshrc" || fail "the private .zshrc could not be written"',
+    // A node outside the system mounts (board #9): only node, npm and npx
+    // of its read-only prefix go on PATH, never the prefix's other globals.
+    ...(node.links ? [`mkdir -p ${NODE_BIN} || fail "the node links could not be made"`,
+      ...['node', 'npm', 'npx'].map((b) => `ln -sfn ${sq(`${NODE_AT}/bin/${b}`)} ${NODE_BIN}/${b} || fail ${sq(`the node link ${b} could not be made`)}`)] : []),
     'for d in bin registry git; do if [ -e "/opt/cargo/$d" ]; then ln -sfn "/opt/cargo/$d" "$CARGO_HOME/$d" || fail "the toolchain link $d could not be made"; fi; done',
     '(exec 3<>/dev/tcp/127.0.0.1/9899) 2>/dev/null && fail "127.0.0.1:9899 answers"',
     '(exec 3<>/dev/tcp/1.1.1.1/443) 2>/dev/null && fail "an outside address answers"',
     'echo "[isolated] self-check passed: no network, no host HOME, no live socket" >&2',
     'export ISOLATED_RUNNER=1',
-    ...withTripwire(),
+    ...withTripwire(node.bin),
   ];
   return lines.join('\n');
 }
@@ -100,7 +104,7 @@ export function selfCheck(forbidden, chain = []) {
 /** The tripwire around the command (`"$@"`): its start, the command, and
  * the verdict. Needs `fail` defined; exported so its behaviour rows can run
  * it alone on a test port (`TRIPWIRE_PORT`, `TRIPWIRE_BASE`). */
-export function withTripwire() {
+export function withTripwire(nodeBin = SYSTEM_NODE.bin) {
   return [
     // The TRIPWIRE (board #503): 127.0.0.1:9899, the default port a live
     // gateway holds on a real host, is held here by a listener that reads
@@ -115,7 +119,7 @@ export function withTripwire() {
     // final marker is 97; any counted connection is 98. Only the count and
     // the times are printed.
     'tw=${TRIPWIRE_BASE:-/tmp/.isolated-tripwire}; rm -f "$tw.count" "$tw.ready"',
-    `/usr/bin/node -e ${sq(TRIPWIRE)} "$tw" "\${TRIPWIRE_PORT:-9899}" & twpid=$!`,
+    `${nodeBin} -e ${sq(TRIPWIRE)} "$tw" "\${TRIPWIRE_PORT:-9899}" & twpid=$!`,
     'for _ in $(seq 100); do [ -e "$tw.ready" ] && break; kill -0 "$twpid" 2>/dev/null || break; sleep 0.05; done',
     '[ -e "$tw.ready" ] || fail "the default-port tripwire could not start"',
     // NOT exec: bash stays PID 1 and reaps every orphan a killed process
@@ -161,7 +165,7 @@ function sq(s) {
 }
 
 /** The `docker run` argv for `command` on `worktree`. Pure, for the test. */
-export function dockerArgs({ worktree, gitDirs, uid, gid, home = homedir(), forbidden, chain = [], command }) {
+export function dockerArgs({ worktree, gitDirs, uid, gid, home = homedir(), forbidden, chain = [], command, node = SYSTEM_NODE }) {
   const ro = (p, at = p) => ['-v', `${p}:${at}:ro`];
   const rw = (p) => ['-v', `${p}:${p}`];
   const args = [
@@ -171,6 +175,7 @@ export function dockerArgs({ worktree, gitDirs, uid, gid, home = homedir(), forb
     ...ro(join(home, '.cargo', 'bin'), '/opt/cargo/bin'),
     ...ro(join(home, '.cargo', 'registry'), '/opt/cargo/registry'),
     ...ro(join(home, '.rustup'), '/opt/rustup'),
+    ...(node.prefix ? ro(node.prefix, NODE_AT) : []),
   ];
   // The repository's shared git dir read-only, this worktree's own git dir
   // (index, HEAD) writable on top of it, and the worktree itself.
@@ -180,15 +185,47 @@ export function dockerArgs({ worktree, gitDirs, uid, gid, home = homedir(), forb
   const env = {
     HOME: '/tmp/home', XDG_CONFIG_HOME: '/tmp/home/.config', XDG_DATA_HOME: '/tmp/home/.local/share',
     XDG_STATE_HOME: '/tmp/home/.local/state', TMPDIR: '/tmp', CARGO_HOME: '/tmp/cargo-home',
-    RUSTUP_HOME: '/opt/rustup', PATH: '/tmp/cargo-home/bin:/usr/local/bin:/usr/bin:/bin', LANG: 'C.UTF-8',
+    RUSTUP_HOME: '/opt/rustup', PATH: `${node.links ? `${NODE_BIN}:` : ''}/tmp/cargo-home/bin:/usr/local/bin:/usr/bin:/bin`, LANG: 'C.UTF-8',
   };
   for (const [k, v] of Object.entries(env)) args.push('-e', `${k}=${v}`);
-  args.push('-w', worktree, IMAGE, '/usr/bin/bash', '-c', selfCheck(forbidden, chain), 'isolated', ...command);
+  args.push('-w', worktree, IMAGE, '/usr/bin/bash', '-c', selfCheck(forbidden, chain, node), 'isolated', ...command);
   return args;
 }
 
 /** Why the runner refuses to start, before any docker call. */
 export class Refusal extends Error {}
+
+/** The system dirs every run mounts read-only at their own path. */
+const SYSTEM_DIRS = ['/usr', '/lib', '/lib64', '/bin', '/sbin'];
+const SYSTEM_NODE = { bin: '/usr/bin/node', prefix: null, links: false };
+/** Where a node outside the system dirs is mounted: a neutral path, never
+ * its real one, because a real path under HOME (~/.local) is exactly what
+ * the self-check refuses to see (validator, #8, 2026-11-05). */
+const NODE_AT = '/opt/node';
+const NODE_BIN = '/tmp/node-bin';
+
+/** The node the container runs (board #9), from `execPath`, the RUNNING
+ * node's real path. Under a system dir it is already visible at that path:
+ * nothing is added. Elsewhere its install prefix (`<prefix>/bin/node`) is
+ * mounted read-only at /opt/node, and only node, npm and npx are linked onto
+ * PATH. A prefix that would expose more than node refuses: one that is `/`,
+ * HOME or holds it, holds the worktree, the main checkout or a forbidden
+ * host path, or a node that is not `<prefix>/bin/node`. Pure. */
+export function nodeRuntime({ execPath, home, worktree, main, forbidden }) {
+  const holds = (outer, inner) => inner === outer || inner.startsWith(`${outer}/`);
+  if (SYSTEM_DIRS.some((d) => holds(d, execPath))) return { bin: execPath, prefix: null, links: false };
+  const fix = 'install node under /usr (for example /usr/bin/node), or as its own <prefix>/bin/node outside HOME\'s top level, the worktree and the config dir, then run the runner with that node';
+  const refuse = (why) => { throw new Refusal(`node ${execPath} cannot be mounted: ${why}; ${fix}`); };
+  if (basename(dirname(execPath)) !== 'bin') refuse('it is not <prefix>/bin/node');
+  const prefix = dirname(dirname(execPath));
+  if (prefix === '/' || prefix === dirname(prefix)) refuse('its prefix is /');
+  if (holds(prefix, home)) refuse(`its prefix ${prefix} is HOME or holds it`);
+  if (holds(prefix, worktree)) refuse(`its prefix ${prefix} holds the worktree`);
+  if (main && holds(prefix, main)) refuse(`its prefix ${prefix} holds the main checkout`);
+  const hit = forbidden.find((f) => holds(prefix, f));
+  if (hit) refuse(`its prefix ${prefix} holds a forbidden host path ${hit} (the config dir or a credential dir)`);
+  return { bin: `${NODE_AT}/bin/node`, prefix, links: true };
+}
 
 const GIT_OVERRIDES = ['GIT_DIR', 'GIT_WORK_TREE', 'GIT_COMMON_DIR', 'GIT_INDEX_FILE'];
 
@@ -336,14 +373,22 @@ export function main(argv = process.argv.slice(2)) {
   for (const p of [join(home, '.cargo', 'bin'), join(home, '.rustup')]) {
     if (!existsSync(p)) { console.error(`[isolated] missing toolchain dir ${p}`); return 2; }
   }
-  ensureImage();
   const forbidden = [
     ...forbiddenPaths({ home, worktree }),
     ...['.tmm', '.tmm/agents', '.tmm/uploads', '.tmm/teams'].map((p) => join(checkout, p)),
   ];
+  let node;
+  try {
+    node = nodeRuntime({ execPath: realpathSync(process.execPath), home, worktree, main: checkout, forbidden });
+  } catch (e) {
+    if (!(e instanceof Refusal)) throw e;
+    console.error(`[isolated] REFUSED before docker: ${e.message}`);
+    return 97;
+  }
+  ensureImage();
   const args = dockerArgs({
     worktree, gitDirs: { common, own }, uid: process.getuid(), gid: process.getgid(), home,
-    forbidden, chain: ancestry(worktree, checkout), command,
+    forbidden, chain: ancestry(worktree, checkout), command, node,
   });
   console.error(`[isolated] ${worktree}: --network none, private HOME/XDG/TMPDIR, only the worktree writable`);
   const r = spawnSync('docker', args, { stdio: 'inherit' });
