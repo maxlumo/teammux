@@ -429,7 +429,7 @@ const forbidden = forbiddenPaths({ home, env: {}, worktree });
 const argsWith = (execPath: string) => dockerArgs({
   worktree, gitDirs: { common: '/local/home/u/work/repo/.git', own: '/local/home/u/work/repo/.git/worktrees/a-1' },
   uid: 1000, gid: 100, home, forbidden, command: ['npm', 'test'],
-  node: nodeRuntime({ execPath, home, worktree, forbidden, main: '/local/home/u/work/repo' }),
+  node: nodeRuntime({ execPath }),
 });
 
 test('a node under the system mounts adds nothing: no mount, the same PATH, the tripwire runs that node', () => {
@@ -443,37 +443,71 @@ test('a node under the system mounts adds nothing: no mount, the same PATH, the 
   assert.ok(argsWith('/usr/local/bin/node')[a.indexOf('-c') + 1].includes('/usr/local/bin/node -e'));
 });
 
-test('a node elsewhere adds ONE read-only mount of its install prefix, off PATH except node, npm and npx', () => {
-  const a = argsWith('/local/home/u/.local/share/node/bin/node');
-  const before = mountsOf(args());
-  const added = mountsOf(a).filter((m) => !before.includes(m));
-  assert.deepEqual(added, ['/local/home/u/.local/share/node:/opt/node:ro'], 'one mount, read-only, at a path outside HOME');
-  assert.deepEqual(mountsOf(a).filter((m) => !m.endsWith(':ro')).sort(), mountsOf(args()).filter((m) => !m.endsWith(':ro')).sort(), 'nothing new is writable');
-  assert.deepEqual(a.slice(0, 6), args().slice(0, 6), 'network and user unchanged');
-  assert.equal(envOf(a).PATH, '/tmp/node-bin:/tmp/cargo-home/bin:/usr/local/bin:/usr/bin:/bin');
+/** A node install on disk: `<prefix>/bin/node` and, unless `npm` is false,
+ * npm's package at `<prefix>/lib/node_modules/npm`, inside a dir that also
+ * holds a SECRET sibling, as ~/.local/share or ~/.ssh would (validator-2,
+ * #9 round 1). */
+function install(parentName: string, { npm = true } = {}) {
+  const t = realpathSync(mkdtempSync(join(tmpdir(), 'tmm-node-')));
+  const prefix = join(t, parentName, 'x');
+  mkdirSync(join(prefix, 'bin'), { recursive: true });
+  writeFileSync(join(prefix, 'bin', 'node'), '');
+  writeFileSync(join(t, parentName, 'SECRET'), 'never mounted');
+  if (npm) {
+    mkdirSync(join(prefix, 'lib', 'node_modules', 'npm', 'bin'), { recursive: true });
+    writeFileSync(join(prefix, 'lib', 'node_modules', 'npm', 'package.json'), '{"name":"npm"}');
+  }
+  return { t, prefix, execPath: join(prefix, 'bin', 'node') };
+}
+
+test('a node elsewhere mounts ONLY its binary and npm\'s package, read-only, at /opt/node', () => {
+  for (const parent of ['.local/share', '.ssh', '.aws', '.config/teammux', '.tmm/agents/a']) {
+    const { t, prefix, execPath } = install(parent);
+    const a = argsWith(execPath);
+    const before = mountsOf(args());
+    const added = mountsOf(a).filter((m) => !before.includes(m));
+    assert.deepEqual(added, [
+      `${prefix}/bin/node:/opt/node/bin/node:ro`,
+      `${prefix}/lib/node_modules/npm:/opt/node/lib/node_modules/npm:ro`,
+    ], `${parent}: the binary and npm only, never the prefix or its parent`);
+    assert.ok(!mountsOf(a).some((m) => [prefix, join(t, parent)].includes(m.split(':')[0])), `${parent}: the dir holding SECRET is not mounted`);
+    assert.deepEqual(mountsOf(a).filter((m) => !m.endsWith(':ro')).sort(), mountsOf(args()).filter((m) => !m.endsWith(':ro')).sort(), 'nothing new is writable');
+    assert.deepEqual(a.slice(0, 6), args().slice(0, 6), 'network and user unchanged');
+    assert.equal(envOf(a).PATH, '/tmp/node-bin:/tmp/cargo-home/bin:/usr/local/bin:/usr/bin:/bin');
+    const s = a[a.indexOf('-c') + 1];
+    assert.ok(s.includes('/opt/node/bin/node -e'), 'the tripwire runs the mounted node');
+    assert.ok(s.includes("'/opt/node/bin/node' /tmp/node-bin/node"), 'node is linked');
+    assert.ok(s.includes("'/opt/node/lib/node_modules/npm/bin/npm-cli.js' /tmp/node-bin/npm"), 'npm is linked to its own cli');
+    assert.ok(s.includes("'/opt/node/lib/node_modules/npm/bin/npx-cli.js' /tmp/node-bin/npx"), 'npx is linked to its own cli');
+    assert.ok(s.indexOf('/tmp/node-bin') < s.indexOf('self-check passed'), 'the links are made in the setup, before the probes');
+    assert.ok(s.indexOf('/tmp/node-bin') > s.indexOf('a host path is visible'), 'and after the host-path refusals');
+    rmSync(t, { recursive: true, force: true });
+  }
+});
+
+test('a node without npm beside it mounts the binary alone and links only node', () => {
+  const { t, prefix, execPath } = install('.local/share', { npm: false });
+  const a = argsWith(execPath);
+  assert.deepEqual(mountsOf(a).filter((m) => !mountsOf(args()).includes(m)), [`${prefix}/bin/node:/opt/node/bin/node:ro`]);
   const s = a[a.indexOf('-c') + 1];
-  assert.ok(s.includes('/opt/node/bin/node -e'), 'the tripwire runs the mounted node');
-  for (const b of ['node', 'npm', 'npx']) assert.ok(s.includes(`/opt/node/bin/${b}`), b);
-  assert.ok(s.indexOf('/tmp/node-bin') < s.indexOf('self-check passed'), 'the links are made in the setup, before the probes');
-  assert.ok(s.indexOf('/tmp/node-bin') > s.indexOf('a host path is visible'), 'and after the host-path refusals');
+  assert.ok(!s.includes('/tmp/node-bin/npm') && !s.includes('/tmp/node-bin/npx'));
+  rmSync(t, { recursive: true, force: true });
 });
 
 test('a node that cannot be mounted refuses, naming the path and the fix', () => {
   const refuses = (execPath: string, what: RegExp) => assert.throws(
-    () => nodeRuntime({ execPath, home, worktree, forbidden, main: '/local/home/u/work/repo' }),
+    () => nodeRuntime({ execPath }),
     (e: unknown) => e instanceof Refusal && what.test(e.message) && e.message.includes(execPath) && /install node/.test(e.message),
   );
-  refuses('/local/home/u/bin/node', /HOME/);
-  refuses('/local/home/u/work/bin/node', /worktree|main checkout/);
-  refuses('/local/home/u/.config/bin/node', /forbidden|config/);
-  refuses('/opt/tools/node', /bin\//);
-  refuses('/bin2/node', /bin\//);
+  refuses('/local/home/u/odd:dir/bin/node', /`:` or `,`/);
+  refuses('/local/home/u/odd,dir/bin/node', /`:` or `,`/);
+  refuses('/local/home/u/no-such-node', /not a regular file/);
 });
 
 test('the runner resolves node from the running process, and refuses before any docker call', () => {
   const src = readFileSync(new URL('./isolated.mjs', import.meta.url), 'utf8');
   const body = src.slice(src.indexOf('export function main('));
   assert.ok(body.indexOf('installRefusal(') < body.indexOf('nodeRuntime(') && body.indexOf('nodeRuntime(') < body.indexOf('ensureImage()'));
-  assert.match(src, /nodeRuntime\(\{ execPath: realpathSync\(process\.execPath\)/);
+  assert.match(src, /nodeRuntime\(\{ execPath: realpathSync\(process\.execPath\) \}\)/);
   assert.ok(!/^\s*['`]\/usr\/bin\/node -e/m.test(src), 'no hardcoded tripwire node');
 });

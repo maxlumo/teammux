@@ -90,7 +90,7 @@ export function selfCheck(forbidden, chain = [], node = SYSTEM_NODE) {
     // A node outside the system mounts (board #9): only node, npm and npx
     // of its read-only prefix go on PATH, never the prefix's other globals.
     ...(node.links ? [`mkdir -p ${NODE_BIN} || fail "the node links could not be made"`,
-      ...['node', 'npm', 'npx'].map((b) => `ln -sfn ${sq(`${NODE_AT}/bin/${b}`)} ${NODE_BIN}/${b} || fail ${sq(`the node link ${b} could not be made`)}`)] : []),
+      ...node.links.map(([b, at]) => `ln -sfn ${sq(at)} ${NODE_BIN}/${b} || fail ${sq(`the node link ${b} could not be made`)}`)] : []),
     'for d in bin registry git; do if [ -e "/opt/cargo/$d" ]; then ln -sfn "/opt/cargo/$d" "$CARGO_HOME/$d" || fail "the toolchain link $d could not be made"; fi; done',
     '(exec 3<>/dev/tcp/127.0.0.1/9899) 2>/dev/null && fail "127.0.0.1:9899 answers"',
     '(exec 3<>/dev/tcp/1.1.1.1/443) 2>/dev/null && fail "an outside address answers"',
@@ -175,7 +175,7 @@ export function dockerArgs({ worktree, gitDirs, uid, gid, home = homedir(), forb
     ...ro(join(home, '.cargo', 'bin'), '/opt/cargo/bin'),
     ...ro(join(home, '.cargo', 'registry'), '/opt/cargo/registry'),
     ...ro(join(home, '.rustup'), '/opt/rustup'),
-    ...(node.prefix ? ro(node.prefix, NODE_AT) : []),
+    ...node.mounts.flatMap(([src, at]) => ro(src, at)),
   ];
   // The repository's shared git dir read-only, this worktree's own git dir
   // (index, HEAD) writable on top of it, and the worktree itself.
@@ -197,7 +197,7 @@ export class Refusal extends Error {}
 
 /** The system dirs every run mounts read-only at their own path. */
 const SYSTEM_DIRS = ['/usr', '/lib', '/lib64', '/bin', '/sbin'];
-const SYSTEM_NODE = { bin: '/usr/bin/node', prefix: null, links: false };
+const SYSTEM_NODE = { bin: '/usr/bin/node', mounts: [], links: null };
 /** Where a node outside the system dirs is mounted: a neutral path, never
  * its real one, because a real path under HOME (~/.local) is exactly what
  * the self-check refuses to see (validator, #8, 2026-11-05). */
@@ -206,25 +206,37 @@ const NODE_BIN = '/tmp/node-bin';
 
 /** The node the container runs (board #9), from `execPath`, the RUNNING
  * node's real path. Under a system dir it is already visible at that path:
- * nothing is added. Elsewhere its install prefix (`<prefix>/bin/node`) is
- * mounted read-only at /opt/node, and only node, npm and npx are linked onto
- * PATH. A prefix that would expose more than node refuses: one that is `/`,
- * HOME or holds it, holds the worktree, the main checkout or a forbidden
- * host path, or a node that is not `<prefix>/bin/node`. Pure. */
-export function nodeRuntime({ execPath, home, worktree, main, forbidden }) {
+ * nothing is added. Elsewhere an ALLOWLIST is mounted read-only under
+ * /opt/node, never the install prefix (validator-2, round 1: a prefix inside
+ * ~/.ssh, ~/.aws, the config dir, .tmm or ~/.local/share exposed that dir):
+ * the binary itself, and npm's own package `<prefix>/lib/node_modules/npm`
+ * when one sits beside it (its package.json names npm). PATH gets links to
+ * node, and to npm's and npx's own CLIs, nothing else. A path docker's `-v`
+ * cannot carry (`:` or `,`) or a node that is not a regular file refuses,
+ * naming the path and the fix. Reads only those two files' metadata. */
+export function nodeRuntime({ execPath }) {
   const holds = (outer, inner) => inner === outer || inner.startsWith(`${outer}/`);
-  if (SYSTEM_DIRS.some((d) => holds(d, execPath))) return { bin: execPath, prefix: null, links: false };
-  const fix = 'install node under /usr (for example /usr/bin/node), or as its own <prefix>/bin/node outside HOME\'s top level, the worktree and the config dir, then run the runner with that node';
+  if (SYSTEM_DIRS.some((d) => holds(d, execPath))) return { bin: execPath, mounts: [], links: null };
+  const fix = 'install node under /usr (for example /usr/bin/node), or at a path without `:` or `,`, then run the runner with that node';
   const refuse = (why) => { throw new Refusal(`node ${execPath} cannot be mounted: ${why}; ${fix}`); };
-  if (basename(dirname(execPath)) !== 'bin') refuse('it is not <prefix>/bin/node');
-  const prefix = dirname(dirname(execPath));
-  if (prefix === '/' || prefix === dirname(prefix)) refuse('its prefix is /');
-  if (holds(prefix, home)) refuse(`its prefix ${prefix} is HOME or holds it`);
-  if (holds(prefix, worktree)) refuse(`its prefix ${prefix} holds the worktree`);
-  if (main && holds(prefix, main)) refuse(`its prefix ${prefix} holds the main checkout`);
-  const hit = forbidden.find((f) => holds(prefix, f));
-  if (hit) refuse(`its prefix ${prefix} holds a forbidden host path ${hit} (the config dir or a credential dir)`);
-  return { bin: `${NODE_AT}/bin/node`, prefix, links: true };
+  if (/[:,]/u.test(execPath)) refuse('its path holds `:` or `,`, which a docker volume cannot carry');
+  let st;
+  try { st = statSync(execPath); } catch { st = null; }
+  if (!st?.isFile()) refuse('it is not a regular file');
+  const bin = `${NODE_AT}/bin/node`;
+  const mounts = [[execPath, bin]];
+  const links = [['node', bin]];
+  const npmDir = join(dirname(dirname(execPath)), 'lib', 'node_modules', 'npm');
+  let npm = null;
+  try { npm = realpathSync(npmDir); } catch { /* no npm beside this node */ }
+  let named = false;
+  try { named = !!npm && JSON.parse(readFileSync(join(npm, 'package.json'), 'utf8')).name === 'npm'; } catch { /* not npm */ }
+  if (named && !/[:,]/u.test(npm)) {
+    const at = `${NODE_AT}/lib/node_modules/npm`;
+    mounts.push([npm, at]);
+    links.push(['npm', `${at}/bin/npm-cli.js`], ['npx', `${at}/bin/npx-cli.js`]);
+  }
+  return { bin, mounts, links };
 }
 
 const GIT_OVERRIDES = ['GIT_DIR', 'GIT_WORK_TREE', 'GIT_COMMON_DIR', 'GIT_INDEX_FILE'];
@@ -379,7 +391,7 @@ export function main(argv = process.argv.slice(2)) {
   ];
   let node;
   try {
-    node = nodeRuntime({ execPath: realpathSync(process.execPath), home, worktree, main: checkout, forbidden });
+    node = nodeRuntime({ execPath: realpathSync(process.execPath) });
   } catch (e) {
     if (!(e instanceof Refusal)) throw e;
     console.error(`[isolated] REFUSED before docker: ${e.message}`);
