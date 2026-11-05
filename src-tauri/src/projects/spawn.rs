@@ -1935,9 +1935,17 @@ mod relaunch_tests {
         crate::backends::codex::note_child_thread(&home, new).unwrap();
         assert_eq!(line(Some(old)), resume(old), "a child's lock never starts the parent fresh");
         std::fs::remove_file(home.join(crate::backends::codex::CHILD_THREADS)).unwrap();
-        // The new conversation's first prompt writes its rollout: resumed as usual.
+        // The new conversation's first prompt writes its rollout. Validator's
+        // P1 (#29 round 0): the slot may still record the CLEARED id for up
+        // to a capture tick; the newest lock is the pane's own thread, so it
+        // is what a restart resumes, not the stale record.
         rollout(new);
         assert_eq!(line(Some(new)), resume(new));
+        assert_eq!(line(Some(old)), resume(new), "a stale recorded id does not revive the cleared conversation");
+        assert_eq!(line(None), resume(new));
+        crate::backends::codex::set_test_version(Some("0.167.0"));
+        assert_eq!(line(Some(old)), resume(old), "an unmeasured version keeps the recorded id");
+        crate::backends::codex::set_test_version(Some("0.166.0"));
         crate::backends::codex::set_test_version(None);
         std::fs::remove_dir_all(&ws).ok();
     }

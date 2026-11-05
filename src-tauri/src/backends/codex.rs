@@ -754,17 +754,37 @@ pub(crate) fn line_is_private(cmd: &str) -> bool {
 }
 
 pub(crate) fn resume_command(cmd: &str, id: Option<&str>, home: Option<&std::path::Path>) -> String {
-    if home.is_some_and(left_in_an_empty_new_thread) {
-        match codex_version() {
-            Some(v) if v == NEW_THREAD_MEASURED => return cmd.to_string(),
-            v => eprintln!(
-                "codex {}: the pane was in a new, empty conversation, but that reading of codex's thread locks is measured on {NEW_THREAD_MEASURED} only; resuming as before (board #29)",
+    let resume = |which: &str| with_resume(cmd, which).unwrap_or_else(|| cmd.to_string());
+    let recorded = || resume(&id.map(crate::shell::quote).unwrap_or_else(|| "--last".to_string()));
+    let Some(current) = home.and_then(pane_thread) else { return recorded() };
+    // Nothing to change: the pane's thread is the one recorded.
+    if current.has_rollout && Some(current.id.as_str()) == id {
+        return recorded();
+    }
+    match codex_version() {
+        Some(v) if v == NEW_THREAD_MEASURED => {
+            if current.has_rollout {
+                // Review P1 (#29 round 0): the slot's id lags a capture tick
+                // behind a new thread's first turn; the lock is the pane's own.
+                resume(&crate::shell::quote(&current.id))
+            } else {
+                cmd.to_string()
+            }
+        }
+        v => {
+            eprintln!(
+                "codex {}: the pane's newest thread is not the recorded one, but that reading of codex's thread locks is measured on {NEW_THREAD_MEASURED} only; resuming as before (board #29)",
                 v.as_deref().unwrap_or("of unknown version")
-            ),
+            );
+            recorded()
         }
     }
-    let which = id.map(crate::shell::quote).unwrap_or_else(|| "--last".to_string());
-    with_resume(cmd, &which).unwrap_or_else(|| cmd.to_string())
+}
+
+/// The thread a killed codex pane was in, read from codex's own files.
+struct PaneThread {
+    id: String,
+    has_rollout: bool,
 }
 
 /// Board #29, measured on codex-cli 0.166.0 (scratch CODEX_HOME): `/new`
@@ -773,19 +793,23 @@ pub(crate) fn resume_command(cmd: &str, id: Option<&str>, home: Option<&std::pat
 /// first prompt; no hook, no session index entry, no database row changes
 /// before that. A window kill leaves the locks; the next codex start
 /// removes those of threads it does not run (a fresh start keeps only its
-/// own, `resume <id>` only that id's). So when the NEWEST lock (mtime) names
-/// a thread with no rollout, the pane was in an empty new conversation: a
-/// restart starts fresh instead of reviving the cleared one. The locks are
-/// codex's internal concurrency state, not a documented door, so the rule
-/// holds only on the measured version (`NEW_THREAD_MEASURED`). A thread the
-/// hub saw as a sub-agent child (`CHILD_THREADS`) is never taken for the
-/// pane's own: a wrong fresh start loses a live conversation, which is worse
-/// than reviving a cleared one.
-fn left_in_an_empty_new_thread(home: &std::path::Path) -> bool {
+/// own, `resume <id>` only that id's). So the NEWEST lock (mtime) names the
+/// thread the pane was in. Without a rollout it is an empty new
+/// conversation: a restart starts fresh instead of reviving the cleared
+/// one. With a rollout it is the pane's current conversation, which the
+/// slot's recorded id may not name yet (it lags a capture tick, review P1),
+/// so that thread is resumed. The locks are codex's internal concurrency
+/// state, not a documented door, so either reading holds only on the
+/// measured version (`NEW_THREAD_MEASURED`). A thread the hub saw as a
+/// sub-agent child (`CHILD_THREADS`) is never taken for the pane's own: a
+/// wrong fresh start loses a live conversation, which is worse than
+/// reviving a cleared one. `None` when the locks cannot be read or none
+/// qualifies.
+fn pane_thread(home: &std::path::Path) -> Option<PaneThread> {
     let codex = home.join("codex");
     let children = std::fs::read_to_string(home.join(CHILD_THREADS)).unwrap_or_default();
-    let Ok(locks) = std::fs::read_dir(codex.join("thread-writer-locks")) else { return false };
-    let newest = locks
+    let locks = std::fs::read_dir(codex.join("thread-writer-locks")).ok()?;
+    let (_, id) = locks
         .flatten()
         .filter_map(|e| {
             let name = e.file_name().to_str()?.strip_suffix(".lock")?.to_string();
@@ -793,9 +817,9 @@ fn left_in_an_empty_new_thread(home: &std::path::Path) -> bool {
             Some((when, name))
         })
         .filter(|(_, id)| super::shared::exact_id_ok(id) && !children.lines().any(|c| c == id))
-        .max();
-    let Some((_, id)) = newest else { return false };
-    !has_rollout(&codex.join("sessions"), &id)
+        .max()?;
+    let has_rollout = has_rollout(&codex.join("sessions"), &id);
+    Some(PaneThread { id, has_rollout })
 }
 
 /// Whether `sessions/YYYY/MM/DD/` holds the rollout of thread `id`. A tree
