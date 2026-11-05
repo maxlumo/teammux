@@ -232,7 +232,7 @@ test('the TCP probes come after every refusal that can be tested on a host', () 
 test('the tripwire sits between "passed" and the verdict and reads no peer bytes', () => {
   const s = selfCheck([]);
   const passed = s.indexOf('self-check passed');
-  const start = s.indexOf('/usr/bin/node -e');
+  const start = s.indexOf("'/usr/bin/node' -e");
   const run = s.indexOf('"$@"');
   const verdict = s.indexOf('exit 98');
   assert.ok(passed < start && start < run && run < verdict, 'passed, the tripwire, the command, the verdict');
@@ -422,25 +422,51 @@ test('the install check runs before any docker call, after the target check', ()
 // command) and resolves it from the RUNNING process, never a guessed path.
 // Measured 2026-11-05 on a host whose node is ~/.local/share/node/bin/node:
 // the hardcoded `/usr/bin/node` tripwire could not start (exit 97, under 3 s),
-// so no isolated run had ever happened there.
+// so the runner could not start there while node lived outside /usr.
 const envOf = (a: string[]) => Object.fromEntries(a.flatMap((x, i) => (a[i - 1] === '-e' ? [x.split(/=(.*)/s).slice(0, 2)] : [])));
 const mountsOf = (a: string[]) => a.flatMap((x, i) => (a[i - 1] === '-v' ? [x] : []));
 const forbidden = forbiddenPaths({ home, env: {}, worktree });
-const argsWith = (execPath: string) => dockerArgs({
+// `pathNode` stands in for the node the container's PATH would pick (the
+// real one reads /usr/local/bin, /usr/bin and /bin on the host running the
+// test); null when PATH has none.
+const argsWith = (execPath: string, pathNode: string | null = null) => dockerArgs({
   worktree, gitDirs: { common: '/local/home/u/work/repo/.git', own: '/local/home/u/work/repo/.git/worktrees/a-1' },
   uid: 1000, gid: 100, home, forbidden, command: ['npm', 'test'],
-  node: nodeRuntime({ execPath }),
+  node: nodeRuntime({ execPath, pathNode: () => pathNode }),
 });
 
-test('a node under the system mounts adds nothing: no mount, the same PATH, the tripwire runs that node', () => {
-  const a = argsWith('/usr/bin/node');
+test('the node PATH already picks adds nothing: no mount, the same PATH, the tripwire runs that node', () => {
+  const a = argsWith('/usr/bin/node', '/usr/bin/node');
   assert.deepEqual(mountsOf(a), mountsOf(args()), 'the mount list is unchanged');
   assert.equal(envOf(a).PATH, '/tmp/cargo-home/bin:/usr/local/bin:/usr/bin:/bin');
   const s = a[a.indexOf('-c') + 1];
-  assert.ok(s.includes('/usr/bin/node -e'), 'the tripwire runs /usr/bin/node, as before');
+  assert.ok(s.includes("'/usr/bin/node' -e"), 'the tripwire runs /usr/bin/node, quoted');
   assert.ok(!s.includes('/tmp/node-bin'), 'no node links are made');
-  assert.deepEqual(a, args(), 'the whole argv is what it was before #9');
-  assert.ok(argsWith('/usr/local/bin/node')[a.indexOf('-c') + 1].includes('/usr/local/bin/node -e'));
+  assert.deepEqual(a, args(), 'the whole argv is the default');
+  const local = argsWith('/usr/local/bin/node', '/usr/local/bin/node');
+  assert.ok(local[local.indexOf('-c') + 1].includes("'/usr/local/bin/node' -e"));
+  assert.equal(envOf(local).PATH, '/tmp/cargo-home/bin:/usr/local/bin:/usr/bin:/bin');
+});
+
+// Reviewer, #9 @82de46b8: visible is not the same as on PATH.
+test('a visible node PATH would not pick is linked first on PATH, with nothing mounted', () => {
+  for (const [execPath, pathNode] of [['/usr/local/node-v26/bin/node', null], ['/usr/bin/node', '/usr/local/bin/node']] as const) {
+    const a = argsWith(execPath, pathNode);
+    assert.deepEqual(mountsOf(a), mountsOf(args()), `${execPath}: visible already, nothing mounted`);
+    assert.equal(envOf(a).PATH, '/tmp/node-bin:/tmp/cargo-home/bin:/usr/local/bin:/usr/bin:/bin', execPath);
+    const s = a[a.indexOf('-c') + 1];
+    assert.ok(s.includes(`'${execPath}' /tmp/node-bin/node`), `${execPath}: \`node\` on PATH is the running node`);
+    assert.ok(s.includes(`'${execPath}' -e`), 'and the tripwire runs it');
+  }
+});
+
+test('the tripwire quotes the node path: a system install with a space runs', () => {
+  const a = argsWith('/usr/my node/bin/node', null);
+  const s = a[a.indexOf('-c') + 1];
+  assert.ok(s.includes("'/usr/my node/bin/node' -e"), 'one shell word');
+  const script = ['fail() { echo "[isolated] REFUSED: $1" >&2; exit 97; }', ...withTripwire('/usr/my node/bin/node')].join('\n');
+  const r = spawnSync('bash', ['-n', '-c', script], { encoding: 'utf8' });
+  assert.equal(r.status, 0, r.stderr);
 });
 
 /** A node install on disk: `<prefix>/bin/node` and, unless `npm` is false,
@@ -475,7 +501,7 @@ test('a node elsewhere mounts ONLY its binary and npm\'s package, read-only, at 
     assert.deepEqual(a.slice(0, 6), args().slice(0, 6), 'network and user unchanged');
     assert.equal(envOf(a).PATH, '/tmp/node-bin:/tmp/cargo-home/bin:/usr/local/bin:/usr/bin:/bin');
     const s = a[a.indexOf('-c') + 1];
-    assert.ok(s.includes('/opt/node/bin/node -e'), 'the tripwire runs the mounted node');
+    assert.ok(s.includes("'/opt/node/bin/node' -e"), 'the tripwire runs the mounted node, quoted');
     assert.ok(s.includes("'/opt/node/bin/node' /tmp/node-bin/node"), 'node is linked');
     assert.ok(s.includes("'/opt/node/lib/node_modules/npm/bin/npm-cli.js' /tmp/node-bin/npm"), 'npm is linked to its own cli');
     assert.ok(s.includes("'/opt/node/lib/node_modules/npm/bin/npx-cli.js' /tmp/node-bin/npx"), 'npx is linked to its own cli');

@@ -119,7 +119,7 @@ export function withTripwire(nodeBin = SYSTEM_NODE.bin) {
     // final marker is 97; any counted connection is 98. Only the count and
     // the times are printed.
     'tw=${TRIPWIRE_BASE:-/tmp/.isolated-tripwire}; rm -f "$tw.count" "$tw.ready"',
-    `${nodeBin} -e ${sq(TRIPWIRE)} "$tw" "\${TRIPWIRE_PORT:-9899}" & twpid=$!`,
+    `${sq(nodeBin)} -e ${sq(TRIPWIRE)} "$tw" "\${TRIPWIRE_PORT:-9899}" & twpid=$!`,
     'for _ in $(seq 100); do [ -e "$tw.ready" ] && break; kill -0 "$twpid" 2>/dev/null || break; sleep 0.05; done',
     '[ -e "$tw.ready" ] || fail "the default-port tripwire could not start"',
     // NOT exec: bash stays PID 1 and reaps every orphan a killed process
@@ -204,36 +204,57 @@ const SYSTEM_NODE = { bin: '/usr/bin/node', mounts: [], links: null };
 const NODE_AT = '/opt/node';
 const NODE_BIN = '/tmp/node-bin';
 
+/** The dirs of the container PATH a system node can sit in, in PATH order
+ * (`/tmp/cargo-home/bin` holds only cargo's own tools). */
+const PATH_DIRS = ['/usr/local/bin', '/usr/bin', '/bin'];
+
+/** The real path of the node the container's PATH picks, read on the host
+ * (the system dirs are mounted at their own paths), or null. */
+function pathNodeOnHost() {
+  for (const d of PATH_DIRS) {
+    try { return realpathSync(join(d, 'node')); } catch { /* not in this dir */ }
+  }
+  return null;
+}
+
 /** The node the container runs (board #9), from `execPath`, the RUNNING
- * node's real path. Under a system dir it is already visible at that path:
- * nothing is added. Elsewhere an ALLOWLIST is mounted read-only under
- * /opt/node, never the install prefix (validator-2, round 1: a prefix inside
- * ~/.ssh, ~/.aws, the config dir, .tmm or ~/.local/share exposed that dir):
- * the binary itself, and npm's own package `<prefix>/lib/node_modules/npm`
- * when one sits beside it (its package.json names npm). PATH gets links to
- * node, and to npm's and npx's own CLIs, nothing else. A path docker's `-v`
- * cannot carry (`:` or `,`) or a node that is not a regular file refuses,
- * naming the path and the fix. Reads only those two files' metadata. */
-export function nodeRuntime({ execPath }) {
+ * node's real path; every node the command starts (`npm`, `env node`) and
+ * the tripwire are that node.
+ * - Under a system dir it is visible at its own path. When it is also the
+ *   node the container's PATH picks (`pathNode`), nothing is added. When it
+ *   is not (reviewer, round 2: `/usr/local/node-v26/bin/node` is visible but
+ *   off PATH, or PATH finds another node first), it is linked first on PATH.
+ * - Elsewhere an ALLOWLIST is mounted read-only under /opt/node, never the
+ *   install prefix (validator-2, round 1): the binary itself.
+ * - Either way npm's own package `<prefix>/lib/node_modules/npm`, when one
+ *   sits beside it and its package.json names npm, is what `npm`/`npx` run
+ *   whenever node is linked: at its own path when visible, else mounted.
+ * A path docker's `-v` cannot carry (`:` or `,`) or a node that is not a
+ * regular file refuses before any mount, naming the path and the fix. */
+export function nodeRuntime({ execPath, pathNode = pathNodeOnHost }) {
   const holds = (outer, inner) => inner === outer || inner.startsWith(`${outer}/`);
-  if (SYSTEM_DIRS.some((d) => holds(d, execPath))) return { bin: execPath, mounts: [], links: null };
+  const visible = (p) => SYSTEM_DIRS.some((d) => holds(d, p));
   const fix = 'install node under /usr (for example /usr/bin/node), or at a path without `:` or `,`, then run the runner with that node';
   const refuse = (why) => { throw new Refusal(`node ${execPath} cannot be mounted: ${why}; ${fix}`); };
-  if (/[:,]/u.test(execPath)) refuse('its path holds `:` or `,`, which a docker volume cannot carry');
-  let st;
-  try { st = statSync(execPath); } catch { st = null; }
-  if (!st?.isFile()) refuse('it is not a regular file');
-  const bin = `${NODE_AT}/bin/node`;
-  const mounts = [[execPath, bin]];
+  if (visible(execPath) && pathNode() === execPath) return { bin: execPath, mounts: [], links: null };
+  const mounts = [];
+  let bin = execPath;
+  if (!visible(execPath)) {
+    if (/[:,]/u.test(execPath)) refuse('its path holds `:` or `,`, which a docker volume cannot carry');
+    let st;
+    try { st = statSync(execPath); } catch { st = null; }
+    if (!st?.isFile()) refuse('it is not a regular file');
+    bin = `${NODE_AT}/bin/node`;
+    mounts.push([execPath, bin]);
+  }
   const links = [['node', bin]];
-  const npmDir = join(dirname(dirname(execPath)), 'lib', 'node_modules', 'npm');
   let npm = null;
-  try { npm = realpathSync(npmDir); } catch { /* no npm beside this node */ }
+  try { npm = realpathSync(join(dirname(dirname(execPath)), 'lib', 'node_modules', 'npm')); } catch { /* no npm beside this node */ }
   let named = false;
   try { named = !!npm && JSON.parse(readFileSync(join(npm, 'package.json'), 'utf8')).name === 'npm'; } catch { /* not npm */ }
-  if (named && !/[:,]/u.test(npm)) {
-    const at = `${NODE_AT}/lib/node_modules/npm`;
-    mounts.push([npm, at]);
+  if (named && (visible(npm) || !/[:,]/u.test(npm))) {
+    const at = visible(npm) ? npm : `${NODE_AT}/lib/node_modules/npm`;
+    if (!visible(npm)) mounts.push([npm, at]);
     links.push(['npm', `${at}/bin/npm-cli.js`], ['npx', `${at}/bin/npx-cli.js`]);
   }
   return { bin, mounts, links };
