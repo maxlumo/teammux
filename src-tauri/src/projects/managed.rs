@@ -85,11 +85,15 @@ fn agent_remove_now(session: &str, agent: &str) -> Result<Value, String> {
 
 /// Stop every process that holds `home` through a backend's
 /// `home_worker_env` (board #26), and return once each has EXITED: SIGTERM,
-/// up to 3 s, then SIGKILL, up to 1 s more. One still alive is an `Err`
-/// naming it. The environment only FINDS a worker; from then on it is
-/// tracked by its identity, pid plus start time (review P1-R1: an
-/// environment that stops matching or cannot be read is not an exit, and a
-/// reused pid is not the worker). Linux only; elsewhere nothing is stopped.
+/// up to 3 s, then SIGKILL, up to 1 s more. The environment only FINDS a
+/// worker; from then on it is tracked by its identity, pid plus start time
+/// (review P1-R1). Exit is only what `observe` CONFIRMS (`Seen::Gone`): a
+/// worker that cannot be observed (`Seen::Unknown`) is kept through the
+/// wait and then refuses, like one still alive; so does a process list that
+/// cannot be read (review round 2: a failed read is not empty data).
+/// Residual: the pid may be reused between the last identity read and
+/// `kill()`; checking first narrows that window, it does not close it.
+/// Linux only; elsewhere nothing is stopped.
 fn stop_home_workers(home: &std::path::Path) -> Result<(), String> {
     #[cfg(target_os = "linux")]
     {
@@ -101,37 +105,52 @@ fn stop_home_workers(home: &std::path::Path) -> Result<(), String> {
             }
         }
         let me = std::process::id() as libc::pid_t;
-        let Ok(procs) = std::fs::read_dir("/proc") else { return Ok(()) };
         let mut workers: Vec<(libc::pid_t, u64)> = Vec::new();
-        for pid in procs.flatten().filter_map(|e| e.file_name().to_str()?.parse::<libc::pid_t>().ok()) {
+        for pid in all_pids().map_err(|e| format!("its home's processes could not be listed ({e})"))? {
             if pid <= 1 || pid == me {
                 continue;
             }
             // Identity before and after the environment read: the match is
             // this instance's, not a pid reused in between.
-            let Some(before) = process_start(pid) else { continue };
-            let holds = std::fs::read(format!("/proc/{pid}/environ"))
-                .map(|env| env.split(|b| *b == 0).any(|kv| wanted.iter().any(|w| w.as_bytes() == kv)))
-                .unwrap_or(false);
-            if holds && process_start(pid) == Some(before) {
-                workers.push((pid, before));
+            let before = observe(pid);
+            if before == Seen::Gone {
+                continue;
+            }
+            let Some(env) = process_env(pid).map_err(|e| format!("process {pid}'s environment could not be read ({e})"))? else { continue };
+            if !env.iter().any(|kv| wanted.iter().any(|w| w.as_bytes() == kv.as_slice())) {
+                continue;
+            }
+            match (before, observe(pid)) {
+                (_, Seen::Gone) => continue,
+                (Seen::Alive(a), Seen::Alive(b)) if a == b => workers.push((pid, a)),
+                (_, Seen::Unknown(e)) | (Seen::Unknown(e), _) => return Err(format!("process {pid} holds its home and cannot be observed ({e})")),
+                _ => return Err(format!("process {pid} holds its home and changed identity while it was read")),
             }
         }
         if workers.is_empty() {
             return Ok(());
         }
-        let alive = |w: &(libc::pid_t, u64)| process_start(w.0) == Some(w.1);
         let signal = |left: &[(libc::pid_t, u64)], sig: libc::c_int| {
-            for w in left.iter().filter(|w| alive(w)) {
-                // SAFETY: a plain syscall on a positive pid whose start time
-                // was just re-read as the worker's.
-                unsafe { libc::kill(w.0, sig) };
+            for &(pid, start) in left {
+                if observe(pid) == Seen::Alive(start) {
+                    // SAFETY: a plain syscall on a positive pid whose start
+                    // time was just re-read as the worker's.
+                    unsafe { libc::kill(pid, sig) };
+                }
             }
         };
+        // What is still not confirmed gone, with the reason when unobservable.
         let wait = |left: Vec<(libc::pid_t, u64)>, for_ms: u64| {
             let until = std::time::Instant::now() + std::time::Duration::from_millis(for_ms);
             loop {
-                let still: Vec<(libc::pid_t, u64)> = left.iter().copied().filter(|w| alive(w)).collect();
+                let still: Vec<(libc::pid_t, u64, Option<String>)> = left
+                    .iter()
+                    .filter_map(|&(pid, start)| match observe(pid) {
+                        Seen::Alive(s) if s == start => Some((pid, start, None)),
+                        Seen::Unknown(e) => Some((pid, start, Some(e))),
+                        Seen::Alive(_) | Seen::Gone => None,
+                    })
+                    .collect();
                 if still.is_empty() || std::time::Instant::now() >= until {
                     return still;
                 }
@@ -139,12 +158,18 @@ fn stop_home_workers(home: &std::path::Path) -> Result<(), String> {
             }
         };
         signal(&workers, libc::SIGTERM);
-        let left = wait(workers, 3000);
+        let left: Vec<(libc::pid_t, u64)> = wait(workers, 3000).into_iter().map(|(p, s, _)| (p, s)).collect();
         signal(&left, libc::SIGKILL);
         let left = wait(left, 1000);
         if !left.is_empty() {
-            let pids: Vec<libc::pid_t> = left.iter().map(|w| w.0).collect();
-            return Err(format!("a process still holding its home did not exit (pid {pids:?})"));
+            let why: Vec<String> = left
+                .iter()
+                .map(|(pid, _, e)| match e {
+                    Some(e) => format!("{pid}: cannot be observed ({e})"),
+                    None => format!("{pid}: still running"),
+                })
+                .collect();
+            return Err(format!("a process holding its home is not known to have exited ({})", why.join("; ")));
         }
     }
     #[cfg(not(target_os = "linux"))]
@@ -152,19 +177,109 @@ fn stop_home_workers(home: &std::path::Path) -> Result<(), String> {
     Ok(())
 }
 
-/// A LIVE process's start time (`/proc/<pid>/stat` field 22, in clock ticks
-/// since boot), or `None` when the pid is gone or a zombie (`Z`/`X`: it can
-/// write nothing more). With the pid it is the process's identity.
+/// What one look at a process shows (board #26 round 2): alive with its
+/// start time; CONFIRMED gone (the pid does not exist, it is a zombie that
+/// can write nothing more, or the read says so); or unknown, which is never
+/// taken for gone.
+#[derive(Debug, Clone, PartialEq, Eq)]
+#[cfg_attr(not(target_os = "linux"), allow(dead_code))]
+enum Seen {
+    Alive(u64),
+    Gone,
+    Unknown(String),
+}
+
+/// One look at `pid` through `/proc/<pid>/stat`.
 #[cfg(target_os = "linux")]
-fn process_start(pid: libc::pid_t) -> Option<u64> {
-    let stat = std::fs::read_to_string(format!("/proc/{pid}/stat")).ok()?;
-    // The command name may hold spaces and parentheses: fields resume after
-    // the LAST ')'. Field 3 is the state, field 22 the start time.
-    let rest: Vec<&str> = stat.rsplit_once(')')?.1.split_whitespace().collect();
-    if matches!(rest.first(), Some(&"Z") | Some(&"X") | None) {
-        return None;
+fn observe(pid: libc::pid_t) -> Seen {
+    #[cfg(test)]
+    if let Some(e) = fault::observe(pid) {
+        return Seen::Unknown(e);
     }
-    rest.get(19)?.parse().ok()
+    match std::fs::read_to_string(format!("/proc/{pid}/stat")) {
+        Ok(stat) => parse_stat(&stat),
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound || e.raw_os_error() == Some(libc::ESRCH) => Seen::Gone,
+        Err(e) => Seen::Unknown(e.to_string()),
+    }
+}
+
+/// `/proc/<pid>/stat`: the command name may hold spaces and parentheses, so
+/// fields resume after the LAST ')'. Field 3 is the state, field 22 the
+/// start time (clock ticks since boot). Anything unreadable is Unknown.
+#[cfg_attr(not(target_os = "linux"), allow(dead_code))]
+fn parse_stat(stat: &str) -> Seen {
+    let Some((_, rest)) = stat.rsplit_once(')') else { return Seen::Unknown("no ')' in stat".into()) };
+    let fields: Vec<&str> = rest.split_whitespace().collect();
+    match fields.first() {
+        Some(&"Z") | Some(&"X") => return Seen::Gone,
+        None => return Seen::Unknown("no state in stat".into()),
+        _ => {}
+    }
+    match fields.get(19).and_then(|f| f.parse().ok()) {
+        Some(start) => Seen::Alive(start),
+        None => Seen::Unknown("no start time in stat".into()),
+    }
+}
+
+/// Every pid on the host, or why the list could not be read.
+#[cfg(target_os = "linux")]
+fn all_pids() -> Result<Vec<libc::pid_t>, String> {
+    #[cfg(test)]
+    if let Some(e) = fault::enumerate() {
+        return Err(e);
+    }
+    let dir = std::fs::read_dir("/proc").map_err(|e| format!("/proc: {e}"))?;
+    let mut pids = Vec::new();
+    for entry in dir {
+        let entry = entry.map_err(|e| format!("/proc: {e}"))?;
+        if let Some(pid) = entry.file_name().to_str().and_then(|n| n.parse().ok()) {
+            pids.push(pid);
+        }
+    }
+    Ok(pids)
+}
+
+/// One process's environment as `K=V` byte strings. `Ok(None)` when it is not
+/// ours to read or stop (`EACCES`/`EPERM`: another user's) or has exited;
+/// any other failure is an `Err`, never "holds nothing".
+#[cfg(target_os = "linux")]
+fn process_env(pid: libc::pid_t) -> Result<Option<Vec<Vec<u8>>>, String> {
+    match std::fs::read(format!("/proc/{pid}/environ")) {
+        Ok(raw) => Ok(Some(raw.split(|b| *b == 0).filter(|kv| !kv.is_empty()).map(<[u8]>::to_vec).collect())),
+        Err(e) if matches!(e.kind(), std::io::ErrorKind::NotFound | std::io::ErrorKind::PermissionDenied) => Ok(None),
+        Err(e) if matches!(e.raw_os_error(), Some(libc::ESRCH) | Some(libc::EPERM) | Some(libc::EACCES)) => Ok(None),
+        Err(e) => Err(e.to_string()),
+    }
+}
+
+/// Test-only faults at the observation boundary (board #26 round 2): a pid
+/// whose look answers Unknown, or a process list that cannot be read.
+#[cfg(test)]
+pub(super) mod fault {
+    use std::cell::RefCell;
+    thread_local! {
+        static OBSERVE: RefCell<Option<(libc::pid_t, u32, String)>> = const { RefCell::new(None) };
+        static ENUMERATE: RefCell<Option<String>> = const { RefCell::new(None) };
+    }
+    /// `pid`'s looks answer as the OS does `good` more times, then Unknown.
+    pub fn set_observe(pid: libc::pid_t, good: u32, why: &str) { OBSERVE.with(|o| *o.borrow_mut() = Some((pid, good, why.into()))); }
+    pub fn set_enumerate(why: &str) { ENUMERATE.with(|o| *o.borrow_mut() = Some(why.into())); }
+    pub fn clear() { OBSERVE.with(|o| *o.borrow_mut() = None); ENUMERATE.with(|o| *o.borrow_mut() = None); }
+    #[cfg_attr(not(target_os = "linux"), allow(dead_code))]
+    pub(super) fn observe(pid: libc::pid_t) -> Option<String> {
+        OBSERVE.with(|o| match o.borrow_mut().as_mut() {
+            Some((p, good, why)) if *p == pid => {
+                if *good == 0 {
+                    return Some(why.clone());
+                }
+                *good -= 1;
+                None
+            }
+            _ => None,
+        })
+    }
+    #[cfg_attr(not(target_os = "linux"), allow(dead_code))]
+    pub(super) fn enumerate() -> Option<String> { ENUMERATE.with(|o| o.borrow().clone()) }
 }
 
 /// The team a managed window was spawned as part of, read off its launch
@@ -593,14 +708,86 @@ mod tests {
     #[cfg(target_os = "linux")]
     fn a_process_identity_is_live_and_stable_and_a_zombie_has_none() {
         let me = std::process::id() as libc::pid_t;
-        let start = process_start(me).expect("this process is alive");
-        assert_eq!(process_start(me), Some(start), "the same instance reads the same start");
+        let Seen::Alive(start) = observe(me) else { panic!("this process is alive") };
+        assert_eq!(observe(me), Seen::Alive(start), "the same instance reads the same start");
         let mut child = std::process::Command::new("true").spawn().unwrap();
         let pid = child.id() as libc::pid_t;
         std::thread::sleep(std::time::Duration::from_millis(300));
-        assert_eq!(process_start(pid), None, "exited, not yet reaped: a zombie is not alive");
+        assert_eq!(observe(pid), Seen::Gone, "exited, not yet reaped: a zombie writes nothing more");
         child.wait().unwrap();
-        assert_eq!(process_start(pid), None, "reaped: gone");
+        assert_eq!(observe(pid), Seen::Gone, "reaped: the pid does not exist");
+    }
+
+    /// Board #26 round 2: what a stat line says. A literal line of a process
+    /// whose name holds spaces and parentheses; its state then start time.
+    #[test]
+    fn a_stat_line_is_alive_with_its_start_gone_as_a_zombie_and_otherwise_unknown() {
+        let line = |state: &str| format!("4242 (omp (worker) x) {state} 1 4242 4242 0 -1 4194560 100 0 0 0 5 2 0 0 20 0 9 0 777123 1000 50");
+        assert_eq!(parse_stat(&line("S")), Seen::Alive(777123));
+        assert_eq!(parse_stat(&line("R")), Seen::Alive(777123));
+        assert_eq!(parse_stat(&line("Z")), Seen::Gone, "a zombie writes nothing more");
+        assert_eq!(parse_stat(&line("X")), Seen::Gone);
+        assert!(matches!(parse_stat("4242 (omp) S 1 2 3"), Seen::Unknown(_)), "a short line is not an exit");
+        assert!(matches!(parse_stat("garbage"), Seen::Unknown(_)), "an unparsable line is not an exit");
+        assert!(matches!(parse_stat(&line("S").replace("777123", "x")), Seen::Unknown(_)));
+    }
+
+    /// Board #26 round 2 (reviewer, orchestrator 16:56): a worker found holding
+    /// the home that then cannot be OBSERVED is not taken for exited. The
+    /// remove waits out its bound and refuses with the reason, and the slot
+    /// and the home are both kept. A process list that cannot be read refuses
+    /// the same way. Both faults are injected at the observation boundary.
+    #[test]
+    #[cfg(target_os = "linux")]
+    fn a_worker_that_cannot_be_observed_or_a_list_that_cannot_be_read_refuses_the_remove() {
+        use_test_store();
+        let dir = crate::config::test_scratch("tmm-rm-unknown");
+        std::fs::create_dir_all(&dir).unwrap();
+        let made = create(&dir.to_string_lossy(), Some("rmunknown"), None, None).unwrap();
+        let id = made["id"].as_str().unwrap().to_string();
+        let session = made["session"].as_str().unwrap().to_string();
+        let home = dir.join(".tmm").join("agents").join("om");
+        std::fs::create_dir_all(&home).unwrap();
+        std::fs::write(home.join("launch.json"), r#"{"backend":"omp"}"#).unwrap();
+        with_store(|store| {
+            store.replace_slots(&id, &[store::Slot {
+                id: None, ord: 0, window_name: "om".into(), cwd: String::new(),
+                kind: store::SlotKind::Agent, command: Some("omp".into()),
+                auto_run: true, agent_session_id: None,
+                first_seen_at: now(), settled_at: Some(now()),
+            }])
+        })
+        .unwrap();
+        let declared = || with_store(|store| store.slots(&id)).unwrap().iter().any(|s| s.window_name == "om");
+
+        fault::set_enumerate("injected: /proc unreadable");
+        let err = agent_remove(&session, "om").unwrap_err();
+        fault::clear();
+        assert!(err.contains("not removed") && err.contains("could not be listed"), "{err}");
+        assert!(declared() && home.join("launch.json").is_file(), "nothing was removed");
+
+        let mut worker = std::process::Command::new("sleep").arg("30").env("OMP_TEXT_PREDICT_AGENT_DIR", &home).spawn().unwrap();
+        let pid = worker.id() as libc::pid_t;
+        std::thread::sleep(std::time::Duration::from_millis(200));
+        // Unobservable while it is being found: refused at once.
+        fault::set_observe(pid, 0, "injected: stat unreadable");
+        let err = agent_remove(&session, "om").unwrap_err();
+        fault::clear();
+        assert!(err.contains("not removed") && err.contains(&pid.to_string()) && err.contains("cannot be observed"), "{err}");
+        assert!(declared() && home.join("launch.json").is_file(), "nothing was removed");
+        // Found alive (two good looks around the environment read), then
+        // unobservable: never signalled, kept through the wait, then refused.
+        fault::set_observe(pid, 2, "injected: stat unreadable");
+        let t = std::time::Instant::now();
+        let err = agent_remove(&session, "om").unwrap_err();
+        fault::clear();
+        assert!(t.elapsed() >= std::time::Duration::from_millis(3900), "it waited out the bound: {:?}", t.elapsed());
+        assert!(err.contains("not removed") && err.contains(&format!("{pid}: cannot be observed")), "{err}");
+        assert!(declared() && home.join("launch.json").is_file(), "the slot and the home are kept");
+        assert!(worker.try_wait().unwrap().is_none(), "never signalled: no fresh Alive to signal");
+        worker.kill().unwrap();
+        worker.wait().unwrap();
+        let _ = std::fs::remove_dir_all(&dir);
     }
 
     /// Board #362 c, the cleanup of accepted person-needed paints (the
