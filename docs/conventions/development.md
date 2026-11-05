@@ -657,26 +657,50 @@ server's config root 0700: the store refuses a `state.db` under any level
 others can change, and `mkdir -m 700 -p` sets only the last one.
 
 ```bash
-D="$(mktemp -d)/gw"
-node scripts/scratch-env.mjs run "$D" -- src-tauri/target/debug/server   # pid in $D/pid
-# write $D/xdg-config/teammux/config.toml (a free port, a token), then restart it the same way
-node scripts/scratch-env.mjs check "$(cat "$D/pid")"   # exit 0, or names each leaked variable
-kill "$(cat "$D/pid")"                                 # by its own pid, never pkill -f
+D="$(mktemp -d)/gw"                                   # never /tmp itself
+node scripts/scratch-env.mjs run "$D" --port 19951 -- src-tauri/target/debug/server
+node scripts/scratch-env.mjs check "$D" --gateway     # exit 0, or says what routes elsewhere
+kill "$(cat "$D/pid")"                                # by its own pid, never pkill -f
+env -u TMUX -u TMUX_PANE -u TMUX_SOCKET TMUX_TMPDIR="$D" tmux kill-server
 ```
 
-The check reads `/proc/<pid>/environ`. A process started without the helper
-fails it, naming `TMUX`, `TMUX_PANE`, the `TMM_*` names and an unset
-`TMUX_TMPDIR` (measured 2026-11-05 from a pane). Before relying on the
-scratch gateway, also confirm it sees only its private tmux server: `tmm
-project list` against it (`XDG_CONFIG_HOME=$D/xdg-config TMM_SERVER=ws://127.0.0.1:<port>
-TMM_TOKEN=<token>`, run with `env -u TMUX -u TMUX_PANE -u TMM_SOCKET`) names
-none of the live `tmux list-sessions` names. Without the helper the
-equivalent is `env -u TMUX -u TMUX_PANE -u TMUX_SOCKET -u TMM_SOCKET
-TMUX_TMPDIR=<private> <command>`, but the helper is the one that also drops
-the rest of `TMM_*` and `TOKEN`. `npm run test:rust` and
-`scripts/isolated.mjs` are already isolated. Pinned by
-`scripts/scratch-env.test.ts` (the leak list over this pane's real shape; the
-env, the 0700 levels and the pid file; a shared or relative dir refused).
+- **Configured before the first launch.** `--port` writes
+  `$D/xdg-config/teammux/config.toml` (`127.0.0.1`, that port, a random
+  token, mode 0600) before the server starts, so it never binds the default
+  port 9899, the live gateway's; `--port 9899` is refused. Reviewer's P2 on
+  `dc5a1aa6`: the first recipe launched once on the default config and then
+  restarted.
+- **`check <dir>` compares values, not names** (reviewer P1-R1 on
+  `dc5a1aa6`; validator reproduced it): a variable that is merely SET proves
+  nothing. An empty `TMUX_TMPDIR` is treated by tmux as unset and falls back
+  to `/tmp`, which here IS the live socket root. The check fails unless:
+  - `<dir>` is an absolute, existing directory of yours at 0700 and not `/tmp`;
+  - the process in `<dir>/pid` has `TMUX_TMPDIR` exactly `<dir>`, and its three
+    XDG roots exactly the ones under it;
+  - it kept no `TMUX`, `TMUX_PANE`, `TMUX_SOCKET`, `TOKEN` or `TMM_*`.
+- **`--gateway` asks the gateway itself.** It plants a `scratch-env-marker`
+  session on the private tmux server, then calls the gateway's own
+  `list_sessions` with the scratch config's token. The gateway must list
+  exactly the private server's sessions, the marker included. An empty
+  `tmm project list` is NOT that proof: it is stored and adopted state, and is
+  empty before adoption even on the wrong tmux. Measured 2026-11-05 from an
+  agent pane: the scratch gateway listed `[scratch-env-marker]` while the live
+  server held five sessions.
+- **Scope.** This removes INHERITED ROUTING to the live tmux server and
+  gateway. `isolatedEnv` keeps `HOME` and the network, so a child that dials
+  the live gateway's port on purpose still can; it is not a sandbox
+  (`scripts/isolated.mjs` is). `npm run test:rust` and `isolated.mjs` are
+  already isolated. A scratch server started without the helper is
+  unguarded; the closest manual form is `env -u TMUX -u TMUX_PANE -u
+  TMUX_SOCKET -u TMM_SOCKET TMUX_TMPDIR=<private> <command>`, but only the
+  helper drops every `TMM_*` and `TOKEN`.
+
+Pinned by `scripts/scratch-env.test.ts`: the value checks on this pane's real
+variables, with negative controls for an empty TMUX_TMPDIR, `/tmp`, a foreign
+config root and an unset root; the root's privacy; the config written before
+launch and port 9899 refused; the routing verdict for the incident's answer,
+an empty answer, a foreign session and a missing marker. None of them starts
+anything against the live server.
 
 ### Integrating a reviewed branch (`tmm merge`, board #445)
 
