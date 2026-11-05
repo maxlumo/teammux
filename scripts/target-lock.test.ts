@@ -46,6 +46,7 @@ test('a second run refuses at once while the first holds the target dir, names i
     assert.match(second.stderr, /test:rust/u);
     assert.match(second.stderr, /sleep 30/u, 'and its command');
     assert.match(second.stderr, /wait for it.*another worktree/isu, 'and the way out');
+    assert.doesNotMatch(second.stderr, /\n\s*\n/u, `no empty line (validator-2 F2): ${JSON.stringify(second.stderr)}`);
 
     // A kill, even -9, releases the lock: it is the kernel's, not a file's.
     const child = Number(/child (\d+)/u.exec(readFileSync(lockFile(target), 'utf8'))?.[1]);

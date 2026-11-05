@@ -39,7 +39,7 @@ my ($target, $lock, $label, @cmd) = @ARGV;
 make_path($target);
 open(my $fh, '+>>', $lock) or die "[$label] cannot open $lock: $!\n";
 unless (flock($fh, LOCK_EX | LOCK_NB)) {
-  seek($fh, 0, 0); local $/; my $holder = <$fh> // ''; chomp $holder;
+  seek($fh, 0, 0); my $holder = do { local $/; <$fh> } // ''; $holder =~ s/\s+\z//;
   print STDERR "[$label] refused: another run holds the target directory $target\n"
     . "  holder: " . ($holder eq '' ? 'unknown (it is starting)' : $holder) . "\n"
     . "  Wait for it to finish, or run in another worktree (its own target directory).\n";
