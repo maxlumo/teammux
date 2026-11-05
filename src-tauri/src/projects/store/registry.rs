@@ -18,6 +18,12 @@ pub(super) const DEFAULT_OMP_SYSTEM: &str = "You are a powerful 10x developer ru
 /// K3 here and needs no per-machine alias in the seed.
 pub(super) const DEFAULT_KIMI_SYSTEM: &str = "You are a powerful 10x developer running on Kimi Code who can handle any task with decisive execution and minimal words.";
 
+/// The `dsh` default's system text — shared by `reg_seed` and the v32
+/// backfill migration (board #6), so the two cannot drift. The neutral
+/// persona the other six carry, for DeepSeek Harness; the model stays EMPTY
+/// (the seed rule): dsh's own profile default applies.
+pub(super) const DEFAULT_DSH_SYSTEM: &str = "You are a powerful 10x developer running on DeepSeek Harness who can handle any task with decisive execution and minimal words.";
+
 /// The shipped `kiro` default: the persona line and NOTHING else (board #344,
 /// owner 2026-10-11 / 10-15: "这个提示词是我们自己的 tmm 配置，发布版本的默认配置
 /// 不应该有这些"). A release must carry no personal workflow rules, so the seed
@@ -132,7 +138,8 @@ impl Store {
                     WHEN 'grok' THEN 3
                     WHEN 'omp' THEN 4
                     WHEN 'kimi' THEN 5
-                    ELSE 6
+                    WHEN 'dsh' THEN 6
+                    ELSE 7
                   END, name"
             )
             .map_err(|e| e.to_string())?;
@@ -226,7 +233,7 @@ impl Store {
             .map_err(|e| e.to_string())
     }
 
-    /// Seed the six backend-native defaults once (empty table only).
+    /// Seed the seven backend-native defaults once (empty table only).
     /// `docs` / `reviewer` and `*-default` aliases are deliberately retired:
     /// one obvious entry per backend, with the defaults pinned to the top of
     /// every registry consumer by `reg_list`.
@@ -327,6 +334,16 @@ impl Store {
                 skills: r#"["tmm-cli","mcp-cli"]"#.into(),
                 mcp: "[]".into(),
             },
+            RegAgent {
+                name: "dsh".into(),
+                backend: "dsh".into(),
+                model: String::new(),
+                effort: String::new(),
+                input_mode: mode("dsh"),
+                system: DEFAULT_DSH_SYSTEM.into(),
+                skills: r#"["tmm-cli","mcp-cli"]"#.into(),
+                mcp: "[]".into(),
+            },
         ];
         // backend-seeds:end
         for s in &seeds {
@@ -420,14 +437,14 @@ mod tests {
         let seeded = store.reg_list().unwrap();
         assert_eq!(
             seeded.iter().map(|a| a.name.as_str()).collect::<Vec<_>>(),
-            ["kiro", "codex", "claude", "grok", "omp", "kimi"],
-            "the six backend defaults are the fixed leading group"
+            ["kiro", "codex", "claude", "grok", "omp", "kimi", "dsh"],
+            "the seven backend defaults are the fixed leading group"
         );
         assert!(seeded.iter().all(|a| a.skills == r#"["tmm-cli","mcp-cli"]"#));
         // Board #336: each seed starts in its backend's default mode.
         assert_eq!(
             seeded.iter().map(|a| (a.name.as_str(), a.input_mode.as_str())).collect::<Vec<_>>(),
-            [("kiro", "steer"), ("codex", "queue"), ("claude", "queue"), ("grok", "queue"), ("omp", "queue"), ("kimi", "queue")]
+            [("kiro", "steer"), ("codex", "queue"), ("claude", "queue"), ("grok", "queue"), ("omp", "queue"), ("kimi", "queue"), ("dsh", "queue")]
         );
         assert_eq!(
             seeded[0].system,
@@ -438,7 +455,7 @@ mod tests {
         // carry no personal workflow. A worktree location, a Git author rule
         // or a co-author trailer is one person's convention and lives in the
         // app-wide AGENTS.md and in that person's own stored definitions —
-        // never in what every fresh install is handed. Checked over ALL six
+        // never in what every fresh install is handed. Checked over ALL seven
         // seeds, so adding a rule to any backend's default fails here.
         for a in &seeded {
             let lower = a.system.to_lowercase();
@@ -452,7 +469,7 @@ mod tests {
         // user's own default applies (the claude Bedrock pin and the omp
         // bedrock-extra pin both failed on every other host), and no inline
         // MCP, since the one it carried needed a credential only one install
-        // had (kiro-web-search wants KIRO_API_KEY). Checked over all six.
+        // had (kiro-web-search wants KIRO_API_KEY). Checked over all seven.
         for a in &seeded {
             assert_eq!(a.model, "", "the {} seed names no model", a.name);
             assert_eq!(a.mcp, "[]", "the {} seed carries no inline MCP", a.name);
@@ -461,7 +478,7 @@ mod tests {
 
         // Seeding twice must not duplicate.
         store.reg_seed(200).unwrap();
-        assert_eq!(store.reg_list().unwrap().len(), 6);
+        assert_eq!(store.reg_list().unwrap().len(), 7);
 
         // A custom definition alphabetically before the defaults stays AFTER
         // their fixed group; the rest of the list is alphabetical.
@@ -478,7 +495,7 @@ mod tests {
         store.reg_save(&custom, 250).unwrap();
         assert_eq!(
             store.reg_list().unwrap().iter().map(|a| a.name.as_str()).collect::<Vec<_>>(),
-            ["kiro", "codex", "claude", "grok", "omp", "kimi", "aaa-custom"]
+            ["kiro", "codex", "claude", "grok", "omp", "kimi", "dsh", "aaa-custom"]
         );
 
         // Upsert edits in place.
@@ -486,11 +503,11 @@ mod tests {
         kiro.model = "gpt-5.6-sol".into();
         store.reg_save(&kiro, 300).unwrap();
         assert_eq!(store.reg_get("kiro").unwrap().unwrap().model, "gpt-5.6-sol");
-        assert_eq!(store.reg_list().unwrap().len(), 7, "save by name is an upsert");
+        assert_eq!(store.reg_list().unwrap().len(), 8, "save by name is an upsert");
 
         assert!(store.reg_delete("aaa-custom").unwrap());
         assert!(!store.reg_delete("aaa-custom").unwrap(), "second delete is a no-op");
-        assert_eq!(store.reg_list().unwrap().len(), 6);
+        assert_eq!(store.reg_list().unwrap().len(), 7);
     }
 
     /// Board #344: a stored definition is the user's declaration and the seed

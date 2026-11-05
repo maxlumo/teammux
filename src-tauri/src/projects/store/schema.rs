@@ -5,11 +5,11 @@
 
 use super::*;
 // The v18 step backfills the omp default from the registry's own seed text.
-use super::registry::{DEFAULT_KIMI_SYSTEM, DEFAULT_OMP_SYSTEM};
+use super::registry::{DEFAULT_DSH_SYSTEM, DEFAULT_KIMI_SYSTEM, DEFAULT_OMP_SYSTEM};
 
 /// Bumped when the schema changes; `migrate` is the only place that knows the
 /// steps. Stored in SQLite's own `user_version` pragma.
-const SCHEMA_VERSION: i64 = 31;
+const SCHEMA_VERSION: i64 = 32;
 
 impl Store {
     /// Ensure the durable half of Board editability exists, then
@@ -708,6 +708,25 @@ impl Store {
             self.ensure_hub_read()?;
             self.seed_hub_read()?;
         }
+        if version < 32 {
+            // v32 (board #6, owner 2026-11-05): the `dsh` default joins
+            // EXISTING installs exactly once — the v18/v22 mechanism (rows > 0
+            // gates out fresh databases, NOT EXISTS respects a user's own
+            // `dsh` def, the stamp makes a later delete stick). The seed rule
+            // holds (no model, no inline MCP), and the mode is dsh's backend
+            // default, the one `reg_seed` gives it.
+            let mode = crate::backends::Backend::Dsh.default_input_mode();
+            self.conn
+                .execute(
+                    "INSERT INTO reg_agents (name, backend, model, effort, input_mode, system, skills, mcp, created_at, updated_at)
+                     SELECT 'dsh', 'dsh', '', '', ?1, ?2, '[\"tmm-cli\",\"mcp-cli\"]', '[]',
+                            CAST(strftime('%s','now') AS INTEGER), CAST(strftime('%s','now') AS INTEGER)
+                     WHERE (SELECT COUNT(*) FROM reg_agents) > 0
+                       AND NOT EXISTS (SELECT 1 FROM reg_agents WHERE name = 'dsh')",
+                    rusqlite::params![mode, DEFAULT_DSH_SYSTEM],
+                )
+                .map_err(|e| format!("migrate to 32: {e}"))?;
+        }
         Ok(())
     }
 
@@ -1282,7 +1301,7 @@ mod tests {
             assert_eq!(kimi.mcp, "[]", "a backfill follows the seed rule: no inline MCP");
             assert_eq!(
                 store.reg_list().unwrap().iter().map(|a| a.name.as_str()).collect::<Vec<_>>(),
-                ["kiro", "codex", "claude", "grok", "omp", "kimi"]
+                ["kiro", "codex", "claude", "grok", "omp", "kimi", "dsh"]
             );
             assert!(store.reg_delete("kimi").unwrap());
         }
@@ -1309,6 +1328,63 @@ mod tests {
         std::fs::remove_dir_all(&dir).ok();
     }
 
+    /// v32 (board #6, owner 2026-11-05: "我记得以前我们还做了 dsh 的适配，但是
+    /// 配置里没有"): the v18/v22 mechanism for `dsh` — backfilled once into a
+    /// seeded registry in its backend's default input mode, after kimi in the
+    /// fixed order; a delete sticks, a custom def is respected.
+    #[test]
+    fn v32_backfills_dsh_into_an_already_seeded_registry() {
+        let scratch = crate::tmux::Scratch::new("migrate-dsh");
+        let path = std::path::PathBuf::from(scratch.path()).join("state.db");
+        {
+            let store = Store::init(Connection::open(&path).unwrap()).unwrap();
+            store.reg_seed(1).unwrap();
+            store.conn.execute("DELETE FROM reg_agents WHERE name='dsh'", []).unwrap();
+            store.conn.pragma_update(None, "user_version", 31).unwrap();
+        }
+        {
+            let store = Store::init(Connection::open(&path).unwrap()).unwrap();
+            let dsh = store.reg_get("dsh").unwrap().expect("v32 backfills the dsh default");
+            assert_eq!(dsh.backend, "dsh");
+            assert_eq!(dsh.system, DEFAULT_DSH_SYSTEM);
+            assert_eq!(dsh.model, "", "a backfill follows the seed rule: no model");
+            assert_eq!(dsh.effort, "");
+            assert_eq!(dsh.input_mode, "queue", "dsh's backend default mode");
+            assert_eq!(dsh.skills, r#"["tmm-cli","mcp-cli"]"#);
+            assert_eq!(dsh.mcp, "[]", "a backfill follows the seed rule: no inline MCP");
+            assert_eq!(
+                store.reg_list().unwrap().iter().map(|a| a.name.as_str()).collect::<Vec<_>>(),
+                ["kiro", "codex", "claude", "grok", "omp", "kimi", "dsh"]
+            );
+            assert!(store.reg_delete("dsh").unwrap());
+        }
+        {
+            let store = Store::init(Connection::open(&path).unwrap()).unwrap();
+            assert!(store.reg_get("dsh").unwrap().is_none(), "a deleted default never resurrects");
+            let custom = RegAgent {
+                name: "dsh".into(),
+                backend: "dsh".into(),
+                model: "my-model".into(),
+                effort: String::new(),
+                input_mode: "queue".into(),
+                system: "My own dsh persona.".into(),
+                skills: "[]".into(),
+                mcp: "[]".into(),
+            };
+            store.reg_save(&custom, 2).unwrap();
+            store.conn.pragma_update(None, "user_version", 31).unwrap();
+        }
+        {
+            let store = Store::init(Connection::open(&path).unwrap()).unwrap();
+            let dsh = store.reg_get("dsh").unwrap().unwrap();
+            assert_eq!((dsh.system.as_str(), dsh.model.as_str()), ("My own dsh persona.", "my-model"), "NOT EXISTS respects a custom definition");
+        }
+        // A FRESH database is not backfilled by the step (rows = 0 gates it
+        // out); reg_seed plants every default right after open.
+        let fresh = Store::open_memory().unwrap();
+        assert!(fresh.reg_list().unwrap().is_empty());
+    }
+
     #[test]
     fn v4_to_v6_migration_adds_registry_and_assets() {
         // An existing v4 db (projects+slots only) must gain reg_agents.
@@ -1330,10 +1406,10 @@ mod tests {
         let store = Store::init(conn).unwrap();
         store.reg_seed(1).unwrap();
         let seeded = store.reg_list().unwrap();
-        assert_eq!(seeded.len(), 6);
+        assert_eq!(seeded.len(), 7);
         assert_eq!(
             seeded.iter().map(|a| a.name.as_str()).collect::<Vec<_>>(),
-            ["kiro", "codex", "claude", "grok", "omp", "kimi"]
+            ["kiro", "codex", "claude", "grok", "omp", "kimi", "dsh"]
         );
         let v: i64 = store.conn.query_row("PRAGMA user_version", [], |r| r.get(0)).unwrap();
         assert_eq!(v, SCHEMA_VERSION);
