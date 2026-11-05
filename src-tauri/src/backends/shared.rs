@@ -348,27 +348,48 @@ fn symlink_file(source: &Path, target: &Path) -> std::io::Result<()> {
     std::os::windows::fs::symlink_file(source, target)
 }
 
-fn claude_user_env_from(path: &Path) -> Value {
+fn read_json_or_empty(path: &Path) -> Value {
     std::fs::read_to_string(path)
         .ok()
         .and_then(|s| serde_json::from_str::<Value>(&s).ok())
-        .map(|v| claude_env_of(&v))
         .unwrap_or_else(|| serde_json::json!({}))
 }
 
-/// The block of parsed Claude settings that a managed home carries: `env`
-/// when it is an object, else none. One definition for the render and for
-/// backend readiness (board #492), which reads the file itself so that an
-/// unreadable one is a reason rather than an empty carry.
+/// The `env` block of parsed Claude settings when it is an object, else an
+/// empty one (model discovery reads the carried env through this).
 pub(crate) fn claude_env_of(settings: &Value) -> Value {
     settings.get("env").cloned().filter(Value::is_object).unwrap_or_else(|| serde_json::json!({}))
 }
 
-/// The provider channel from the user's Claude settings. Managed homes copy
-/// only this block: Bedrock auth selection, region and model pins travel with
-/// the agent, while plugins and unrelated user preferences do not.
-pub(crate) fn claude_user_env() -> Value {
-    claude_user_env_from(&claude_user_settings())
+/// Claude Code's documented credential COMMANDS (settings reference, read
+/// 2026-11-05 for 2.1.318): `apiKeyHelper` "Generate the API credential with
+/// your own command", `awsAuthRefresh` "Refresh expired Bedrock credentials",
+/// `awsCredentialExport` "Supply Bedrock credentials as JSON", `gcpAuthRefresh`
+/// "Refresh Google Cloud credentials". `apiKeyHelper` is the measured one
+/// (board #2: without it an interactive managed Claude is "Not logged in").
+/// `forceLoginMethod` (a login restriction) and `otelHeadersHelper`
+/// (telemetry) are not credentials and stay behind.
+pub(crate) const CLAUDE_AUTH_KEYS: &[&str] = &["apiKeyHelper", "awsAuthRefresh", "awsCredentialExport", "gcpAuthRefresh"];
+
+/// What a managed Claude home carries from parsed user settings: the `env`
+/// block (the provider channel) plus each string-valued `CLAUDE_AUTH_KEYS`
+/// entry. Auth carries, prefs do not. The ONE definition for the renderer,
+/// the start-time backfill and backend readiness (board #492, #2).
+pub(crate) fn claude_carry_of(settings: &Value) -> Value {
+    let mut carry = serde_json::Map::new();
+    carry.insert("env".into(), claude_env_of(settings));
+    for key in CLAUDE_AUTH_KEYS {
+        if let Some(v) = settings.get(*key).filter(|v| v.is_string()) {
+            carry.insert((*key).into(), v.clone());
+        }
+    }
+    Value::Object(carry)
+}
+
+/// `claude_carry_of` the user's Claude settings (absent or invalid: env only,
+/// empty).
+pub(crate) fn claude_user_carry() -> Value {
+    claude_carry_of(&read_json_or_empty(&claude_user_settings()))
 }
 
 /// The user's Claude settings file: the ONE path the renderer carries from
@@ -657,21 +678,34 @@ mod tests {
     }
 
     #[test]
-    fn claude_channel_inherits_only_the_user_env_block() {
-        let root = crate::config::test_scratch("teamtest-claude-env");
-        std::fs::create_dir_all(&root).unwrap();
-        let settings = root.join("settings.json");
-        std::fs::write(
-            &settings,
-            r#"{"env":{"CLAUDE_CODE_USE_BEDROCK":"1","AWS_REGION":"us-west-2"},"enabledPlugins":{"private":true},"theme":"light"}"#,
-        )
-        .unwrap();
-        let inherited = claude_user_env_from(&settings);
-        assert_eq!(inherited["CLAUDE_CODE_USE_BEDROCK"], "1");
-        assert_eq!(inherited["AWS_REGION"], "us-west-2");
-        assert!(inherited.get("enabledPlugins").is_none());
-        assert!(inherited.get("theme").is_none());
-        std::fs::remove_dir_all(&root).ok();
+    fn claude_carry_is_the_env_block_and_the_credential_commands_only() {
+        let settings = serde_json::json!({
+            "env": {"CLAUDE_CODE_USE_BEDROCK": "1", "AWS_REGION": "us-west-2"},
+            "apiKeyHelper": "print-key",
+            "awsAuthRefresh": "aws sso login",
+            "awsCredentialExport": "export-creds",
+            "gcpAuthRefresh": "gcloud auth login",
+            "enabledPlugins": {"SENTINEL": true},
+            "theme": "SENTINEL",
+            "forceLoginMethod": "SENTINEL",
+            "otelHeadersHelper": "SENTINEL",
+            "model": "SENTINEL"
+        });
+        assert_eq!(
+            claude_carry_of(&settings),
+            serde_json::json!({
+                "env": {"CLAUDE_CODE_USE_BEDROCK": "1", "AWS_REGION": "us-west-2"},
+                "apiKeyHelper": "print-key",
+                "awsAuthRefresh": "aws sso login",
+                "awsCredentialExport": "export-creds",
+                "gcpAuthRefresh": "gcloud auth login"
+            })
+        );
+        // A non-string helper or env is not a credential command or a channel.
+        assert_eq!(
+            claude_carry_of(&serde_json::json!({"env": 7, "apiKeyHelper": {"SENTINEL": 1}})),
+            serde_json::json!({"env": {}})
+        );
     }
 
     #[test]

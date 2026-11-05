@@ -314,18 +314,17 @@ pub(crate) fn render_claude(
     // into the isolated settings.json, grok's "auth carries, prefs do not"
     // pattern in claude's dialect (owner, 2026-08-22: "都用bedrock渠道…复用
     // 我们全局定义的配置 但是自己管理好类似kirohome这种"). Plugins and
-    // marketplaces deliberately do NOT carry.
+    // marketplaces deliberately do NOT carry. The documented credential
+    // commands (`apiKeyHelper` and kin) DO carry with the env: without the
+    // helper an interactive managed Claude was "Not logged in" (board #2,
+    // 2.1.318). What carries is `shared::claude_carry_of`, nothing else.
     let settingsfile = home.join("settings.json");
-    shared::write_atomic(
-        &settingsfile,
-        &serde_json::to_string_pretty(&json!({
-            "env": shared::claude_user_env(),
-            "statusLine": shared::claude_status_line_config(),
-            "skipDangerousModePermissionPrompt": true,
-            "hooks": claude_hooks(&notify)
-        }))
-        .unwrap(),
-    )?;
+    let mut settings = shared::claude_user_carry();
+    let root = settings.as_object_mut().expect("the carry is an object");
+    root.insert("statusLine".into(), shared::claude_status_line_config());
+    root.insert("skipDangerousModePermissionPrompt".into(), json!(true));
+    root.insert("hooks".into(), claude_hooks(&notify));
+    shared::write_atomic(&settingsfile, &serde_json::to_string_pretty(&settings).unwrap())?;
     // A fresh CLAUDE_CONFIG_DIR otherwise parks at the theme/onboarding and
     // workspace-trust dialogs before the TUI. Claude documents the persisted
     // trust shape (`projects[repo_root].hasTrustDialogAccepted = true`); this
@@ -374,38 +373,48 @@ pub(crate) fn render_claude(
     })
 }
 
-/// Merge missing provider-channel keys into a managed Claude settings object.
-/// Existing values are per-agent overrides and win; newly introduced global
-/// keys (for example ANTHROPIC_DEFAULT_HAIKU_MODEL replacing the deprecated
-/// small-fast key) still reach old homes on their next start.
+/// Merge the missing part of the carry (`shared::claude_carry_of`: the env
+/// channel and the credential commands) into a managed Claude settings
+/// object. Existing values are per-agent overrides and win, inside `env` and
+/// at the top level; newly introduced global keys (for example
+/// ANTHROPIC_DEFAULT_HAIKU_MODEL, or an `apiKeyHelper` a home rendered before
+/// board #2 lacks) still reach old homes on their next start.
 #[cfg(not(any(target_os = "android", target_os = "ios")))]
-pub(crate) fn merge_missing_claude_env(conf: &mut Value, inherited: &Value) -> bool {
+pub(crate) fn merge_missing_claude_carry(conf: &mut Value, carry: &Value) -> bool {
     let Some(root) = conf.as_object_mut() else { return false };
-    let Some(source) = inherited.as_object().filter(|env| !env.is_empty()) else { return false };
-    if !root.get("env").is_some_and(Value::is_object) {
-        root.insert("env".into(), Value::Object(source.clone()));
-        return true;
-    }
-    let target = root.get_mut("env").and_then(Value::as_object_mut).unwrap();
+    let Some(carry) = carry.as_object() else { return false };
     let mut changed = false;
-    for (key, value) in source {
-        if !target.contains_key(key) {
-            target.insert(key.clone(), value.clone());
+    for (key, value) in carry {
+        if key == "env" {
+            let Some(source) = value.as_object().filter(|env| !env.is_empty()) else { continue };
+            if !root.get("env").is_some_and(Value::is_object) {
+                root.insert("env".into(), Value::Object(source.clone()));
+                changed = true;
+                continue;
+            }
+            let target = root.get_mut("env").and_then(Value::as_object_mut).unwrap();
+            for (k, v) in source {
+                if !target.contains_key(k) {
+                    target.insert(k.clone(), v.clone());
+                    changed = true;
+                }
+            }
+        } else if !root.contains_key(key) {
+            root.insert(key.clone(), value.clone());
             changed = true;
         }
     }
     changed
 }
 
-/// Backfill a managed claude settings.json with missing inherited channel keys
-/// (see `backends_shared::claude_user_env`). Fail-soft: refresh must never
-/// block a start. Returns true when the file changed.
+/// Backfill a managed claude settings.json with the missing carry (see
+/// `merge_missing_claude_carry`). Fail-soft: refresh must never block a
+/// start. Returns true when the file changed.
 #[cfg(not(any(target_os = "android", target_os = "ios")))]
-pub(crate) fn ensure_claude_env(path: &Path) -> Result<bool, String> {
+pub(crate) fn ensure_claude_carry(path: &Path) -> Result<bool, String> {
     let Ok(text) = std::fs::read_to_string(path) else { return Ok(false) };
     let Ok(mut conf) = serde_json::from_str::<Value>(&text) else { return Ok(false) };
-    let inherited = shared::claude_user_env();
-    if !merge_missing_claude_env(&mut conf, &inherited) {
+    if !merge_missing_claude_carry(&mut conf, &shared::claude_user_carry()) {
         return Ok(false);
     }
     shared::write_atomic(path, &serde_json::to_string_pretty(&conf).unwrap()).map(|_| true)
@@ -425,8 +434,9 @@ pub(crate) fn ensure_claude_status_line(path: &Path) -> Result<bool, String> {
 }
 
 
-/// The claude half of `refresh_hooks`: hooks, channel drift (missing global
-/// Bedrock keys backfilled without overwriting per-agent overrides), the
+/// The claude half of `refresh_hooks`: hooks, carry drift (missing global
+/// channel keys and credential commands backfilled without overwriting
+/// per-agent overrides), the
 /// official statusLine, and pre-seeded workspace trust.
 #[cfg(not(any(target_os = "android", target_os = "ios")))]
 pub(crate) fn refresh(home: &Path, workspace: &Path, notify: &str) -> Result<bool, String> {
@@ -434,7 +444,7 @@ pub(crate) fn refresh(home: &Path, workspace: &Path, notify: &str) -> Result<boo
     let settings = home.join("settings.json");
     if settings.is_file() {
         changed |= patch_hooks(&settings, claude_hooks(notify))?;
-        changed |= ensure_claude_env(&settings)?;
+        changed |= ensure_claude_carry(&settings)?;
         changed |= ensure_claude_status_line(&settings)?;
         changed |= ensure_claude_state(home, workspace)?;
     }

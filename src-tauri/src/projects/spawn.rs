@@ -1840,7 +1840,7 @@ mod team_plan_tests {
 }
 
 #[cfg(test)]
-pub(crate) use crate::backends::claude::{claude_hooks, ensure_claude_state, merge_missing_claude_env, render_claude};
+pub(crate) use crate::backends::claude::{claude_hooks, ensure_claude_state, merge_missing_claude_carry, render_claude};
 #[cfg(test)]
 pub(crate) use crate::backends::codex::{codex_hooks, render_codex};
 #[cfg(test)]
@@ -2822,15 +2822,72 @@ hooks = [ { type = "command", command = "/opt/guard.sh" } ]
             },
             "hooks": {}
         });
-        let global = json!({
+        let global = json!({ "env": {
             "CLAUDE_CODE_USE_BEDROCK": "1",
             "ANTHROPIC_MODEL": "global-model",
             "ANTHROPIC_DEFAULT_HAIKU_MODEL": "global-haiku"
-        });
-        assert!(merge_missing_claude_env(&mut managed, &global));
+        } });
+        assert!(merge_missing_claude_carry(&mut managed, &global));
         assert_eq!(managed["env"]["ANTHROPIC_MODEL"], "agent-specific-model");
         assert_eq!(managed["env"]["ANTHROPIC_DEFAULT_HAIKU_MODEL"], "global-haiku");
-        assert!(!merge_missing_claude_env(&mut managed, &global), "second refresh is a no-op");
+        assert!(!merge_missing_claude_carry(&mut managed, &global), "second refresh is a no-op");
+    }
+
+    /// Board #2 (Claude Code 2.1.318): a user who authenticates through
+    /// `apiKeyHelper` got a managed home with only the `env` block, and every
+    /// interactive prompt answered "Not logged in". The home carries the
+    /// documented credential commands with the env; preferences stay behind.
+    #[test]
+    fn a_managed_claude_home_carries_the_users_credential_commands_and_no_preferences() {
+        let user = crate::backends::shared::claude_user_settings();
+        std::fs::create_dir_all(user.parent().unwrap()).unwrap();
+        std::fs::write(
+            &user,
+            r#"{
+                "env": {"CLAUDE_CODE_USE_BEDROCK": "1"},
+                "apiKeyHelper": "print-key",
+                "awsAuthRefresh": "aws sso login",
+                "awsCredentialExport": "export-creds",
+                "gcpAuthRefresh": "gcloud auth login",
+                "theme": "SENTINEL",
+                "enabledPlugins": {"SENTINEL": true},
+                "forceLoginMethod": "SENTINEL",
+                "otelHeadersHelper": "SENTINEL",
+                "model": "SENTINEL",
+                "permissions": {"allow": ["SENTINEL"]}
+            }"#,
+        )
+        .unwrap();
+        let dir = crate::config::test_scratch("tmm-cc-auth-carry");
+        std::fs::create_dir_all(&dir).unwrap();
+        let d = def("claude");
+        let prompt = build_prompt(&d, "tester", "proj", "", "", "");
+        render_claude(&d, "tester", &dir, &dir, &prompt, &[]).unwrap();
+        let settings = dir.join("settings.json");
+        let read = || serde_json::from_str::<Value>(&std::fs::read_to_string(&settings).unwrap()).unwrap();
+        let home = read();
+        assert_eq!(home["apiKeyHelper"], "print-key");
+        assert_eq!(home["awsAuthRefresh"], "aws sso login");
+        assert_eq!(home["awsCredentialExport"], "export-creds");
+        assert_eq!(home["gcpAuthRefresh"], "gcloud auth login");
+        assert_eq!(home["env"]["CLAUDE_CODE_USE_BEDROCK"], "1");
+        assert!(!home.to_string().contains("SENTINEL"), "a preference leaked: {home}");
+
+        // An older home (env only) gets the helper on its next start; a value
+        // the agent's home already set wins over the user's.
+        let mut old = home.clone();
+        let root = old.as_object_mut().unwrap();
+        root.remove("apiKeyHelper");
+        root.insert("awsAuthRefresh".into(), json!("agent-own-refresh"));
+        std::fs::write(&settings, old.to_string()).unwrap();
+        assert!(crate::backends::claude::refresh(&dir, &dir, "notify").unwrap());
+        let refreshed = read();
+        assert_eq!(refreshed["apiKeyHelper"], "print-key");
+        assert_eq!(refreshed["awsAuthRefresh"], "agent-own-refresh");
+        assert!(!refreshed.to_string().contains("SENTINEL"));
+
+        std::fs::remove_file(&user).ok();
+        std::fs::remove_dir_all(&dir).ok();
     }
 
     #[test]

@@ -217,13 +217,13 @@ pub(crate) fn read_toml(path: &Path) -> Result<Option<toml::Table>, &'static str
     }
 }
 
-/// The env block Claude's render carries (`shared::claude_env_of`), read
-/// with `read_small` so an unreadable or invalid settings file is a reason,
-/// never the empty carry an absent one is.
+/// What Claude's render carries (`shared::claude_carry_of`: the env block and
+/// the credential commands), read with `read_small` so an unreadable or
+/// invalid settings file is a reason, never the empty carry an absent one is.
 pub(crate) fn claude_carry(path: &Path) -> Result<Value, &'static str> {
     match read_small(path)? {
-        None => Ok(json!({})),
-        Some(text) => serde_json::from_str::<Value>(&text).map(|v| super::shared::claude_env_of(&v)).map_err(|_| "config_invalid"),
+        None => Ok(super::shared::claude_carry_of(&json!({}))),
+        Some(text) => serde_json::from_str::<Value>(&text).map(|v| super::shared::claude_carry_of(&v)).map_err(|_| "config_invalid"),
     }
 }
 
@@ -843,7 +843,7 @@ fn helper() -> Option<PathBuf> {
     h.is_file().then_some(h)
 }
 
-/// The user's Claude settings, the file `shared::claude_user_env` reads.
+/// The user's Claude settings, the file `shared::claude_user_carry` reads.
 #[cfg(not(test))]
 fn claude_settings_path() -> PathBuf {
     super::shared::claude_user_settings()
@@ -913,22 +913,22 @@ fn overlay_path() -> String {
 /// The baseline probe for a Refresh: the claude carry (already read, see
 /// `refresh`) written into a scratch dir that lives exactly as long as the
 /// probe.
-fn refresh_probe(needs: &[(Backend, Need)], claude_env: Option<&Value>, deadline: Instant) -> Result<Frame, &'static str> {
+fn refresh_probe(needs: &[(Backend, Need)], claude_carry: Option<&Value>, deadline: Instant) -> Result<Frame, &'static str> {
     let names: Vec<String> = {
         let mut all: Vec<String> = needs.iter().flat_map(|(_, n)| match n { Need::Env { any_of } => any_of.clone(), _ => Vec::new() }).collect();
         all.sort();
         all.dedup();
         all
     };
-    let wants_claude = claude_env.is_some() && needs.iter().any(|(_, n)| *n == Need::ClaudeAuth);
+    let wants_claude = claude_carry.is_some() && needs.iter().any(|(_, n)| *n == Need::ClaudeAuth);
     if names.is_empty() && !wants_claude {
         return Ok(Frame::Refresh { env: BTreeMap::new(), claude: None });
     }
     let base = baseline(deadline)?;
     let helper = helper().ok_or("helper_missing")?;
     let scratch = Scratch::new().map_err(|_| "scratch_failed")?;
-    let claude_dir = if wants_claude {
-        let settings = json!({ "env": claude_env }).to_string();
+    let claude_dir = if let Some(carry) = claude_carry.filter(|_| wants_claude) {
+        let settings = carry.to_string();
         scratch.write("settings.json", &settings).map_err(|_| "scratch_failed")?;
         Some(scratch.path().to_path_buf())
     } else {
@@ -947,7 +947,7 @@ pub fn refresh(deadline: Instant) -> Value {
     // same deadline decides whether to go on (reviewer P1-B, round 3). One
     // that ran past it starts nothing more: the reply has gone (timed out),
     // and this result would not be read.
-    let claude_env = claude_carry(&claude_settings_path());
+    let carry = claude_carry(&claude_settings_path());
     #[cfg(test)]
     test_seam::prepared();
     if Instant::now() >= deadline {
@@ -956,7 +956,7 @@ pub fn refresh(deadline: Instant) -> Value {
     let mut needs: Vec<(Backend, Need)> = Vec::new();
     for b in Backend::ALL {
         let need = b.set_up_need();
-        needs.push(match (&need, &claude_env) {
+        needs.push(match (&need, &carry) {
             // Unreadable settings: the carry is unknown, so is claude.
             (Need::ClaudeAuth, Err(r)) => (b, Need::Found(SetUp::unknown(r))),
             _ => (b, need),
@@ -984,7 +984,7 @@ pub fn refresh(deadline: Instant) -> Value {
             .collect();
         #[cfg(test)]
         test_seam::maybe_panic();
-        let probe = refresh_probe(&needs, claude_env.as_ref().ok(), deadline);
+        let probe = refresh_probe(&needs, carry.as_ref().ok(), deadline);
         let rows: Vec<Value> = needs
             .iter()
             .zip(versions)
@@ -1467,12 +1467,14 @@ mod tests {
         assert_eq!(read_small(&bin), Err("config_invalid"));
         assert_eq!(read_small(&dir.join("absent")), Ok(None));
         // the claude carry: absent is the empty carry, unreadable is a reason
-        assert_eq!(claude_carry(&dir.join("absent")), Ok(json!({})));
+        assert_eq!(claude_carry(&dir.join("absent")), Ok(json!({ "env": {} })));
         let bad = dir.join("settings.json");
         std::fs::write(&bad, "{ not json").unwrap();
         assert_eq!(claude_carry(&bad), Err("config_invalid"));
-        std::fs::write(&bad, r#"{"env":{"CLAUDE_CODE_USE_BEDROCK":"1"},"theme":"dark"}"#).unwrap();
-        assert_eq!(claude_carry(&bad), Ok(json!({ "CLAUDE_CODE_USE_BEDROCK": "1" })));
+        // the probe's home carries what render does: env + credential commands
+        // (board #2), never a preference
+        std::fs::write(&bad, r#"{"env":{"CLAUDE_CODE_USE_BEDROCK":"1"},"apiKeyHelper":"print-key","theme":"dark"}"#).unwrap();
+        assert_eq!(claude_carry(&bad), Ok(json!({ "env": { "CLAUDE_CODE_USE_BEDROCK": "1" }, "apiKeyHelper": "print-key" })));
         assert_eq!(claude_carry(&fifo), Err("config_not_regular"));
     }
 
