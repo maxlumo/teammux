@@ -290,14 +290,22 @@ not exist afterwards; pinned on a scratch root with the real config's plugins), 
   broken fails loudly instead of prompting; the guard checks only that
   tauri's pick holds `source.properties`, the first file tauri reads, not
   that the NDK is complete. `NDK_HOME` is optional; if set, it must be that
-  NDK (compared through symlinks). On this host the SDK
-  is `/home/cfu/Android/sdk` (lowercase) with the NDK at
-  `/home/cfu/Android/sdk/ndk/28.2.13676358`; `/home/cfu/Android/Sdk`
-  (capital S) also exists, is empty, and is what the auto-detect picks:
+  NDK (compared through symlinks). Per host:
+  - `cfu`: the SDK is `/home/cfu/Android/sdk` (lowercase) with the NDK at
+    `/home/cfu/Android/sdk/ndk/28.2.13676358`; `/home/cfu/Android/Sdk`
+    (capital S) also exists, is empty, and is what the auto-detect picks:
 
-  ```bash
-  ANDROID_HOME=/home/cfu/Android/sdk npm run build:android
-  ```
+    ```bash
+    ANDROID_HOME=/home/cfu/Android/sdk npm run build:android
+    ```
+  - `ubuntu` (board #16): the SDK is `/home/ubuntu/Android/Sdk` with one NDK,
+    `ndk/28.2.13676358`, plus platform-tools 37.0.1, `platforms;android-36`
+    and `build-tools;36.0.0`, all from sdkmanager. `~/.zshrc` exports
+    `ANDROID_HOME` and `NDK_HOME` from that directory, so a login shell needs
+    no prefix. First build 2026-11-05, about 08:55 to 09:02 UTC (7 min, gradle
+    8.14.3), at main `49882cd0` in a detached worktree with `command npm ci`
+    (the shell's `npm` is pnpm). No signing files exist on this host, so the
+    APK is `app-universal-release-unsigned.apk` and the postflight exits 1.
 - **Linux server only** — `npm run build:server` needs no WebKitGTK; it is all
   the browser UI and the phone talk to. It runs `vite build` first and embeds
   `dist/` (`embed-ui`), so `tmm gateway` serves the web UI on its own port and
