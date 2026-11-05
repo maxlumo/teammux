@@ -23,7 +23,7 @@
   import { parseQuote, TAIL_GAP, bottomGap, tailAfterScroll, markMentions, showMentions, mentionedAgents, splitImages, toolColor, pickAnchor, toolEventParts, elideTail, foldedCommandArgs, markIssueRefs, foldLines, statusNote, noteStateColor, runtimeLabel, agentHue, sysParts, sysVerbColor, boardLine, boardStatusColor, promptParts, sameDay, continuesRun, perLineOf, STEPS_ROWS, stateIsLive } from './hub.ts';
 
   let {
-    blocks = [], agents = [], managedNames = [], names = NO_LABELS, issueIds = [], selected = '', visible = false, compact = false,
+    blocks = [], agents = [], managedNames = [], knownNames = managedNames, names = NO_LABELS, issueIds = [], selected = '', visible = false, compact = false,
     roomReady = false, justLoaded = false, openedAt = Infinity,
     loadingOlder = false, histMore = false, actMore = false, stepsRows = STEPS_ROWS,
     following = $bindable(true), newBelow = $bindable(false),
@@ -971,7 +971,7 @@
                   <!-- Folded: the start of the message, cut where the
                        budget runs out, …… glued to the last kept line.
                        Raw view and agent messages render in full. -->
-                  {@html markIssueRefs(markMentions(renderMarkdown(folded ? foldBody(parts.text, !!quote) : parts.text), managedNames, names), issueSet)}
+                  {@html markIssueRefs(markMentions(renderMarkdown(folded ? foldBody(parts.text, !!quote) : parts.text), knownNames, names), issueSet)}
                 {/if}
               {/if}
               <!-- One unfold control for a folded command and a folded text. -->

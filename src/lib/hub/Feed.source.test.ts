@@ -95,7 +95,7 @@ test('Feed preserves reveal gates and consumes the shared rendering and path mec
   // Board #340: a `#<id>` link takes the same route, so it never also flips
   // the action row, and only the project's own ids are linked.
   assert.match(source, /return handlePathLinkClick\(e, routePathRef\) \|\| openIssueRef\(e\);/u);
-  assert.match(source, /\{@html markIssueRefs\(markMentions\(renderMarkdown\([^)]*\)[^)]*\), managedNames, names\), issueSet\)\}/u);
+  assert.match(source, /\{@html markIssueRefs\(markMentions\(renderMarkdown\([^)]*\)[^)]*\), knownNames, names\), issueSet\)\}/u, 'history shows every known identity, running or stopped (#21 round 2)');
   assert.match(source, /<span class="n-text">\{showMentions\(activityLabel\(b\.event\), names\)\}<\/span>/u, 'a note quoting a delivery line shows each address by its label (#21 round 1)');
   assert.match(source, /<ChatImage \{src\} alt=\{m\.from\} onviewstart=\{onimagestart\} onview=\{onimage\} \/>/u, 'the tap\'s claim and reference travel with the image (board #447)');
 });

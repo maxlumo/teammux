@@ -6294,6 +6294,38 @@ test('a rename re-labels the open feed, its @mentions and the roster in place (#
   assert.ok(texts(app.document, '.acard .a-name').includes('robin'), 'and the roster card');
 });
 
+test('a STOPPED agent renamed from its card re-labels its history @mentions, and still receives nothing (#21 round 2)', { timeout: 60000 }, async (context) => {
+  // Reviewer P2-R1: history display came from the LIVE roster, so a stopped
+  // agent's stored @mention kept its old name and lost its chip.
+  const now = Date.now();
+  const message = (seq: number, from: string, body: string) => ({ id: `m${seq}`, seq, room: 'proj:fixture', from, ts: now - 1000 + seq, body, kind: 'msg', to: [] });
+  const agents = [
+    { name: 'alice', window: 0, managed: true, agent: 'kiro', state: 'idle', since: 10 },
+    { name: 'bob', window: 1, managed: true, agent: 'codex', state: 'idle', since: 5 },
+  ];
+  const slots = [{ window_name: 'bob', kind: 'agent', command: 'codex' }];
+  const app = await composerFixture(context, {
+    hubAgents: async () => ({ agents }),
+    projectList: async () => ({ projects: [{ project: { id: 'fixture', name: 'fixture', session: 'fixture', path: '/fixture' }, live: true, slots }] }),
+    hubLog: async () => ({ messages: [message(1, 'alice', '@bob please look'), message(2, 'bob', '@alice done')], has_more: false }),
+  });
+  const options = () => [...app.document.querySelectorAll('.cmd-menu .cmd-opt .cmd-name')].map((n) => n.textContent);
+  try {
+    assert.ok(texts(app.document, '.m-to').includes('@bob'), 'running: its mention is a chip');
+    agents.pop();
+    await app.advance(5000);
+    assert.ok(stripCard(app.document, 'bob'), 'stopped: its card stays');
+    assert.ok(texts(app.document, '.m-to').includes('@bob'), 'stopped: its history mention is still a chip');
+    await app.rename('bob', 'robin', []);
+    assert.deepEqual(texts(app.document, '.m-who'), ['alice', 'robin'], 'the sender head follows');
+    assert.ok(texts(app.document, '.m-to').includes('@robin') && !texts(app.document, '.m-to').includes('@bob'), 'the history mention follows, no restart, no reload');
+    await app.text('ask @');
+    assert.deepEqual(options(), ['@alice', '@all'], 'a stopped agent is still not offered as a recipient');
+    await app.rename('bob', 'bob', ['robin']);
+    assert.ok(texts(app.document, '.m-to').includes('@bob') && !texts(app.document, '.m-to').includes('@robin'), 'Reset returns the history to the physical name');
+  } finally { await app.close(); }
+});
+
 test('a rename while the composer holds @old still sends to the agent (#21)', { timeout: 60000 }, async (context) => {
   const posts: string[] = [];
   const app = await composerFixture(context, { hubPost: async (_s: string, body: string) => { posts.push(body); return {}; } });

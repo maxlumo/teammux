@@ -335,6 +335,10 @@
   const managedNames = $derived(managedAgents.map((a) => a.name));
   // Declared but not running — a stopped agent still belongs to the room.
   const stopped = $derived(stoppedAgents(selectedRow?.slots, managedAgents));
+  // Every identity the room knows, running or stopped (#21 round 2, reviewer
+  // P2-R1): what history DISPLAYS as an address. Who can RECEIVE stays
+  // managedNames, the live roster.
+  const knownNames = $derived([...managedNames, ...stopped]);
 
   let projectReadSequence = 0, rosterReadSequence = 0;
   /** The list's own state for the union (P1-C4): has it ever answered, and
@@ -2811,7 +2815,7 @@
             <div class="empty">{managedAgents.length ? t('hubEmpty') : t('hubEmptyNoAgents')}</div>
           {/if}
       {/snippet}
-      <Feed bind:this={feedView} {blocks} {agents} {managedNames} {names} issueIds={roomIssueIds} {selected} {visible} {compact}
+      <Feed bind:this={feedView} {blocks} {agents} {managedNames} {knownNames} {names} issueIds={roomIssueIds} {selected} {visible} {compact}
         {roomReady} {justLoaded} {openedAt} {loadingOlder} {histMore} {actMore}
         stepsRows={hubPrefs.stepsRows} {stateLabel} {emptyFeed} bind:following bind:newBelow
         onseen={markSeen} onolder={loadOlder} onpath={routePathRef}
