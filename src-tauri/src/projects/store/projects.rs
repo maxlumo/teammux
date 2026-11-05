@@ -404,14 +404,20 @@ impl Store {
     /// Drop ONE slot by window name — "this agent is no longer part of the
     /// project", as opposed to `replace_slots`, which is the capture loop
     /// rewriting the whole declaration.
+    /// Remove a slot. Its agent's names (board #20, orchestrator 13:35) go in
+    /// the same transaction, so a later agent with the same physical name
+    /// inherits none of its labels.
     pub fn delete_slot(&self, project_id: &str, window_name: &str) -> Result<bool, String> {
-        let n = self
-            .conn
+        let tx = self.conn.unchecked_transaction().map_err(|e| e.to_string())?;
+        let n = tx
             .execute(
                 "DELETE FROM slots WHERE project_id = ?1 AND window_name = ?2",
                 params![project_id, window_name],
             )
             .map_err(|e| e.to_string())?;
+        tx.execute("DELETE FROM agent_names WHERE project_id = ?1 AND agent = ?2", params![project_id, window_name])
+            .map_err(|e| e.to_string())?;
+        tx.commit().map_err(|e| e.to_string())?;
         Ok(n > 0)
     }
 

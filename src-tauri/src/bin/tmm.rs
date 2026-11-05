@@ -149,6 +149,9 @@ USAGE (human or agent — self-management):
                                       model, effort, mode, prompt, skills, MCP, team): fresh home,
                                       fresh conversation; the source is untouched
   tmm agent remove <name>             eject it: stop + forget its slot + delete its home
+  tmm agent rename <name> <label>     show and address it as <label> in this project; its window,
+                    [--reset]         home and TMM_AGENT keep the physical name, old names still
+                                      reach it (#20); --reset shows the physical name again
   tmm project list                    all projects
   tmm project create <path> [--name n] [--session s] [--with-agent {backends}]
   tmm project up <session>            bring a project's tmux session up
@@ -852,6 +855,7 @@ async fn main() {
                 "list" => {
                     let r = rpc(&ctx, "hub_board_list", json!({ "session": session })).await;
                     if ctx.json { println!("{r}"); return; }
+                    let names = tmux_mobile::address::Names::from_json(r.get("labels").unwrap_or(&Value::Null));
                     let empty = Vec::new();
                     let issues = r.get("issues").and_then(|v| v.as_array()).unwrap_or(&empty);
                     if issues.is_empty() {
@@ -866,7 +870,7 @@ async fn main() {
                             let g = |k: &str| i.get(k).and_then(|v| v.as_str()).unwrap_or("");
                             let id = i.get("id").and_then(|v| v.as_i64()).unwrap_or(0);
                             let notes = i.get("notes").and_then(|v| v.as_i64()).unwrap_or(0);
-                            let assignee = if g("assignee").is_empty() { String::new() } else { format!(" @{}", g("assignee")) };
+                            let assignee = if g("assignee").is_empty() { String::new() } else { format!(" @{}", names.shown(g("assignee"))) };
                             let n = if notes > 0 { format!(" [{notes} notes]") } else { String::new() };
                             // A titleless issue is still NAMED (board #31):
                             // the same title → body → #id fallback every
@@ -881,15 +885,16 @@ async fn main() {
                     };
                     let r = rpc(&ctx, "hub_board_get", json!({ "session": session, "id": id })).await;
                     if ctx.json { println!("{r}"); return; }
+                    let names = tmux_mobile::address::Names::from_json(r.get("labels").unwrap_or(&Value::Null));
                     let g = |k: &str| r.get(k).and_then(|v| v.as_str()).unwrap_or("");
                     println!("#{} [{}] {}", id, g("status"), tmux_mobile::projects::issue_ref(g("title"), g("body"), id));
-                    if !g("assignee").is_empty() { println!("assignee: {}", g("assignee")); }
-                    if !g("created_by").is_empty() { println!("opened by: {}", g("created_by")); }
+                    if !g("assignee").is_empty() { println!("assignee: {}", names.shown(g("assignee"))); }
+                    if !g("created_by").is_empty() { println!("opened by: {}", names.shown(g("created_by"))); }
                     if !g("body").is_empty() { println!("\n{}\n", g("body")); }
                     let empty = Vec::new();
                     for n in r.get("notes").and_then(|v| v.as_array()).unwrap_or(&empty) {
-                        let a = n.get("author").and_then(|v| v.as_str()).unwrap_or("");
-                        let b = n.get("body").and_then(|v| v.as_str()).unwrap_or("");
+                        let a = names.shown(n.get("author").and_then(|v| v.as_str()).unwrap_or(""));
+                        let b = names.show_body(n.get("body").and_then(|v| v.as_str()).unwrap_or(""));
                         println!("  · {a}: {b}");
                     }
                 }
@@ -1176,18 +1181,7 @@ async fn main() {
             if ctx.json {
                 println!("{r}");
             } else {
-                let empty = Vec::new();
-                let rows = r.get("agents").and_then(|a| a.as_array()).unwrap_or(&empty);
-                for a in rows {
-                    let s = |k: &str| a.get(k).and_then(|v| v.as_str()).unwrap_or("");
-                    let w = a.get("window").and_then(|v| v.as_u64()).unwrap_or(0);
-                    let agent = a.get("agent").and_then(|v| v.as_str());
-                    let tail = detail_tail(s("detail"));
-                    match agent {
-                        Some(b) => println!("{w}: {} [{b}] {}{tail}", s("name"), s("state")),
-                        None => println!("{w}: {} (shell)", s("name")),
-                    }
-                }
+                print!("{}", agent_list_text(&r));
             }
         }
         // Everything the chat UI can do to ONE agent, so an agent can do it too
@@ -1234,6 +1228,19 @@ async fn main() {
                 let win = r.get("window_name").and_then(|v| v.as_str()).unwrap_or(&name);
                 println!("✓ forked {name} → {win}");
             }
+        }
+        // Board #20: an agent's LABEL, the name people and agents read and
+        // type; the physical name (window, home, TMM_AGENT) never changes.
+        ("agent", rest) if rest.first().map(String::as_str) == Some("rename") => {
+            let session = need_project(&ctx);
+            let reset = flags.contains_key("reset");
+            let (name, label) = match (rest.get(1).cloned(), rest.get(2).cloned(), reset) {
+                (Some(n), None, true) => (n, None),
+                (Some(n), Some(l), false) => (n, Some(l)),
+                _ => fail(EXIT_USAGE, "agent rename needs a name and a label: tmm agent rename <name> <label> (or <name> --reset)"),
+            };
+            let r = rpc(&ctx, "hub_agent_rename", json!({ "session": session, "agent": name, "label": label })).await;
+            if ctx.json { println!("{r}"); } else { print!("{}", rename_text(&r)); }
         }
         ("agent", rest)
             if matches!(rest.first().map(String::as_str), Some("stop" | "restart" | "remove" | "interrupt")) =>
@@ -2649,6 +2656,7 @@ const VERB_FLAGS: &[VerbFlags] = &[
     VerbFlags { key: "agent mode", ctx: true, flags: &[] },
     VerbFlags { key: "agent team", ctx: true, flags: &[] },
     VerbFlags { key: "agent fork", ctx: true, flags: &["as"] },
+    VerbFlags { key: "agent rename", ctx: true, flags: &["reset"] },
     VerbFlags { key: "project", ctx: true, flags: &[] },
     VerbFlags { key: "project list", ctx: true, flags: &[] },
     VerbFlags { key: "project create", ctx: true, flags: &["name", "session", "with-agent"] },
@@ -3068,18 +3076,50 @@ fn print_log_with_rooms(ctx: &Ctx, r: &Value, with_room: bool) {
         println!("{r}");
         return;
     }
+    for line in log_lines(r, with_room) {
+        println!("{line}");
+    }
+}
+
+/// The log's lines (board #20): each stored row as the project shows it now,
+/// its sender and its addresses (and a lifecycle line's subject) by the
+/// current label, through `Names` over the answer's `labels`. The row itself
+/// is never changed; `--output json` prints it as stored.
+fn log_lines(r: &Value, with_room: bool) -> Vec<String> {
+    let names = tmux_mobile::address::Names::from_json(r.get("labels").unwrap_or(&Value::Null));
     let empty = Vec::new();
+    let mut out = Vec::new();
     for m in r.get("messages").and_then(|m| m.as_array()).unwrap_or(&empty) {
-        let from = m.get("from").and_then(|v| v.as_str()).unwrap_or("?");
-        let body = m.get("body").and_then(|v| v.as_str()).unwrap_or("");
+        let from = names.shown(m.get("from").and_then(|v| v.as_str()).unwrap_or("?"));
+        let body = &names.show_body(m.get("body").and_then(|v| v.as_str()).unwrap_or(""));
         let ts = m.get("ts").and_then(|v| v.as_i64()).unwrap_or(0);
         if with_room {
             let room = m.get("room").and_then(|v| v.as_str()).unwrap_or("?");
-            println!("[{}] [{room}] {from}: {body}", local_stamp(ts));
+            out.push(format!("[{}] [{room}] {from}: {body}", local_stamp(ts)));
         } else {
-            println!("[{}] {from}: {body}", local_stamp(ts));
+            out.push(format!("[{}] {from}: {body}", local_stamp(ts)));
         }
     }
+    out
+}
+
+/// What `tmm agent list` prints: one line per window; an agent by its label,
+/// with its physical name beside it when they differ (board #20).
+fn agent_list_text(r: &Value) -> String {
+    let empty = Vec::new();
+    let mut out = String::new();
+    for a in r.get("agents").and_then(|a| a.as_array()).unwrap_or(&empty) {
+        let s = |k: &str| a.get(k).and_then(|v| v.as_str()).unwrap_or("");
+        let w = a.get("window").and_then(|v| v.as_u64()).unwrap_or(0);
+        let tail = detail_tail(s("detail"));
+        let label = s("label");
+        let who = if label.is_empty() || label == s("name") { s("name").to_string() } else { format!("{label} ({})", s("name")) };
+        match a.get("agent").and_then(|v| v.as_str()) {
+            Some(b) => out.push_str(&format!("{w}: {who} [{b}] {}{tail}\n", s("state"))),
+            None => out.push_str(&format!("{w}: {} (shell)\n", s("name"))),
+        }
+    }
+    out
 }
 
 /// Epoch MILLISECONDS -> local `2026-08-17 16:31`, for a reader that wants to
@@ -3264,6 +3304,24 @@ fn models_text(answers: &[Value]) -> String {
     out.push_str("Kind: authoritative = an id outside it is refused at save; suggestions = any id may be typed. \
                   Default = what a NEW agent with no model starts on, not a project's or a resumed session's.\n");
     out
+}
+
+/// What `tmm agent rename` prints (board #20): the label now shown, the
+/// physical name it keeps, which old names still reach it, and that its own
+/// prompt follows at its next start.
+fn rename_text(r: &Value) -> String {
+    let s = |k: &str| r.get(k).and_then(|v| v.as_str()).unwrap_or("").to_string();
+    let (agent, label) = (s("agent"), s("label"));
+    let aliases: Vec<&str> = r.get("aliases").and_then(|v| v.as_array()).map(|a| a.iter().filter_map(|n| n.as_str()).collect()).unwrap_or_default();
+    let still = if aliases.is_empty() { String::new() } else { format!("{} still reach{} it", aliases.join(", "), if aliases.len() == 1 { "es" } else { "" }) };
+    let head = if label == agent {
+        let tail = if still.is_empty() { String::new() } else { format!(" ({still})") };
+        format!("✓ {agent} is shown as {agent} again{tail}")
+    } else {
+        let tail = if still.is_empty() { String::new() } else { format!("; {still}") };
+        format!("✓ {agent} is now {label} (its window, home and TMM_AGENT stay {agent}{tail})")
+    };
+    format!("{head}\n  Its own prompt says {label} from its next start: tmm agent restart {label}\n")
 }
 
 /// What plain-text `tmm teams list` prints: one line per team, and under a
@@ -3820,7 +3878,13 @@ fn managed_names(agents: &Value) -> Vec<String> {
         .map(|a| {
             a.iter()
                 .filter(|r| r["managed"].as_bool() == Some(true))
-                .filter_map(|r| r["name"].as_str().map(str::to_string))
+                .flat_map(|r| {
+                    // Every name that reaches it (board #20): physical, label, old labels.
+                    let mut names: Vec<String> = r["name"].as_str().map(str::to_string).into_iter().collect();
+                    names.extend(r["label"].as_str().filter(|l| Some(*l) != r["name"].as_str()).map(str::to_string));
+                    names.extend(r["aliases"].as_array().into_iter().flatten().filter_map(|v| v.as_str().map(str::to_string)));
+                    names
+                })
                 .collect()
         })
         .unwrap_or_default()
@@ -3864,6 +3928,60 @@ Availability is not known yet: this server has not checked its CLIs. A check has
         // An older server sends no group: the flat list it always printed.
         let old = serde_json::json!({ "agents": [{ "name": "kiro", "backend": "kiro", "system": "K" }] });
         assert_eq!(registry_text(&old), "kiro [kiro] — K\n");
+    }
+
+    /// Board #20: `tmm log` shows a stored message as the project shows it
+    /// NOW: its sender and every address by the current label, a lifecycle
+    /// line's subject too, while the stored row (in `--output json`) is what
+    /// was said. A server that sends no labels prints the rows as they are.
+    #[test]
+    fn log_shows_stored_rows_by_the_current_label() {
+        use super::log_lines;
+        let r = serde_json::json!({
+            "labels": [{ "agent": "dev", "label": "robert", "aliases": ["bob"] }],
+            "messages": [
+                { "from": "lead", "body": "@bob please look", "ts": 0 },
+                { "from": "dev", "body": "@lead done, cc @dev", "ts": 0 },
+                { "from": "lead", "body": "[tmm] spawned dev — team t", "ts": 0 },
+            ],
+        });
+        let tail = |l: &String| l.split_once("] ").map(|(_, t)| t.to_string()).unwrap_or_default();
+        assert_eq!(log_lines(&r, false).iter().map(tail).collect::<Vec<_>>(), ["lead: @robert please look", "robert: @lead done, cc @robert", "lead: [tmm] spawned robert — team t"]);
+        let old = serde_json::json!({ "messages": [{ "from": "dev", "body": "@bob hi", "ts": 0 }] });
+        assert_eq!(log_lines(&old, false).iter().map(tail).collect::<Vec<_>>(), ["dev: @bob hi"]);
+    }
+
+    /// Board #20: `tmm agent list` shows each agent by its label, with the
+    /// physical name beside it when they differ.
+    #[test]
+    fn agent_list_shows_the_label_and_the_physical_name_beside_it() {
+        use super::agent_list_text;
+        let r = serde_json::json!({ "agents": [
+            { "window": 1, "name": "dev", "label": "robert", "aliases": ["bob"], "agent": "claude", "state": "idle", "detail": "" },
+            { "window": 2, "name": "lead", "label": "lead", "aliases": [], "agent": "kiro", "state": "working", "detail": "" },
+            { "window": 3, "name": "zsh", "command": "zsh" },
+        ] });
+        assert_eq!(agent_list_text(&r), "1: robert (dev) [claude] idle\n2: lead [kiro] working\n3: zsh (shell)\n");
+    }
+
+    /// Board #20: what `tmm agent rename` prints: the new name, the physical
+    /// one it keeps, and that the agent's own prompt follows at its next
+    /// start, with the command; a reset says it is back to its own name.
+    #[test]
+    fn rename_says_the_label_the_physical_name_and_the_restart() {
+        use super::rename_text;
+        let r = serde_json::json!({ "agent": "builder", "label": "bob", "aliases": ["bo"] });
+        assert_eq!(rename_text(&r), "\
+✓ builder is now bob (its window, home and TMM_AGENT stay builder; bo still reaches it)
+  Its own prompt says bob from its next start: tmm agent restart bob
+");
+        let reset = serde_json::json!({ "agent": "builder", "label": "builder", "aliases": ["bo", "bob"] });
+        assert_eq!(rename_text(&reset), "\
+✓ builder is shown as builder again (bo, bob still reach it)
+  Its own prompt says builder from its next start: tmm agent restart builder
+");
+        let first = serde_json::json!({ "agent": "builder", "label": "bob", "aliases": [] });
+        assert_eq!(rename_text(&first).lines().next(), Some("✓ builder is now bob (its window, home and TMM_AGENT stay builder)"));
     }
 
     /// Board #15: plain-text `tmm teams list` says a team is unavailable, with
@@ -4393,6 +4511,13 @@ old — X []
         ] });
         assert_eq!(managed_names(&agents), vec!["dev".to_string()]);
         assert!(managed_names(&json!({})).is_empty());
+        // Board #20: a managed agent is reached by its label and its old
+        // labels too, so `tmm send "@bob /compact"` and `tmm board assign 3
+        // bob` pass the client check; the server resolves them.
+        let labelled = json!({ "agents": [
+            { "name": "dev", "managed": true, "label": "robert", "aliases": ["bob"] }, { "name": "zsh", "managed": false, "label": "zsh", "aliases": [] },
+        ] });
+        assert_eq!(managed_names(&labelled), vec!["dev".to_string(), "robert".to_string(), "bob".to_string()]);
     }
 
     #[test]

@@ -1800,7 +1800,7 @@ pub fn record_prompt_outcome(session: &str, window: &str, prompt: &str, cli_own:
     // Who this prompt asks, parsed ONCE from the FULL prompt (#257 review):
     // the row's text is cut at MAX_PROMPT_CHARS for display, and a combined
     // prompt of held lines can put its second requester past that cut.
-    let requesters = prompt_requesters(prompt, cli_own);
+    let requesters = prompt_requesters(session, prompt, cli_own);
     // Its requesters ride in the SAME activity INSERT as the row (#257).
     let event = ("prompt", text, String::new(), via.to_string(), refs);
     let (_, row) = turn_fact_held_row(&order, session, window, None, |_| false, Some(event), |r, ts, seq| {
@@ -1823,8 +1823,28 @@ fn prompt_via(acked: bool, cli_own: Option<&str>) -> &'static str {
 }
 
 /// Who a prompt asks: no one for the CLI's own, else its stamped senders.
-fn prompt_requesters(prompt: &str, cli_own: Option<&str>) -> Vec<String> {
-    if cli_own.is_some() { Vec::new() } else { crate::address::requesters(prompt) }
+fn prompt_requesters(session: &str, prompt: &str, cli_own: Option<&str>) -> Vec<String> {
+    if cli_own.is_some() { Vec::new() } else { requesters_in(session, prompt) }
+}
+
+/// A prompt's stamped senders as PHYSICAL agents (board #20): a typed line
+/// shows its sender's current label, and the reply edge, the turn's members
+/// and status are keyed by the physical name, so each sender goes through
+/// the one resolution here, where the requesters are parsed for the row.
+pub fn requesters_in(session: &str, prompt: &str) -> Vec<String> {
+    let senders = crate::address::requesters(prompt);
+    if senders.is_empty() {
+        return senders;
+    }
+    let names = super::names::names(session);
+    let mut out: Vec<String> = Vec::new();
+    for s in &senders {
+        let agent = names.resolve(s).to_string();
+        if !out.contains(&agent) {
+            out.push(agent);
+        }
+    }
+    out
 }
 
 /// A prompt that carried neither the candidate command nor any chat line
@@ -1861,7 +1881,7 @@ fn record_numbered_prompt(
     command_hit: bool,
 ) -> (bool, Option<i64>) {
     let ids: Vec<i64> = settled.iter().map(|h| h.row.id).collect();
-    let requesters = prompt_requesters(prompt, cli_own);
+    let requesters = prompt_requesters(session, prompt, cli_own);
     let mut event = None;
     let generation = generation_for(session, window);
     let written = queue(|s| {

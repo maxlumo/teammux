@@ -9,7 +9,7 @@ use super::registry::{DEFAULT_DSH_SYSTEM, DEFAULT_KIMI_SYSTEM, DEFAULT_OMP_SYSTE
 
 /// Bumped when the schema changes; `migrate` is the only place that knows the
 /// steps. Stored in SQLite's own `user_version` pragma.
-const SCHEMA_VERSION: i64 = 32;
+const SCHEMA_VERSION: i64 = 33;
 
 impl Store {
     /// Ensure the durable half of Board editability exists, then
@@ -726,6 +726,11 @@ impl Store {
                     rusqlite::params![mode, DEFAULT_DSH_SYSTEM],
                 )
                 .map_err(|e| format!("migrate to 32: {e}"))?;
+        }
+        if version < 33 {
+            // v33 (board #20): agent labels, the logical names beside the
+            // physical one. A new table; no existing row changes.
+            self.ensure_agent_names()?;
         }
         Ok(())
     }

@@ -84,6 +84,9 @@ tmm agent backends --models          each CLI's declared model ids, their kind a
 tmm agent interrupt|stop|restart|remove <name>
 tmm agent mode <name> queue|steer    kiro only: its Ctrl+S, this session (#271)
 tmm agent fork <name> [--as <new>]   a NEW agent from a running one's definition (#383)
+tmm agent rename <name> <label>      show and address it as <label> in this project; the window, home and
+                                     TMM_AGENT keep the physical name, old labels still reach it (#20);
+                                     `<name> --reset` shows the physical name again; its prompt follows at its next start
 tmm agent team <name> <team|->       move a running agent into a team of this project, or out (-), at runtime
                                      (#384; needs the server's agent_team cap; a definition member is refused;
                                      its prompt follows at its next start; a teammate the notice did not reach

@@ -35,6 +35,12 @@ pub fn name_char(c: char) -> bool {
 /// `mail a@bob` typed into bob's pane while `(@bob)` and `@bob，` reached
 /// nobody.
 pub fn mention_names(body: &str) -> Vec<String> {
+    mention_spans(body).into_iter().map(|(a, b)| body[a..b].to_string()).collect()
+}
+
+/// Where `mention_names` reads each address: the byte range of the NAME
+/// (after its `@`). The one parser; `Names::show_body` maps through it.
+fn mention_spans(body: &str) -> Vec<(usize, usize)> {
     let in_word = |c: char| c.is_ascii_alphanumeric() || matches!(c, '_' | '.' | '-');
     let mut out = Vec::new();
     for (i, _) in body.match_indices('@') {
@@ -50,7 +56,7 @@ pub fn mention_names(body: &str) -> Vec<String> {
             _ => false,
         };
         if end > 0 && !host {
-            out.push(rest[..end].to_string());
+            out.push((i + 1, i + 1 + end));
         }
     }
     out
@@ -243,9 +249,173 @@ pub fn pane_targets(reply_to: &[String]) -> impl Iterator<Item = &String> {
     reply_to.iter().filter(|t| *t != HUMAN)
 }
 
+
+/// One agent's names in a project (board #20, owner 2026-11-05 13:25: "文件
+/// 存储的是实际的路径，在前端页面展示以及聊天会话里的是逻辑上的名字"): its
+/// PHYSICAL name (`agent`: the window, home, `TMM_AGENT`, every store key,
+/// never changed), its current `label` (what people read and type) and its
+/// previous labels (`aliases`), which stay reserved and keep resolving.
+#[derive(Debug, Clone, Default, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+pub struct Label {
+    pub agent: String,
+    pub label: String,
+    pub aliases: Vec<String>,
+}
+
+/// A project's agent names: the ONE resolution (`resolve`, any name an agent
+/// has or had to its physical name, at every addressing door) and the ONE
+/// display (`shown`/`show_body`, any of those names to the current label,
+/// when a stored row is READ; stored rows are never rewritten). A LEAF type,
+/// so the server and `tmm` map names by the same rule. An agent with no row
+/// is its own name.
+#[derive(Debug, Clone, Default)]
+pub struct Names(Vec<Label>);
+
+impl Names {
+    pub fn new(labels: Vec<Label>) -> Names {
+        Names(labels)
+    }
+
+    /// The wire shape `[{agent, label, aliases}]`; a malformed row is skipped.
+    pub fn from_json(v: &serde_json::Value) -> Names {
+        Names(v.as_array().map(|rows| rows.iter().filter_map(|r| serde_json::from_value(r.clone()).ok()).collect()).unwrap_or_default())
+    }
+
+    pub fn labels(&self) -> &[Label] {
+        &self.0
+    }
+
+    fn of(&self, name: &str) -> Option<&Label> {
+        self.0.iter().find(|l| l.agent == name || l.label == name || l.aliases.iter().any(|a| a == name))
+    }
+
+    /// The physical name `name` addresses: itself unless it is an agent's
+    /// label or previous label.
+    pub fn resolve<'a>(&'a self, name: &'a str) -> &'a str {
+        self.of(name).map_or(name, |l| l.agent.as_str())
+    }
+
+    /// What is shown for `name`: its agent's current label, else itself.
+    pub fn shown<'a>(&'a self, name: &'a str) -> &'a str {
+        self.of(name).map_or(name, |l| l.label.as_str())
+    }
+
+    /// A stored body as it is shown now: every address `mention_names` reads,
+    /// and the subject of a `[tmm] <verb> <subject>` lifecycle line, mapped to
+    /// the current label. Nothing else changes.
+    pub fn show_body(&self, body: &str) -> String {
+        if self.0.is_empty() {
+            return body.to_string();
+        }
+        let mut spans = mention_spans(body);
+        if let Some(rest) = body.strip_prefix("[tmm] ") {
+            // The words of a lifecycle line that name agents: its subject
+            // (`[tmm] spawned <name> …`) and a command line's targets after
+            // its arrow (`[tmm] /compact → a, b (…)`).
+            let word = |start: usize| {
+                let end = body[start..].find(|c: char| c.is_whitespace() || c == ',').map_or(body.len(), |e| start + e);
+                (end > start && body[start..end].chars().all(name_char)).then_some((start, end))
+            };
+            if let Some(sp) = rest.find(' ') {
+                spans.extend(word("[tmm] ".len() + sp + 1));
+            }
+            if let Some(arrow) = body.find(" → ") {
+                let mut at = arrow + " → ".len();
+                while let Some((a, b)) = word(at) {
+                    spans.push((a, b));
+                    match body[b..].strip_prefix(", ") {
+                        Some(_) => at = b + 2,
+                        None => break,
+                    }
+                }
+            }
+            spans.sort();
+            spans.dedup();
+        }
+        let mut out = String::with_capacity(body.len());
+        let mut at = 0;
+        for (a, b) in spans {
+            out.push_str(&body[at..a]);
+            out.push_str(self.shown(&body[a..b]));
+            at = b;
+        }
+        out.push_str(&body[at..]);
+        out
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn squad() -> Names {
+        Names::new(vec![
+            Label { agent: "builder".into(), label: "bob".into(), aliases: vec!["bobby".into(), "bo".into()] },
+            Label { agent: "validator".into(), label: "validator".into(), aliases: vec!["val".into()] },
+        ])
+    }
+
+    /// Board #20: an agent's physical name, its current label and every
+    /// previous label resolve to the PHYSICAL name; anything else is itself.
+    #[test]
+    fn names_resolve_physical_current_and_previous_labels_to_the_physical_name() {
+        let n = squad();
+        for name in ["builder", "bob", "bobby", "bo"] {
+            assert_eq!(n.resolve(name), "builder", "{name}");
+        }
+        assert_eq!(n.resolve("val"), "validator", "a reset agent's previous label still resolves");
+        assert_eq!(n.resolve("validator"), "validator");
+        assert_eq!(n.resolve("reviewer"), "reviewer", "an agent with no label is its own name");
+        assert_eq!(n.resolve("all"), "all");
+        assert_eq!(n.resolve("Bob"), "Bob", "names are exact, like window names");
+    }
+
+    /// Board #20: what is SHOWN for an agent is its current label, whichever
+    /// of its names a stored row used.
+    #[test]
+    fn names_show_the_current_label_for_any_name() {
+        let n = squad();
+        for name in ["builder", "bob", "bobby"] {
+            assert_eq!(n.shown(name), "bob", "{name}");
+        }
+        assert_eq!(n.shown("val"), "validator");
+        assert_eq!(n.shown("reviewer"), "reviewer");
+        assert_eq!(n.shown("human"), "human");
+    }
+
+    /// Board #20: a stored body is mapped when READ, never rewritten: every
+    /// @address the parser reads, and a `[tmm]` lifecycle line's subject.
+    /// What the parser does not read as an address is left alone.
+    #[test]
+    fn a_stored_body_shows_current_labels_for_its_addresses_and_lifecycle_subject() {
+        let n = squad();
+        assert_eq!(n.show_body("@builder please hand @bobby's patch to @val, cc @reviewer @all"),
+            "@bob please hand @bob's patch to @validator, cc @reviewer @all");
+        assert_eq!(n.show_body("(@builder) 请@bo，看一下"), "(@bob) 请@bob，看一下");
+        assert_eq!(n.show_body("mail me@builder.dev or builder"), "mail me@builder.dev or builder", "not an address, not a lifecycle line");
+        assert_eq!(n.show_body("[tmm] spawned builder — team dev-squad"), "[tmm] spawned bob — team dev-squad");
+        assert_eq!(n.show_body("[tmm] restarted bobby"), "[tmm] restarted bob");
+        assert_eq!(n.show_body("[tmm] spawned reviewer"), "[tmm] spawned reviewer");
+        assert_eq!(n.show_body("[tmm] /compact → builder, val (not run for x)"), "[tmm] /compact → bob, validator (not run for x)", "a command line's targets after the arrow");
+        assert_eq!(n.show_body("[tmm] /model x → →"), "[tmm] /model x → →", "nothing that is not a name");
+        assert_eq!(n.show_body("@builder → builder"), "@bob → builder", "only a [tmm] line's arrow names targets");
+        assert_eq!(Names::default().show_body("@builder hi"), "@builder hi");
+    }
+
+    /// Board #20: the wire shape `[{agent, label, aliases}]` (hub_log, board,
+    /// hub_agents) reads back into the same Names; a malformed row is skipped.
+    #[test]
+    fn names_read_from_the_wire_shape() {
+        let v = serde_json::json!([
+            { "agent": "builder", "label": "bob", "aliases": ["bobby"] },
+            { "agent": "x" },
+            "junk",
+        ]);
+        let n = Names::from_json(&v);
+        assert_eq!((n.resolve("bobby"), n.shown("builder")), ("builder", "bob"));
+        assert_eq!(n.shown("x"), "x");
+        assert_eq!(serde_json::to_value(squad().labels()).unwrap()[0], serde_json::json!({ "agent": "builder", "label": "bob", "aliases": ["bobby", "bo"] }));
+    }
 
     /// Board #248: the ONE case table for both sides — `hub.test.ts` reads
     /// these rows out of this file and runs the client's `mentionTokens` over

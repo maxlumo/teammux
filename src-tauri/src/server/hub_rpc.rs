@@ -160,7 +160,7 @@ fn dispatch_hub(req: &Request, notifications: Option<&crate::agent_notifications
         // program, not something said to a person — and record-only, so the
         // mention scanner never sees it.
         "hub_command" => {
-            let agent = param(p, "agent")?;
+            let agent: &str = &live_agent(session, p)?;
             let text = param(p, "text")?.trim();
             if !text.starts_with('/') {
                 return Err(RpcError::InvalidParams("a command must start with '/'".into()));
@@ -312,7 +312,7 @@ fn dispatch_hub(req: &Request, notifications: Option<&crate::agent_notifications
             let record_only =
                 is_status || p.get("record_only").and_then(|v| v.as_bool()).unwrap_or(false);
             let msg = if record_only {
-                let recipients = crate::address::mention_names(&body);
+                let recipients = addressed(session, &body);
                 rooms::post_routed(&room, from, &body, &recipients).map_err(RpcError::Internal)?
             } else {
                 // DELIVERY: an idle agent sits at its prompt and reads
@@ -407,6 +407,11 @@ fn dispatch_hub(req: &Request, notifications: Option<&crate::agent_notifications
                     obj.insert("has_more".into(), serde_json::json!(more && !reached_cursor));
                 }
             }
+            // Board #20: the project's labels, so a reader shows each stored
+            // row by the current label (`Names::show_body`); rows unchanged.
+            if let Some(obj) = history.as_object_mut() {
+                obj.insert("labels".into(), serde_json::json!(crate::projects::names::names(session).labels()));
+            }
             Ok(history)
         }
 
@@ -445,14 +450,23 @@ fn dispatch_hub(req: &Request, notifications: Option<&crate::agent_notifications
             }
             let global = p.get("global").and_then(|v| v.as_bool()).unwrap_or(false);
             let all = p.get("all").and_then(|v| v.as_bool()).unwrap_or(false);
-            let from = p.get("from").and_then(|v| v.as_str());
+            // A sender named by label is its physical name in the rows (board
+            // #20); a global search spans projects, whose labels differ, so it
+            // reads names as they are stored.
+            let names = if global { crate::address::Names::default() } else { crate::projects::names::names(session) };
+            let from = p.get("from").and_then(|v| v.as_str()).map(|f| names.resolve(f).to_string());
+            let from = from.as_deref();
             let limit = p.get("limit").and_then(|v| v.as_i64()).unwrap_or(50).clamp(1, 500);
             let scope = if global { None } else { Some(room.as_str()) };
             if files {
                 let before_seq = p.get("before_seq").and_then(|v| v.as_i64());
                 return Ok(rooms::search_files(scope, &terms, all, from, before_seq, limit).map_err(RpcError::Internal)?);
             }
-            Ok(rooms::search_messages(scope, &terms, all, from, limit).map_err(RpcError::Internal)?)
+            let mut found = rooms::search_messages(scope, &terms, all, from, limit).map_err(RpcError::Internal)?;
+            if let Some(obj) = found.as_object_mut() {
+                obj.insert("labels".into(), serde_json::json!(names.labels()));
+            }
+            Ok(found)
         }
 
         // Deleting a message is TWO steps, because a transcript is a record and a
@@ -527,12 +541,15 @@ fn dispatch_hub(req: &Request, notifications: Option<&crate::agent_notifications
         // ---- the project task board (owner, 2026-08-29): the human writes
         // issues on the board page, agents read/update through `tmm board`.
         // Session-scoped like the chat room; note/move/save record WHO acted.
-        "hub_board_list" => Ok(crate::projects::board_list(session).map_err(RpcError::InvalidParams)?),
+        // Both carry the project's labels (board #20): an assignee, an
+        // opener and a note's author are stored as physical names and shown
+        // by the reader through `Names`.
+        "hub_board_list" => Ok(with_labels(session, crate::projects::board_list(session).map_err(RpcError::InvalidParams)?)),
         "hub_board_get" => {
             let Some(issue_id) = p.get("id").and_then(|v| v.as_i64()) else {
                 return Err(RpcError::InvalidParams("id required".into()));
             };
-            Ok(crate::projects::board_get(session, issue_id).map_err(RpcError::InvalidParams)?)
+            Ok(with_labels(session, crate::projects::board_get(session, issue_id).map_err(RpcError::InvalidParams)?))
         }
         "hub_board_save" => board_save(
             session,
@@ -669,7 +686,7 @@ fn dispatch_hub(req: &Request, notifications: Option<&crate::agent_notifications
         // drops raw C0 bytes sent to a pane in extended mode. Server-side so
         // the CLI and the UI share ONE implementation.
         "hub_agent_interrupt" => {
-            let agent = param(p, "agent")?;
+            let agent: &str = &live_agent(session, p)?;
             if crate::projects::managed_home(session, agent).is_none() {
                 return Err(RpcError::InvalidParams(format!("'{agent}' is not an agent this app started")));
             }
@@ -743,7 +760,7 @@ fn dispatch_hub(req: &Request, notifications: Option<&crate::agent_notifications
         // The moved agent, the new team's live members (#382's join notice)
         // and the old team's live members are told in their panes.
         "hub_agent_set_team" => {
-            let agent = param(p, "agent")?;
+            let agent: &str = &live_agent(session, p)?;
             let team = p.get("team").and_then(|v| v.as_str()).map(str::trim)
                 .ok_or_else(|| RpcError::InvalidParams("missing required param: team (a team, or \"\" to leave)".into()))?;
             let Some(project) = crate::projects::project_for_session(session).map_err(RpcError::InvalidParams)? else {
@@ -771,8 +788,17 @@ fn dispatch_hub(req: &Request, notifications: Option<&crate::agent_notifications
             // (board #388; `tmm agent team` notes it on stderr).
             Ok(serde_json::json!({ "agent": agent, "team": if team.is_empty() { serde_json::Value::Null } else { serde_json::json!(team) }, "left": if left.is_empty() { serde_json::Value::Null } else { serde_json::json!(left) }, "changed": changed, "untold": told.untold, "unread": told.unread }))
         }
-        "hub_agent_input_mode" => {
+        // Board #20: set an agent's label (`label` null or absent = back to
+        // its physical name). Only the label changes: nothing is re-keyed,
+        // moved or restarted. Open clients hear `agent_renamed`.
+        "hub_agent_rename" => {
             let agent = param(p, "agent")?;
+            let label = p.get("label").and_then(|v| v.as_str());
+            let l = crate::projects::names::rename(session, agent, label).map_err(RpcError::InvalidParams)?;
+            Ok(serde_json::json!({ "agent": l.agent, "label": l.label, "aliases": l.aliases }))
+        }
+        "hub_agent_input_mode" => {
+            let agent: &str = &live_agent(session, p)?;
             let mode = param(p, "mode")?;
             if !matches!(mode, "queue" | "steer") {
                 return Err(RpcError::InvalidParams(format!("mode must be queue or steer, not '{mode}'")));
@@ -801,7 +827,7 @@ fn dispatch_hub(req: &Request, notifications: Option<&crate::agent_notifications
         // Eject an agent from the project: stop it, drop its slot, remove its
         // isolated home. Stop is the pause button, this is the delete button.
         "hub_agent_remove" => {
-            let agent = param(p, "agent")?;
+            let agent: &str = &live_agent(session, p)?;
             let v = crate::projects::agent_remove(session, agent).map_err(RpcError::InvalidParams)?;
             let _ = rooms::post(&room, agent, &format!("[tmm] removed {agent}"));
             Ok(v)
@@ -811,7 +837,7 @@ fn dispatch_hub(req: &Request, notifications: Option<&crate::agent_notifications
         // effective definition, a fresh home and a fresh conversation. The
         // source is only read. The room shows who it was forked from.
         "hub_agent_fork" => {
-            let agent = param(p, "agent")?;
+            let agent: &str = &live_agent(session, p)?;
             if crate::projects::managed_home(session, agent).is_none() {
                 return Err(RpcError::InvalidParams(format!("'{agent}' is not an agent this app started")));
             }
@@ -837,7 +863,7 @@ fn dispatch_hub(req: &Request, notifications: Option<&crate::agent_notifications
         }
 
         "hub_agent_stop" | "hub_agent_restart" => {
-            let agent = param(p, "agent")?;
+            let agent: &str = &live_agent(session, p)?;
             if crate::projects::managed_home(session, agent).is_none() {
                 return Err(RpcError::InvalidParams(format!("'{agent}' is not an agent this app started")));
             }
@@ -1374,8 +1400,27 @@ fn window_of_agent(session: &str, agent: &str) -> Option<usize> {
 #[cfg(not(any(target_os = "android", target_os = "ios")))]
 pub(super) async fn hub_push_loop(out_tx: tokio::sync::mpsc::UnboundedSender<super::Outbound>) {
     let mut rx = crate::projects::rooms::subscribe();
+    let mut renamed = crate::projects::names::subscribe();
     loop {
-        match rx.recv().await {
+        let msg = tokio::select! {
+            m = rx.recv() => m,
+            // Board #20: one `agent_renamed {session, agent, label, aliases}`
+            // per rename, so an open client re-labels without a poll.
+            r = renamed.recv() => {
+                match r {
+                    Ok(json) => {
+                        let frame = serde_json::json!({ "id": null, "method": "agent_renamed", "params": serde_json::from_str::<serde_json::Value>(&json).unwrap_or(serde_json::Value::Null) });
+                        if out_tx.send(super::Outbound::Encrypted(serde_json::to_string(&frame).unwrap())).is_err() {
+                            return;
+                        }
+                    }
+                    Err(tokio::sync::broadcast::error::RecvError::Lagged(_)) => {}
+                    Err(tokio::sync::broadcast::error::RecvError::Closed) => return,
+                }
+                continue;
+            }
+        };
+        match msg {
             Ok(msg_json) => {
                 let frame = serde_json::json!({
                     "id": null,
@@ -1463,9 +1508,11 @@ fn board_save(session: &str, room: &str, p: &serde_json::Value, hand: &HandOff) 
     // never re-read out of text later, so a name like "dev @all" cannot widen
     // into two addresses and "all" cannot broadcast. Nothing is saved or
     // posted for an assignee that is not one of those.
+    // A label or previous label is stored as the PHYSICAL agent (board #20).
+    let names = crate::projects::names::names(session);
     let assignee = match s("assignee") {
         None => None,
-        Some(raw) => Some(board_assignee(raw).map_err(RpcError::InvalidParams)?),
+        Some(raw) => Some(names.resolve(board_assignee(raw).map_err(RpcError::InvalidParams)?)),
     };
     // The board and the agents' live states are TWO AXES (an issue's
     // lifecycle vs a window's turn), joined at EVENTS, not merged: a
@@ -1816,7 +1863,7 @@ fn post_and_deliver(session: &str, room: &str, from: &str, body: &str, detached:
 fn post_and_deliver_found(session: &str, room: &str, from: &str, body: &str, detached: bool) -> Result<(serde_json::Value, Vec<String>), String> {
     use crate::projects::rooms;
 
-    let recipients = crate::address::mention_names(body);
+    let recipients = addressed(session, body);
     let mut msg = rooms::post_routed(room, from, body, &recipients)?;
     let seq = msg.get("seq").and_then(|v| v.as_i64());
     let id = msg.get("id").and_then(|v| v.as_str()).unwrap_or_default().to_string();
@@ -2007,7 +2054,17 @@ fn board_note_notify(
     notify: &serde_json::Value,
     io: &NoteIo,
 ) -> Result<serde_json::Value, RpcError> {
-    let asked = notify_param(notify).map_err(RpcError::InvalidParams)?;
+    // Each named recipient through the one resolution (board #20): a label
+    // or previous label is announced to, and checked as, the physical agent.
+    let names = crate::projects::names::names(session);
+    let asked: Vec<String> = notify_param(notify)
+        .map_err(RpcError::InvalidParams)?
+        .iter()
+        .map(|raw| {
+            let bare = raw.trim().trim_start_matches('@');
+            if names.resolve(bare) == bare { raw.clone() } else { names.resolve(bare).to_string() }
+        })
+        .collect();
     let issue = (io.read)(session, issue_id).map_err(RpcError::InvalidParams)?;
     let targets = notify_targets(&asked, author, io.all, io.managed).map_err(RpcError::InvalidParams)?;
     let line = notify_line(issue_id, body, &targets);
@@ -2286,9 +2343,9 @@ fn compact_context_body(body: &str) -> String {
     out
 }
 
-fn context_recipient_label(to: &[String]) -> String {
+fn context_recipient_label(to: &[String], names: &crate::address::Names) -> String {
     to.iter()
-        .map(|name| if name == "room" { "room".to_string() } else { format!("@{name}") })
+        .map(|name| if name == "room" { "room".to_string() } else { format!("@{}", names.shown(name)) })
         .collect::<Vec<_>>()
         .join(", ")
 }
@@ -2307,6 +2364,7 @@ fn team_context(
     history: &[RoutedChat],
     target: &str,
     history_clipped: bool,
+    names: &crate::address::Names,
 ) -> Option<String> {
     let after = history
         .iter()
@@ -2320,9 +2378,9 @@ fn team_context(
             format!(
                 "[{}] {} -> {}: {}",
                 context_stamp(message.ts),
-                message.from,
-                context_recipient_label(&message.to),
-                compact_context_body(&message.body)
+                names.shown(&message.from),
+                context_recipient_label(&message.to, names),
+                compact_context_body(&names.show_body(&message.body))
             )
         })
         .collect();
@@ -2358,6 +2416,29 @@ fn team_context(
     out.push_str(&kept.join("\n"));
     out.push_str("\n[/tmm team context]");
     Some(out)
+}
+
+/// An answer with the project's `labels` beside its rows (board #20).
+fn with_labels(session: &str, mut v: serde_json::Value) -> serde_json::Value {
+    if let Some(obj) = v.as_object_mut() {
+        obj.insert("labels".into(), serde_json::json!(crate::projects::names::names(session).labels()));
+    }
+    v
+}
+
+/// The LIVE agent a request names (board #20): its `agent` param through the
+/// one resolution, so a label or a previous label reaches the physical agent.
+/// `hub_spawn`'s `agent` is a registry definition and does not come here.
+fn live_agent(session: &str, p: &serde_json::Value) -> Result<String, RpcError> {
+    Ok(crate::projects::names::resolve(session, param(p, "agent")?))
+}
+
+/// The PHYSICAL agents a body addresses (board #20): `mention_names`, each
+/// through the one resolution. What is stored as `to` and what delivery
+/// matches against window names.
+fn addressed(session: &str, body: &str) -> Vec<String> {
+    let names = crate::projects::names::names(session);
+    crate::address::mention_names(body).iter().map(|m| names.resolve(m).to_string()).collect()
 }
 
 #[cfg(not(any(target_os = "android", target_os = "ios")))]
@@ -2401,7 +2482,8 @@ fn deliver_mentions_with(
 ) -> (Vec<String>, Vec<(String, &'static str)>) {
     use crate::projects::agents;
 
-    let mentions = crate::address::mention_names(body);
+    let names = crate::projects::names::names(session);
+    let mentions: Vec<String> = crate::address::mention_names(body).iter().map(|m| names.resolve(m).to_string()).collect();
     if mentions.is_empty() {
         return (Vec::new(), Vec::new());
     }
@@ -2487,8 +2569,10 @@ fn deliver_mentions_with(
         // only tells it `now`. Local wall time, minute precision; seconds would
         // be noise in a chat line.
         let context = crate::projects::team_of(ws.as_deref(), &p.window_name)
-            .and_then(|_| team_context(&history, &p.window_name, history_clipped));
-        let line = delivered_chat_line(from, body, context.as_deref());
+            .and_then(|_| team_context(&history, &p.window_name, history_clipped, &names));
+        // What is TYPED shows current labels (board #20): the sender and the
+        // body's addresses. The stored row keeps what was said.
+        let line = delivered_chat_line(names.shown(from), &names.show_body(body), context.as_deref());
         // The one delivery path (board #257): typed now, or — for a busy
         // queue-mode agent — held and typed combined at its turn's end. The
         // context is computed HERE, at the line's own moment, so held lines'
@@ -2591,7 +2675,7 @@ pub(super) fn fire_wake(id: i64) {
         .unwrap_or_else(|| w.session.clone());
     let room = project_room(&session);
     let body = crate::projects::wakes::fired_body(w, crate::projects::now() as i64);
-    let recipients = crate::address::mention_names(&body);
+    let recipients = addressed(&session, &body);
     let Ok(msg) = crate::projects::rooms::post_routed(&room, &w.sender, &body, &recipients) else { return };
     let seq = msg.get("seq").and_then(|v| v.as_i64());
     let id = msg.get("id").and_then(|v| v.as_str()).unwrap_or_default();
@@ -2607,6 +2691,7 @@ pub(super) fn fire_wake(id: i64) {
 /// <workspace>/.tmm/agents/<window_name>/ exists iff spawn materialized it.
 #[cfg(not(any(target_os = "android", target_os = "ios")))]
 fn agent_states(session: &str) -> serde_json::Value {
+    let names = crate::projects::names::names(session);
     use crate::projects::{agents, telemetry};
 
     let ws = crate::projects::project_for_session(session)
@@ -2687,9 +2772,14 @@ fn agent_states(session: &str) -> serde_json::Value {
                 let pane = pane_ids.get(&p.window_name).map(String::as_str).unwrap_or("");
                 crate::projects::delivery::input_mode_seen(session, &p.window_name, pane, text)
             });
+            let l = names.labels().iter().find(|l| l.agent == p.window_name);
             serde_json::json!({
                 "window": p.window,
                 "name": p.window_name,
+                // Board #20: what people read and type for it, and the old
+                // labels that still reach it; `name` stays the physical name.
+                "label": names.shown(&p.window_name),
+                "aliases": l.map(|l| l.aliases.clone()).unwrap_or_default(),
                 "command": p.current_command,
                 "agent": agent.map(|a| a.backend),
                 "managed": managed,
@@ -2710,7 +2800,8 @@ fn agent_states(session: &str) -> serde_json::Value {
         })
         .collect();
     let stopped_teams = stopped_teams(ws.as_deref(), &live);
-    serde_json::json!({ "session": session, "agents": rows, "stopped_teams": stopped_teams })
+    // Every label in the project, stopped agents' included (board #20).
+    serde_json::json!({ "session": session, "agents": rows, "stopped_teams": stopped_teams, "labels": names.labels() })
 }
 
 /// The team of every agent home whose window is NOT live (board #258): a
@@ -4491,6 +4582,117 @@ mod tests {
         assert!(pane.contains("[tmm chat "), "in the stamped result shape: {pane:?}");
     }
 
+    /// Board #20: every addressing door takes an agent's physical name, its
+    /// current label and every previous label, and lands on the physical
+    /// agent: an @mention (stored `to`, delivery, no offline row), a
+    /// `/command`, a live-agent RPC, a board assignee. Stored rows keep the
+    /// physical name; what is TYPED shows the current label (the sender and
+    /// the body's addresses), and a reply edge read from that typed line
+    /// resolves back to the physical sender.
+    #[test]
+    fn every_addressing_door_resolves_old_current_and_physical_names() {
+        crate::projects::tests::use_test_store();
+        let tag = uuid::Uuid::new_v4().simple().to_string()[..8].to_string();
+        let session = format!("tmm-label-{tag}");
+        let ws = crate::config::test_scratch(&format!("tmm-label-ws-{tag}"));
+        let recipe = serde_json::json!({ "backend": "claude", "cmd": "claude", "team": "" }).to_string();
+        for name in ["dev", "lead"] {
+            let home = ws.join(".tmm/agents").join(name);
+            std::fs::create_dir_all(&home).unwrap();
+            std::fs::write(home.join("launch.json"), &recipe).unwrap();
+        }
+        let tmux = |args: &[&str]| std::process::Command::new("tmux").args(args).status().map(|s| s.success()).unwrap_or(false);
+        if !tmux(&["new-session", "-d", "-s", &session, "-n", "dev", "-c", &ws.to_string_lossy(), "cat"]) {
+            eprintln!("no tmux server — skipping");
+            let _ = std::fs::remove_dir_all(&ws);
+            return;
+        }
+        let _cleanup = KillOnDrop(session.clone(), ws.clone());
+        assert!(tmux(&["new-window", "-d", "-t", &session, "-n", "lead", "-c", &ws.to_string_lossy(), "cat"]));
+        crate::projects::adopt(&session, Some("label-doors-test")).expect("adopt project");
+        let call = |method: &str, params: serde_json::Value| {
+            let r = handle_hub_request(&req(method, params), None);
+            r.result.ok_or_else(|| r.error.map(|e| e.message).unwrap_or_default())
+        };
+        let renamed = call("hub_agent_rename", serde_json::json!({ "session": session, "agent": "dev", "label": "bob" })).unwrap();
+        assert_eq!(renamed, serde_json::json!({ "agent": "dev", "label": "bob", "aliases": [] }));
+        call("hub_agent_rename", serde_json::json!({ "session": session, "agent": "bob", "label": "robert" })).unwrap();
+        let pane = |w: &str| crate::tmux::capture_pane_plain(&format!("{session}:{w}"), Some(0)).unwrap_or_default();
+        let wait_for = |w: &str, needle: &str| {
+            for _ in 0..40 {
+                if pane(w).contains(needle) {
+                    return true;
+                }
+                std::thread::sleep(std::time::Duration::from_millis(100));
+            }
+            false
+        };
+
+        // @mention: old label, current label, physical name all reach dev.
+        for (n, name) in ["bob", "robert", "dev"].iter().enumerate() {
+            let body = format!("@{name} ping-{n}");
+            let msg = call("hub_post", serde_json::json!({ "session": session, "from": "lead", "body": body })).unwrap();
+            assert_eq!(msg["to"], serde_json::json!(["dev"]), "stored to is the physical name: {msg}");
+            assert_eq!(msg.get("offline"), None, "found, not offline: {msg}");
+            assert!(wait_for("dev", &format!("lead: @robert ping-{n}")), "typed with the current label: {}", pane("dev"));
+        }
+        let stored: Vec<String> = rooms::history_page(&project_room(&session), None, 20)["messages"].as_array().unwrap().iter()
+            .map(|m| m["body"].as_str().unwrap_or_default().to_string()).collect();
+        assert!(stored.contains(&"@bob ping-0".to_string()), "the stored body is never rewritten: {stored:?}");
+
+        // A line FROM the renamed agent is typed under its current label, and
+        // the reply edge read from that typed line is the physical sender.
+        call("hub_post", serde_json::json!({ "session": session, "from": "dev", "body": "@lead done" })).unwrap();
+        assert!(wait_for("lead", "robert: @lead done"), "{}", pane("lead"));
+        assert_eq!(crate::projects::telemetry::requesters_in(&session, "[tmm chat 2026-11-05 13:00] robert: @lead done"), vec!["dev".to_string()]);
+        assert_eq!(crate::projects::telemetry::requesters_in(&session, "[tmm chat 2026-11-05 13:00] bob: @lead x"), vec!["dev".to_string()], "an old label too");
+
+        // /command by label.
+        let cmd = call("hub_command", serde_json::json!({ "session": session, "agent": "bob", "text": "/compact" })).unwrap();
+        assert_eq!(cmd["sent"], serde_json::json!(["dev"]), "{cmd}");
+
+        // A live-agent RPC by label (interrupt only types Escape).
+        call("hub_agent_interrupt", serde_json::json!({ "session": session, "agent": "robert" })).expect("interrupt by label");
+        call("hub_agent_interrupt", serde_json::json!({ "session": session, "agent": "bob" })).expect("interrupt by old label");
+
+        // Board: the assignee is stored as the physical name.
+        let saved = call("hub_board_save", serde_json::json!({ "session": session, "title": "t", "assignee": "bob", "who": "lead" })).unwrap();
+        let issue = call("hub_board_get", serde_json::json!({ "session": session, "id": saved["id"] })).unwrap();
+        assert_eq!(issue["assignee"], "dev", "{issue}");
+
+        // --notify by an old label announces to the physical agent.
+        let noted = call("hub_board_note", serde_json::json!({ "session": session, "id": saved["id"], "who": "lead", "body": "n", "notify": ["@bob"] })).unwrap();
+        assert_eq!(noted["recipients"], serde_json::json!(["dev"]), "{noted}");
+
+        // A wake addressed by label is a wake for the physical agent (the
+        // card's next-wake hover and the stall nudge read this).
+        let w = crate::projects::store::Wake { id: 0, session: session.clone(), sender: "lead".into(), body: "@bob later".into(), due_at: 0, created_at: 0 };
+        assert!(crate::projects::wakes::addressed_to(&w, "dev") && crate::projects::wakes::addressed_to(&w, "robert"));
+
+        // Transitions. A line typed BEFORE a rename settles after it: the
+        // delivery row is keyed by the physical window, which a rename never
+        // touches. A turn open across a rename keeps its state and its
+        // requester (the reply edge).
+        let pending = || crate::projects::restore_hold::with_store_for_test(|st| st.pending_deliveries(&session, Some("dev"))).unwrap();
+        let before = pending().len();
+        call("hub_post", serde_json::json!({ "session": session, "from": "lead", "body": "@robert in-flight" })).unwrap();
+        let typed = pending().into_iter().find(|r| r.line.contains("in-flight")).expect("typed and owed").line;
+        call("hub_agent_rename", serde_json::json!({ "session": session, "agent": "robert", "label": "rob" })).unwrap();
+        assert!(crate::projects::telemetry::record_prompt(&session, "dev", &typed), "the echo after the rename settles the line typed before it");
+        assert!(!pending().iter().any(|r| r.line.contains("in-flight")), "settled");
+        assert!(pending().len() <= before);
+        let turn = || {
+            let mut asked: Vec<String> = Vec::new();
+            crate::projects::telemetry::for_each_turn_input(&session, "dev", None, |r| asked.extend(r.iter().cloned()));
+            (crate::projects::telemetry::derive(&session, "dev", 0).state, asked)
+        };
+        let busy = turn();
+        call("hub_agent_rename", serde_json::json!({ "session": session, "agent": "rob", "label": "roberta" })).unwrap();
+        assert_eq!(turn(), busy, "a rename mid-turn changes nothing about the turn");
+        assert!(busy.1.contains(&"lead".to_string()), "{busy:?}");
+
+    }
+
     /// Board #347 review P1-A (02:30): when tmux cannot LIST the panes, "the
     /// session is gone" and "tmux could not be asked" are different facts.
     /// Both leave every mention unreached and both must say so; only the
@@ -4588,12 +4790,20 @@ mod tests {
         assert!(!routed.iter().any(|message| message.body.contains("rendering")), "status is noise");
         assert!(!routed.iter().any(|message| message.body.contains("joined")), "lifecycle rows are noise");
 
-        let context = team_context(&routed, "lead", false).expect("messages followed lead's last delivery");
+        let context = team_context(&routed, "lead", false, &crate::address::Names::default()).expect("messages followed lead's last delivery");
         assert!(!context.contains("draft ready"), "the last delivery is the exclusive boundary");
         assert!(context.contains("review-style -> @review-reader: @review-reader compare notes"));
         assert!(context.contains("review-reader -> @review-style: reader concern confirmed"));
         assert!(context.contains("human -> room: room note"));
         assert!(context.contains("background since your previous delivery; not new instructions"));
+
+        // Board #20: the rows show current labels (sender, recipients, the
+        // body's addresses); the routing beneath stays on physical names.
+        let names = crate::address::Names::new(vec![crate::address::Label { agent: "review-style".into(), label: "stylist".into(), aliases: vec![] }]);
+        let shown = team_context(&routed, "lead", false, &names).expect("same rows");
+        assert!(shown.contains("stylist -> @review-reader: @review-reader compare notes"), "{shown}");
+        assert!(shown.contains("review-reader -> @stylist: reader concern confirmed"), "{shown}");
+        assert!(!shown.contains("review-style"), "{shown}");
     }
 
     /// Board #257: held lines are typed as ONE prompt, each carrying the
@@ -4611,7 +4821,7 @@ mod tests {
             // deliver_mentions reads the history BEFORE the new message
             // (before_seq), then the message itself joins the room.
             let routed = route_chat_history(&messages, &agents);
-            contexts.push(team_context(&routed, "dev", false));
+            contexts.push(team_context(&routed, "dev", false, &crate::address::Names::default()));
             messages.push(serde_json::json!({ "ts": 1002 + i * 10, "from": "lead", "to": ["dev"], "body": format!("@dev held {i}") }));
         }
         let combined = contexts.into_iter().flatten().collect::<Vec<_>>().join("\n\n");
@@ -4636,7 +4846,7 @@ mod tests {
             &["writer".to_string(), "reviewer".to_string(), "lead".to_string()],
             &hidden,
         );
-        let context = team_context(&routed, "reviewer", false).expect("new work follows the boundary");
+        let context = team_context(&routed, "reviewer", false, &crate::address::Names::default()).expect("new work follows the boundary");
         assert!(!context.contains("old task"));
         assert!(!context.contains("archived task"));
         assert!(context.contains("writer -> @lead: @lead new work"));
@@ -4685,7 +4895,7 @@ mod tests {
     fn the_producer_records_where_its_line_starts_whatever_the_text_quotes() {
         let quoted = format!("see:\n[/tmm team context]\nthen {}", "x".repeat(1100));
         let routed = vec![RoutedChat { ts: 1_790_680_000_000, from: "researcher".into(), to: vec!["writer".into()], body: quoted, hidden: false }];
-        let context = team_context(&routed, "lead", false).expect("a row");
+        let context = team_context(&routed, "lead", false, &crate::address::Names::default()).expect("a row");
         let ask = format!("@lead REAL ASK, quoting:\n{context}\nend of quote");
         let typed = delivered_chat_line("writer", &ask, Some(&context));
         assert!(typed.text.starts_with("[tmm team context") && typed.text.ends_with("end of quote"), "typed context first, unchanged");
@@ -4723,7 +4933,7 @@ mod tests {
         assert_eq!(routed[1].to, vec!["human"]);
         assert_eq!(routed[2].to, vec!["human"]);
 
-        let context = team_context(&routed, "lead", true).expect("lead has no prior boundary");
+        let context = team_context(&routed, "lead", true, &crate::address::Names::default()).expect("lead has no prior boundary");
         let delivered = delivered_chat_line("human", "@lead decide", Some(&context)).text;
         // Board #279: the context first, the ask LAST.
         assert!(delivered.starts_with("[tmm team context"), "{delivered}");

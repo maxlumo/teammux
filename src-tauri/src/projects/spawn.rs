@@ -355,7 +355,8 @@ fn materialize(
 
     // The software-wide instructions (`<config>/AGENTS.md`) lead every prompt,
     // on every backend — read now, so a spawn always carries the current text.
-    let system_prompt = build_prompt(def, window_name, session, brief, by, &super::global_prompt::read());
+    let _ = (brief, by);
+    let system_prompt = labelled_prompt(def, window_name, &super::names::names(session), session, &super::global_prompt::read());
     let skills = resolve_skill_refs(def, &home);
     // MCP is ONE door now (owner, 2026-08-28): registry defs seed the shared
     // workspace config that `tmm mcp` reads per call — never a backend's
@@ -945,6 +946,15 @@ fn may_start_in(workspace: &str, name: &str, who: &Starting) -> Result<bool, Str
     }
 }
 
+/// The refusal for a NEW physical name that is a label or a previous label
+/// in this workspace's project (board #20, orchestrator 13:35), or None
+/// when it is free of labels. A store that cannot be read cannot tell, and
+/// refuses: one name must never address two agents.
+fn label_taken(workspace: &str, name: &str) -> Result<Option<String>, String> {
+    Ok(super::with_store(|s| s.label_holder(workspace, name))?
+        .map(|agent| format!("the name '{name}' is a name of agent '{agent}' in this project — not started")))
+}
+
 /// The name for an ordinary NEW spawn (a hire, a team member, a join), reserved
 /// against every other new spawn (reviewer rounds 2–3). The decision is made INSIDE
 /// the allocation lock with a FRESH read of the windows (`live_now`), never from a
@@ -982,6 +992,12 @@ fn reserve_name(workspace: &str, live_now: &dyn Fn() -> Result<Vec<String>, Stri
         if !may_start_in(workspace, name, who)? {
             if explicit.is_some() {
                 return Err(format!("the name '{name}' is another agent's home — taken by it, not started"));
+            }
+            continue;
+        }
+        if let Some(refusal) = label_taken(workspace, name)? {
+            if explicit.is_some() {
+                return Err(refusal);
             }
             continue;
         }
@@ -1023,6 +1039,12 @@ fn claim_first(workspace: &str, live_now: &dyn Fn() -> Result<Vec<String>, Strin
         if live.iter().any(|w| w == name) || flight.contains(&key) {
             if explicit {
                 return Err(taken(name));
+            }
+            continue;
+        }
+        if let Some(refusal) = label_taken(workspace, name)? {
+            if explicit {
+                return Err(refusal);
             }
             continue;
         }
@@ -1961,6 +1983,22 @@ fn ensure_gitignore(workspace: &str) {
 /// Persona + the complete tmm collaboration flow. The brief is a real first
 /// user message, never duplicated into this replayed system prompt.
 fn build_prompt(def: &RegAgent, name: &str, session: &str, _brief: &str, _by: &str, global: &str) -> String {
+    build_prompt_as(def, name, name, session, global)
+}
+
+/// The prompt of the agent `window_name` as its project shows it (board #20):
+/// its label in the intro and the team block, its teammates' addresses as
+/// their labels (`Names::show_body` over the persona, the one display), and
+/// the physical name it keeps said once. Read at every start, so a rename
+/// reaches the prompt at the agent's next start.
+fn labelled_prompt(def: &RegAgent, window_name: &str, names: &crate::address::Names, session: &str, global: &str) -> String {
+    let shown = names.shown(window_name);
+    let mut d = def.clone();
+    d.system = super::teams::shown_self(&names.show_body(&def.system), window_name, shown);
+    build_prompt_as(&d, shown, window_name, session, global)
+}
+
+fn build_prompt_as(def: &RegAgent, name: &str, physical: &str, session: &str, global: &str) -> String {
     let mut s = String::new();
     // House rules before the role: the app-wide AGENTS.md (global_prompt.rs)
     // is the first block, then the agent's own persona.
@@ -1972,8 +2010,13 @@ fn build_prompt(def: &RegAgent, name: &str, session: &str, _brief: &str, _by: &s
         s += def.system.trim();
         s += "\n\n";
     }
+    let also = if name == physical {
+        " (a tmux session managed by Teammux)".to_string()
+    } else {
+        format!(" (its window and TMM_AGENT are \"{physical}\"; both names reach you), a tmux session managed by Teammux")
+    };
     s += &format!(
-        "You are agent \"{name}\" in project \"{session}\" (a tmux session managed by Teammux).\n\
+        "You are agent \"{name}\" in project \"{session}\"{also}.\n\
          \n\
          tmm collaboration flow:\n\
          - Messages arrive in your pane as `[tmm chat YYYY-MM-DD HH:MM] <sender>: <text>`. A message that arrives while you work either waits for the current turn to end or joins it, depending on your CLI and its input mode; it never cancels your turn.\n\
@@ -2146,6 +2189,27 @@ pub(crate) fn tmm_dir() -> Option<PathBuf> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// Board #20: an agent's own prompt, from its next start, calls it by its
+    /// label and names the physical name its window and TMM_AGENT keep; the
+    /// team block says the label too, and its teammates' addresses are their
+    /// labels. With no label the prompt is exactly what it was.
+    #[test]
+    fn a_labelled_agents_prompt_calls_it_and_its_teammates_by_their_labels() {
+        use crate::address::{Label, Names};
+        let mut d = def("kiro");
+        d.system = "Persona.\n\n## Your team: \"t\"\n\nYou are \"dev\". Your role: builds\nYour teammates (address one with `tmm send \"@name …\"`; a [path] marks a different sub-team):\n- @qa — tests".into();
+        let names = Names::new(vec![
+            Label { agent: "dev".into(), label: "bob".into(), aliases: vec![] },
+            Label { agent: "qa".into(), label: "tess".into(), aliases: vec!["q".into()] },
+        ]);
+        let p = labelled_prompt(&d, "dev", &names, "proj", "");
+        assert!(p.contains("You are agent \"bob\" in project \"proj\" (its window and TMM_AGENT are \"dev\"; both names reach you)"), "{p}");
+        assert!(p.contains("You are \"bob\". Your role: builds"), "{p}");
+        assert!(p.contains("- @tess — tests"), "{p}");
+        assert!(!p.contains("You are \"dev\"") && !p.contains("@qa"), "{p}");
+        assert_eq!(labelled_prompt(&d, "dev", &Names::default(), "proj", ""), build_prompt(&d, "dev", "proj", "", "", ""), "no label: unchanged");
+    }
 
     fn def(backend: &str) -> RegAgent {
         // Central-asset resolution in mcp_defs/resolve_skill_refs touches the
@@ -4367,6 +4431,38 @@ hooks = [ { type = "command", command = "/opt/guard.sh" } ]
     /// barrier, many rounds — never both get it. The fork's claim holds `dev-2`
     /// before any window exists; the hire is handed `dev-3`; an explicit `dev-2`
     /// (what a team spawn passes) is refused, not silently written over.
+    /// Board #20 (orchestrator 13:35): a NEW physical name may not be a label
+    /// or a previous label in the project, or one name would address two
+    /// agents. An explicit name (a team member's, a fork's `--as`) is refused
+    /// by name; an automatic one steps past it as past a live window.
+    #[test]
+    fn a_new_agent_never_takes_a_name_that_is_a_label_here() {
+        super::super::tests::use_test_store();
+        let ws = crate::config::test_scratch("tmm-label-spawn");
+        let ws_str = ws.to_string_lossy().to_string();
+        let id = format!("label-spawn-{}", std::process::id());
+        let p = crate::projects::store::Project {
+            id: id.clone(), name: id.clone(), path: ws_str.clone(), icon: None, session: id.clone(),
+            adopted: false, autostart: false, created_at: 1, last_up_at: None, last_seen_at: None, archived: false, room: String::new(),
+        };
+        super::super::with_store(|s| s.insert_project(&p)).unwrap();
+        super::super::with_store(|s| s.set_agent_label(&id, "dev", Some("bob"), 1)).unwrap();
+        super::super::with_store(|s| s.set_agent_label(&id, "dev", Some("robert"), 2)).unwrap();
+        let none = || Ok(Vec::new());
+        let who = Starting { agent_def: "bob", team: "", member: "" };
+        for taken in ["bob", "robert"] {
+            let e = reserve_name(&ws_str, &none, &who, Some(taken), taken).unwrap_err();
+            assert_eq!(e, format!("the name '{taken}' is a name of agent 'dev' in this project — not started"));
+            let e = claim_first(&ws_str, &none, &[taken.to_string()], true).unwrap_err();
+            assert_eq!(e, format!("the name '{taken}' is a name of agent 'dev' in this project — not started"));
+        }
+        let auto = reserve_name(&ws_str, &none, &who, None, "bob").unwrap();
+        assert_eq!(auto.name(), "bob-2", "an automatic name steps past a label");
+        drop(auto);
+        let auto = claim_first(&ws_str, &none, &["robert".to_string(), "robert-2".to_string()], false).unwrap();
+        assert_eq!(auto.name(), "robert-2");
+    }
+
     #[test]
     fn a_fork_and_an_ordinary_spawn_reaching_for_the_same_name_never_share_it() {
         let ws = crate::config::test_scratch("tmm-fork-shared");

@@ -98,7 +98,10 @@ pub fn try_pending(session: Option<&str>) -> Result<Vec<Wake>, String> {
 /// wake reaches every managed agent). The card's "next wake" and the stall
 /// nudge both ask this, so neither keeps a narrower second definition.
 pub fn addressed_to(w: &Wake, name: &str) -> bool {
-    crate::address::mention_names(&w.body).iter().any(|m| m == name || m == "all")
+    // Its addresses through the one resolution (board #20): a wake for a
+    // label or previous label is a wake for the physical agent.
+    let names = super::names::names(&w.session);
+    crate::address::mention_names(&w.body).iter().any(|m| m == "all" || names.resolve(m) == names.resolve(name))
 }
 
 /// The body a fired wake posts: the `[wake]` marker in the `[reply]` shape

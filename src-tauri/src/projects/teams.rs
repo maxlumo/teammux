@@ -313,6 +313,16 @@ pub fn member_role(flat: &[Flat], path: &str, member: &str) -> String {
         .unwrap_or_default()
 }
 
+/// A team block's own-name sentence (`You are "<window>".`, written by
+/// `effective_def` and `joined_block`) as the project shows the agent (board
+/// #20): its label. The one place that knows the sentence's shape maps it.
+pub fn shown_self(system: &str, window_name: &str, shown: &str) -> String {
+    if window_name == shown {
+        return system.to_string();
+    }
+    system.replace(&format!("You are \"{window_name}\"."), &format!("You are \"{shown}\"."))
+}
+
 pub fn joined_block(root: &str, team: Option<&RegTeam>, flat: &[Flat], window_name: &str, mates: &[(String, String, String)]) -> String {
     let mut block = format!("## Your team: \"{root}\"");
     if let Some(d) = team.and_then(description_of) {
