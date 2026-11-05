@@ -113,3 +113,35 @@ test('the gateway routes privately only when it lists exactly the private server
   assert.match(routeVerdict([MARKER, 'teammux'], [MARKER])!, /teammux/u, 'a session the private server lacks');
   assert.match(routeVerdict([MARKER], [])!, /private tmux server has no scratch-env-marker/u, 'the marker must really be on the private server');
 });
+
+// Board #30: on macOS there is no /proc. `ps -E -ww -o command=` prints the
+// argv line, one space, then the environment space-joined; `ps -ww -o
+// command=` prints the argv line alone (both captured on clawdbjs, macOS
+// 27.0.1, from `env -i PATH=/usr/bin:/bin TMUX_TMPDIR="/tmp/a b" FOO=1 node -e
+// … x=y "two words"`). A platform binary (/bin/sleep) shows no environment.
+const MAC_ARGV = '/opt/homebrew/bin/node -e setTimeout(()=>{},20000) x=y two words';
+const MAC_WITH_ENV = `${MAC_ARGV} PATH=/usr/bin:/bin TMUX_TMPDIR=/tmp/a b FOO=1`;
+
+test('the macOS ps -E line yields exactly the environment: the argv copy is cut, a spaced value is kept (#30)', async () => {
+  const { psEnviron } = await import('./scratch-env.mjs');
+  assert.deepEqual(psEnviron(MAC_ARGV, MAC_WITH_ENV), { environ: nul(['PATH=/usr/bin:/bin', 'TMUX_TMPDIR=/tmp/a b', 'FOO=1']) });
+});
+
+test('an environment ps -E cannot show or cannot tell apart is unreadable, never empty (#30)', async () => {
+  const { psEnviron } = await import('./scratch-env.mjs');
+  assert.match(psEnviron('/bin/sleep 5', '/bin/sleep 5').why, /no environment/, 'a platform binary hides its environment');
+  assert.match(psEnviron(MAC_ARGV, '/usr/bin/other PATH=/bin').why, /argv/, 'the argv changed between the two reads');
+  assert.match(psEnviron(MAC_ARGV, `${MAC_ARGV} TMUX_TMPDIR=/a TMUX_TMPDIR=/b`).why, /TMUX_TMPDIR.*twice/, 'a name seen twice is ambiguous');
+});
+
+test('check reads the environment per platform and fails with the reason when it cannot (#30)', async () => {
+  const { environOf } = await import('./scratch-env.mjs');
+  const ps = (argv: string, withEnv: string) => (args: string[]) => ({ status: 0, stdout: `${args.includes('-E') ? withEnv : argv}\n` });
+  assert.deepEqual(environOf('42', { platform: 'darwin', run: ps(MAC_ARGV, MAC_WITH_ENV) }).environ, nul(['PATH=/usr/bin:/bin', 'TMUX_TMPDIR=/tmp/a b', 'FOO=1']));
+  assert.match(environOf('42', { platform: 'darwin', run: () => ({ status: 1, stdout: '' }) }).why, /pid 42/, 'ps finds no such process');
+  assert.match(environOf('42', { platform: 'darwin', run: () => ({ error: new Error('spawn ps ENOENT') }) }).why, /ENOENT/);
+  assert.match(environOf('42', { platform: 'freebsd' }).why, /freebsd/, 'an unknown platform is not a pass');
+  // Linux, for real: a pid that does not exist has no /proc/<pid>/environ.
+  assert.match(environOf('999999999', { platform: 'linux' }).why, /\/proc\/999999999\/environ/);
+  assert.equal(environOf(String(process.pid), { platform: 'linux' }).environ, readFileSync(`/proc/${process.pid}/environ`, 'utf8'));
+});

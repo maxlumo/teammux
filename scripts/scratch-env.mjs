@@ -16,7 +16,8 @@
 //       token) BEFORE the launch, starts <command> detached with the isolated
 //       env, writes <dir>/pid (stop it with: kill "$(cat <dir>/pid)").
 //   node scripts/scratch-env.mjs check <dir> [--gateway]
-//       exits 1, naming each route, unless the process in <dir>/pid has
+//       exits 1, naming each route (or why its environment is unreadable:
+//       /proc on Linux, ps -E on macOS, #30), unless the process in <dir>/pid has
 //       TMUX_TMPDIR and the XDG roots exactly under <dir> and kept no
 //       live-pointing name. --gateway also plants a marker session on the
 //       private tmux server and asks the gateway's own list_sessions: it must
@@ -40,7 +41,7 @@ const EXACT = ['TMUX', 'TMUX_PANE', 'TMUX_SOCKET', 'TOKEN'];
 /** The gateway's default port (src-tauri/src/config.rs): the LIVE gateway's. */
 export const LIVE_DEFAULT_PORT = 9899;
 
-/** What in a NUL-separated environment (/proc/<pid>/environ) routes the
+/** What in a NUL-separated environment (environOf) routes the
  * process anywhere but the scratch `dir` (#14 review P1-R1: a NAMED variable
  * proves nothing, its VALUE must be the private root): every live-pointing
  * name that survived, then TMUX_TMPDIR unless it is exactly `dir` (tmux treats
@@ -62,6 +63,57 @@ export function leaks(environ, dir) {
     out.push(`${name} is ${got === undefined ? 'unset' : `'${got}'`}${fallback}, not ${want[name]}`);
   }
   return out;
+}
+
+/** The environment in macOS `ps -E` output (board #30; there is no /proc).
+ * `argv` is `ps -ww -o command= -p <pid>`, `withEnv` the same with -E: the
+ * argv line, one space, then each NAME=value space-joined (measured on
+ * clawdbjs, macOS 27.0.1). The argv copy is cut by that exact prefix, so an
+ * argv word like `x=y` is never read as environment; a word that does not
+ * start a NAME= continues the previous value (a value with a space). What it
+ * cannot tell apart is unreadable, never empty (#26's lesson): no environment
+ * at all (a platform binary such as /bin/sleep hides it), an argv that
+ * changed between the two reads, or a name seen twice. Returns {environ}
+ * (NUL-separated, the /proc form) or {why}. */
+export function psEnviron(argv, withEnv) {
+  const line = argv.trim();
+  const full = withEnv.replace(/\n$/, '');
+  if (!full.startsWith(`${line} `) && full !== line) return { why: `the argv ps -E shows is not the argv ps shows ('${line}')` };
+  const rest = full.slice(line.length + 1);
+  if (!rest) return { why: 'ps -E shows no environment (a platform binary or a process that is not ours hides it)' };
+  const vars = [];
+  for (const word of rest.split(' ')) {
+    if (/^[A-Za-z_][A-Za-z0-9_]*=/.test(word)) vars.push(word);
+    else if (vars.length) vars[vars.length - 1] += ` ${word}`;
+    else return { why: `ps -E's environment does not start with NAME= ('${word}')` };
+  }
+  const names = vars.map((kv) => kv.slice(0, kv.indexOf('=')));
+  const twice = names.find((n, i) => names.indexOf(n) !== i);
+  if (twice) return { why: `${twice} appears twice in ps -E, which cannot tell a value's spaces from a new variable` };
+  return { environ: vars.map((kv) => `${kv}\0`).join('') };
+}
+
+/** The NUL-separated environment of `pid`, or why it cannot be read: the
+ * one platform switch of `check`. Linux reads /proc/<pid>/environ, macOS
+ * `ps -E` (psEnviron); anything else, or any failure, is {why}, never a pass. */
+export function environOf(pid, { platform = process.platform, run = (args) => spawnSync('ps', args, { encoding: 'utf8' }) } = {}) {
+  if (platform === 'linux') {
+    try { return { environ: readFileSync(`/proc/${pid}/environ`, 'utf8') }; } catch (e) { return { why: e.message }; }
+  }
+  if (platform === 'darwin') {
+    const read = (args) => {
+      const r = run([...args, '-ww', '-o', 'command=', '-p', pid]);
+      if (r.error) return { why: `ps: ${r.error.message}` };
+      if (r.status !== 0 || !r.stdout.trim()) return { why: `ps finds no process with pid ${pid}` };
+      return { out: r.stdout };
+    };
+    const a = read([]);
+    if (a.why) return a;
+    const e = read(['-E']);
+    if (e.why) return e;
+    return psEnviron(a.out, e.out);
+  }
+  return { why: `no way to read a process environment on ${platform}` };
 }
 
 /** Why `dir` cannot be a scratch root, read only (a check never changes
@@ -197,7 +249,12 @@ async function main(args) {
     }
     const pid = readFileSync(join(dir, 'pid'), 'utf8').trim();
     if (!/^\d+$/.test(pid)) throw new Error(`${join(dir, 'pid')} holds no pid`);
-    const found = leaks(readFileSync(`/proc/${pid}/environ`, 'utf8'), dir);
+    const env = environOf(pid);
+    if (env.why) {
+      console.error(`[scratch-env] cannot read the environment of pid ${pid}, so it is not proven private: ${env.why}`);
+      return 1;
+    }
+    const found = leaks(env.environ, dir);
     if (found.length) {
       console.error(`[scratch-env] pid ${pid} is not routed only to ${dir}:\n  ${found.join('\n  ')}`);
       return 1;

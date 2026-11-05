@@ -690,6 +690,20 @@ env -u TMUX -u TMUX_PANE -u TMUX_SOCKET TMUX_TMPDIR="$D" tmux kill-server
   - the process in `<dir>/pid` has `TMUX_TMPDIR` exactly `<dir>`, and its three
     XDG roots exactly the ones under it;
   - it kept no `TMUX`, `TMUX_PANE`, `TMUX_SOCKET`, `TOKEN` or `TMM_*`.
+- **The environment is read per platform, and unreadable FAILS** (board
+  #30). Linux reads `/proc/<pid>/environ`. macOS has no `/proc`, so `check`
+  runs `ps -ww -o command=` and `ps -E -ww -o command=` and keeps what `-E`
+  adds after the argv line (measured on clawdbjs, macOS 27.0.1: argv, one
+  space, then `NAME=value` space-joined; a word not starting a `NAME=`
+  continues the previous value). An environment that cannot be read is a
+  failure with its reason, never "nothing found" (#26's lesson): no such
+  process, `ps` showing no environment (a platform binary such as
+  `/bin/sleep` hides it), an argv that changed between the two reads, a
+  name seen twice, or another platform. Before #30 the check died with
+  `ENOENT /proc/<pid>/environ` on macOS and the environment was inspected
+  by hand. Residual: a value that itself contains ` NAME=` reads as two
+  variables; if that NAME is one the check judges, it fails or is flagged
+  as seen twice.
 - **`--gateway` asks the gateway itself.** It plants a `scratch-env-marker`
   session on the private tmux server, then calls the gateway's own
   `list_sessions` with the scratch config's token. The gateway must list
@@ -707,7 +721,9 @@ env -u TMUX -u TMUX_PANE -u TMUX_SOCKET TMUX_TMPDIR="$D" tmux kill-server
   TMUX_SOCKET -u TMM_SOCKET TMUX_TMPDIR=<private> <command>`, but only the
   helper drops every `TMM_*` and `TOKEN`.
 
-Pinned by `scripts/scratch-env.test.ts`: the value checks on this pane's real
+Pinned by `scripts/scratch-env.test.ts`: the macOS `ps -E` parser on a line
+captured on clawdbjs (the argv copy cut, a spaced value kept) and each
+unreadable case failing; the value checks on this pane's real
 variables, with negative controls for an empty TMUX_TMPDIR, `/tmp`, a foreign
 config root and an unset root; the root's privacy; the config written before
 launch and port 9899 refused; the routing verdict for the incident's answer,
