@@ -8,14 +8,24 @@
 // Concurrent suites are normal here (several agents, one host), so no
 // harness may hold a fixed port. The rule lives in ONE helper.
 import assert from 'node:assert/strict';
+import { readdirSync, readFileSync } from 'node:fs';
 import { readFile } from 'node:fs/promises';
 import { fileURLToPath } from 'node:url';
 import test from 'node:test';
-import { execFileSync } from 'node:child_process';
 
 const root = fileURLToPath(new URL('../../../', import.meta.url));
-const listed = (pattern: string) => execFileSync('rg', ['-l', pattern, 'src', 'scripts', '--glob', '*.ts', '--glob', '*.mjs', '--glob', '*.js'], { cwd: root, encoding: 'utf8' })
-  .split('\n').filter((f) => f && !f.endsWith('harness.source.test.ts')).sort();
+// Board #10: the sources are read with Node's own file API, never a host
+// tool. The test used to shell out to ripgrep, which a host need not have
+// and the isolation runner rightly does not mount: under isolation it failed
+// with `spawnSync rg ENOENT`. Like rg, the walk skips hidden entries and
+// node_modules. Paths are repo-relative with `/`.
+const files = (...dirs: string[]): string[] => dirs.flatMap((dir) => readdirSync(new URL(dir, `file://${root}`), { recursive: true, withFileTypes: true })
+  .filter((e) => e.isFile())
+  .map((e) => `${e.parentPath.slice(root.length)}/${e.name}`.replace(/^\/+/u, ''))
+  .filter((f) => !f.split('/').some((part) => part.startsWith('.') || part === 'node_modules')))
+  .sort();
+const listed = (pattern: RegExp) => files('src', 'scripts')
+  .filter((f) => /\.(?:ts|mjs|js)$/u.test(f) && !f.endsWith('harness.source.test.ts') && pattern.test(readFileSync(`${root}${f}`, 'utf8')));
 
 test('the ONE Vite SSR helper opens no socket: ws:false, hmr:false, no port', async () => {
   const ssr = await readFile(new URL('./ssr.ts', import.meta.url), 'utf8');
@@ -30,17 +40,15 @@ test('the render tier is ONE process: every *.render.ts suite is collected by re
   // — 44 s CPU for the tier, which a busy host stretched to 35–42 s per test
   // against a 60 s budget. The suites now run in one process behind one
   // warm server; the fixed cost is paid once, outside any test's timer.
-  const creators = listed('createServer\\(');
+  const creators = listed(/createServer\(/u);
   // The render tier's server is the helper's. The one other creator is not a render
   // process: scripts/vite-config.test.ts (board #393) runs the dev server's real file
   // watcher in middleware mode on a scratch root — no port, no socket, no component —
   // to prove a changed build-output .html is not reported (Vite turns it into a reload).
   assert.deepEqual(creators, ['scripts/vite-config.test.ts', 'src/lib/test/ssr.ts'], 'createServer( exists once for the render tier, in the helper (plus the watcher test)');
-  // rg exits 1 when nothing matches — which is the pass here.
-  let strays = '';
-  try { strays = execFileSync('rg', ['--files', 'src', 'scripts', '-g', '*.render.test.ts'], { cwd: root, encoding: 'utf8' }).trim(); } catch (e) { if ((e as { status?: number }).status !== 1) throw e; }
-  assert.equal(strays, '', 'no component owns a render PROCESS of its own — a *.render.test.ts is a stray');
-  const suites = execFileSync('rg', ['--files', 'src', '-g', '*.render.ts'], { cwd: root, encoding: 'utf8' }).split('\n').filter(Boolean).sort();
+  const strays = files('src', 'scripts').filter((f) => f.endsWith('.render.test.ts'));
+  assert.deepEqual(strays, [], 'no component owns a render PROCESS of its own — a *.render.test.ts is a stray');
+  const suites = files('src').filter((f) => f.endsWith('.render.ts'));
   assert.ok(suites.length >= 7, `render suites found: ${suites.length}`);
   const collector = await readFile(new URL('./render.test.ts', import.meta.url), 'utf8');
   for (const f of suites) {

@@ -534,6 +534,12 @@ or which cell owns overflow. These assertions do not execute handlers.
 - Prefer upgrading to a real unit test whenever the logic can move into
   an importable module — source regexes are a last resort, and each one
   should explain WHY the invariant matters.
+- A source test reads files with Node's own API (`readdirSync`,
+  `readFileSync`), never by spawning a host tool (`rg`, `grep`, `find`).
+  The project declares no such tool, and the isolation runner rightly does
+  not mount one: `harness.source.test.ts` shelled out to ripgrep and failed
+  under isolation with `spawnSync rg ENOENT` (board #10, 2026-11-05). `git`
+  is the exception, being the repository's own tool.
 
 `<Component>.render.ts` compiles the real component through Vite SSR and
 asserts its emitted markup (`Board.render.ts` was the first, as
