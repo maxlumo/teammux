@@ -300,7 +300,9 @@ not exist afterwards; pinned on a scratch root with the real config's plugins), 
     ```
   - `ubuntu` (board #16): the SDK is `/home/ubuntu/Android/Sdk` with one NDK,
     `ndk/28.2.13676358`, plus platform-tools 37.0.1, `platforms;android-36`
-    and `build-tools;36.0.0`, all from sdkmanager. `~/.zshrc` exports
+    and `build-tools;36.0.0` from sdkmanager. `build-tools;35.0.0` is there
+    too: gradle installed it itself during the first build (build log,
+    08:59:34 UTC), so the build uses it. `~/.zshrc` exports
     `ANDROID_HOME` and `NDK_HOME` from that directory, so a login shell needs
     no prefix. First build 2026-11-05, about 08:55 to 09:02 UTC (7 min, gradle
     8.14.3), at main `49882cd0` in a detached worktree with `command npm ci`
