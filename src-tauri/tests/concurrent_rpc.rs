@@ -712,7 +712,7 @@ async fn plain_token_auth_delivers_rpc_responses() {
 
 /// Before auth a peer has proven nothing, so its frame budget is small: a
 /// text frame over the pre-auth cap closes the connection instead of being
-/// parsed. (The 80 MB allowance is for an authenticated `fs_upload`.)
+/// parsed. (The 80 MB allowance is for an authenticated peer: download.rs.)
 #[tokio::test]
 async fn an_oversized_frame_before_auth_closes_the_connection() {
     let addr = spawn_server_once("preauth-cap-token").await;

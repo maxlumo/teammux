@@ -307,7 +307,6 @@ export function createWsApi(connection: Connection) {
    * download URL is fetched at once and dies in a minute. */
   const fsDownloadUrl = (path: string, opts: { stream?: boolean } = {}) =>
     call<{ url: string; name: string }>('fs_download_url', opts.stream ? { path, stream: true } : { path });
-  const fsUpload = (path: string, data: string) => call('fs_upload', { path, data }, 60000);
   const fsConvert = (path: string, format = 'html') => call('fs_convert', { path, format });
   const gitCmd = (subcmd: string, args: string[] = [], cwd?: string) => call<{ code: number; stdout: string; stderr: string }>('git', { subcmd, args, cwd });
 
@@ -683,7 +682,7 @@ export function createWsApi(connection: Connection) {
     scratchSession, scratchKill, scratchRelease, newSession, killSession, newWindow, killWindow, paneCommand,
     resizePane, setSocket, getBookmarks, saveBookmarks, getPrefs, setPref, fsCwd, fsList,
     fsStat, fsRead, fsWrite, fsMkdir, fsDelete, fsRename, fsDownload, fsDownloadUrl,
-    fsUpload, fsUploadBegin, fsUploadResume, fsUploadAbort, fsConvert, gitCmd, projectList, projectCreate, projectAdopt, projectUp,
+    fsUploadBegin, fsUploadResume, fsUploadAbort, fsConvert, gitCmd, projectList, projectCreate, projectAdopt, projectUp,
     projectDown, projectRename, projectArchive, projectDelete, projectAutostart, hubPost,
     hubCommand, hubLog, hubLogAround, hubSearch, hubFiles, hubMsgArchive, hubMsgRestore, hubMsgPurge, hubRooms,
     hubUnread, hubRead, systemStatus, hubArchive, hubAgents, boardList, boardCounts,
@@ -734,7 +733,7 @@ export const RPC_KIND = {
   fsCwd: 'read', fsList: 'read', fsStat: 'read', fsRead: 'read',
   fsWrite: 'write', fsMkdir: 'write', fsDelete: 'write', fsRename: 'write',
   fsDownload: 'read', fsDownloadUrl: 'read', fsDownloadHttp: 'read', fsPreviewBase: 'read',
-  fsUpload: 'write', fsUploadBegin: 'write', fsUploadResume: 'write', fsUploadAbort: 'write', fsConvert: 'read', gitCmd: 'write',
+  fsUploadBegin: 'write', fsUploadResume: 'write', fsUploadAbort: 'write', fsConvert: 'read', gitCmd: 'write',
   projectList: 'read', projectCreate: 'write', projectAdopt: 'write', projectUp: 'write',
   projectDown: 'write', projectRename: 'write', projectArchive: 'write', projectDelete: 'write',
   projectAutostart: 'write',

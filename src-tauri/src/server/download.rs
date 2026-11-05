@@ -71,10 +71,12 @@ fn verify_download(token: &str, stream: bool, path: &str, exp: u64, sig: &str) -
     mac.verify_slice(&sig_bytes).is_ok()
 }
 
-// WebSocket frame / message limits. A legitimate `fs_upload` can carry a
-// file up to fs::MAX_READ_SIZE (50 MB) inside a base64 string (~67 MB text),
-// plus JSON envelope + encryption overhead. 80 MB accommodates that with
-// margin; anything bigger is almost certainly malformed or abusive.
+// WebSocket frame / message limits. The 80 MB allowance was sized for the
+// base64 `fs_upload` RPC (a file up to fs::MAX_READ_SIZE, 50 MB, as ~67 MB of
+// text plus envelope and encryption). Board #25 removed it: uploads go over
+// HTTP (board #23), so no client message needs this much any more; the
+// allowance stays until it is re-measured (a follow-up noted on #25).
+// Anything bigger is almost certainly malformed or abusive.
 // tokio-tungstenite's default (64 MB) is too small for a max-size upload,
 // and without an explicit cap an attacker could force per-connection buffer
 // growth up to that limit on every frame.

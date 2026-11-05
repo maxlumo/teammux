@@ -97,8 +97,8 @@ reference to a session, pane, room, issue or project carries its `ServerId`
   — a ping every 1 s, no pong for 2 s, 1 s to log in — a client that logs in
   and never reads ends on `our ping deadline (no pong)`, one that never logs
   in on `our auth deadline`; a build that ships keeps 15 s, 45 s and 10 s).
-- RPC timeout is 6 s by default; long-running methods (`fs_download`,
-  `fs_upload`) pass `60_000` at the call site.
+- RPC timeout is 6 s by default; a long-running method (`fs_download`)
+  passes `60_000` at the call site.
 - **3-consecutive-RPC-timeout disconnect is gated on `pending.size === 0`
   AND inbound silence ≥ 10 s.** Two separate "link is actually alive"
   signals suppress the breaker:

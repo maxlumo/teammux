@@ -94,8 +94,8 @@ const WIRE_DEFLATE_JSON = 0x01;
 const COMPRESS_MIN_BYTES = 256;
 
 const CONNECT_TIMEOUT_MS = 5000;
-// Default timeout for ordinary RPCs. Long-running methods (fs_download,
-// fs_upload) override with a much larger value at their call site.
+// Default timeout for ordinary RPCs. A long-running method (fs_download)
+// overrides it with a much larger value at its call site.
 // Short default → consecutive timeouts feel a dead link quickly AND the
 // UI flips to "Reconnecting" fast. See call() for the interplay with
 // `pending.size` gating.

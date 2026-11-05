@@ -438,8 +438,9 @@ pub fn download_file(path: &str) -> Result<(String, String), String> {
     Ok((name, b64))
 }
 
-/// Where an upload to `path` lands: THE one validator for every upload door
-/// (`fs_upload` and the HTTP channel's `fs_upload_begin`, board #23). It is
+/// Where an upload to `path` lands: THE one validator for the one upload
+/// door, the HTTP channel's `fs_upload_begin` (board #23; the base64
+/// `fs_upload` RPC was removed by board #25). It is
 /// `resolve_path`'s rule (`~` expanded, canonical) applied to the PARENT, so
 /// `..` resolves for a file that does not exist yet, and it refuses up front
 /// what a write would only fail on later: an empty, relative or NUL-carrying
@@ -462,15 +463,6 @@ pub(crate) fn upload_target(path: &str) -> Result<PathBuf, String> {
     let target = target.canonicalize().unwrap_or(target);
     if target.is_dir() { return Err(format!("a directory is in the way: {}", target.display())); }
     Ok(target)
-}
-
-pub fn upload_file(path: &str, data_b64: &str) -> Result<(), String> {
-    let p = upload_target(path)?;
-    use base64::Engine;
-    let bytes = base64::engine::general_purpose::STANDARD
-        .decode(data_b64)
-        .map_err(|e| format!("invalid base64: {}", e))?;
-    fs::write(&p, &bytes).map_err(|e| format!("upload error: {}", e))
 }
 
 #[cfg(test)]

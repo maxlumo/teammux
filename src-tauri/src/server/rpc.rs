@@ -527,13 +527,6 @@ fn dispatch(req: &Request, token: &str) -> Result<serde_json::Value, RpcError> {
 
         "fs_upload_abort" => super::upload::abort(param(p, "id")?).map_err(RpcError::InvalidParams),
 
-        "fs_upload" => {
-            let path = param(p, "path")?;
-            let data = param(p, "data")?;
-            rfs::upload_file(path, data).map_err(RpcError::Internal)?;
-            Ok(serde_json::json!({ "ok": true }))
-        }
-
         "git" => {
             let subcmd = param(p, "subcmd")?;
             let args: Vec<String> = p

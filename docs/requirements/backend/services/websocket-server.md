@@ -12,7 +12,7 @@ Rust-based WebSocket server providing JSON-RPC interface to tmux and filesystem 
 ## Authentication
 - Two modes: encrypted (AES-256-GCM with HKDF key derivation) and legacy plain token
 - Server sends `server_nonce` (+ `e2e: 2`, the newest handshake it speaks) on connect; client responds with `client_nonce` + HMAC proof (+ the `e2e` version it wants), or plain token
-- Before auth a connection gets 8 KB per text frame and 10 s to finish the handshake; over either, the server closes it. The 80 MB message allowance exists for authenticated `fs_upload`, not for a stranger on a 0.0.0.0 port.
+- Before auth a connection gets 8 KB per text frame and 10 s to finish the handshake; over either, the server closes it. The 80 MB message allowance is for an authenticated peer, not for a stranger on a 0.0.0.0 port (it was sized for the base64 `fs_upload`, removed by board #25; uploads go over HTTP).
 - E2E v2 derives three keys per session (proof, client→server, server→client) so the two directions never share a (key, nonce); a client that does not ask for v2 gets the single-key v1 handshake. Contract: `docs/requirements/api-contracts/websocket-rpc.md`
 - Encrypted mode: all subsequent messages are binary AES-256-GCM frames; decrypted payloads use a one-byte raw-JSON/raw-deflate framing tag
 - Token auto-generated on first run, persisted in `config.toml` in `~/.config/teammux/` (an install made before the rename keeps `~/.config/tmux-mobile/`) (mode 0600). Printed at startup only when stdout is a terminal; under a supervisor or redirect the line names the config file instead, so the secret never lands in a log

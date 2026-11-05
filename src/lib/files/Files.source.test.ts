@@ -29,6 +29,16 @@ test('upload feedback rides the same slot: one batch runner for both transports,
   assert.equal(source.match(/await runUploadBatch\(/gu)?.length, 2, 'picker/drop Files and native paths share ONE runner');
   // One mechanism (#23): Files uploads only through the HTTP channel.
   assert.doesNotMatch(source, /fsUpload\b/u, 'Files no longer calls fs_upload');
+});
+
+test('one upload mechanism: the base64 fs_upload RPC is gone from the client and the server (board #25)', async () => {
+  const read = (p: string) => readFile(new URL(p, import.meta.url), 'utf8');
+  assert.doesNotMatch(await read('../core/ws-api.ts'), /'fs_upload'/u, 'no client call');
+  assert.doesNotMatch(await read('../../../src-tauri/src/server/rpc.rs'), /"fs_upload" =>/u, 'no server arm');
+  assert.doesNotMatch(await read('../../../src-tauri/src/fs.rs'), /fn upload_file\b/u, 'no base64 writer');
+  const stager = await read('../hub/attachments.svelte.ts');
+  assert.match(stager, /uploadFile\(\{ dest, size: blob\.size, source: async \(start, end\) => blob\.slice\(start, end\), api \}\)/u,
+    'Hub attachments go through #23\'s one core, sliced, never read whole');
   // Uploaded = the last chunk committed: the upload resolves before the count.
   assert.match(source, /await uploadFile\(\{[\s\S]{0,400}?\}\);\s*outcome\.ok\.push\(item\.name\);/u);
   assert.match(source, /uploadLifetime\.clear\(\); \};/u, 'a context exit stops the line, like copy/download');
@@ -103,7 +113,7 @@ test('an OS drag onto the listing uploads into the CURRENT directory (board #22)
   // ONE destination rule for every upload entry point — and the DIR is a
   // PARAMETER bound at the gesture, never a live read: navigating away while
   // a batch uploads must not re-route the remaining files (review of
-  // 82da1c9). Both helpers snapshot cwd on entry, every fsUpload routes
+  // 82da1c9). Both helpers snapshot cwd on entry, every upload routes
   // through uploadDest(dir, …), and nothing inside the loops re-reads cwd.
   assert.match(source, /const uploadDest = \(dir, name\) => dir\.replace\(\/\\\/\$\/, ''\) \+ '\/' \+ name;/u,
     'one destination rule, dir as a parameter');

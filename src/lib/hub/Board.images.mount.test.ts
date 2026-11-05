@@ -1,3 +1,4 @@
+import { uploadChannel } from '../test/upload-channel.ts';
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import type { TestContext } from 'node:test';
@@ -32,6 +33,12 @@ async function mount(context: TestContext, opts: Opts = {}) {
   // The DEFAULT fixtures are copied per mount: a stateful fake writes into its issues, and one test's writes must not reach the next.
   const issues = opts.issues ?? [issueA, issueB].map((i) => ({ ...i }));
   let back!: () => boolean;
+  // Board #25: attachments go over #23's HTTP channel; begin waits on opts.upload.
+  const ch = uploadChannel((path) => {
+    if (path.endsWith('/.gitignore')) return;
+    calls.uploads.push(path);
+    return opts.upload?.(path);
+  });
   const app = await (await compiled).mount(context, {
     props: { session: 'fixture', visible: true, guardPage: 'board', onGoBack: (fn: typeof back) => back = fn },
     setup(window) {
@@ -42,6 +49,7 @@ async function mount(context: TestContext, opts: Opts = {}) {
       w.HTMLCanvasElement.prototype.toBlob = function (cb: (b: Blob) => void) { cb(new w.Blob(['img'], { type: 'image/webp' })); };
       w.URL.createObjectURL = () => 'blob:thumb';
       w.URL.revokeObjectURL = () => {};
+      w.fetch = ch.fetch;
       opts.setup?.(w);
     },
     modules: [{
@@ -66,11 +74,7 @@ async function mount(context: TestContext, opts: Opts = {}) {
       boardNote: async (session: string, id: number, body: string) => { calls.notes.push({ id, body, session }); if (opts.note) await opts.note(); return {}; },
       hubPost: async (session: string, body: string) => { calls.posts.push({ session, body }); return {}; },
       fsMkdir: async () => ({}),
-      fsUpload: async (path: string) => {
-        if (path.endsWith('/.gitignore')) return {};
-        calls.uploads.push(path);
-        return opts.upload ? opts.upload(path) : {};
-      },
+      ...ch.rpc,
       fsDownloadHttp: opts.download ?? (async (path: string) => ({ url: `https://dl.test/?p=${encodeURIComponent(path)}` })),
     }, {
       // The REAL registry and walk (this realm's leave-guards.ts) receive the

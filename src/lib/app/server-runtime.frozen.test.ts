@@ -26,7 +26,7 @@ test('every RPC wrapper is classified read or write, and nothing else is in the 
 
 test('the classification of what a blocked app must not send, and must still read', () => {
   // The writes a person makes from a mounted page, and the reads K keeps.
-  for (const name of ['sendKeys', 'pasteText', 'hubPost', 'hubRead', 'fsWrite', 'fsUpload', 'boardSave', 'registrySave',
+  for (const name of ['sendKeys', 'pasteText', 'hubPost', 'hubRead', 'fsWrite', 'fsUploadBegin', 'boardSave', 'registrySave',
     'globalPromptSet', 'projectRename', 'killSession', 'newWindow', 'gitCmd', 'setPref', 'saveBookmarks']) {
     assert.equal(RPC_KIND[name as keyof typeof RPC_KIND], 'write', name);
   }

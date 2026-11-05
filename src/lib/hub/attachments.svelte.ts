@@ -9,6 +9,7 @@ import type { WsApi } from '../core/ws.ts';
 import { t } from '../core/i18n.svelte.ts';
 import { imageId, uploadImagePath, uploadFilePath, pastedFiles, textIsThePaste } from './hub.ts';
 import { attachToken, attachmentBody } from './hub-composer.ts';
+import { uploadFile } from '../files/http-upload.ts';
 
 // ── Attach an image (owner, 2026-08-26: "我发送图片时可以有一个小的+按钮，
 // 上传到项目下…创建临时目录，随机图片 id，并且转 webp…限制一下原图"). The
@@ -17,11 +18,17 @@ import { attachToken, attachmentBody } from './hub-composer.ts';
 // 1568 serves both and a 12 MB phone photo becomes a ~100 KB webp before it
 // crosses the wire. Encoding prefers webp; WebKit cannot ENCODE webp, so the
 // blob's own type decides the extension (jpeg there). The upload lands in
-// <ws>/.tmm/uploads/ via the same fs_upload the file browser uses, and the
+// <ws>/.tmm/uploads/ through the ONE upload core the file browser uses
+// (`uploadFile`, #23's HTTP channel; board #25 retired `fs_upload`), and the
 // text gains a `![](path)` at save time — an image is a reference, never
 // bytes, and every surface renders it through ChatImage.
 export const IMG_EDGE = 1568;
-export const FILE_CAP = 32 * 1024 * 1024; // base64 over one RPC; beyond this, point the agent at the original path instead
+// The transport no longer limits an attachment (#23's channel streams any
+// size), so this is a CHAT-SIZE policy (board #25, orchestrator 18:37): an
+// attachment is a COPY into <ws>/.tmm/uploads that nothing prunes, and the
+// host's disk filled to 0 MB on 2026-11-05. A larger file belongs in Files,
+// or the agent is pointed at its path, which the failed chip says.
+export const FILE_CAP = 32 * 1024 * 1024;
 
 /** A staged attachment. A FAILED one is a chip too (review, 2026-09-03: an
  * oversized file or a failed upload only console.warned, so the user could
@@ -38,7 +45,7 @@ export type StagerHost = {
   /** The RPCs the uploads go through, the host's own server's (board #335
    * ②b-3). A module, not a component: it has no context to read, so its
    * host hands it the api it read at init. */
-  api: Pick<WsApi, 'fsMkdir' | 'fsUpload'>;
+  api: Pick<WsApi, 'fsMkdir' | 'fsUploadBegin' | 'fsUploadResume' | 'fsUploadAbort'>;
   /** The project directory uploads land under (none: nothing stages). */
   ws: () => string | null | undefined;
   getText: () => string;
@@ -48,7 +55,7 @@ export type StagerHost = {
   focus?: () => void;
 };
 
-async function encodeImage(file: File): Promise<{ b64: string; ext: string }> {
+async function encodeImage(file: File): Promise<{ blob: Blob; ext: string }> {
   const bmp = await createImageBitmap(file);
   const k = Math.min(1, IMG_EDGE / Math.max(bmp.width, bmp.height));
   const w = Math.max(1, Math.round(bmp.width * k)), h = Math.max(1, Math.round(bmp.height * k));
@@ -60,14 +67,7 @@ async function encodeImage(file: File): Promise<{ b64: string; ext: string }> {
   const out = blob?.type === 'image/webp' ? blob
     : await new Promise<Blob | null>((res) => canvas.toBlob(res, 'image/jpeg', 0.85));
   if (!out) throw new Error('encode failed');
-  return { b64: toB64(new Uint8Array(await out.arrayBuffer())), ext: out.type === 'image/webp' ? 'webp' : 'jpg' };
-}
-
-// Chunked, never one big spread (Key Patterns: base64 large data).
-function toB64(bytes: Uint8Array): string {
-  let bin = '';
-  for (let i = 0; i < bytes.length; i += 8192) bin += String.fromCharCode(...bytes.subarray(i, i + 8192));
-  return btoa(bin);
+  return { blob: out, ext: out.type === 'image/webp' ? 'webp' : 'jpg' };
 }
 
 const errText = (err: unknown) => String((err as Error)?.message ?? err ?? '');
@@ -83,7 +83,10 @@ export function attachPaste(e: ClipboardEvent, stage: (files: File[]) => unknown
 }
 
 export function createStager(host: StagerHost) {
-  const { fsMkdir, fsUpload } = host.api;
+  const { fsMkdir, fsUploadBegin, fsUploadResume, fsUploadAbort } = host.api;
+  // One file, sliced chunk by chunk, never read whole or base64'd.
+  const api = { begin: fsUploadBegin, resume: fsUploadResume, abort: fsUploadAbort };
+  const put = (dest: string, blob: Blob) => uploadFile({ dest, size: blob.size, source: async (start, end) => blob.slice(start, end), api });
   // The staged set's generation: bumped whenever it is invalidated (project
   // switch, explicit clear). An async stage job snapshots it at entry and
   // refuses to touch the staged set or the text once stale — without this,
@@ -155,7 +158,7 @@ export function createStager(host: StagerHost) {
         if (stale()) return;
         // Self-gitignored like the other .tmm runtime dirs — an attachment
         // must never show up in the project's `git status`.
-        await fsUpload(`${ws}/.tmm/uploads/.gitignore`, btoa('*\n'));
+        await put(`${ws}/.tmm/uploads/.gitignore`, new Blob(['*\n']));
         if (stale()) return;
         for (const f of files) {
           let item: Attachment;
@@ -164,10 +167,10 @@ export function createStager(host: StagerHost) {
           try {
             if (f.type.startsWith('image/')) {
               // Images are re-encoded (webp, capped long edge).
-              const { b64, ext } = await encodeImage(f);
+              const { blob, ext } = await encodeImage(f);
               if (stale()) return;
               const path = uploadImagePath(ws, imageId(), ext);
-              await fsUpload(path, b64);
+              await put(path, blob);
               if (stale()) return;
               item = { key: path, path, kind: 'image', name: f.name, n: attachSeq++, thumb: URL.createObjectURL(f) };
             } else {
@@ -177,10 +180,8 @@ export function createStager(host: StagerHost) {
                 pending = [...pending, failedAttachment(f, t('hubAttachTooLarge').replace('{mb}', String(FILE_CAP / 1024 / 1024)))];
                 continue;
               }
-              const b64 = toB64(new Uint8Array(await f.arrayBuffer()));
-              if (stale()) return;
               const path = uploadFilePath(ws, imageId(), f.name);
-              await fsUpload(path, b64);
+              await put(path, f);
               if (stale()) return;
               item = { key: path, path, kind: 'file', name: f.name, n: attachSeq++, thumb: '' };
             }

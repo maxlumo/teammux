@@ -655,7 +655,8 @@ test('a stage job dies with its room, and nothing sends while one is in flight (
   const code = stage.replace(/\/\/[^\n]*/g, ''); // comments SAY "await" too
   const awaits = [...code.matchAll(/await /g)].length;
   const checks = [...code.matchAll(/if \(stale\(\)\) return;/g)].length;
-  assert.ok(awaits >= 6, `stageFiles has its awaits (saw ${awaits})`);
+  // 5 since board #25: a plain file is sliced by the upload, no longer read whole (its arrayBuffer await and check went together).
+  assert.ok(awaits >= 5, `stageFiles has its awaits (saw ${awaits})`);
   assert.equal(checks, awaits, 'one staleness check per await — a new await without one is the race back');
   assert.ok(stage.lastIndexOf('if (stale()) return;') < stage.indexOf('pending = [...pending, item]'),
     'the commit mutates only after the final check');

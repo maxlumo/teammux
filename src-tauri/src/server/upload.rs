@@ -995,7 +995,7 @@ mod tests {
         std::fs::create_dir(d.join("sub")).unwrap();
         let v = begin(TOK, &format!("{}/sub/../t.bin", d.display()), 1).unwrap();
         assert_eq!(put(v["url"].as_str().unwrap(), 0, b"x").await.0, 201);
-        assert!(d.join("t.bin").exists(), "the traversal resolved to the canonical target, as fs_upload's");
+        assert!(d.join("t.bin").exists(), "the traversal resolved to the canonical target, by fs::upload_target");
         for bad in ["rel/x".to_string(), format!("{}/missing/x", d.display()), format!("{}/sub", d.display()), format!("{}/a\0b", d.display())] {
             assert_eq!(begin(TOK, &bad, 1).unwrap_err(), crate::fs::upload_target(&bad).unwrap_err(), "{bad:?}");
         }

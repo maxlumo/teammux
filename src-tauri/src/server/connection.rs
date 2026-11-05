@@ -705,7 +705,7 @@ where
                 }
 
                 // Post-auth dispatch. Each request is processed in its own
-                // task so a slow one (fs_download, fs_upload) doesn't block
+                // task so a slow one (fs_download) doesn't block
                 // the receive loop from reading / dispatching the next one.
                 // Responses are funneled through out_tx and the send task
                 // keeps their encrypt + ws.send in FIFO order.

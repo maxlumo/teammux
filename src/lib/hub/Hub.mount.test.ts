@@ -1,6 +1,7 @@
 import assert from 'node:assert/strict';
 import test from 'node:test';
 import type { TestContext } from 'node:test';
+import { uploadChannel } from '../test/upload-channel.ts';
 import { compileMount } from '../test/mount.ts';
 
 let compilation: ReturnType<typeof compileMount> | undefined;
@@ -590,24 +591,23 @@ test('a pending attachment blocks Enter until the real Hub can send the complete
   const fixture = await compiledHub();
   const started = performance.now();
   const { pushed, rpc } = roomFixture();
-  const uploads: Array<{ path: string; body: string }> = [];
   const posts: Array<{ session: string; body: string }> = [];
   let releaseUpload!: () => void;
   const upload = new Promise<void>((resolve) => { releaseUpload = resolve; });
+  // Board #25: an attachment goes over #23's HTTP channel; the .gitignore
+  // lands at once, the file waits on `upload`.
+  const ch = uploadChannel((path) => (path.endsWith('/.gitignore') ? undefined : upload));
   const app = await fixture.mount(context, {
     props: { visible: true },
+    setup(window) { (window as any).fetch = ch.fetch; },
     modules: [{
       ...rpc,
       fsMkdir: async () => ({}),
-      fsUpload: async (path: string, body: string) => {
-        if (path.endsWith('/.gitignore')) return {};
-        uploads.push({ path, body });
-        await upload;
-        return {};
-      },
+      ...ch.rpc,
       hubPost: async (session: string, body: string) => { posts.push({ session, body }); return {}; },
     }],
   });
+  const files = () => ch.begun.filter((p) => !p.endsWith('/.gitignore'));
   try {
     for (let i = 0; i < 10 && selectedCard(app.document) !== 'alice'; i++) {
       await app.flush();
@@ -623,9 +623,9 @@ test('a pending attachment blocks Enter until the real Hub can send the complete
     const file = new app.window.File(['payload'], 'report.txt', { type: 'text/plain' });
     Object.defineProperty(picker, 'files', { value: [file] });
     picker.dispatchEvent(new app.window.Event('change', { bubbles: true }));
-    for (let i = 0; i < 10 && !uploads.length; i++) await app.flush();
-    assert.equal(uploads.length, 1, 'the actual stageFiles pipeline reached the deferred upload');
-    assert.equal(uploads[0]!.body, 'cGF5bG9hZA==');
+    for (let i = 0; i < 10 && !files().length; i++) await app.flush();
+    assert.equal(files().length, 1, 'the actual stageFiles pipeline reached the deferred upload');
+    assert.deepEqual(ch.committed, [{ path: '/fixture/.tmm/uploads/.gitignore', data: 'Kgo=' }], 'the uploads dir ignores itself, through the same channel');
     assert.equal(send.disabled, true);
     const enter = async () => {
       input.dispatchEvent(new app.window.KeyboardEvent('keydown', {
@@ -639,9 +639,10 @@ test('a pending attachment blocks Enter until the real Hub can send the complete
     releaseUpload();
     for (let i = 0; i < 10 && send.disabled; i++) await app.flush();
     assert.equal(send.disabled, false);
+    assert.equal(ch.committed[1]!.data, 'cGF5bG9hZA==', 'the bytes as picked, over HTTP');
     assert.equal(input.value, 'Inspect [file:1]');
     await enter();
-    assert.deepEqual(posts, [{ session: 'fixture', body: `@alice Inspect ${uploads[0]!.path}` }]);
+    assert.deepEqual(posts, [{ session: 'fixture', body: `@alice Inspect ${files()[0]}` }]);
     assert.equal(input.value, '');
     assert.equal(app.document.querySelectorAll('.pend-chip').length, 0);
   } finally {
@@ -950,9 +951,13 @@ function deferred<T>() {
 async function composerFixture(context: TestContext, extra: Record<string, (...args: any[]) => unknown> = {}, mobile = false, storage: Record<string, string> = {}, overflowing = false) {
   const fixture = await compiledHub();
   const { rpc, renamed } = roomFixture();
+  // The HTTP upload channel's PUTs (board #25) go through the realm's fetch,
+  // not the ws module.
+  const { fetch: put, ...rpcExtra } = extra;
   const app = await fixture.mount(context, {
     props: { visible: true, mobile },
     setup(window) {
+      if (put) (window as any).fetch = put;
       window.Element.prototype.getAnimations = () => [];
       // A rendered message measures text; jsdom has no canvas (#340 tests render some).
       window.HTMLCanvasElement.prototype.getContext = () => null;
@@ -973,7 +978,7 @@ async function composerFixture(context: TestContext, extra: Record<string, (...a
       })) }),
       modelsList: async () => ({ models: ['test-model'] }),
       fsMkdir: async () => ({}),
-      ...extra,
+      ...rpcExtra,
     }],
   });
   const wait = async (predicate: () => boolean) => {
@@ -2231,13 +2236,17 @@ test('a peer Stop captures its room, deduplicates pending clicks and never selec
 test('Composer paste keeps Office words, stages files once and isolates overlapping generations', { timeout: 60000 }, async (context) => {
   const uploads: Array<{ path: string; job: ReturnType<typeof deferred<object>> }> = [];
   const posts: string[] = [];
+  // Board #25: each attachment's begin waits on its own job (a rejection is
+  // the server's refusal); the .gitignore lands at once.
+  const ch = uploadChannel((path) => {
+    if (path.endsWith('/.gitignore')) return;
+    const job = deferred<object>();
+    uploads.push({ path, job });
+    return job.promise;
+  });
   const app = await composerFixture(context, {
-    fsUpload: async (path: string) => {
-      if (path.endsWith('/.gitignore')) return {};
-      const job = deferred<object>();
-      uploads.push({ path, job });
-      return job.promise;
-    },
+    ...ch.rpc,
+    fetch: ch.fetch,
     hubPost: async (_session: string, body: string) => { posts.push(body); return {}; },
   });
   try {
@@ -5466,10 +5475,12 @@ test('a local attachment that opens while a chat image\'s signature is held cann
   const { rpc } = roomFixture();
   const shot = { id: 'm1', seq: 1, ts: 100, from: 'alice', body: 'look ![](/fixture/shot.png)' };
   const pending: Array<(value: { url: string; name: string }) => void> = [];
+  const ch = uploadChannel();
   const app = await fixture.mount(context, {
     props: { visible: true },
     setup(window) {
       const w = window as any;
+      w.fetch = ch.fetch;
       w.Element.prototype.getAnimations = () => [];
       w.createImageBitmap = async () => ({ width: 10, height: 10, close() {} });
       w.HTMLCanvasElement.prototype.getContext = () => ({ drawImage() {}, measureText: () => ({ width: 8 }) });
@@ -5481,7 +5492,7 @@ test('a local attachment that opens while a chat image\'s signature is held cann
       ...rpc,
       hubLog: async () => ({ messages: [shot], has_more: false }),
       fsMkdir: async () => ({}),
-      fsUpload: async () => ({}),
+      ...ch.rpc,
       fsDownloadHttp: () => new Promise((done) => pending.push(done as never)),
     }],
   });
@@ -5502,6 +5513,59 @@ test('a local attachment that opens while a chat image\'s signature is held cann
     assert.equal(lb()?.getAttribute('src'), 'blob:thumb', 'A\u2019s late answer does not replace the later open');
     assert.equal(app.document.querySelector('.lb .lb-download'), null, 'and the local picture has no download');
   } finally { for (const done of pending) done({ url: 'https://dl.test/x', name: 'x' }); await app.close(); }
+});
+
+test('a pasted image uploads over HTTP, sends as a reference and shows in the feed (#25)', { timeout: 60000 }, async (context) => {
+  const fixture = await compiledHub();
+  const { rpc, pushed } = roomFixture();
+  const posts: string[] = [];
+  const ch = uploadChannel();
+  const app = await fixture.mount(context, {
+    props: { visible: true },
+    setup(window) {
+      const w = window as any;
+      w.fetch = ch.fetch;
+      w.Element.prototype.getAnimations = () => [];
+      w.createImageBitmap = async () => ({ width: 10, height: 10, close() {} });
+      w.HTMLCanvasElement.prototype.getContext = () => ({ drawImage() {}, measureText: () => ({ width: 8 }) });
+      w.HTMLCanvasElement.prototype.toBlob = function (cb: (b: Blob) => void) { cb(new w.Blob(['webp-bytes'], { type: 'image/webp' })); };
+      w.URL.createObjectURL = () => 'blob:thumb';
+      w.URL.revokeObjectURL = () => {};
+    },
+    modules: [{
+      ...rpc,
+      fsMkdir: async () => ({}),
+      ...ch.rpc,
+      hubPost: async (_s: string, body: string) => { posts.push(body); return {}; },
+      fsDownloadHttp: async (path: string) => ({ url: `https://dl.test/?p=${encodeURIComponent(path)}`, name: 'x.webp' }),
+    }],
+  });
+  const settle = async (n = 12) => { for (let i = 0; i < n; i++) await app.flush(); };
+  try {
+    await settle();
+    const input = app.document.querySelector<HTMLTextAreaElement>('.c-input')!;
+    const image = new app.window.File(['raw-png'], 'shot.png', { type: 'image/png' });
+    const event = new app.window.Event('paste', { bubbles: true, cancelable: true });
+    Object.defineProperty(event, 'clipboardData', { value: { files: [image], items: [], getData: () => '' } });
+    input.dispatchEvent(event);
+    for (let i = 0; i < 20 && !app.document.querySelector('.pend-thumb'); i++) await app.flush();
+    const shot = ch.committed.find((c) => c.path.endsWith('.webp'))!;
+    assert.match(shot.path, /^\/fixture\/\.tmm\/uploads\/.+\.webp$/u, 'the re-encoded image landed under uploads');
+    assert.equal(shot.data, Buffer.from('webp-bytes').toString('base64'), 'its bytes went over the HTTP channel');
+    assert.equal(input.value, '[img:1]');
+    app.document.querySelector<HTMLButtonElement>('.composer-actions > button:last-child')!.click();
+    await settle();
+    assert.equal(posts.length, 1);
+    assert.ok(posts[0]!.includes(`![](${shot.path})`), `sent as a reference, never bytes: ${posts[0]}`);
+    const message = app.window.JSON.parse(JSON.stringify({ id: 'sent', seq: 9, room: 'proj:fixture', from: 'human', ts: Date.now(), body: posts[0] }));
+    for (const listener of pushed) (listener as (m: unknown) => void)(message);
+    await settle();
+    // Your own message rests folded with an [Image] line (board #372); expanded, the picture.
+    assert.equal(app.document.querySelector('.feed .m-imgs')?.textContent, '[Image]');
+    app.document.querySelector<HTMLButtonElement>('.feed .m-unfold')!.click();
+    await settle();
+    assert.ok(app.document.querySelector('.feed .shots .ci-link'), 'the picture shows in the feed');
+  } finally { await app.close(); }
 });
 
 // Board #461: the turn rail's retirement through the Hub's REAL entries — a room
@@ -5671,6 +5735,7 @@ const lockAgents = [
 async function lockFixture(context: TestContext, extra: Record<string, (...args: any[]) => unknown> = {}, bobAtStart = true) {
   const posts: string[] = [], commands: string[] = [], restarts: string[] = [];
   let bobLive = bobAtStart;
+  const ch = uploadChannel();
   const app = await composerFixture(context, {
     hubAgents: async () => ({ agents: lockAgents.filter((a) => bobLive || a.name !== 'bob') }),
     // bob's slot keeps a stopped bob on the strip (a stopped identity keeps its filter, #241).
@@ -5681,7 +5746,8 @@ async function lockFixture(context: TestContext, extra: Record<string, (...args:
     hubPost: async (_s: string, body: string) => { posts.push(body); return {}; },
     hubCommand: async (_s: string, name: string, command: string) => { commands.push(`${name}:${command}`); return {}; },
     hubAgentRestart: async (_s: string, name: string) => { restarts.push(name); return {}; },
-    fsUpload: async () => ({}),
+    ...ch.rpc,
+    fetch: ch.fetch,
     ...extra,
   });
   const menu = async (name: string) => {
