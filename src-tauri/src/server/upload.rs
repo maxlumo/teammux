@@ -123,9 +123,18 @@ fn dev_ino(f: &std::fs::File) -> Option<(u64, u64)> {
     f.metadata().ok().map(|m| (m.dev(), m.ino()))
 }
 
+/// `received` is the part file's real length, read from the file at every
+/// PUT and resume (validator, round 1 P1: it was a counter that a failed
+/// write could run ahead of). Within a PUT it advances by what each
+/// positional write RETURNED, never by what was handed over.
 struct Progress {
     received: u64,
     last: Instant,
+}
+
+/// What the part file holds, from the file itself.
+fn on_disk(up: &Upload) -> Option<u64> {
+    up.file.metadata().ok().map(|m| m.len())
 }
 
 type Slot = Arc<Upload>;
@@ -275,7 +284,9 @@ pub(super) fn begin(token: &str, path: &str, size: u64) -> Result<serde_json::Va
     use std::os::unix::fs::PermissionsExt;
     let file = create_in(&dirf, &part_c).map_err(|e| format!("cannot create {}: {e}", part.display()))?;
     let new_mode = file.metadata().map(|m| m.permissions().mode() & 0o777).unwrap_or(0o644);
-    let mode = std::fs::metadata(&dest).map(|m| m.permissions().mode() & 0o7777).unwrap_or(new_mode);
+    // `& 0o777`: an overwrite by `fs::write` made the kernel drop S_ISUID and
+    // S_ISGID, so the committed file carries neither (validator, round 1 P2).
+    let mode = std::fs::metadata(&dest).map(|m| m.permissions().mode() & 0o777).unwrap_or(new_mode);
     let ino = dev_ino(&file).ok_or("cannot stat the part file")?;
     if size == 0 {
         // Nothing to send: the empty file commits now, by the same rename.
@@ -301,6 +312,7 @@ pub(super) fn resume(token: &str, id: &str) -> Result<serde_json::Value, String>
     expire_idle(Instant::now());
     let up = registry().lock().unwrap().get(id).cloned().ok_or_else(|| format!("no such upload: {id}"))?;
     let mut p = up.state.try_lock().map_err(|_| "upload busy: a chunk is still being written".to_string())?;
+    p.received = on_disk(&up).ok_or("cannot read the part file")?;
     p.last = Instant::now();
     Ok(serde_json::json!({ "url": url_for(token, id, &up), "received": p.received, "chunk": CHUNK_BYTES }))
 }
@@ -366,7 +378,7 @@ async fn serve<S>(mut stream: S, token: Arc<String>, stall: Duration)
 where
     S: tokio::io::AsyncRead + tokio::io::AsyncWrite + Unpin + Send,
 {
-    use tokio::io::{AsyncReadExt, AsyncSeekExt, AsyncWriteExt};
+    use tokio::io::{AsyncReadExt, AsyncWriteExt};
     let Ok((buf, end)) = super::dispatch::read_head(&mut stream).await else { return };
     let head = String::from_utf8_lossy(&buf[..end]).to_string();
     let mut body_start = buf[end..].to_vec();
@@ -400,7 +412,11 @@ where
             break 'v Err(refuse("400 Bad Request", None));
         };
         // One PUT at a time per upload: a second one is refused, uncounted.
-        let Ok(e) = up.state.try_lock() else { break 'v Err(refuse("409 Conflict", None)) };
+        let Ok(mut e) = up.state.try_lock() else { break 'v Err(refuse("409 Conflict", None)) };
+        match on_disk(&up) {
+            Some(n) => e.received = n,
+            None => break 'v Err(refuse("500 Internal Server Error", None)),
+        }
         if offset != e.received { break 'v Err(refuse("409 Conflict", Some(e.received))); }
         if len > MAX_PUT_BYTES || offset + len > up.size { break 'v Err(refuse("413 Content Too Large", Some(e.received))); }
         // The part's name must still be the file begin created; the bytes go
@@ -422,45 +438,50 @@ where
     };
     e.last = Instant::now();
 
-    let mut file = tokio::fs::File::from_std(file);
-    if file.seek(std::io::SeekFrom::Start(e.received)).await.is_err() {
-        return answer(&mut stream, "500 Internal Server Error", Some(e.received)).await;
-    }
-    // Bytes count as received only once written, so a body cut short keeps
-    // what arrived and the client resumes from there.
+    // Bytes count as received only once a positional write at their offset
+    // has RETURNED them as written (validator, round 1 P1: the async file
+    // returned before writing, and its error surfaced later or never). A body
+    // cut short keeps what was written, and the client resumes from there.
+    let file = Arc::new(file);
     let mut left = len;
     body_start.truncate(left as usize);
     let mut chunk = body_start;
     let mut tmp = vec![0u8; 64 * 1024];
     loop {
         if !chunk.is_empty() {
-            if file.write_all(&chunk).await.is_err() {
-                let _ = file.flush().await;
+            let (f, at, piece) = (file.clone(), e.received, std::mem::take(&mut chunk));
+            let (written, failed) = tokio::task::spawn_blocking(move || write_at(&f, &piece, at)).await.unwrap_or((0, true));
+            e.received += written;
+            left -= written;
+            if failed {
+                e.last = Instant::now();
                 return answer(&mut stream, "500 Internal Server Error", Some(e.received)).await;
             }
-            e.received += chunk.len() as u64;
-            left -= chunk.len() as u64;
         }
         if left == 0 { break; }
         let want = (left as usize).min(tmp.len());
         match tokio::time::timeout(stall, stream.read(&mut tmp[..want])).await.unwrap_or(Ok(0)) {
-            Ok(0) | Err(_) => { let _ = file.flush().await; e.last = Instant::now(); return; }
+            Ok(0) | Err(_) => { e.last = Instant::now(); return; }
             Ok(n) => chunk = tmp[..n].to_vec(),
         }
     }
-    let _ = file.flush().await;
     e.last = Instant::now();
     if e.received < up.size { return answer(&mut stream, "204 No Content", Some(e.received)).await; }
 
     // Commit: the bytes in THIS file are exactly the declared size, then ONE
     // renameat in begin's directory puts them at the destination. Nothing is
     // written there before.
-    use std::os::unix::fs::PermissionsExt;
-    let ok = file.sync_all().await.is_ok()
-        && file.metadata().await.map(|m| m.len() == up.size).unwrap_or(false)
-        && file.set_permissions(std::fs::Permissions::from_mode(up.mode)).await.is_ok()
-        && names(&up.dir, &up.part_name, up.ino)
-        && rename_in(&up.dir, &up.part_name, &up.dest_name).is_ok();
+    // The fsync of a large file blocks: it runs off the async runtime.
+    let commit = up.clone();
+    let ok = tokio::task::spawn_blocking(move || {
+        use std::os::unix::fs::PermissionsExt;
+        let f = &commit.file;
+        f.sync_all().is_ok()
+            && f.metadata().map(|m| m.len() == commit.size).unwrap_or(false)
+            && f.set_permissions(std::fs::Permissions::from_mode(commit.mode)).is_ok()
+            && names(&commit.dir, &commit.part_name, commit.ino)
+            && rename_in(&commit.dir, &commit.part_name, &commit.dest_name).is_ok()
+    }).await.unwrap_or(false);
     drop(file);
     registry().lock().unwrap().remove(id);
     if ok {
@@ -469,6 +490,21 @@ where
         unlink_in(&up.dir, &up.part_name);
         answer(&mut stream, "500 Internal Server Error", None).await;
     }
+}
+
+/// Write `buf` at `at`; (bytes the kernel accepted, whether a write failed).
+fn write_at(f: &std::fs::File, buf: &[u8], at: u64) -> (u64, bool) {
+    use std::os::unix::fs::FileExt;
+    let mut done = 0usize;
+    while done < buf.len() {
+        match f.write_at(&buf[done..], at + done as u64) {
+            Ok(0) => return (done as u64, true),
+            Ok(n) => done += n,
+            Err(e) if e.kind() == std::io::ErrorKind::Interrupted => {}
+            Err(_) => return (done as u64, true),
+        }
+    }
+    (done as u64, false)
 }
 
 /// Read and discard `n` more body bytes, each read bounded by `stall`.
@@ -682,6 +718,78 @@ mod tests {
         assert!(begin(TOK, dest.to_str().unwrap(), 4).unwrap_err().contains("upload in progress"));
         drop(held);
         abort(&id).unwrap();
+    }
+
+    /// validator, round 1 P1: a write that fails was counted as received (the
+    /// async write returned before the bytes were written), and a resume then
+    /// committed a file with a zero-filled hole. A real failure is injected:
+    /// the test re-runs itself in a CHILD process under a 10 MiB file-size
+    /// limit (SIGXFSZ ignored, so a write past it fails with EFBIG), which
+    /// limits nothing else in the suite.
+    #[test]
+    fn a_write_that_fails_is_never_counted_and_a_resume_leaves_no_hole() {
+        const LIMIT: u64 = 10 * 1024 * 1024;
+        if std::env::var_os("TMM_UPLOAD_FSIZE_CHILD").is_none() {
+            let out = std::process::Command::new(std::env::current_exe().unwrap())
+                .args(["--exact", "server::upload::tests::a_write_that_fails_is_never_counted_and_a_resume_leaves_no_hole", "--test-threads=1", "--nocapture"])
+                .env("TMM_UPLOAD_FSIZE_CHILD", "1")
+                .output().unwrap();
+            let text = format!("{}{}", String::from_utf8_lossy(&out.stdout), String::from_utf8_lossy(&out.stderr));
+            assert!(out.status.success() && text.contains("1 passed"), "the child run: {text}");
+            return;
+        }
+        let set_limit = |soft: u64| {
+            let mut lim: libc::rlimit = unsafe { std::mem::zeroed() };
+            // SAFETY: valid out-pointer, then the same struct with a lowered or restored soft limit.
+            unsafe { libc::getrlimit(libc::RLIMIT_FSIZE, &mut lim) };
+            lim.rlim_cur = soft as libc::rlim_t;
+            assert_eq!(unsafe { libc::setrlimit(libc::RLIMIT_FSIZE, &lim) }, 0);
+        };
+        // SAFETY: ignoring a signal for this child process only.
+        unsafe { libc::signal(libc::SIGXFSZ, libc::SIG_IGN) };
+        tokio::runtime::Builder::new_current_thread().enable_all().build().unwrap().block_on(async {
+            let d = scratch("fsize");
+            let dest = d.join("f.bin");
+            let size = 20 * 1024 * 1024;
+            let src: Vec<u8> = (0..size).map(|i| (i % 251) as u8 + 1).collect(); // no zero byte, so a hole shows
+            let (id, url) = begun(&dest, size as u64);
+            let c = CHUNK_BYTES as usize;
+            assert_eq!(put(&url, 0, &src[..c]).await.0, 204);
+            assert_eq!(put(&url, c as u64, &src[c..2 * c]).await.0, 204);
+            set_limit(LIMIT);
+            let (status, offset) = put(&url, 2 * c as u64, &src[2 * c..3 * c]).await;
+            let on_disk = std::fs::metadata(d.join(&part_files(&d)[0])).unwrap().len();
+            assert_eq!(status, 500, "the failed write is reported");
+            assert_eq!(on_disk, LIMIT, "the kernel stopped the part at the limit");
+            assert_eq!(offset, Some(on_disk), "the answer counts only what is on disk");
+            let r = resume(TOK, &id).unwrap();
+            assert_eq!(r["received"], on_disk, "resume counts only what is on disk");
+            set_limit(libc::RLIM_INFINITY as u64); // space or quota comes back
+            let url = r["url"].as_str().unwrap().to_string();
+            let mut at = on_disk as usize;
+            loop {
+                let end = (at + c).min(size);
+                let (status, offset) = put(&url, at as u64, &src[at..end]).await;
+                at = offset.unwrap() as usize;
+                if status == 201 { break; }
+                assert_eq!(status, 204);
+            }
+            assert!(std::fs::read(&dest).unwrap() == src, "the committed file is the source, with no hole");
+        });
+    }
+
+    #[tokio::test]
+    async fn an_overwrite_drops_the_setuid_bit_as_a_plain_write_did() {
+        // validator, round 1 P2: fs::write's overwrite made the kernel drop
+        // S_ISUID/S_ISGID; the commit carried them over.
+        use std::os::unix::fs::PermissionsExt;
+        let d = scratch("suid");
+        let dest = d.join("tool");
+        std::fs::write(&dest, b"x").unwrap();
+        std::fs::set_permissions(&dest, std::fs::Permissions::from_mode(0o6755)).unwrap();
+        let (_id, url) = begun(&dest, 2);
+        assert_eq!(put(&url, 0, b"ab").await.0, 201);
+        assert_eq!(std::fs::metadata(&dest).unwrap().permissions().mode() & 0o7777, 0o755);
     }
 
     #[tokio::test]
