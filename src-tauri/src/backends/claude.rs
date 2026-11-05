@@ -539,6 +539,58 @@ pub(crate) fn is_user_prompt_submit(payload: &Value) -> bool {
         .is_some_and(|e| e.eq_ignore_ascii_case("userpromptsubmit"))
 }
 
+/// The prompt Claude Code submits ITSELF when a background task finishes
+/// (board #13, measured on 2.1.318, 2026-11-05): the whole prompt is one
+/// `<task-notification>` block, its children one per line in this order —
+/// `task-id`, `tool-use-id`, `output-file`, `status` (`completed`/`failed`),
+/// `summary` — and, for a background Agent, `note` then `result`. The hook
+/// payload carries no origin field, so the structure is the only evidence:
+/// anything else, including this XML pasted inside other text or quoted on a
+/// `[tmm chat]` line, is ordinary input. Returns the summary, unescaped,
+/// which is all the feed shows (never the output file's path).
+pub(crate) fn task_notification(prompt: &str) -> Option<String> {
+    const COMMAND: [&str; 5] = ["task-id", "tool-use-id", "output-file", "status", "summary"];
+    const AGENT_TAIL: [&str; 2] = ["note", "result"];
+    let body = prompt.trim().strip_prefix("<task-notification>\n")?.strip_suffix("\n</task-notification>")?;
+    let mut rest = body;
+    let mut values = Vec::with_capacity(COMMAND.len());
+    for tag in COMMAND {
+        values.push(xml_child(&mut rest, tag, false)?);
+    }
+    if !rest.is_empty() {
+        xml_child(&mut rest, AGENT_TAIL[0], false)?;
+        // Its answer is free text, but never a second block glued on.
+        if xml_child(&mut rest, AGENT_TAIL[1], true)?.contains("</task-notification>") {
+            return None;
+        }
+    }
+    if !rest.is_empty() || [values[0], values[3], values[4]].iter().any(|v| v.trim().is_empty()) {
+        return None;
+    }
+    Some(unescape_xml(values[4].trim()))
+}
+
+/// The next `<tag>…</tag>` child at the front of `rest`, then its newline.
+/// Claude escapes these values, so a child ends at its first close and holds
+/// no `<`; only the agent's `result`, its whole answer, may hold any text, so
+/// it is `last` and ends at the LAST close.
+fn xml_child<'a>(rest: &mut &'a str, tag: &str, last: bool) -> Option<&'a str> {
+    let inner = rest.strip_prefix(&format!("<{tag}>"))?;
+    let close = format!("</{tag}>");
+    let at = if last { inner.rfind(&close)? } else { inner.find(&close)? };
+    let after = &inner[at + close.len()..];
+    let value = &inner[..at];
+    if !last && value.contains('<') {
+        return None;
+    }
+    *rest = if last || after.is_empty() { after } else { after.strip_prefix('\n')? };
+    Some(value)
+}
+
+fn unescape_xml(text: &str) -> String {
+    text.replace("&lt;", "<").replace("&gt;", ">").replace("&quot;", "\"").replace("&apos;", "'").replace("&amp;", "&")
+}
+
 /// Claude Code's idle reminder (`Notification` / `idle_prompt`): fires ~60 s
 /// after a turn ended with nobody typing. Not an ask — the consumer drops it
 /// before normalize runs (board #75).
@@ -630,5 +682,48 @@ mod tests {
         // Nothing declared; a non-string value is not an id.
         assert!(declared_models(&serde_json::json!({})).is_empty());
         assert_eq!(carried_model(&serde_json::json!({ "env": { "ANTHROPIC_MODEL": 7 } })), None);
+    }
+
+    /// Board #13, measured on Claude Code 2.1.318 (scratch home, 2026-11-05):
+    /// the whole `UserPromptSubmit.prompt` of a background Bash command that
+    /// finished, and of one that failed.
+    const BG_DONE: &str = "<task-notification>\n<task-id>b4hc3uwf8</task-id>\n<tool-use-id>toolu_bdrk_01MYxHQnP3B8gZudJRYkWRNv</tool-use-id>\n<output-file>/tmp/claude-1000/-tmp-b4-13-measure-ws/1f055bf3-8ea9-4336-9521-5e580b650aee/tasks/b4hc3uwf8.output</output-file>\n<status>completed</status>\n<summary>Background command \"Sleep 4s then print ok-b4\" completed (exit code 0)</summary>\n</task-notification>";
+    const BG_FAILED: &str = "<task-notification>\n<task-id>baf797rux</task-id>\n<tool-use-id>toolu_bdrk_01Jhpe5uF3xZe4rVqefPN9Ze</tool-use-id>\n<output-file>/tmp/claude-1000/-tmp-b4-13-measure-ws/1f055bf3-8ea9-4336-9521-5e580b650aee/tasks/baf797rux.output</output-file>\n<status>failed</status>\n<summary>Background command \"Sleep 6s, print bad, exit with code 3\" failed with exit code 3</summary>\n</task-notification>";
+    /// The background-AGENT shape, from state.db (sound-factory, 2026-11-05,
+    /// the same 2.1.318): the five children, then `<note>` and `<result>`.
+    /// The result is the agent's whole answer and may span lines.
+    const AGENT_DONE: &str = "<task-notification>\n<task-id>acaef99e9f1b99278</task-id>\n<tool-use-id>toolu_bdrk_01KLzr7mAQotpWoRxRyThSbT</tool-use-id>\n<output-file>/tmp/claude-1000/-home-ubuntu-work-projects-sound-factory/cf3eb3d2/tasks/acaef99e9f1b99278.output</output-file>\n<status>completed</status>\n<summary>Agent \"Research open models for painted anime\" finished</summary>\n<note>A task-notification fires each time this agent stops with no live background children of its own.</note>\n<result>I wrote the report.\n\nIt covers about 40 candidates.</result>\n</task-notification>";
+
+    #[test]
+    fn a_finished_background_task_is_the_clis_own_prompt_and_shows_only_its_summary() {
+        assert_eq!(task_notification(BG_DONE).as_deref(), Some("Background command \"Sleep 4s then print ok-b4\" completed (exit code 0)"));
+        assert_eq!(task_notification(BG_FAILED).as_deref(), Some("Background command \"Sleep 6s, print bad, exit with code 3\" failed with exit code 3"));
+        assert_eq!(task_notification(AGENT_DONE).as_deref(), Some("Agent \"Research open models for painted anime\" finished"));
+        // Claude escapes the summary (state.db 2026-11-05: `&gt;`, `&amp;`): shown unescaped.
+        let escaped = BG_DONE.replace("\"Sleep 4s then print ok-b4\"", "\"(a &gt; /tmp/x 2&gt;&amp;1)\"");
+        assert_eq!(task_notification(&escaped).as_deref(), Some("Background command \"(a > /tmp/x 2>&1)\" completed (exit code 0)"));
+        // Surrounding whitespace is not content.
+        assert!(task_notification(&format!("\n{BG_DONE}\n")).is_some());
+    }
+
+    /// Sentinels: the same XML that is not the WHOLE prompt, or not the
+    /// measured children, is a person's (or a teammate's) input.
+    #[test]
+    fn task_notification_xml_inside_other_text_is_ordinary_input() {
+        for not_own in [
+            format!("look at this: {BG_DONE}"),
+            format!("{BG_DONE}\nwhat does it mean?"),
+            format!("[tmm chat 2026-11-05 08:30] lead: @dev {BG_DONE}"),
+            format!("{BG_DONE}\n{BG_FAILED}"),
+            format!("{AGENT_DONE}\n{AGENT_DONE}"),
+            BG_DONE.replace("<status>completed</status>\n", ""),
+            BG_DONE.replace("<task-id>b4hc3uwf8</task-id>", "<task-id></task-id>"),
+            BG_DONE.replace("<summary>", "<summary>x</summary>\n<extra>").replace("</summary>\n</task", "</extra>\n</task"),
+            AGENT_DONE.replace("<note>A task-notification fires each time this agent stops with no live background children of its own.</note>\n", ""),
+            "<task-notification></task-notification>".to_string(),
+            String::new(),
+        ] {
+            assert_eq!(task_notification(&not_own), None, "{not_own:?}");
+        }
     }
 }

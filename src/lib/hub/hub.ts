@@ -2207,8 +2207,13 @@ export function feedBlocks(
 
   const stream: (FeedBlock | ToolItem | TurnMark)[] = [...msgs, ...turns];
   const lastTool = new Map<string, string>();
-  for (const e of activity) {
-    if (consumed.has(e)) continue;
+  for (const raw of activity) {
+    if (consumed.has(raw)) continue;
+    // A prompt the CLI submitted by itself (board #13: Claude's
+    // background-task notification, stored `via: 'cli'` with its summary as
+    // the text) is a step of the agent's own work, like a sub-agent brief:
+    // nobody typed it, so it is never an input row.
+    const e: HubActivityEvent = raw.kind === 'prompt' && raw.via === 'cli' ? { ...raw, kind: 'tool', tool: 'Background' } : raw;
     // A line that never came back is about the message, not about telemetry:
     // it survives even the chat-only level.
     if (e.kind === 'warn') {

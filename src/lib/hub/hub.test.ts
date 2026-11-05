@@ -297,6 +297,32 @@ test("a codex sub-agent brief is a tool step, never an input row (board #169)", 
   assert.deepEqual(steps?.events.map((e) => toolEventParts(e)), [{ tool: 'Subagent', text: 'Please adversarial-review the in-progress #164 diff' }]);
 });
 
+test("Claude's own background-task prompt is a step in its lane, never an input row (board #13)", () => {
+  // The server records the <task-notification> prompt Claude Code submits
+  // when a background task finishes as {kind: 'prompt', via: 'cli', text:
+  // <summary>}: still the turn's opening edge, but nobody typed it.
+  const summary = 'Background command "npm test" completed (exit code 0)';
+  const lanes = (from: string) => (from === 'dev' ? 'w1' : undefined);
+  const activity = [
+    ev({ ts: 100, window: 'w1', kind: 'prompt', via: 'cli', text: summary }),
+    ev({ ts: 110, window: 'w1', kind: 'tool', tool: 'Read', text: '/tmp/out' }),
+  ];
+  const feed = [{ ts: 200, from: 'dev', body: 'all green' }];
+  assert.deepEqual(feedBlocks(feed, activity, 'chat').map((b) => b.type), ['msg'], 'chat level: not a message');
+  assert.deepEqual(feedBlocks(feed, activity, 'status').map((b) => b.type), ['msg'], 'status level: no input row');
+  const tools = feedBlocks([], activity, 'tools', lanes);
+  assert.deepEqual(tools.map((b) => b.type), ['steps'], 'one lane: the notice opens it and the work joins it');
+  const steps = tools[0]!;
+  assert.deepEqual(steps.type === 'steps' ? steps.events.map((e) => toolEventParts(e)) : null,
+    [{ tool: 'Background', text: summary }, { tool: 'Read', text: '/tmp/out' }]);
+  // Its own reply carries the run, notice included.
+  const replied = feedBlocks(feed, activity, 'tools', lanes);
+  assert.deepEqual(replied.map((b) => b.type), ['msg']);
+  assert.equal(replied[0]?.type === 'msg' && replied[0].steps?.events.length, 2);
+  // A person's prompt with the same words is still their input row.
+  assert.deepEqual(feedBlocks([], [ev({ ts: 1, kind: 'prompt', via: 'local', text: summary })], 'tools').map((b) => b.type), ['prompt']);
+});
+
 test('a finished turn is not a row — the reply already is', () => {
   const feed = [{ ts: 200, from: 'dev', body: 'done' }];
   const completed = [ev({ ts: 210, kind: 'notif', text: 'completed' })];

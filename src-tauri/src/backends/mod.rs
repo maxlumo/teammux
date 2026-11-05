@@ -527,6 +527,17 @@ impl Backend {
         }
     }
 
+    /// A prompt this CLI submitted by ITSELF, not typed by anyone (board #13):
+    /// `Some(text to show)` when it is one, the ONE definition every place
+    /// that classifies a prompt asks. Only Claude has one today: the
+    /// `<task-notification>` it submits when a background task finishes.
+    pub fn cli_own_prompt(self, prompt: &str) -> Option<String> {
+        match self {
+            Backend::Claude => claude::task_notification(prompt),
+            Backend::Kiro | Backend::Codex | Backend::Grok | Backend::Omp | Backend::Kimi | Backend::Dsh => None,
+        }
+    }
+
     /// True when a tool event is the CLI's own HOUSEKEEPING rather than the
     /// agent's work — kiro v3's post-turn `memory` auto-capture (board #227).
     /// The consumer records such a call only inside an open turn; outside one

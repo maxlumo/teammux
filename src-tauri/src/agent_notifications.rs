@@ -172,11 +172,23 @@ impl AgentNotificationHub {
     /// turn that ended — e.g. one an interrupt closed, which takes no edge —
     /// so it is dropped and the members are re-folded from the log (a
     /// tool-only turn has none yet).
-    fn start_turn(&self, session: &str, window: &str, prompt: &str) {
+    /// A prompt arrived: classified ONCE here, at the door. A prompt the CLI
+    /// submitted by itself (`Backend::cli_own_prompt`, board #13: Claude's
+    /// background-task notification) is a real turn edge — it opens or joins
+    /// the turn — but asks no one, and its row shows only what the backend
+    /// says it is. Everything else asks the senders its stamps name.
+    #[cfg(not(any(target_os = "android", target_os = "ios")))]
+    pub(crate) fn open_prompt(&self, session: &str, window: &str, backend: Option<crate::backends::Backend>, prompt: &str) -> crate::projects::telemetry::PromptOutcome {
+        let own = backend.and_then(|b| b.cli_own_prompt(prompt));
+        self.start_turn(session, window, if own.is_some() { Vec::new() } else { reply_targets(prompt) });
+        crate::projects::telemetry::record_prompt_outcome(session, window, prompt, own.as_deref())
+    }
+
+    fn start_turn(&self, session: &str, window: &str, asks: Vec<String>) {
         let open = turn_is_open(session, window);
         let epoch = turn_epoch(session, window);
         let mut targets = if open { self.current_members(session, window, epoch) } else { Vec::new() };
-        join_targets(&mut targets, reply_targets(prompt));
+        join_targets(&mut targets, asks);
         self.state.lock().unwrap().reply_targets.insert(window_key(session, window), (epoch, targets));
     }
 
@@ -195,7 +207,7 @@ impl AgentNotificationHub {
     pub(crate) fn scratch_with_turn(session: &str, window: &str, prompt: &str) -> (Self, PathBuf) {
         let root = crate::config::test_scratch("tmm-scratch-hub");
         let hub = Self::load_at(root.clone());
-        hub.start_turn(session, window, prompt);
+        hub.start_turn(session, window, reply_targets(prompt));
         (hub, root)
     }
 
@@ -552,8 +564,7 @@ impl AgentNotificationHub {
                     // A restored window's prompt may not reach the log under its
                     // generation: its turn's reply edge is put back as it was.
                     let edge_before = envelope.restore.as_ref().and_then(|_| self.state.lock().unwrap().reply_targets.get(&window_key(&session, &window)).cloned());
-                    self.start_turn(&session, &window, &prompt);
-                    let outcome = crate::projects::telemetry::record_prompt_outcome(&session, &window, &prompt);
+                    let outcome = self.open_prompt(&session, &window, crate::backends::Backend::parse(&envelope.backend), &prompt);
                     if crate::projects::telemetry::generation_write_failed() {
                         let mut state = self.state.lock().unwrap();
                         match edge_before {
@@ -2094,7 +2105,7 @@ mod tests {
         hub.set_room_poster(spy.clone());
         let (_, win, _) = crate::tmux::resolve_pane_id(&pane_id).expect("pane resolves");
         // Board #289: the human asks in the same turn (one combined prompt).
-        hub.start_turn(&session, &win, "[tmm chat 2026-09-08 08:00] lead: @dev fix it\n\n[tmm chat 2026-09-08 08:00] human: @dev and add a test");
+        hub.start_turn(&session, &win, reply_targets("[tmm chat 2026-09-08 08:00] lead: @dev fix it\n\n[tmm chat 2026-09-08 08:00] human: @dev and add a test"));
         std::fs::create_dir_all(root.join("inbox")).unwrap();
         // Exactly the payload measured from kiro-cli 2.16.2.
         std::fs::write(
@@ -4735,7 +4746,7 @@ mod tests {
         assert!(combined.find("validator:").unwrap() > 1024, "the second requester sits past the text cut");
         let root = crate::config::test_scratch("tmm-combined");
         let hub = AgentNotificationHub::load_at(root.clone());
-        hub.start_turn(&session, "v", &combined);
+        hub.start_turn(&session, "v", reply_targets(&combined));
         record_prompt(&session, "v", &combined);
         // validator 05:04 / orchestrator 05:05: the row carries its senders
         // the moment record_prompt returns — one INSERT, no second write.
@@ -4780,6 +4791,112 @@ mod tests {
         assert_eq!(after.len(), 1);
     }
 
+    /// Board #13 (Claude Code 2.1.318): a finished background task makes
+    /// Claude submit a `<task-notification>` prompt by itself. Through the
+    /// one prompt door: it starts a turn whose reply goes to no one (also
+    /// after a restart, from the log), joins an open turn without adding
+    /// anyone, and the same XML pasted by a person, or from a CLI that is not
+    /// Claude, is still that person's input.
+    #[test]
+    fn a_clis_own_prompt_opens_or_joins_the_turn_and_asks_no_one() {
+        use crate::backends::Backend;
+        use crate::projects::telemetry::PERSIST_IN_TEST;
+        crate::projects::tests::use_test_store();
+        PERSIST_IN_TEST.with(|p| p.set(true));
+        let bg = "<task-notification>\n<task-id>b4hc3uwf8</task-id>\n<tool-use-id>toolu_1</tool-use-id>\n<output-file>/tmp/claude-1000/x/tasks/b4hc3uwf8.output</output-file>\n<status>completed</status>\n<summary>Background command \"ls\" completed (exit code 0)</summary>\n</task-notification>";
+        let root = crate::config::test_scratch("tmm-cli-own");
+        let hub = AgentNotificationHub::load_at(root.clone());
+        let fresh = || format!("cli-own-{}", uuid::Uuid::new_v4());
+
+        // It STARTS a turn: the reply edge names no one, before and after a restart.
+        let s = fresh();
+        hub.open_prompt(&s, "dev", Some(Backend::Claude), bg);
+        assert!(hub.holds_edge(&s, "dev"), "it opened the turn's edge");
+        assert!(hub.take_reply_targets(&s, "dev").is_empty());
+        let s = fresh();
+        hub.open_prompt(&s, "dev", Some(Backend::Claude), bg);
+        crate::projects::telemetry::forget_process_state(&s);
+        assert!(AgentNotificationHub::load_at(root.clone()).take_reply_targets(&s, "dev").is_empty(), "the log names no one either");
+
+        // It JOINS an open turn: the turn keeps its requesters, and adds none.
+        let s = fresh();
+        hub.open_prompt(&s, "dev", Some(Backend::Claude), "[tmm chat 2026-11-05 08:30] lead: @dev run the suite");
+        hub.open_prompt(&s, "dev", Some(Backend::Claude), bg);
+        assert_eq!(hub.take_reply_targets(&s, "dev"), vec!["lead".to_string()]);
+
+        // Controls: a person pasting it, and a CLI that is not Claude.
+        for (backend, prompt) in [(Some(Backend::Claude), format!("what is this? {bg}")), (Some(Backend::Codex), bg.to_string()), (None, bg.to_string())] {
+            let s = fresh();
+            hub.open_prompt(&s, "dev", backend, &prompt);
+            assert_eq!(hub.take_reply_targets(&s, "dev"), vec!["human".to_string()], "{backend:?}");
+        }
+        PERSIST_IN_TEST.with(|p| p.set(false));
+        let _ = std::fs::remove_dir_all(root);
+    }
+
+    /// Board #13 end to end, through the hook inbox (the door reads the
+    /// envelope's backend): the measured 2.1.318 prompt for a finished
+    /// background command opens the managed claude's turn, its row is
+    /// `via: cli` with the summary only, the status runs and then rests, and
+    /// the Stop's reply is recorded in the room for no one.
+    #[test]
+    fn claude_background_task_notification_through_the_inbox_asks_no_one() {
+        crate::projects::tests::use_test_store();
+        let session = format!("tmm-bgtask-{}", std::process::id());
+        let ws = crate::config::test_scratch("tmm-bgtask-ws");
+        std::fs::create_dir_all(ws.join(".tmm/agents/cl")).unwrap();
+        std::fs::write(ws.join(".tmm/agents/cl/launch.json"), "{}").unwrap();
+        let created = std::process::Command::new("tmux")
+            .args(["new-session", "-d", "-s", &session, "-n", "cl", "-c", &ws.to_string_lossy(), "sleep 60"])
+            .status()
+            .map(|s| s.success())
+            .unwrap_or(false);
+        if !created {
+            eprintln!("no tmux server — skipping");
+            return;
+        }
+        let adopted = crate::projects::adopt(&session, Some("bgtask-test")).is_ok();
+        let pane_id = String::from_utf8(
+            std::process::Command::new("tmux").args(["display-message", "-p", "-t", &session, "#{pane_id}"]).output().unwrap().stdout,
+        )
+        .unwrap()
+        .trim()
+        .to_string();
+        struct Spy(std::sync::Mutex<Vec<(String, Vec<String>)>>);
+        impl RoomPoster for Spy {
+            fn post_final(&self, _session: &str, _agent: &str, body: &str, reply_to: &[String]) -> Result<(), String> {
+                self.0.lock().unwrap().push((body.into(), reply_to.to_vec()));
+                Ok(())
+            }
+        }
+        let spy = std::sync::Arc::new(Spy(std::sync::Mutex::new(Vec::new())));
+        let root = crate::config::test_scratch("tmm-bgtask-hub");
+        let hub = AgentNotificationHub::load_at(root.clone());
+        hub.set_room_poster(spy.clone());
+        std::fs::create_dir_all(root.join("inbox")).unwrap();
+        let drop = |name: &str, payload: Value| {
+            std::fs::write(root.join("inbox").join(name), serde_json::to_vec(&json!({"backend": "claude", "pane_id": pane_id, "payload": payload})).unwrap()).unwrap();
+            hub.consume_inbox();
+        };
+        let bg = "<task-notification>\n<task-id>b4hc3uwf8</task-id>\n<tool-use-id>toolu_bdrk_01MYxHQnP3B8gZudJRYkWRNv</tool-use-id>\n<output-file>/tmp/claude-1000/-tmp-ws/1f05/tasks/b4hc3uwf8.output</output-file>\n<status>completed</status>\n<summary>Background command \"Sleep 4s then print ok-b4\" completed (exit code 0)</summary>\n</task-notification>";
+        drop("1-prompt.json", json!({"hook_event_name": "UserPromptSubmit", "session_id": "1f05", "prompt": bg}));
+        if adopted {
+            let status = crate::projects::telemetry::derive(&session, "cl", 0).state;
+            let prompt = crate::projects::telemetry::recent_events(&session, 0).into_iter().rfind(|e| e.kind == "prompt").expect("the prompt is a turn fact");
+            assert_eq!((prompt.via.as_str(), prompt.text.as_str()), ("cli", "Background command \"Sleep 4s then print ok-b4\" completed (exit code 0)"));
+            assert!(!prompt.text.contains("/tmp/"), "the output file stays out of the feed");
+            assert_eq!(status, "running", "the prompt opened the turn");
+            drop("2-stop.json", json!({"hook_event_name": "Stop", "session_id": "1f05", "last_assistant_message": "The command finished with exit code 0."}));
+            assert_eq!(spy.0.lock().unwrap().clone(), vec![("The command finished with exit code 0.".to_string(), Vec::<String>::new())], "recorded in the room, delivered to no one");
+            assert_ne!(crate::projects::telemetry::derive(&session, "cl", 0).state, "running", "the Stop closed it");
+        } else {
+            eprintln!("could not adopt a project — skipped the assertions");
+        }
+        let _ = std::process::Command::new("tmux").args(["kill-session", "-t", &session]).status();
+        let _ = std::fs::remove_dir_all(&ws);
+        let _ = std::fs::remove_dir_all(root);
+    }
+
     #[test]
     fn a_restart_recovers_the_reply_edge_from_prompt_activity() {
         let session = format!("reply-restart-{}", uuid::Uuid::new_v4());
@@ -4812,7 +4929,7 @@ mod tests {
         let hub = AgentNotificationHub::load_at(root.clone());
         // The live order: start_turn, then the prompt is recorded.
         let input = |hub: &AgentNotificationHub, line: &str| {
-            hub.start_turn(&session, "v", line);
+            hub.start_turn(&session, "v", reply_targets(line));
             record_prompt(&session, "v", line);
         };
 

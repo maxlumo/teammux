@@ -3770,7 +3770,7 @@ mod tests {
         PERSIST_IN_TEST.with(|f| f.set(true));
         // Recorded as the consumer records an attributed prompt: under its
         // generation, the row and the hold's acceptance in one transaction.
-        let (typed, went) = super::super::telemetry::with_generation(Some((&p.session, "dev", &launch)), || record_prompt_outcome(&p.session, "dev", "a person typed this"));
+        let (typed, went) = super::super::telemetry::with_generation(Some((&p.session, "dev", &launch)), || record_prompt_outcome(&p.session, "dev", "a person typed this", None));
         assert_eq!(went, super::super::telemetry::GenerationWrite::Ok);
         PERSIST_IN_TEST.with(|f| f.set(false));
         assert!(!typed.acked && typed.persisted(), "{typed:?}");

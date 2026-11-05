@@ -636,7 +636,8 @@ pub fn for_each_turn_input(session: &str, window: &str, limit: Option<usize>, mu
     let mut seen = 0;
     for event in &rows[start..] {
         if event.kind == "prompt" && limit.is_none_or(|n| seen < n) {
-            visit(&crate::address::requesters(&event.text));
+            // Its stored senders when it has them (as the durable path reads).
+            visit(&event.requesters.clone().unwrap_or_else(|| crate::address::requesters(&event.text)));
             seen += 1;
         }
     }
@@ -1715,7 +1716,7 @@ pub fn record_undelivered(session: &str, window: &str, line: &str, reason: &str)
 /// decoration, and an agent that is mid-task receives our line appended to
 /// whatever it was already typing.
 pub fn record_prompt(session: &str, window: &str, prompt: &str) -> bool {
-    record_prompt_outcome(session, window, prompt).acked
+    record_prompt_outcome(session, window, prompt, None).acked
 }
 
 /// What recording one prompt did (board #422 round 3): `acked` is the
@@ -1737,7 +1738,11 @@ impl PromptOutcome {
     }
 }
 
-pub fn record_prompt_outcome(session: &str, window: &str, prompt: &str) -> PromptOutcome {
+/// `cli_own` is the door's verdict (`Backend::cli_own_prompt`, board #13):
+/// `Some(shown)` for a prompt the CLI submitted by itself. It is a turn
+/// edge only — it settles no line of ours, proves nothing about a queued
+/// command, asks no one, and its row is `via: cli` with `shown` as its text.
+pub fn record_prompt_outcome(session: &str, window: &str, prompt: &str, cli_own: Option<&str>) -> PromptOutcome {
     recovery_mark(session);
     // The settlement and the prompt fact are ONE critical section under the
     // turn-fact lock (board #264): an end edge stepping the command rows
@@ -1747,7 +1752,8 @@ pub fn record_prompt_outcome(session: &str, window: &str, prompt: &str) -> Promp
     if let Some(hook) = IN_PROMPT_HOOK.lock().unwrap().take() {
         hook();
     }
-    let rows = queue(|s| s.pending_deliveries(session, Some(window))).unwrap_or_default();
+    // The CLI's own prompt is no submission: nothing of ours to settle.
+    let rows = if cli_own.is_some() { Vec::new() } else { queue(|s| s.pending_deliveries(session, Some(window))).unwrap_or_default() };
     // Chat lines and commands settle apart (board #264, orchestrator 11:31):
     // the chat rows by the #249 matcher as always; of the command rows only
     // the window's OLDEST IDLE one is a candidate — its CLI runs commands in
@@ -1770,7 +1776,7 @@ pub fn record_prompt_outcome(session: &str, window: &str, prompt: &str) -> Promp
     // and writes its row in ONE store transaction: retried after a failure,
     // it finds exactly the receipts it matched, never a deleted one.
     if numbered_persists(session, window) {
-        let (acked, row) = record_numbered_prompt(&order, session, window, prompt, settled, next_command, command_hit);
+        let (acked, row) = record_numbered_prompt(&order, session, window, prompt, cli_own, settled, next_command, command_hit);
         return PromptOutcome { acked, row };
     }
     // A row counts only if THIS echo deleted it: two echoes racing for one
@@ -1785,16 +1791,16 @@ pub fn record_prompt_outcome(session: &str, window: &str, prompt: &str) -> Promp
         hook();
     }
     let refs: Vec<DeliveryRef> = won.iter().map(|hit| DeliveryRef::of(hit.row)).collect();
-    let text = truncate_chars(&stored_prompt(&won, prompt), MAX_PROMPT_CHARS);
+    let text = truncate_chars(&cli_own.map_or_else(|| stored_prompt(&won, prompt), str::to_string), MAX_PROMPT_CHARS);
     settle_next_command(prompt, next_command, command_hit, won.is_empty());
     // A turn just opened. This is the ONE honest "it started working" signal:
     // pane activity cannot be it, because an agent TUI repaints its prompt
     // (spinner, status line, cursor) long after it finished.
-    let via = if acked { "app" } else { "local" };
+    let via = prompt_via(acked, cli_own);
     // Who this prompt asks, parsed ONCE from the FULL prompt (#257 review):
     // the row's text is cut at MAX_PROMPT_CHARS for display, and a combined
     // prompt of held lines can put its second requester past that cut.
-    let requesters = crate::address::requesters(prompt);
+    let requesters = prompt_requesters(prompt, cli_own);
     // Its requesters ride in the SAME activity INSERT as the row (#257).
     let event = ("prompt", text, String::new(), via.to_string(), refs);
     let (_, row) = turn_fact_held_row(&order, session, window, None, |_| false, Some(event), |r, ts, seq| {
@@ -1803,6 +1809,22 @@ pub fn record_prompt_outcome(session: &str, window: &str, prompt: &str) -> Promp
     }, Some(requesters));
     // Its row id is the proof it reached the log: a failed INSERT has none.
     PromptOutcome { acked, row }
+}
+
+/// A prompt row's provenance: `app` (it settled a line this app typed),
+/// `cli` (the CLI submitted it itself, board #13), or `local` (typed at the
+/// keyboard).
+fn prompt_via(acked: bool, cli_own: Option<&str>) -> &'static str {
+    match (cli_own, acked) {
+        (Some(_), _) => "cli",
+        (None, true) => "app",
+        (None, false) => "local",
+    }
+}
+
+/// Who a prompt asks: no one for the CLI's own, else its stamped senders.
+fn prompt_requesters(prompt: &str, cli_own: Option<&str>) -> Vec<String> {
+    if cli_own.is_some() { Vec::new() } else { crate::address::requesters(prompt) }
 }
 
 /// A prompt that carried neither the candidate command nor any chat line
@@ -1833,12 +1855,13 @@ fn record_numbered_prompt(
     session: &str,
     window: &str,
     prompt: &str,
+    cli_own: Option<&str>,
     settled: Vec<Settled>,
     next_command: Option<&super::store::DeliveryRow>,
     command_hit: bool,
 ) -> (bool, Option<i64>) {
     let ids: Vec<i64> = settled.iter().map(|h| h.row.id).collect();
-    let requesters = crate::address::requesters(prompt);
+    let requesters = prompt_requesters(prompt, cli_own);
     let mut event = None;
     let generation = generation_for(session, window);
     let written = queue(|s| {
@@ -1852,9 +1875,9 @@ fn record_numbered_prompt(
                 ts: ts_ms,
                 window: window.to_string(),
                 kind: "prompt".into(),
-                text: truncate_chars(&stored_prompt(&won, prompt), MAX_PROMPT_CHARS),
+                text: truncate_chars(&cli_own.map_or_else(|| stored_prompt(&won, prompt), str::to_string), MAX_PROMPT_CHARS),
                 tool: String::new(),
-                via: if won.is_empty() { "local" } else { "app" }.into(),
+                via: prompt_via(!won.is_empty(), cli_own).into(),
                 state: String::new(),
                 deliveries: refs,
                 requesters: Some(requesters.clone()),
@@ -2850,9 +2873,9 @@ mod tests {
         let session = format!("tmm-422-outcome-{}", uuid::Uuid::new_v4().simple());
         let sql = |q: String| crate::projects::with_store(|s| s.exec_test_sql(&q)).unwrap();
         let lost = PromptOutcome { acked: false, row: None };
-        let plain = record_prompt_outcome(&session, "A", "a person typed this");
+        let plain = record_prompt_outcome(&session, "A", "a person typed this", None);
         assert!(!plain.acked && plain.persisted(), "{plain:?}");
-        let numbered = with_numbered(Some((&session, "A")), || record_prompt_outcome(&session, "A", "numbered"));
+        let numbered = with_numbered(Some((&session, "A")), || record_prompt_outcome(&session, "A", "numbered", None));
         assert!(!numbered.acked && numbered.persisted(), "{numbered:?}");
         let rows = crate::projects::with_store(|s| s.activity_page(&session, 0, None, 10)).unwrap().0;
         assert_eq!(rows.iter().map(|r| Some(r.id)).collect::<Vec<_>>(), vec![plain.row, numbered.row], "each names its own durable row");
@@ -2860,8 +2883,8 @@ mod tests {
             "CREATE TEMP TRIGGER outcome422 BEFORE INSERT ON activity WHEN NEW.session = '{session}' AND NEW.kind = 'prompt'
              BEGIN SELECT RAISE(ABORT, 'disk full'); END;"
         ));
-        let plain = record_prompt_outcome(&session, "A", "lost on the plain path");
-        let numbered = with_numbered(Some((&session, "A")), || record_prompt_outcome(&session, "A", "lost numbered"));
+        let plain = record_prompt_outcome(&session, "A", "lost on the plain path", None);
+        let numbered = with_numbered(Some((&session, "A")), || record_prompt_outcome(&session, "A", "lost numbered", None));
         sql("DROP TRIGGER outcome422;".into());
         assert_eq!(plain, lost, "a refused INSERT is not persisted");
         assert_eq!(numbered, lost, "nor on the numbered path");
@@ -4931,6 +4954,28 @@ mod tests {
         assert_eq!((e.kind.as_str(), e.via.as_str(), e.text.as_str()), ("prompt", "local", "fix the flaky test"));
         assert!(held(&session, "claude").is_empty(), "the command row is gone");
         assert!(!record_prompt(&session, "claude", "/goal do x"), "and a later look-alike cannot claim it");
+    }
+
+    /// Board #13: a prompt the CLI submitted itself (Claude's background-task
+    /// notification) is a turn edge and nothing else: it settles no line of
+    /// ours, proves nothing about the queued command (the row stays owed),
+    /// asks no one, and its row shows only what the door handed it.
+    #[test]
+    fn a_cli_own_prompt_opens_the_turn_and_settles_or_asks_nothing() {
+        crate::projects::tests::use_test_store();
+        let session = format!("cli-own-{}", uuid::Uuid::new_v4());
+        record_command_delivery(&session, "claude", "/goal do x", "m-x").unwrap();
+        let xml = "<task-notification>\n<task-id>b1</task-id>\n<tool-use-id>t1</tool-use-id>\n<output-file>/tmp/o</output-file>\n<status>completed</status>\n<summary>Background command \"ls\" completed (exit code 0)</summary>\n</task-notification>";
+        let out = record_prompt_outcome(&session, "claude", xml, Some("Background command \"ls\" completed (exit code 0)"));
+        assert!(!out.acked, "no line of ours");
+        let e = recent_events(&session, 0).into_iter().last().unwrap();
+        assert_eq!((e.kind.as_str(), e.via.as_str(), e.text.as_str()), ("prompt", "cli", "Background command \"ls\" completed (exit code 0)"));
+        assert_eq!(e.requesters, Some(Vec::new()), "asks no one");
+        assert_eq!(held(&session, "claude"), vec!["/goal do x".to_string()], "the command row is still owed");
+        assert_eq!(derive(&session, "claude", 0).state, "running", "it opened the turn");
+        let mut senders = Vec::new();
+        for_each_turn_input(&session, "claude", None, |s| senders.extend_from_slice(s));
+        assert!(senders.is_empty(), "the log's turn inputs name no one: {senders:?}");
     }
 
     /// Validator 11:50: an idle /goal whose CLI emits no prompt hook but does

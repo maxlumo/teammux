@@ -116,6 +116,31 @@ Right after the 04:33 server restart (the first after #107's migration + 4936-ro
 
 codex 0.153.4 runs `spawn_agent` children as threads INSIDE the parent's process, and the managed `hooks.json` fires for every thread on the same pane. Read naively, a child's `UserPromptSubmit` was THE window's turn start: the parent's brief to its child rendered as a codex INPUT row nobody typed (owner 2026-09-11 03:46, "很多消息好像没有正确识别到"), matched no pending delivery (`via: local`), and — the damage that mattered — `start_turn` replaced the window's reply edge with the brief's (nobody), so when codex's real turn ended its final reply reached no one: `tmm log --grep 'codex: [reply]'` held not one line while kiro and claude posted every turn. Measured in a scratch CODEX_HOME with hooks dumping every payload (parent spawns one child, waits, closes; 13 hooks): every event carries the ROOT `session_id`; child events carry `agent_id` + `agent_type`, parent events neither; the child ends with `SubagentStop`, never `Stop`; the parent's `Stop` does carry `last_assistant_message`. The rule, applied at the door (`consume_file`, before the tool/prompt classification, dialect on `backends/codex.rs::subagent_thread`): a payload from a sub-agent thread is the agent's own work like a tool call — its brief is a `Subagent` step in the tool lane, its tool calls stay tool rows, and NOTHING from a child opens or closes the window's turn, becomes its prompt, auto-posts, or writes its conversation id. Pinned by `a_subagent_brief_is_a_tool_row_and_leaves_the_turn_alone` (reply edge survives, one prompt, one Subagent row), the codex dialect test with the measured payloads, and the feed test that a `Subagent` row is a step, never an input. The missing spaces inside briefs are codex's own writing (verbatim in its rollout), not our rendering. One exception, measured next (board #170, same scratch method with `-a on-request -s read-only` and a child told to write a file): a child's `PermissionRequest` {agent_id, agent_type, tool_name: "Bash", tool_input: {command, description}} is shown in the PARENT's TUI as a blocking modal ("Would you like to run the following command? Thread: Agent (…)") until the human answers — so it IS the window's ask and derives `permission_required` like the parent's own; the door lets exactly that child event through (`a_subagent_permission_request_is_the_windows_ask`).
 
+### A prompt the CLI submits by itself is a turn edge that asks no one (board #13, 2026-11-05, Claude Code 2.1.318)
+
+When a background task finishes (a `Bash` call with `run_in_background`, or a background Agent), Claude Code SUBMITS a prompt of its own, and `UserPromptSubmit` fires for it like for any other. Before, it carried no `[tmm chat]` stamp and matched no delivery, so it was recorded `via: local`, drawn as the agent's INPUT, and — by the premise of the next section, that an unstamped prompt is a person typing — `requesters` put `human` on the edge, so the turn it opened "replied" to a human who had asked nothing (owner screenshot 2026-11-05; state.db that day: 26 such rows across token-porta, teammux and sound-factory, every one `via local`, `["human"]`). Measured in a scratch `CLAUDE_CONFIG_DIR` with hooks dumping every payload, one background command that exits 0 and one that exits 3: the payload has NO origin field; the WHOLE `prompt` is one block, each child on its own line, in this order:
+
+```
+<task-notification>
+<task-id>…</task-id>
+<tool-use-id>…</tool-use-id>
+<output-file>/tmp/claude-<uid>/…/tasks/<task-id>.output</output-file>
+<status>completed|failed</status>
+<summary>Background command "…" completed (exit code 0) | failed with exit code 3</summary>
+</task-notification>
+```
+
+A background Agent adds `<note>…</note>` and `<result>…</result>` (its whole answer, free text) after `summary`, and says `Agent "…" finished`. The values are XML-escaped (`&gt;`, `&amp;` in the stored rows). The rule:
+
+- **One definition, at the door.** `Backend::cli_own_prompt` (Claude: `backends/claude.rs::task_notification`) recognises the block by its STRUCTURE — the whole prompt, the measured children in order, nothing before or after. The same XML pasted inside other words, quoted on a `[tmm chat]` line, two blocks glued together, or from a CLI that is not Claude, is ordinary input (`task_notification_xml_inside_other_text_is_ordinary_input`). `AgentNotificationHub::open_prompt` asks it once and hands the verdict to both halves of the prompt edge.
+- **Still a turn edge.** It opens a turn, or joins the open one, and the Stop closes it as always (tenet 8: a real CLI prompt is a real turn edge).
+- **Asks no one.** It adds no requester: joining an open turn, the turn keeps its requesters; opening one, its reply is recorded in the room and delivered to no one. Its row stores `requesters: []`, so a restart's fold of the log names no one either.
+- **Settles nothing.** It is no submission of ours: no delivery receipt, and it proves nothing about a queued `/command` (the row stays owed).
+- **Its row is `via: cli`, text = the unescaped summary.** The output file's path never reaches the log or the feed; the feed draws it as a step (hub-feed.md § A CLI's own prompt is a step).
+- **Old rows keep their look.** The rows recorded before this rule are not rewritten and the feed does not re-parse them: the recogniser is the server's, the client has no second copy, and an Agent-shaped row is cut at the 1024-character prompt limit, so it no longer has the structure to recognise.
+
+Pinned by `a_finished_background_task_is_the_clis_own_prompt_and_shows_only_its_summary` (the measured payloads as fixtures), `a_clis_own_prompt_opens_or_joins_the_turn_and_asks_no_one`, `a_cli_own_prompt_opens_the_turn_and_settles_or_asks_nothing`, and `claude_background_task_notification_through_the_inbox_asks_no_one` (envelope → row → status → Stop → room post with no recipient). Other backends have no self-submitted prompt today; one that appears is a new `cli_own_prompt` arm, measured first.
+
 ### Hook-sourced final replies carry one reply edge
 
 `userPromptSubmit` parses stamped `[tmm chat …] sender:` envelopes and stores
@@ -132,7 +157,8 @@ spawn kick excepted). That reading rests on one premise: everything the app
 itself types into a pane carries a `[tmm chat …]` stamp (chat lines, board
 notices, wakes, briefs; validator 11:34 checked each). A new automatic input
 without a stamp would be recorded as the human's request, so it must be
-stamped too. The final reply's room row therefore names `human` in
+stamped too. An input the CLI itself submits cannot be stamped by us, so it
+is recognised by its shape instead (`Backend::cli_own_prompt`, section above). The final reply's room row therefore names `human` in
 `to`; `HubRoomPoster` (`server::post_final_with`) types `[reply]` only to
 `address::pane_targets`, which drops the human, because the human has no pane
 and reads the room. The live

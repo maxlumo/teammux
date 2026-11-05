@@ -171,8 +171,10 @@ export interface HubActivityEvent {
   /** `tool` events only: the tool's name ("Edit", "execute_bash"). */
   tool?: string;
   /** `prompt` events only: 'app' when the text is the line this app typed into
-   * the pane (the delivery receipt), 'local' when typed at the keyboard. */
-  via?: 'app' | 'local';
+   * the pane (the delivery receipt), 'local' when typed at the keyboard,
+   * 'cli' when the CLI submitted it by itself (board #13; `text` is then the
+   * summary the server chose to show). */
+  via?: 'app' | 'local' | 'cli';
   /** The delivery rows this event is about (board #249): the rows a `prompt`
    * echo settled, or the one row a `warn` reported. `id` is the row (the one
    * correlation key); `msg` the chat message it carries, where one exists.
