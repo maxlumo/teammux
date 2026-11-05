@@ -60,6 +60,12 @@ fn agent_remove_now(session: &str, agent: &str) -> Result<Value, String> {
     if home.is_none() && !declared && !window_killed {
         return Err(format!("'{agent}' is not an agent of project '{}'", project.name));
     }
+    // A process outside the window that still holds the home would write it
+    // back after the delete (board #26: omp's text-predict worker, 5 min
+    // later), so it is stopped first; one that will not exit refuses.
+    if let Some(h) = &home {
+        stop_home_workers(h).map_err(|e| format!("'{agent}' was not removed — {e}"))?;
+    }
     let slot_removed = with_store(|store| store.delete_slot(&project.id, agent))?;
     // A removed agent has no Stop left to honour (board #422).
     with_store(|store| store.forget_slot_stopped(&project.id, agent))?;
@@ -75,6 +81,68 @@ fn agent_remove_now(session: &str, agent: &str) -> Result<Value, String> {
         "slot_removed": slot_removed,
         "home_removed": home_removed,
     }))
+}
+
+/// Stop every process that holds `home` through a backend's
+/// `home_worker_env` (board #26), and return once each has exited: SIGTERM,
+/// up to 3 s, then SIGKILL, up to 1 s more. One still alive is an `Err`
+/// naming it. The holders are found by their environment, under `/proc`, so
+/// this is Linux only; elsewhere nothing is stopped.
+fn stop_home_workers(home: &std::path::Path) -> Result<(), String> {
+    #[cfg(target_os = "linux")]
+    {
+        let keys: Vec<&str> = crate::backends::Backend::ALL.iter().filter_map(|b| b.home_worker_env()).collect();
+        let mut wanted: Vec<String> = Vec::new();
+        for path in [Some(home.to_path_buf()), std::fs::canonicalize(home).ok()].into_iter().flatten() {
+            for k in &keys {
+                wanted.push(format!("{k}={}", path.to_string_lossy()));
+            }
+        }
+        let holders = |wanted: &[String]| -> Vec<libc::pid_t> {
+            let Ok(procs) = std::fs::read_dir("/proc") else { return Vec::new() };
+            procs
+                .flatten()
+                .filter_map(|e| e.file_name().to_str()?.parse::<libc::pid_t>().ok())
+                .filter(|&pid| pid > 1 && pid != std::process::id() as libc::pid_t)
+                .filter(|pid| {
+                    std::fs::read(format!("/proc/{pid}/environ"))
+                        .map(|env| env.split(|b| *b == 0).any(|kv| wanted.iter().any(|w| w.as_bytes() == kv)))
+                        .unwrap_or(false)
+                })
+                .collect()
+        };
+        // A zombie has no environment left, so it is never found again.
+        let wait = |pids: &[libc::pid_t], for_ms: u64| {
+            let until = std::time::Instant::now() + std::time::Duration::from_millis(for_ms);
+            loop {
+                let alive: Vec<libc::pid_t> = holders(&wanted).into_iter().filter(|p| pids.contains(p)).collect();
+                if alive.is_empty() || std::time::Instant::now() >= until {
+                    return alive;
+                }
+                std::thread::sleep(std::time::Duration::from_millis(50));
+            }
+        };
+        let pids = holders(&wanted);
+        if pids.is_empty() {
+            return Ok(());
+        }
+        // SAFETY: plain syscalls on positive pids just read from /proc as
+        // holding this home; a pid that exited meanwhile fails with ESRCH.
+        for &pid in &pids {
+            unsafe { libc::kill(pid, libc::SIGTERM) };
+        }
+        let left = wait(&pids, 3000);
+        for &pid in &left {
+            unsafe { libc::kill(pid, libc::SIGKILL) };
+        }
+        let left = wait(&left, 1000);
+        if !left.is_empty() {
+            return Err(format!("a process still holding its home did not exit (pid {left:?})"));
+        }
+    }
+    #[cfg(not(target_os = "linux"))]
+    let _ = home;
+    Ok(())
 }
 
 /// The team a managed window was spawned as part of, read off its launch
@@ -427,6 +495,42 @@ mod tests {
         // A name that was never ours is rejected rather than half-handled.
         assert!(agent_remove(&session, "nope").is_err());
 
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// Board #26 (measured on omp 18.15.0): omp's text-predict worker is a
+    /// child of omp's global daemon broker, not of the pane. It holds
+    /// `OMP_TEXT_PREDICT_AGENT_DIR=<home>`, survives the window kill, and
+    /// persists `predict/ngram/` into the home up to 5 min after its last
+    /// activity. The removed home came back and blocked the name. Here a
+    /// stand-in worker, orphaned outside any window, writes 3 s later: after
+    /// the remove and past that time, no home exists.
+    #[test]
+    #[cfg(target_os = "linux")]
+    fn a_removed_home_is_not_written_again_by_a_worker_outside_the_window() {
+        use_test_store();
+        let dir = crate::config::test_scratch("tmm-rm-late");
+        std::fs::create_dir_all(&dir).unwrap();
+        let made = create(&dir.to_string_lossy(), Some("rmlate"), None, None).unwrap();
+        let session = made["session"].as_str().unwrap().to_string();
+        let home = dir.join(".tmm").join("agents").join("om");
+        std::fs::create_dir_all(&home).unwrap();
+        std::fs::write(home.join("launch.json"), r#"{"backend":"omp"}"#).unwrap();
+        // `( … ) &` inside a shell that exits at once: the writer is
+        // re-parented away from this test, like the broker's worker.
+        let status = std::process::Command::new("sh")
+            .arg("-c")
+            .arg(r#"(sleep 3; mkdir -p "$OMP_TEXT_PREDICT_AGENT_DIR/predict/ngram" && echo '{}' > "$OMP_TEXT_PREDICT_AGENT_DIR/predict/ngram/cursor.json") >/dev/null 2>&1 &"#)
+            .env("OMP_TEXT_PREDICT_AGENT_DIR", &home)
+            .status()
+            .unwrap();
+        assert!(status.success());
+        std::thread::sleep(std::time::Duration::from_millis(200));
+
+        let r = agent_remove(&session, "om").unwrap();
+        assert_eq!(r["home_removed"].as_bool(), Some(true), "{r}");
+        std::thread::sleep(std::time::Duration::from_millis(4000));
+        assert!(!home.exists(), "the home came back: {:?}", std::fs::read_dir(&home).map(|d| d.flatten().map(|e| e.path()).collect::<Vec<_>>()));
         let _ = std::fs::remove_dir_all(&dir);
     }
 

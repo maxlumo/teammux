@@ -207,6 +207,17 @@ impl Backend {
         }
     }
 
+    /// The environment variable by which a process outside the agent's pane
+    /// holds its home and may still write into it after the window is killed
+    /// (board #26). Only omp has one: measured on omp, claude, codex and kimi,
+    /// a window kill ended every other process naming the home.
+    pub fn home_worker_env(self) -> Option<&'static str> {
+        match self {
+            Backend::Omp => Some(omp::HOME_WORKER_ENV),
+            _ => None,
+        }
+    }
+
     /// Whether a RUNNING agent of this backend reads its config again at the
     /// start of every turn, so a saved definition reaches it with no restart
     /// (board #411): dsh, whose turns are fresh processes. Every other CLI

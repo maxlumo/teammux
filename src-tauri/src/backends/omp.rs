@@ -558,6 +558,16 @@ pub(crate) fn resume_command(cmd: &str, id: Option<&str>) -> String {
     }
 }
 
+/// The variable by which a process OUTSIDE the pane holds this home (board
+/// #26, measured on omp 18.15.0). omp's text-predict worker
+/// (`omp __omp_worker_text_predict`) is started by omp's global daemon broker
+/// (`__omp_worker_daemon_broker`, parented to init), so it survives the window
+/// kill. It is keyed to the home by `OMP_TEXT_PREDICT_AGENT_DIR=<home>`,
+/// persists `predict/ngram/` into it up to 5 min after its last activity
+/// (its 5 min debounce) and exits after 15 min idle. A remove stops it before
+/// deleting the home. It exits about 200 ms after SIGTERM.
+pub(crate) const HOME_WORKER_ENV: &str = "OMP_TEXT_PREDICT_AGENT_DIR";
+
 /// This backend's detection/relaunch row (board #129). oh-my-pi is one `omp`
 /// ELF binary, so pane_current_command says "omp" directly; detection
 /// matches the program NAME exactly (`agents::by_program`, board #260), so

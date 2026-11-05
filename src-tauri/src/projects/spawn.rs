@@ -1054,7 +1054,19 @@ fn claim_home(workspace: &str, live_now: &dyn Fn() -> Result<Vec<String>, String
 /// `claim_home` over candidates the caller fixed (the seam the deterministic
 /// tests use to make two requests reach the same one).
 fn claim_first(workspace: &str, live_now: &dyn Fn() -> Result<Vec<String>, String>, candidates: &[String], explicit: bool) -> Result<Claim, String> {
-    let taken = |name: &str| format!("the name '{name}' is taken — a window, an agent home or another request already has it");
+    let taken = |name: &str| format!("the name '{name}' is taken — a window or another request already has it");
+    // Board #26: a refusal by home names the home, and says when it holds no
+    // launch recipe (what a CLI left after a remove, or a start in progress:
+    // this function makes the directory before the recipe, so it is never
+    // reclaimed here).
+    let home_taken = |name: &str| {
+        let home = agent_home(workspace, name);
+        if home.join("launch.json").exists() {
+            format!("the name '{name}' is taken — its agent home {} already exists", home.display())
+        } else {
+            format!("the name '{name}' is taken — the directory {} exists with no launch recipe (left by a CLI after a remove, or an agent still being created); remove it to free the name", home.display())
+        }
+    };
     let mut flight = in_flight();
     // Fresh, inside the allocation lock — and read BEFORE anything on disk is
     // touched: a read that failed refuses with nothing created.
@@ -1083,7 +1095,7 @@ fn claim_first(workspace: &str, live_now: &dyn Fn() -> Result<Vec<String>, Strin
             }
             Err(e) if e.kind() == std::io::ErrorKind::AlreadyExists => {
                 if explicit {
-                    return Err(taken(name));
+                    return Err(home_taken(name));
                 }
             }
             Err(e) => return Err(format!("cannot tell whether the name '{name}' is free ({e}); nothing was created")),
@@ -4603,6 +4615,28 @@ hooks = [ { type = "command", command = "/opt/guard.sh" } ]
         drop(kept);
         assert!(agent_home(&ws_str, "w-4").is_dir(), "a launch that worked keeps its home");
         assert!(claim_first(&ws_str, &|| Ok(live.clone()), &["w-4".to_string()], true).unwrap_err().contains("is taken"), "and the name stays taken");
+        let _ = std::fs::remove_dir_all(&ws);
+    }
+
+    /// Board #26: a fork's refusal says WHAT holds the name. The incident's
+    /// home held only omp's `predict/ngram/`, written after a remove, and the
+    /// refusal named "a window, an agent home or another request". A home
+    /// with no launch recipe is not reclaimed: `claim_first` itself makes the
+    /// directory before the recipe, so it may be another request's start.
+    #[test]
+    fn a_name_held_by_a_home_without_a_recipe_is_refused_naming_that_home() {
+        let ws = crate::config::test_scratch("tmm-fork-orphan");
+        let ws_str = ws.to_string_lossy().to_string();
+        let orphan = agent_home(&ws_str, "validator-2");
+        std::fs::create_dir_all(orphan.join("predict/ngram")).unwrap();
+        std::fs::write(orphan.join("predict/ngram/cursor.json"), "{\"historyId\":10}").unwrap();
+        let err = claim_first(&ws_str, &|| Ok(Vec::new()), &["validator-2".to_string()], true).unwrap_err();
+        assert!(err.contains("is taken"), "{err}");
+        assert!(err.contains(&orphan.display().to_string()), "names the home: {err}");
+        assert!(err.contains("no launch recipe"), "says it is not an agent's: {err}");
+        assert!(orphan.join("predict/ngram/cursor.json").is_file(), "nothing is deleted on a refusal");
+        let live = claim_first(&ws_str, &|| Ok(vec!["dev".to_string()]), &["dev".to_string()], true).unwrap_err();
+        assert!(live.contains("a window"), "a running window is named as such: {live}");
         let _ = std::fs::remove_dir_all(&ws);
     }
 
