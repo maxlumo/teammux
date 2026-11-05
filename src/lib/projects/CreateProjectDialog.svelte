@@ -136,7 +136,7 @@
   .path-row :global(.chip-btn) { flex: none; }
   .agent-pick { display: flex; align-items: center; gap: 8px; background: var(--surface); border: 1px solid var(--border); border-radius: var(--ui-radius-control); color: var(--text2); padding: 8px 11px; font-size: var(--fs-ui); cursor: pointer; text-align: left; }
   .agent-pick.sel { border-color: var(--accent-line); background: var(--accent-bg); color: var(--text); }
-  .agent-pick:disabled { opacity: 0.5; cursor: default; }
+  .agent-pick:disabled { opacity: var(--control-disabled-opacity); cursor: default; }
   .agent-pick :global(svg) { margin-left: auto; color: var(--accent); }
   .ava { width: 20px; height: 20px; border-radius: 6px; display: grid; place-items: center; color: white; font-size: var(--fs-meta); font-weight: 700; flex: none; }
 </style>

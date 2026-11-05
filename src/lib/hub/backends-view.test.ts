@@ -158,3 +158,21 @@ test('only a stated unavailable greys, and the words say why (#7)', () => {
   }
   assert.equal(unavailableText(def('x', 'kiro', 'custom', { state: 'unavailable', reason: 'brand_new_code' }), t), 'Unavailable: kiro unknown reason');
 });
+
+test('a team names the member that makes it unavailable, in words (#7 round 1)', async () => {
+  const { teamUnavailableText } = await import('./backends-view.ts');
+  const t = (k: string) => ({
+    teamsUnavailable: 'Unavailable: {member} runs on {program}, {reason}',
+    teamsUnavailableMissing: 'Unavailable: {member} runs on {program}, missing {names} ({reason})',
+    backendsReasonNotFound: 'not on the managed PATH',
+    backendsReasonEnvUnset: "not set in the login shell's environment",
+    backendsReasonUnknown: 'unknown reason',
+  } as Record<string, string>)[k] ?? k;
+  assert.equal(teamUnavailableText({ availability: { state: 'unavailable', member: 's', backend: 'grok', reason: 'not_found', missing: [] } }, t),
+    'Unavailable: s runs on grok, not on the managed PATH');
+  assert.equal(teamUnavailableText({ availability: { state: 'unavailable', member: 'd', backend: 'dsh', reason: 'env_unset', missing: ['DEEPSEEK_API_KEY'] } }, t),
+    "Unavailable: d runs on dsh, missing DEEPSEEK_API_KEY (not set in the login shell's environment)");
+  for (const availability of [{ state: 'available' }, { state: 'unknown' }, undefined]) {
+    assert.equal(teamUnavailableText({ availability }, t), '', JSON.stringify(availability));
+  }
+});

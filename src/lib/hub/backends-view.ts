@@ -269,3 +269,16 @@ export function unavailableText(def: Listed, t: (key: string) => string): string
   const key = why.missing.length ? 'agentsUnavailableMissing' : 'agentsUnavailable';
   return t(key).replace('{program}', def.backend).replace('{names}', why.missing.join(', ')).replace('{reason}', reason);
 }
+
+/** The words for a team the server found unavailable (board #7 round 1):
+ * it names the member whose harness cannot run here, or '' when the team can
+ * start or nothing is known. The server decides (`teams_list`, the same one
+ * rule); a start of such a team is refused whole by the server too. */
+export function teamUnavailableText(team: { availability?: Availability & { member?: string; backend?: string } }, t: (key: string) => string): string {
+  const a = team.availability;
+  if (a?.state !== 'unavailable') return '';
+  const missing = Array.isArray(a.missing) ? a.missing : [];
+  const key = missing.length ? 'teamsUnavailableMissing' : 'teamsUnavailable';
+  return t(key).replace('{member}', a.member ?? '').replace('{program}', a.backend ?? '')
+    .replace('{names}', missing.join(', ')).replace('{reason}', t(reasonKey(a.reason)));
+}

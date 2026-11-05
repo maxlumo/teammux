@@ -144,6 +144,10 @@ test('the Agents list groups use the shared atoms, and every spawn surface reads
   const block = /\/\* Board #7: the two groups[\s\S]*?\.r-dot \{[^}]*\}/u.exec(source)?.[0] ?? '';
   assert.ok(block, 'the group CSS block');
   assert.doesNotMatch(block, /#[0-9a-f]{3,8}\b|rgb\(|font-size:/iu, 'tokens only: no literal colour, no raw font size');
+  // validator-2 S1 (round 1): an unavailable thing dims with the ONE disabled
+  // token (design-language.md: native disabled semantics at 0.4), never a
+  // literal opacity, on every surface that greys one.
+  assert.match(block, /\.side-row\.unavailable \.ava, \.side-row\.unavailable \.r-backend \{ opacity: var\(--control-disabled-opacity\); \}/u);
   // Every place that lists agents to start, and the team member picker, asks
   // the ONE reader; none re-derives availability from readiness itself.
   const spawners = {
@@ -159,8 +163,19 @@ test('the Agents list groups use the shared atoms, and every spawn surface reads
   assert.match(spawners['Hub.svelte'], /disabled=\{!!why && !startPick\.includes\(r\.name\)\}/u, 'the start dialog offers no pick');
   assert.match(spawners['CreateProjectDialog.svelte'], /disabled=\{!!why && !agents\.includes\(r\.name\)\}/u);
   assert.match(source, /hint: unavailableText\(d, t\) \|\| undefined/u, 'the team member picker says why');
+  for (const [file, text] of Object.entries(spawners)) {
+    const css = text.slice(text.lastIndexOf('<style'));
+    assert.doesNotMatch(css, /(?:unavailable|:disabled)[^{]*\{[^}]*opacity:\s*0?\.\d/u, `${file}: a disabled or unavailable rule uses --control-disabled-opacity, not a literal`);
+  }
+  // validator-2 P1 (round 1): a TEAM start is a spawn too; both team surfaces
+  // read the one team reader and offer no start for an unavailable team.
+  const hub = spawners['Hub.svelte'];
+  assert.match(hub, /import \{ teamUnavailableText, unavailableText \} from '\.\/backends-view\.ts'/u);
+  assert.match(hub, /<button class="start-row team" class:unavailable=\{!!why\} disabled=\{starting \|\| !!why\}/u, 'the roster start list team row');
+  assert.match(hub, /<button class="agent-pick team" disabled=\{starting \|\| !!why\}/u, 'the start dialog team row');
+  assert.equal(hub.match(/@const why = teamUnavailableText\(tm, t\)/gu)?.length, 2);
   // English and Chinese strings exist for every new key.
-  for (const key of ['agentsGroupDefaults', 'agentsGroupCustom', 'agentsUnavailable', 'agentsUnavailableMissing']) {
+  for (const key of ['agentsGroupDefaults', 'agentsGroupCustom', 'agentsUnavailable', 'agentsUnavailableMissing', 'teamsUnavailable', 'teamsUnavailableMissing']) {
     assert.equal(i18n.match(new RegExp(`\\b${key}:`, 'gu'))?.length, 2, key);
   }
 });

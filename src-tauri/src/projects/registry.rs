@@ -14,13 +14,65 @@ pub fn registry_list() -> Result<Value, String> {
         for a in &mut agents {
             a.mcp = mcp_mask::masked_agent(&a.name, &a.mcp)?;
         }
-        #[cfg(not(any(target_os = "android", target_os = "ios")))]
-        let (checked, grey) = crate::backends::readiness::availability();
-        // A phone-hosted server runs no readiness check: nothing is known.
-        #[cfg(any(target_os = "android", target_os = "ios"))]
-        let (checked, grey) = (false, |_: &str| None::<Value>);
+        let (checked, grey) = availability_view();
         Ok(annotate(agents, checked, grey))
     })
+}
+
+/// The server's availability view (board #7): whether a readiness report
+/// exists, and the one rule over it per backend. Never waits; with no report
+/// one background Refresh starts (`readiness::availability`). A phone-hosted
+/// server runs no readiness check, so nothing is known there.
+pub(crate) fn availability_view() -> (bool, Box<dyn Fn(&str) -> Option<Value>>) {
+    #[cfg(not(any(target_os = "android", target_os = "ios")))]
+    {
+        let (checked, grey) = crate::backends::readiness::availability();
+        (checked, Box::new(grey))
+    }
+    #[cfg(any(target_os = "android", target_os = "ios"))]
+    {
+        (false, Box::new(|_: &str| None))
+    }
+}
+
+/// A team's availability (board #7): `unknown` with no readiness report,
+/// `unavailable` with the first member the one rule greys (`teams::
+/// unavailable_member`: its name, backend, reason, missing names), else
+/// `available`. A team that cannot be expanded is spawn's error to name,
+/// never availability's, so it reads `available` here.
+pub(crate) fn team_availability(
+    team: &store::RegTeam,
+    agents: &[store::RegAgent],
+    checked: bool,
+    grey: &dyn Fn(&str) -> Option<Value>,
+    lookup: &dyn Fn(&str) -> Result<Option<store::RegTeam>, String>,
+) -> Value {
+    if !checked {
+        return json!({ "state": "unknown" });
+    }
+    let base = |n: &str| agents.iter().find(|a| a.name == n).map(|a| a.backend.clone());
+    match super::teams::expand(team, lookup, usize::MAX).ok().and_then(|flat| super::teams::unavailable_member(&flat, &base, grey)) {
+        Some(mut why) => {
+            why["state"] = json!("unavailable");
+            why
+        }
+        None => json!({ "state": "available" }),
+    }
+}
+
+/// The refusal a team start gives when `availability` says unavailable, in
+/// the words `tmm agent backends` uses; None otherwise (unknown never
+/// refuses). The whole team is refused: no member starts.
+#[cfg(not(any(target_os = "android", target_os = "ios")))]
+pub(crate) fn team_refusal(team: &str, availability: &Value) -> Option<String> {
+    if availability["state"] != "unavailable" {
+        return None;
+    }
+    let s = |k: &str| availability[k].as_str().unwrap_or("").to_string();
+    let why = availability["reason"].as_str().map(crate::backends::readiness::reason_text).unwrap_or("its readiness check found it unusable");
+    let names: Vec<&str> = availability["missing"].as_array().map(|m| m.iter().filter_map(|n| n.as_str()).collect()).unwrap_or_default();
+    let what = if names.is_empty() { why.to_string() } else { format!("missing {} ({why})", names.join(", ")) };
+    Some(format!("team '{team}' cannot start on this server: member '{}' runs on {}, which is {what}. Nothing was started.", s("member"), s("backend")))
 }
 
 /// The listed shape (board #7): each definition with its `group` and its
@@ -226,11 +278,29 @@ fn fill_member_input_modes(members: &str, stored: Option<&store::RegTeam>) -> Re
 pub fn teams_list() -> Result<Value, String> {
     with_store(|store| {
         let mut teams = store.teams_list()?;
+        // Board #7: each team's availability, through the one rule, read
+        // before the masking (which changes no backend).
+        let agents = store.reg_list()?;
+        let (checked, grey) = availability_view();
+        let all = teams.clone();
+        let lookup = |n: &str| Ok(all.iter().find(|t| t.name == n).cloned());
+        let availability: Vec<Value> = teams.iter().map(|t| team_availability(t, &agents, checked, &*grey, &lookup)).collect();
         // Every inline agent's MCP values masked (board #451).
         for t in &mut teams {
             t.members = mcp_mask::masked_team(&t.name, &t.members)?;
         }
-        Ok(json!({ "teams": teams }))
+        let rows: Vec<Value> = teams
+            .iter()
+            .zip(availability)
+            .map(|(t, av)| {
+                let mut v = serde_json::to_value(t).unwrap_or_else(|_| json!({}));
+                if let Some(o) = v.as_object_mut() {
+                    o.insert("availability".into(), av);
+                }
+                v
+            })
+            .collect();
+        Ok(json!({ "teams": rows }))
     })
 }
 
@@ -415,5 +485,32 @@ mod listing_tests {
 
         let unchecked = annotate(agents, false, grey);
         assert!(unchecked["agents"].as_array().unwrap().iter().all(|r| r["availability"] == json!({ "state": "unknown" })), "no report greys nothing");
+    }
+
+    /// Board #7 (orchestrator 07:46): a team with any unavailable member says
+    /// which member and why; with no readiness report it is unknown; and the
+    /// start refuses with the same reason, never starting part of the team.
+    #[test]
+    fn a_team_says_which_member_makes_it_unavailable_and_its_start_refuses() {
+        use crate::projects::store::RegTeam;
+        let agents = vec![a("builder", "kiro"), a("scout", "grok")];
+        let grey = |b: &str| (b == "grok").then(|| json!({ "reason": "not_found", "missing": [] }));
+        let lookup = |_: &str| Ok(None);
+        let team = |m: &str| RegTeam { name: "squad".into(), description: String::new(), members: m.into() };
+        let bad = team(r#"[{"name":"b","base":"builder"},{"name":"s","base":"scout"}]"#);
+        let good = team(r#"[{"name":"b","base":"builder"}]"#);
+        assert_eq!(team_availability(&bad, &agents, true, &grey, &lookup),
+            json!({ "state": "unavailable", "member": "s", "backend": "grok", "reason": "not_found", "missing": [] }));
+        assert_eq!(team_availability(&good, &agents, true, &grey, &lookup), json!({ "state": "available" }));
+        assert_eq!(team_availability(&bad, &agents, false, &grey, &lookup), json!({ "state": "unknown" }), "no report greys nothing");
+        assert_eq!(team_availability(&team("[]"), &agents, true, &grey, &lookup), json!({ "state": "available" }), "an unexpandable team is spawn's error, not availability's");
+        assert_eq!(
+            team_refusal("squad", &team_availability(&bad, &agents, true, &grey, &lookup)).as_deref(),
+            Some("team 'squad' cannot start on this server: member 's' runs on grok, which is not on the managed PATH. Nothing was started.")
+        );
+        let dsh = json!({ "state": "unavailable", "member": "d", "backend": "dsh", "reason": "env_unset", "missing": ["DEEPSEEK_API_KEY"] });
+        assert_eq!(team_refusal("t", &dsh).as_deref(), Some("team 't' cannot start on this server: member 'd' runs on dsh, which is missing DEEPSEEK_API_KEY (not set in the login shell's environment). Nothing was started."));
+        assert_eq!(team_refusal("t", &json!({ "state": "unknown" })), None, "unknown never refuses");
+        assert_eq!(team_refusal("t", &json!({ "state": "available" })), None);
     }
 }

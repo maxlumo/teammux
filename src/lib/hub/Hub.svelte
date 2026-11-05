@@ -38,7 +38,7 @@
   import Icon from '../ui/Icon.svelte';
   import { onDestroy, untrack, tick as settled } from 'svelte';
   import { t } from '../core/i18n.svelte.ts';
-  import { unavailableText } from './backends-view.ts';
+  import { teamUnavailableText, unavailableText } from './backends-view.ts';
   import { sortRows } from '../projects/projects.ts';
   import { alertOf } from './notify-centre.svelte.ts';
   import HubSearch from './HubSearch.svelte';
@@ -2711,10 +2711,11 @@
                 <!-- Configured TEAMS (board #74): one tap starts every member
                      with its role. -->
                 {#each teams as tm (tm.name)}
-                  <button class="start-row team" disabled={starting} onclick={() => startTeam(tm.name, '', 'start')}>
+                  {@const why = teamUnavailableText(tm, t)}
+                  <button class="start-row team" class:unavailable={!!why} disabled={starting || !!why} onclick={() => startTeam(tm.name, '', 'start')}>
                     <span class="ava tava"><Icon name="bots" size={12} /></span>
                     <span class="sr-name">{tm.name}</span>
-                    <span class="sr-backend">{teamMembers(tm).join(' · ')}</span>
+                    <span class="sr-backend">{why || teamMembers(tm).join(' · ')}</span>
                   </button>
                 {/each}
               </div>
@@ -2826,9 +2827,10 @@
              with the brief below; the ad-hoc pick stays underneath. -->
         <div class="dlg-agents" class:touch={compact}>
           {#each teams as tm (tm.name)}
-            <button class="agent-pick team" disabled={starting} onclick={() => startTeam(tm.name, startBrief.trim())}>
+            {@const why = teamUnavailableText(tm, t)}
+            <button class="agent-pick team" disabled={starting || !!why} onclick={() => startTeam(tm.name, startBrief.trim())}>
               <span class="ava tava"><Icon name="bots" size={12} /></span>
-              <span class="ap-name">{tm.name} · {teamMembers(tm).join(', ')}</span>
+              <span class="ap-name">{tm.name} · {why || teamMembers(tm).join(', ')}</span>
               <span class="ap-go">{t('hubStartTeamNamed')}</span>
             </button>
           {/each}
@@ -3042,7 +3044,7 @@
     color: var(--text); padding: 8px 11px; font-size: var(--fs-ui); cursor: pointer;
   }
   .start-row:hover { border-color: var(--accent); background: var(--accent-bg); }
-  .start-row:disabled { opacity: 0.5; }
+  .start-row:disabled { opacity: var(--control-disabled-opacity); }
   .sr-name { font-family: var(--font-mono); font-weight: 600; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
   .sr-backend { font-family: var(--font-mono); font-size: var(--fs-sub); color: var(--text3); margin-left: auto; }
 
@@ -3058,7 +3060,7 @@
   .dlg-agents.touch .agent-pick { min-height: 44px; }
   .agent-pick { display: flex; align-items: center; gap: 8px; background: var(--surface); border: 1px solid var(--border); border-radius: var(--ui-radius-control); color: var(--text2); padding: 8px 11px; font-size: var(--fs-ui); cursor: pointer; text-align: left; }
   .agent-pick.sel { border-color: var(--accent); color: var(--text); background: var(--accent-bg); }
-  .agent-pick:disabled { opacity: 0.5; cursor: default; }
+  .agent-pick:disabled { opacity: var(--control-disabled-opacity); cursor: default; }
   .agent-pick > :global(svg) { flex: none; color: var(--accent); }
   .dlg-actions { display: flex; justify-content: flex-end; gap: 8px; margin-top: 6px; }
 </style>

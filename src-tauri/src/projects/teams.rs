@@ -169,6 +169,20 @@ pub fn expand(root: &RegTeam, lookup: &dyn Fn(&str) -> Result<Option<RegTeam>, S
     Ok(out)
 }
 
+/// The first member of a flattened team whose harness the one availability
+/// rule greys (board #7), as `{member, backend, reason, missing}`; None when
+/// every member can run. `base_backend` resolves a base definition's backend,
+/// and `grey` is the rule over the server's last readiness report. A member
+/// whose base cannot be resolved is skipped: spawn names that error itself.
+pub fn unavailable_member(flat: &[Flat], base_backend: &dyn Fn(&str) -> Option<String>, grey: &dyn Fn(&str) -> Option<serde_json::Value>) -> Option<serde_json::Value> {
+    flat.iter().find_map(|f| {
+        let m = &f.member;
+        let backend = if m.base.trim().is_empty() { m.agent.as_ref().map(|a| a.backend.clone()) } else { base_backend(m.base.trim()) }?;
+        let why = grey(&backend)?;
+        Some(serde_json::json!({ "member": m.name.trim(), "backend": backend, "reason": why["reason"], "missing": why["missing"] }))
+    })
+}
+
 /// One roster line's raw material: final window name, role, nesting path.
 pub type RosterEntry = (String, String, String);
 
@@ -350,6 +364,26 @@ mod tests {
         Flat { member: parse_members(t).unwrap().remove(i), team: t.clone(), path: t.name.clone(), briefs: vec![] }
     }
     const NO_TEAMS: &[String] = &[];
+
+    /// Board #7 (orchestrator 07:46): a team is unavailable when ANY member,
+    /// nested ones included, runs on a harness the one rule greys: the first
+    /// such member, with its backend and reason. A member resolves to its
+    /// base definition's backend, or its inline agent's.
+    #[test]
+    fn a_team_is_unavailable_through_its_first_unavailable_member() {
+        let grey = |b: &str| (b == "grok" || b == "dsh").then(|| serde_json::json!({ "reason": "not_found", "missing": [] }));
+        let base = |n: &str| match n { "builder" => Some("kiro".to_string()), "scout" => Some("grok".to_string()), _ => None };
+        let lookup = |n: &str| Ok(match n { "inner" => Some(named("inner", r#"[{"name":"d","agent":{"name":"d","backend":"dsh"}}]"#)), _ => None });
+        let ok = team(r#"[{"name":"b","base":"builder"},{"name":"c","agent":{"name":"c","backend":"claude"}}]"#);
+        assert_eq!(unavailable_member(&expand(&ok, &lookup, 8).unwrap(), &base, &grey), None);
+        let by_base = team(r#"[{"name":"b","base":"builder"},{"name":"s","base":"scout"},{"name":"d2","agent":{"name":"d2","backend":"dsh"}}]"#);
+        assert_eq!(unavailable_member(&expand(&by_base, &lookup, 8).unwrap(), &base, &grey),
+            Some(serde_json::json!({ "member": "s", "backend": "grok", "reason": "not_found", "missing": [] })), "the first, by its base");
+        let nested = team(r#"[{"name":"b","base":"builder"},{"team":"inner"}]"#);
+        assert_eq!(unavailable_member(&expand(&nested, &lookup, 8).unwrap(), &base, &grey).unwrap()["member"], "d", "a nested inline member counts");
+        let unresolved = team(r#"[{"name":"x","base":"gone"}]"#);
+        assert_eq!(unavailable_member(&expand(&unresolved, &lookup, 8).unwrap(), &base, &grey), None, "an unresolved base is spawn's error to name, not availability's");
+    }
 
     #[test]
     fn validate_pins_the_shape() {

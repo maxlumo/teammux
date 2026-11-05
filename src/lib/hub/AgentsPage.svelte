@@ -1535,7 +1535,7 @@
      7px dot the Backends section wears. */
   .agent-group.divided { border-top: 1px solid var(--border); margin-top: 6px; padding-top: 2px; }
   .side-row.unavailable { align-items: flex-start; }
-  .side-row.unavailable .ava, .side-row.unavailable .r-backend { opacity: 0.45; }
+  .side-row.unavailable .ava, .side-row.unavailable .r-backend { opacity: var(--control-disabled-opacity); }
   .r-why { display: flex; align-items: baseline; gap: 6px; font-family: var(--font-ui); }
   .r-dot { flex: none; width: 7px; height: 7px; border-radius: 50%; align-self: center; }
   @media (max-width: 760px) {

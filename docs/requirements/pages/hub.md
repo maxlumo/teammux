@@ -223,7 +223,9 @@ completion).
   missing, per the server's last Backends check) is greyed and says why in
   words; it can still be opened and read, and the roster's start list, the
   start dialog and New project offer no start for it, while the team member
-  picker names the reason. Unknown or untested setup, and a failed or absent
+  picker names the reason. A team with such a member is offered no start
+  either, saying which member and why, and `tmm spawn --team` refuses it
+  whole. Unknown or untested setup, and a failed or absent
   check, grey nothing. We install and configure nothing. Also
   `tmm registry list`, in the same two groups. "Instructions for every agent"
   edits the app-wide `<config>/AGENTS.md` that leads every managed agent's

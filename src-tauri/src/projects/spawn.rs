@@ -1226,6 +1226,19 @@ fn uniquify(name: &str, taken: &std::collections::HashSet<&str>) -> Result<Strin
 /// not stop the others and is reported in `errors`. Returns
 /// `{ team, spawned: [{name, window_name, pane}], errors: [..] }`.
 pub fn spawn_team(session: &str, team_name: &str, brief: &str, by: &str) -> Result<Value, String> {
+    // Board #7 (orchestrator 07:46): a team with a member on a harness this
+    // server cannot run is refused WHOLE, with that member's reason, before
+    // anything starts; the same rule the Agents page and the pickers read.
+    // Unknown (no readiness report yet) never refuses.
+    if let Some(team) = super::team_get(team_name)? {
+        let agents = super::with_store(|store| store.reg_list())?;
+        let (checked, grey) = super::registry::availability_view();
+        let lookup = |n: &str| super::team_get(n);
+        let availability = super::registry::team_availability(&team, &agents, checked, &*grey, &lookup);
+        if let Some(refusal) = super::registry::team_refusal(team_name, &availability) {
+            return Err(refusal);
+        }
+    }
     spawn_team_members(session, team_name, brief, by, false, None)
 }
 
