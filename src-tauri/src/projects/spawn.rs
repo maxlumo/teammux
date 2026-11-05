@@ -2974,6 +2974,27 @@ hooks = [ { type = "command", command = "/opt/guard.sh" } ]
         assert!(dotted.cmd.contains("check_for_update_on_startup=false"));
     }
 
+    /// Board #5: codex-cli 0.166.0's default footer paints no context, so a
+    /// managed launch names its status-line items as a `-c` override (the
+    /// user's config.toml is a symlink and is not edited). The default's
+    /// model, cwd and thread title are kept, and `context-used` goes before
+    /// the cwd so a phone-width truncation keeps it. Display items only:
+    /// the model and effort stay in the profile (non-negotiable 10).
+    #[test]
+    fn codex_launch_line_paints_a_context_item() {
+        let scratch = crate::tmux::Scratch::new("spawn-codex-status");
+        let dir = std::path::PathBuf::from(scratch.path());
+        let d = def("codex");
+        let prompt = build_prompt(&d, "tester", "proj", "", "", "");
+        let cmd = render_codex(&d, "tester", &dir, &dir, &prompt, &[]).unwrap().cmd;
+        let tokens: Vec<&str> = cmd.split_whitespace().collect();
+        let want = r#"'tui.status_line=["model-with-reasoning","context-used","current-dir","thread-title"]'"#;
+        assert!(tokens.windows(2).any(|w| w == ["-c", want]), "the status line override: {cmd}");
+        for r in [crate::backends::codex::resume_command(&cmd, None), crate::backends::codex::resume_command(&cmd, Some("01a1656d-ae66-7b90-a5b0-6ba62708fd87"))] {
+            assert!(r.contains(want), "a resume keeps it: {r}");
+        }
+    }
+
     /// Board #245: the definition's input mode, rendered by each switching
     /// backend into its own config — kiro's `settings/cli.json` key, codex's
     /// keymap overrides (measured doors; see the backend files). Queue is the

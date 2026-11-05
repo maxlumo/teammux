@@ -168,7 +168,7 @@ pub fn sniff_codex(pane: &str) -> Vitals {
     // somebody's content.
     if v.context_pct.is_none() {
         for line in pane.lines().rev().filter(|l| !codex_content_line(l)) {
-            if let Some(pct) = codex_context_left(line) {
+            if let Some(pct) = codex_context_left(before_thread_title(line)) {
                 v.context_pct = Some(pct);
                 break;
             }
@@ -362,11 +362,11 @@ pub(crate) fn codex_footer(line: &str) -> Option<CodexFooter> {
     let mut model: Option<(String, Option<String>)> = None;
     let mut context_pct = None;
     let mut cwd = false;
-    for seg in line.trim().split('\u{b7}').map(str::trim) {
+    for seg in before_thread_title(line).split('\u{b7}').map(str::trim) {
         if seg.starts_with('/') || seg.starts_with('~') {
             cwd = true;
         } else if let Some(pct) = codex_context_item(seg) {
-            context_pct = Some(pct);
+            context_pct = context_pct.or(Some(pct));
         } else if model.is_none() {
             model = codex_model_item(seg);
         }
@@ -390,10 +390,35 @@ pub(crate) fn codex_footer(line: &str) -> Option<CodexFooter> {
     })
 }
 
+/// The part of a status line that may carry items: everything up to and
+/// including the first cwd segment. codex-cli 0.166.0 paints the thread title
+/// AFTER the cwd, in its default footer and in the managed launch's
+/// `tui.status_line` alike (board #5, measured 2026-11-05), and the title is
+/// free text: codex names the thread from its first message, which for a
+/// managed agent is a room message that may quote a footer. So nothing after
+/// the cwd is read. A line with no cwd segment is returned whole.
+#[cfg(not(any(target_os = "android", target_os = "ios")))]
+fn before_thread_title(line: &str) -> &str {
+    let line = line.trim();
+    let mut end = 0;
+    for seg in line.split('\u{b7}') {
+        end += seg.len();
+        let t = seg.trim();
+        if t.starts_with('/') || t.starts_with('~') {
+            return &line[..end];
+        }
+        end += '\u{b7}'.len_utf8();
+    }
+    line
+}
+
 /// `<model> [<effort>]`, in either spelling codex has painted:
 ///
 /// * the catalog SLUG — `xai.grok-4.6`, `gpt-5.2-codex`, `openai.gpt-5.6-sol`
 ///   (0.148.0 … 0.154.0) — one lowercase token carrying a digit;
+/// * a one-token `display_name` — `GPT-6-Astra` (0.166.0, measured
+///   2026-11-05, board #5) — letters, digits, `.` and `-`, carrying both a
+///   letter and a digit;
 /// * the catalog `display_name` — `GPT-6 Astra (Global)`,
 ///   `GPT-6 Astra (US cross-region)` (0.162.1, measured 2026-10-15, board
 ///   #373) — up to three name words then a parenthesised route.
@@ -446,13 +471,14 @@ fn codex_model_name(s: &str) -> Option<&str> {
             && words.iter().any(|w| w.chars().any(|c| c.is_ascii_digit()));
         return (route_ok && name_ok).then_some(s);
     }
-    // The slug form: one token, lowercase, carrying a digit.
+    // One token: the lowercase slug, or (0.166.0) a one-token display name.
     let mut toks = s.split_whitespace();
     let model = toks.next()?;
     if toks.next().is_some() {
         return None;
     }
-    (looks_like_model(model) && model.chars().any(|c| c.is_ascii_digit())).then_some(model)
+    let one_token = looks_like_model(model) || looks_like_model_word(model);
+    (one_token && model.chars().any(|c| c.is_ascii_digit())).then_some(model)
 }
 
 /// A word a model's display name may be made of: letters, digits, `.`, `-`,
@@ -651,6 +677,16 @@ pub(crate) fn render_codex(
     // not set as well. A person's own paste arrives bracketed from the
     // terminal, the path the heuristic does not handle.
     config_args.push(shared::codex_config_override("tui.disable_paste_burst", Value::Bool(true)));
+    // Board #5: the card's context reading needs a context ITEM, and
+    // codex-cli 0.166.0's default footer paints none (`GPT-6-Astra high ·
+    // <cwd> · <thread title>`). `tui.status_line` is codex's documented door
+    // for the footer; this keeps the default's items and adds `context-used`
+    // BEFORE the cwd, because codex truncates the line with `…` and the cwd
+    // is the long one (45 columns, measured: `GPT-6-Astra high · Context 0%
+    // used · /tmp/…`). Display items only, never the model or effort
+    // (non-negotiable 10). In a managed pane it replaces a status line the
+    // user set in config.toml; their own codex is untouched.
+    config_args.push(shared::codex_config_override("tui.status_line", json!(CODEX_STATUS_LINE)));
     if let Some(key) = codex_trust_key(workspace) {
         config_args.push(shared::codex_config_override(&key, Value::String("trusted".into())));
     }
@@ -668,6 +704,12 @@ pub(crate) fn render_codex(
     })
 }
 
+
+/// The managed codex footer's items, in paint order (board #5, ids from
+/// codex-cli 0.166.0). `sniff_codex` reads nothing after the cwd, which is
+/// where the thread title goes.
+#[cfg(not(any(target_os = "android", target_os = "ios")))]
+const CODEX_STATUS_LINE: [&str; 4] = ["model-with-reasoning", "context-used", "current-dir", "thread-title"];
 
 /// The `-c` key that pre-answers codex's folder-trust screen for `workspace`,
 /// or None when the path holds a dot (codex splits the key on dots and keeps

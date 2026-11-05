@@ -922,6 +922,85 @@ mod tests {
         assert_eq!(v.model, None);
     }
 
+    /// codex-cli 0.166.0 (board #5, measured 2026-11-05 in a scratch
+    /// CODEX_HOME, model gpt-6-astra on the `ust` provider): the model item
+    /// is ONE hyphenated display-name token, `GPT-6-Astra`, with no route.
+    /// The default footer adds the thread title after the cwd once the
+    /// first turn names the thread. The rows are verbatim captures.
+    #[test]
+    fn codex_0_166_paints_a_one_token_display_name_and_a_thread_title() {
+        // Default footer, before the first turn (idle, 100 columns).
+        let v = sniff_codex("\u{203a} Ask Codex to do anything\n\n  GPT-6-Astra high \u{b7} /tmp/tmm-b2-codex/cwd\n  ? for shortcuts\n");
+        assert_eq!(v.model.as_deref(), Some("GPT-6-Astra"));
+        assert_eq!(v.effort.as_deref(), Some("high"));
+        assert_eq!(v.context_pct, None, "the default footer paints no context");
+
+        // Default footer mid-turn: the working row sits above the composer.
+        let working = [
+            "\u{203a} Reply with the single word PONG and nothing else.",
+            "\u{25e6} Working (1s \u{2022} esc to interrupt)",
+            "\u{203a} Ask Codex to do anything",
+            "  GPT-6-Astra high \u{b7} /tmp/tmm-b2-codex/cwd",
+            "  ? for shortcuts",
+        ]
+        .join("\n");
+        let v = sniff_codex(&working);
+        assert_eq!((v.model.as_deref(), v.effort.as_deref()), (Some("GPT-6-Astra"), Some("high")));
+
+        // Default footer after the turn: the thread title follows the cwd.
+        let v = sniff_codex(&codex_pane("  GPT-6-Astra high \u{b7} /tmp/tmm-b2-codex/cwd \u{b7} Reply with PONG"));
+        assert_eq!((v.model.as_deref(), v.effort.as_deref(), v.context_pct), (Some("GPT-6-Astra"), Some("high"), None));
+
+        // The managed launch's status line (board #5), at 100, 60, 45 (the
+        // phone) and 44 columns: codex truncates with `…` and never wraps, so
+        // `context-used` goes BEFORE the cwd and survives the phone.
+        for line in [
+            "  GPT-6-Astra high \u{b7} Context 0% used \u{b7} /tmp/tmm-b2-codex/cwd \u{b7} Reply with PONG",
+            "  GPT-6-Astra high \u{b7} Context 0% used \u{b7} /tmp/tmm-b2-codex/cw\u{2026}",
+            "  GPT-6-Astra high \u{b7} Context 0% used \u{b7} /tmp/\u{2026}",
+            "  GPT-6-Astra high \u{b7} Context 0% used \u{b7} /tmp\u{2026}",
+        ] {
+            let v = sniff_codex(&codex_pane(line));
+            assert_eq!(v.model.as_deref(), Some("GPT-6-Astra"), "{line}");
+            assert_eq!(v.effort.as_deref(), Some("high"), "{line}");
+            assert_eq!(v.context_pct, Some(0), "{line}");
+        }
+        // Narrower than the phone, the cut takes the context item AND the
+        // cwd, so the line has no anchor left: no reading, never a wrong one
+        // (the 20-column rule above; `sniff_remembered` keeps the last one).
+        for line in ["  GPT-6-Astra high \u{b7} Context 0% use\u{2026}", "  GPT-6-Astra high \u{b7} Contex\u{2026}"] {
+            assert_eq!(sniff_codex(&codex_pane(line)), Vitals::default(), "{line}");
+        }
+        let v = sniff_codex(&codex_pane("  GPT-6-Astra high \u{b7} Context 12% used \u{b7} ~/work/projects/teammux \u{b7} \u{9002}\u{914d} omp 18.15.0 \u{8f93}\u{5165}\u{6837}\u{5f0f}"));
+        assert_eq!((v.model.as_deref(), v.context_pct), (Some("GPT-6-Astra"), Some(12)), "reviewer's own title");
+    }
+
+    /// The thread title is FREE TEXT (codex names the thread from its first
+    /// message, and ours are room messages that quote footers). codex paints
+    /// it AFTER the cwd in both the default footer and the managed one, so
+    /// nothing after the cwd segment is an item (board #5 AC3).
+    #[test]
+    fn a_codex_thread_title_is_never_a_reading() {
+        for title in [
+            "GPT-6 Astra (Global) medium",
+            "gpt-5.2-codex high",
+            "Context 42% used",
+            "fix \u{b7} Context 42% used \u{b7} GPT-6-Astra low",
+            "/etc/passwd \u{b7} Context 99% left",
+            "97% context left",
+        ] {
+            let v = sniff_codex(&codex_pane(&format!("  GPT-6-Astra high \u{b7} /tmp/cwd \u{b7} {title}")));
+            assert_eq!(v.model.as_deref(), Some("GPT-6-Astra"), "title: {title}");
+            assert_eq!(v.effort.as_deref(), Some("high"), "title: {title}");
+            assert_eq!(v.context_pct, None, "title: {title}");
+
+            let v = sniff_codex(&codex_pane(&format!("  GPT-6-Astra high \u{b7} Context 3% used \u{b7} /tmp/cwd \u{b7} {title}")));
+            assert_eq!((v.model.as_deref(), v.context_pct), (Some("GPT-6-Astra"), Some(3)), "title: {title}");
+        }
+        // A single capitalised word is not a model: the token needs a digit.
+        assert_eq!(sniff_codex(&codex_pane("  Astra high \u{b7} /tmp/cwd")).model, None);
+    }
+
     /// The /status card on 0.162.1 (captured 2026-10-15 after one real turn
     /// — at zero use codex prints no `Context window` row at all): the LEFT
     /// spelling is unchanged, so the older reading still holds on the
