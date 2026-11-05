@@ -482,9 +482,12 @@ pub(crate) fn resume_exact(cmd: &str, id: &str) -> Option<String> {
 /// that id, both print "No conversation found…" and exit 1, parking the pane
 /// at the shell. A SessionStart id is recorded at startup, but the transcript
 /// is written only after the first turn. So with a home, this resumes only
-/// what the home holds: the exact id when `projects/*/<id>.jsonl` exists,
-/// else the newest transcript of the launch cwd (the workspace) when that cwd
-/// has one, else a fresh start. Without a home it keeps the unchecked forms.
+/// what the home holds. A RECORDED id resumes exactly when
+/// `projects/*/<id>.jsonl` exists and otherwise starts fresh: falling back to
+/// the cwd's newest would revive an OLDER conversation with the wrong history
+/// (review P1-R1). With no recorded id, the newest transcript of the launch
+/// cwd is continued when there is one, else a fresh start. Without a home it
+/// keeps the unchecked forms.
 pub(crate) fn resume_command(cmd: &str, id: Option<&str>, home: Option<&Path>) -> String {
     let Some(home) = home else {
         return match id {
@@ -492,13 +495,12 @@ pub(crate) fn resume_command(cmd: &str, id: Option<&str>, home: Option<&Path>) -
             None => format!("{cmd} --continue"),
         };
     };
-    if let Some(id) = id.filter(|id| holds_transcript(home, id)) {
-        return exact_line(cmd, id);
+    match id {
+        Some(id) if holds_transcript(home, id) => exact_line(cmd, id),
+        Some(_) => cmd.to_string(),
+        None if cwd_has_transcript(home) => format!("{cmd} --continue"),
+        None => cmd.to_string(),
     }
-    if cwd_has_transcript(home) {
-        return format!("{cmd} --continue");
-    }
-    cmd.to_string()
 }
 
 /// Whether the home holds the transcript of conversation `id` under any cwd.
@@ -513,8 +515,12 @@ fn holds_transcript(home: &Path, id: &str) -> bool {
 }
 
 /// Whether the launch cwd has a transcript `--continue` can pick. The cwd is
-/// the workspace, from the managed layout `<ws>/.tmm/agents/<name>`. A home
-/// outside that layout counts any transcript at all.
+/// the workspace, from the managed layout `<ws>/.tmm/agents/<name>`,
+/// canonicalized: claude files transcripts under its REAL cwd (measured on
+/// 2.1.318: run from a symlink to `repo/sub`, the transcript went to
+/// `…-repo-sub`). That is not `claude_trust_key`, which walks up to the git
+/// root because it answers trust. A home outside that layout counts any
+/// transcript at all.
 fn cwd_has_transcript(home: &Path) -> bool {
     let has_jsonl = |dir: &Path| {
         std::fs::read_dir(dir)
@@ -531,6 +537,7 @@ fn cwd_has_transcript(home: &Path) -> bool {
         .and_then(Path::parent);
     match workspace {
         Some(ws) => {
+            let ws = std::fs::canonicalize(ws).unwrap_or_else(|_| ws.to_path_buf());
             let (exact, long_prefix) = project_dir_name(&ws.to_string_lossy());
             dirs.flatten().any(|d| {
                 let name = d.file_name().to_string_lossy().to_string();
@@ -753,6 +760,37 @@ mod tests {
         let long = scratch.join("a".repeat(240));
         let prefix: String = format!("{s_dir}-{}", "a".repeat(240)).chars().take(200).collect();
         case(&long, &format!("{prefix}-1k2j3h"));
+        std::fs::remove_dir_all(&scratch).ok();
+    }
+
+    /// Board #22 round 1 (measured on 2.1.318): claude files a transcript
+    /// under its encoding of the CANONICAL cwd. Run from a symlink to
+    /// `repo/sub`, the transcript went to `…-repo-sub`, not to the link's
+    /// name, and not to the git root `…-repo` that `claude_trust_key` answers
+    /// for trust.
+    #[test]
+    fn the_transcript_directory_is_the_canonical_workspace_not_its_link_or_git_root() {
+        let scratch = crate::config::test_scratch("tmm-claude-canon");
+        std::fs::create_dir_all(&scratch).unwrap();
+        let scratch = std::fs::canonicalize(scratch).unwrap();
+        let sub = scratch.join("repo/sub");
+        std::fs::create_dir_all(scratch.join("repo/.git")).unwrap();
+        std::fs::create_dir_all(&sub).unwrap();
+        let link = scratch.join("link");
+        std::os::unix::fs::symlink(&sub, &link).unwrap();
+        let home = link.join(".tmm/agents/cl");
+        std::fs::create_dir_all(&home).unwrap();
+        let enc = |p: &Path| -> String { p.to_string_lossy().chars().map(|c| if c.is_ascii_alphanumeric() { c } else { '-' }).collect() };
+        let put = |dir: &str| {
+            let d = home.join("projects").join(dir);
+            std::fs::create_dir_all(&d).unwrap();
+            shared::write_atomic(&d.join("a.jsonl"), "{}\n").unwrap();
+        };
+        put(&enc(&link));
+        put(&enc(&scratch.join("repo")));
+        assert_eq!(resume_command("claude", None, Some(&home)), "claude", "the link's name and the git root are not claude's directory");
+        put(&enc(&sub));
+        assert_eq!(resume_command("claude", None, Some(&home)), "claude --continue", "the canonical cwd is");
         std::fs::remove_dir_all(&scratch).ok();
     }
 

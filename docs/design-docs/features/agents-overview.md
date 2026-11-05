@@ -712,10 +712,14 @@ The owner uses Claude through Bedrock ("都用bedrock渠道…复用我们全局
 - After one interactive turn, `projects/<D(cwd)>/<id>.jsonl` exists, and both `--continue` and `--resume <id>` resume it. A transcript written only by `claude -p` (entrypoint `sdk-cli`) is not picked by `--continue`. Managed agents are interactive, so this case is left as is.
 - `D(cwd)`, from the binary: every non-alphanumeric UTF-16 unit becomes `-`. A name longer than 200 units is cut to 200 and gets `-<hash>` appended. The hash is not reproduced; a long name is matched on that prefix.
 
-**Rule.** `claude::resume_command` asks the home and has no other caller. Every restart path reaches it: `relaunch_line` (`up`, `tmm agent restart`) and the respawn's `launch_command` (a team restart, or a restart before the slot settles). The respawn now passes the home, where before it passed none. The choice, in order:
-1. `--resume <id>` when the recorded id's `<id>.jsonl` is under `projects/*/`.
-2. Otherwise `--continue` when `projects/<D(workspace)>/` holds a `*.jsonl`.
+**Rule.** `claude::resume_command` asks the home and has no other caller. Every restart path reaches it: `relaunch_line` (`up`, `tmm agent restart`) and the respawn's `launch_command` (a team restart, or a restart before the slot settles). The respawn now passes the home, where before it passed none. The choice:
+1. A recorded id resumes with `--resume <id>` when its `<id>.jsonl` is under `projects/*/`, and otherwise starts FRESH.
+2. With no recorded id, `--continue` is used when `projects/<D(canonical workspace)>/` holds a `*.jsonl`.
 3. Otherwise a fresh start.
+
+Why a recorded id never falls back to `--continue` (review P1-R1, round 1): when the recorded conversation's transcript is gone while an older one remains, `--continue` revives the OLDER conversation and hands the agent the wrong history. Measured: after `/clear`, SessionStart reports a new id (`source: clear`) and the old transcript stays.
+
+Why the workspace is canonicalized: claude files a transcript under its REAL cwd. Measured: run from a symlink to `repo/sub`, the transcript went to `…-repo-sub`. It went neither to the link's name nor to the git root `…-repo`, which is what `claude_trust_key` answers for trust, so that function is not reused.
 
 A home outside the `<ws>/.tmm/agents/<name>` layout counts any transcript. Without a home, the unchecked forms are kept. The strict restore form (`resume_exact`, board #422) is unchanged: it never falls back to fresh.
 
@@ -727,7 +731,7 @@ A home outside the `<ws>/.tmm/agents/<name>` layout counts any transcript. Witho
 - spawn a team member, then `tmm agent restart --team` before any turn: up, fresh;
 - after a turn: `--continue`, and the turn is on screen.
 
-Pinned by `spawn::relaunch_tests::a_claude_restart_resumes_only_a_conversation_that_exists`, `restart_spawn_resumes_but_a_new_hire_starts_fresh` and `claude::tests::continue_needs_a_transcript_in_claudes_own_directory_for_the_workspace`.
+Pinned by `spawn::relaunch_tests::a_claude_restart_resumes_only_a_conversation_that_exists`, `restart_spawn_resumes_but_a_new_hire_starts_fresh` `claude::tests::continue_needs_a_transcript_in_claudes_own_directory_for_the_workspace` and `claude::tests::the_transcript_directory_is_the_canonical_workspace_not_its_link_or_git_root`.
 
 ### The kimi backend: Kimi Code CLI 2.0.2 on Bedrock (board #224, 2026-09-20)
 

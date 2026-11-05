@@ -1856,10 +1856,13 @@ mod relaunch_tests {
         std::fs::write(transcripts.join(format!("{id}.jsonl")), "{}\n").unwrap();
         assert_eq!(relaunch_line(wss, "cl", Some(id)).unwrap().unwrap(), format!("{cmd} --resume {id}"), "the same conversation, exactly");
         assert_eq!(relaunch_line(wss, "cl", None).unwrap().unwrap(), format!("{cmd} --continue"), "no id recorded: the newest of this cwd");
+        // Review P1-R1: the recorded conversation's transcript is gone while an
+        // older one remains. Resuming the older one would hand the agent the
+        // wrong history, so a recorded id without its transcript starts fresh.
         assert_eq!(
             relaunch_line(wss, "cl", Some("11111111-2222-3333-4444-555555555555")).unwrap().unwrap(),
-            format!("{cmd} --continue"),
-            "an id this home does not hold falls back to the cwd's newest"
+            cmd,
+            "a recorded id this home does not hold: fresh, never the older conversation"
         );
         std::fs::remove_dir_all(&ws).ok();
     }
