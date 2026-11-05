@@ -2917,6 +2917,57 @@ hooks = [ { type = "command", command = "/opt/guard.sh" } ]
         std::fs::remove_dir_all(&root).ok();
     }
 
+    /// Board #3 (Claude Code 2.1.318, 2026-11-05): a restarted managed Claude
+    /// parked at the modal "LSP plugin recommendation" dialog
+    /// (rust-analyzer-lsp@claude-plugins-official), where a delivered digit or
+    /// Enter could pick "Yes, install". The documented off switch is
+    /// `lspRecommendationDisabled: true` in `.claude.json` (code-intelligence
+    /// docs § Turn recommendations back on). A fresh home gets it at render;
+    /// an EXISTING home (onboarding and trust already seeded, no key) gets it
+    /// from the start-time backfill, and a home that set it false is put back.
+    #[test]
+    fn claude_state_disables_lsp_plugin_recommendations_in_new_and_existing_homes() {
+        let root = crate::config::test_scratch("tmm-cc-lsp");
+        let workspace = root.join("repo");
+        let home = root.join("home");
+        std::fs::create_dir_all(workspace.join(".git")).unwrap();
+        std::fs::create_dir_all(&home).unwrap();
+        let state = home.join(".claude.json");
+        let read = || -> Value { serde_json::from_str(&std::fs::read_to_string(&state).unwrap()).unwrap() };
+
+        // New home.
+        assert!(ensure_claude_state(&home, &workspace).unwrap());
+        assert_eq!(read()["lspRecommendationDisabled"], json!(true));
+        assert!(!ensure_claude_state(&home, &workspace).unwrap(), "canonical state is a no-op");
+
+        // An existing pre-#3 home: onboarding and trust seeded, the key absent,
+        // Claude's own counters present. The start-time backfill adds the key
+        // and keeps the rest.
+        let repo = std::fs::canonicalize(&workspace).unwrap().to_string_lossy().into_owned();
+        let old = json!({
+            "hasCompletedOnboarding": true, "theme": "dark", "userID": "keep",
+            "lspRecommendationIgnoredCount": 2,
+            "projects": { repo.clone(): { "hasTrustDialogAccepted": true } }
+        });
+        std::fs::write(&state, old.to_string()).unwrap();
+        std::fs::write(home.join("settings.json"), "{}").unwrap();
+        assert!(crate::backends::claude::refresh(&home, &workspace, "notify").unwrap());
+        let after = read();
+        assert_eq!(after["lspRecommendationDisabled"], json!(true));
+        assert_eq!(after["lspRecommendationIgnoredCount"], json!(2));
+        assert_eq!(after["userID"], "keep");
+        assert_eq!(after["projects"][repo.as_str()]["hasTrustDialogAccepted"], json!(true));
+
+        // A home whose dialog was turned back on is turned off again: a managed
+        // home carries no plugins, and nobody answers its dialogs.
+        let mut on = read();
+        on["lspRecommendationDisabled"] = json!(false);
+        std::fs::write(&state, on.to_string()).unwrap();
+        assert!(ensure_claude_state(&home, &workspace).unwrap());
+        assert_eq!(read()["lspRecommendationDisabled"], json!(true));
+        std::fs::remove_dir_all(&root).ok();
+    }
+
     #[test]
     fn codex_launch_line_pre_answers_its_startup_prompts() {
         // Board #184 (owner 2026-09-12: "codex 启动会有提示是否升级，这个也要屏蔽掉，

@@ -234,7 +234,8 @@ pub(crate) fn claude_trust_key(workspace: &Path) -> PathBuf {
         .to_path_buf()
 }
 
-/// Materialize onboarding + workspace trust in an isolated managed Claude home.
+/// Materialize onboarding, workspace trust and the LSP-recommendation off
+/// switch in an isolated managed Claude home.
 /// Claude's official permissions docs name this exact persisted shape. Merge,
 /// never replace: `.claude.json` also owns session history, usage and UI state.
 #[cfg(not(any(target_os = "android", target_os = "ios")))]
@@ -249,6 +250,16 @@ pub(crate) fn ensure_claude_state(home: &Path, workspace: &Path) -> Result<bool,
     let mut changed = !path.is_file();
     if obj.get("hasCompletedOnboarding") != Some(&json!(true)) {
         obj.insert("hasCompletedOnboarding".into(), json!(true));
+        changed = true;
+    }
+    // Board #3 (2.1.318): the modal "LSP plugin recommendation" dialog
+    // offered rust-analyzer-lsp to a restarted managed agent, and a delivered
+    // digit or Enter could answer "Yes, install". `lspRecommendationDisabled`
+    // is the documented off switch in `.claude.json` (code-intelligence docs
+    // § Turn recommendations back on). A managed home carries no plugins and
+    // nobody answers its dialogs, so the value is held at true.
+    if obj.get("lspRecommendationDisabled") != Some(&json!(true)) {
+        obj.insert("lspRecommendationDisabled".into(), json!(true));
         changed = true;
     }
     if !obj.contains_key("theme") {
