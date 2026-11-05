@@ -22,7 +22,8 @@ test('one cap, the same word on the server and in the client gate', async () => 
 
 test('the transport waits sit above the server budgets: 20 s Refresh, 35 s Test', async () => {
   const api = await readFile(new URL('../core/ws-api.ts', import.meta.url), 'utf8');
-  assert.match(api, /call<unknown>\('backends_check', test \? \{ test \} : \{\}, test \? 35000 : 20000\)/u);
+  // `first` joins the Refresh, so it waits as long as a Refresh (agents-overview.md § The Agents list).
+  assert.match(api, /call<unknown>\('backends_check', test \? \{ test \} : arg \? \{ first: true \} : \{\}, test \? 35000 : 20000\)/u);
   assert.match(api, /backendsCheck: 'read'/u);
 });
 

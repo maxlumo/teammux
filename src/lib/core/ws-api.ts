@@ -578,8 +578,10 @@ export function createWsApi(connection: Connection) {
    * at once when the server has one, else it waits for the ONE Refresh the
    * server's first registry list started (joined, never a second probe). The
    * waits sit above the server's own 15 s / 30 s budgets, which answer first. */
-  const backendsCheck = (arg?: string | { first: true }) =>
-    call<unknown>('backends_check', typeof arg === 'string' ? { test: arg } : arg?.first ? { first: true } : {}, typeof arg === 'string' ? 35000 : 20000);
+  const backendsCheck = (arg?: string | { first: true }) => {
+    const test = typeof arg === 'string' ? arg : '';
+    return call<unknown>('backends_check', test ? { test } : arg ? { first: true } : {}, test ? 35000 : 20000);
+  };
   /** One backend's model catalogue (board #511): the declared ids with their
    * kind, and the baseline default, each with a fixed reason when absent. An
    * older server answers `{backend, models}` only (no `kind` key); the page
