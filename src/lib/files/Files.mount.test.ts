@@ -749,7 +749,7 @@ test('crumb and row menus copy the NAME or the full PATH (board #191)', async co
  * commits. Each PUT waits for the test to `answer` it (or `drop` it, keeping
  * some of its bytes, as a cut body does). Chunks are 2 bytes so progress moves. */
 function uploadGateway() {
-  type Pending = { offset: number; body: Uint8Array; id: string; answer: () => void; drop: (keep: number) => void };
+  type Pending = { offset: number; body: Uint8Array; id: string; answer: () => void; drop: (keep: number) => void; conflict: () => void };
   const g = {
     uploads: new Map<string, { path: string; size: number; received: number; bytes: number[]; committed: boolean }>(),
     pending: [] as Pending[],
@@ -770,6 +770,9 @@ function uploadGateway() {
     },
     fsUploadResume: async (id: string) => {
       g.resumes.push(id);
+      // The server's receipt (reviewer P1-R1): a committed upload answers done.
+      const done = g.uploads.get(`${id}:done`);
+      if (done) return { url: '', received: done.size, chunk: 2, done: true };
       const u = g.uploads.get(id);
       if (!u) throw new Error(`no such upload: ${id}`);
       return { url: `http://gw/up/${id}?sig=2`, received: u.received, chunk: 2 };
@@ -792,9 +795,16 @@ function uploadGateway() {
           if (u.received === u.size) { u.committed = true; g.uploads.delete(id); g.uploads.set(`${id}:done`, u); }
           resolve(new Response(null, { status: u.committed ? 201 : 204, headers: { 'Upload-Offset': String(u.received) } }));
         },
+        /** Answer with a 409 naming where the upload stands, without taking the chunk. */
+        conflict: () => {
+          const u = g.uploads.get(id)!;
+          resolve(new Response(null, { status: 409, headers: { 'Upload-Offset': String(u.received) } }));
+        },
         drop: (keep: number) => {
           const u = g.uploads.get(id)!;
           if (offset === u.received) { u.bytes.push(...body.slice(0, keep)); u.received += keep; }
+          // The last bytes landed: the commit happened, only its 201 is lost.
+          if (u.received === u.size) { u.committed = true; g.uploads.delete(id); g.uploads.set(`${id}:done`, u); }
           reject(new TypeError('Failed to fetch'));
         },
       };
@@ -904,6 +914,56 @@ test('Cancel stops sending and aborts the upload, so the server removes its part
     assert.equal(g.pending.length, 0, 'the chunk in flight was aborted, none sent after it');
     assert.deepEqual(g.begins, ['/fixture/one.txt'], 'the rest of the batch is not started');
     assert.doesNotMatch(feedbackText(app), /Uploading|Uploaded/, 'the line goes');
+  } finally { for (const p of g.pending) p.answer(); await app.close(); }
+});
+
+test('a last chunk that commits but whose answer is lost ends as uploaded, with nothing sent again (#23, reviewer P1-R1)', async context => {
+  const g = uploadGateway();
+  const app = await (await compiled).mount(context, {
+    props: { visible: true, session: 'fixture' },
+    modules: [rpc(g.rpc)],
+    setup(window) { pickFiles(window, [['one.txt', 'abcd']]); (window as any).fetch = g.fetch; },
+  });
+  try {
+    await settle(app);
+    button(app, 'Upload files').click();
+    await until(app, () => g.pending.length === 1, 'the first chunk is sent');
+    g.pending.shift()!.answer();
+    await until(app, () => g.pending.length === 1, 'the last chunk is sent');
+    g.pending.shift()!.drop(2); // it lands and commits; the 201 is lost
+    await settle(app);
+    await app.advance(1500);
+    await until(app, () => /Uploaded one\.txt/.test(feedbackText(app)), 'the resume says done');
+    assert.deepEqual(g.uploads.get('u1:done')?.bytes, [...new TextEncoder().encode('abcd')]);
+    assert.deepEqual(g.resumes, ['u1']);
+    assert.equal(g.begins.length, 1, 'no new upload');
+    assert.equal(g.pending.length, 0, 'nothing sent again');
+    assert.equal(app.document.querySelector('.files-feedback [role=alert]'), null, 'no failure line');
+  } finally { for (const p of g.pending) p.answer(); await app.close(); }
+});
+
+test('a 409 that keeps naming the same offset ends in a named failure with Retry, after a bounded number of tries (#23, reviewer P2-R2)', async context => {
+  const g = uploadGateway();
+  const app = await (await compiled).mount(context, {
+    props: { visible: true, session: 'fixture' },
+    modules: [rpc(g.rpc)],
+    setup(window) { pickFiles(window, [['one.txt', 'abcd']]); (window as any).fetch = g.fetch; },
+  });
+  try {
+    await settle(app);
+    button(app, 'Upload files').click();
+    let tries = 0;
+    for (let i = 0; i < 10 && !app.document.querySelector('.files-feedback [role=alert]'); i++) {
+      await until(app, () => g.pending.length === 1 || !!app.document.querySelector('.files-feedback [role=alert]'), 'an attempt');
+      if (g.pending.length) { tries += 1; g.pending.shift()!.conflict(); }
+      await settle(app);
+      await app.advance(1500);
+    }
+    await until(app, () => !!app.document.querySelector('.files-feedback [role=alert]'), 'the upload gives up');
+    assert.equal(tries, 4, 'UPLOAD_MAX_STALLS tries, never a loop');
+    assert.match(feedbackText(app), /Upload failed: one\.txt/);
+    assert.match(feedbackText(app), /409/, 'with the reason');
+    assert.ok(button(app, 'Retry'));
   } finally { for (const p of g.pending) p.answer(); await app.close(); }
 });
 

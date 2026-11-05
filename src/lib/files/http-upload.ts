@@ -19,7 +19,8 @@ export interface UploadBegun { id: string; url: string; chunk: number; received:
  * already absolute for this connection (ws-api.ts). */
 export interface UploadApi {
   begin(path: string, size: number): Promise<UploadBegun>;
-  resume(id: string): Promise<{ url: string; received: number; chunk?: number }>;
+  /** `done`: the server committed this upload (its receipt; the final 201 was lost). */
+  resume(id: string): Promise<{ url: string; received: number; chunk?: number; done?: boolean }>;
   abort(id: string): Promise<unknown>;
 }
 
@@ -79,6 +80,7 @@ export async function uploadFile(o: UploadOptions): Promise<void> {
   if (o.resumeId) {
     id = o.resumeId;
     const r = await o.api.resume(id);
+    if (r.done) { tell(o.size); return; }
     ({ url, received } = r);
     chunk = r.chunk ?? 4 * 1024 * 1024;
   } else {
@@ -89,45 +91,52 @@ export async function uploadFile(o: UploadOptions): Promise<void> {
   const stop = async () => { await o.api.abort(id).catch(() => {}); return new UploadCancelled(); };
   tell(received);
 
+  // Done means the SERVER said so: a 201 (the commit's rename happened) or a
+  // resume answering `done` (its receipt, for a 201 that was lost; reviewer
+  // P1-R1). Holding every byte is not done: the commit can still fail.
+  // Every answer that does not move the offset forward, a 409 naming the
+  // same offset included, is a stall: it waits, asks resume, and counts
+  // against the budget, which only progress resets (reviewer P2-R2).
   let stalls = 0;
-  while (received < o.size) {
+  for (;;) {
     if (cancelled()) throw await stop();
-    const end = Math.min(o.size, received + chunk);
     let reason: string;
-    try {
-      const body = await o.source(received, end);
-      const res = await doFetch(url, {
-        method: 'PUT',
-        headers: { 'Upload-Offset': String(received) },
-        body: body as BodyInit,
-        signal: o.signal,
-      });
-      const at = offsetOf(res);
-      if ((res.status === 204 || res.status === 201) && at != null) {
-        if (at > received) stalls = 0;
-        received = at;
-        tell(received);
-        continue;
+    if (received >= o.size) {
+      reason = 'the last chunk is not committed';
+    } else {
+      const end = Math.min(o.size, received + chunk);
+      try {
+        const body = await o.source(received, end);
+        const res = await doFetch(url, {
+          method: 'PUT',
+          headers: { 'Upload-Offset': String(received) },
+          body: body as BodyInit,
+          signal: o.signal,
+        });
+        const at = offsetOf(res);
+        if (res.status === 201) { tell(o.size); return; }
+        if ((res.status === 204 || res.status === 409) && at != null && at > received) {
+          stalls = 0;
+          received = at;
+          tell(received);
+          continue;
+        }
+        if (at != null) received = at;
+        reason = at != null ? `HTTP ${res.status} at byte ${at}` : `HTTP ${res.status}`;
+      } catch (e) {
+        if (cancelled()) throw await stop();
+        reason = e instanceof Error ? e.message : String(e);
       }
-      if (res.status === 409 && at != null) {
-        if (at > received) stalls = 0;
-        received = at;
-        tell(received);
-        continue;
-      }
-      reason = `HTTP ${res.status}`;
-    } catch (e) {
-      if (cancelled()) throw await stop();
-      reason = e instanceof Error ? e.message : String(e);
     }
-    // Lost the connection, the URL expired, or the server refused: ask the
-    // session where the upload stands and carry on from there.
+    // Lost the connection, the URL expired, the server refused, or the
+    // answer did not move: ask the session where the upload stands.
     stalls += 1;
     if (stalls >= maxStalls) throw new UploadFailed(id, reason, received);
     await sleep(o.retryDelayMs ?? UPLOAD_RETRY_DELAY_MS);
     if (cancelled()) throw await stop();
     try {
       const r = await o.api.resume(id);
+      if (r.done) { tell(o.size); return; }
       if (r.received > received) stalls = 0;
       url = r.url;
       received = r.received;

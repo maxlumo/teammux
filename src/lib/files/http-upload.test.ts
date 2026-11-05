@@ -13,6 +13,7 @@ function gateway(size: number, opts: { chunk?: number } = {}) {
     committed: false,
     aborted: false,
     urlSerial: 0,
+    begins: 0,
     puts: [] as { offset: number; len: number }[],
     /** Called before each PUT is answered; return 'drop' to fail it as a network error
      * after keeping `keep` of its bytes, as a cut body does on the server. */
@@ -21,8 +22,13 @@ function gateway(size: number, opts: { chunk?: number } = {}) {
     fetch: null as unknown as typeof fetch,
   };
   g.api = {
-    begin: async (_path, s) => { assert.equal(s, size); return { id: 'u1', url: `http://gw/up/u1?v=${g.urlSerial++}`, chunk, received: 0 }; },
-    resume: async (id) => { assert.equal(id, 'u1'); return { url: `http://gw/up/u1?v=${g.urlSerial++}`, received: g.received }; },
+    begin: async (_path, s) => { assert.equal(s, size); g.begins += 1; return { id: 'u1', url: `http://gw/up/u1?v=${g.urlSerial++}`, chunk, received: 0 }; },
+    resume: async (id) => {
+      assert.equal(id, 'u1');
+      // The server's receipt (reviewer P1-R1): a committed upload answers done.
+      if (g.committed) return { url: '', received: size, done: true };
+      return { url: `http://gw/up/u1?v=${g.urlSerial++}`, received: g.received };
+    },
     abort: async () => { g.aborted = true; g.bytes = []; return { ok: true }; },
   };
   g.fetch = (async (url: string, init: RequestInit) => {
@@ -34,6 +40,7 @@ function gateway(size: number, opts: { chunk?: number } = {}) {
     const f = g.fault?.(g.puts.length);
     if (f) {
       if (offset === g.received) { g.bytes.push(...body.slice(0, f.keep)); g.received += f.keep; }
+      if (g.received === size) g.committed = true; // the commit happened; only the answer is lost
       throw new TypeError('Failed to fetch');
     }
     if (offset !== g.received) return new Response(null, { status: 409, headers: { 'Upload-Offset': String(g.received) } });
@@ -128,4 +135,63 @@ test('an empty file is done at begin', async () => {
     fetch: (async () => { fetched = true; }) as unknown as typeof fetch, onProgress: (s, t) => seen.push(s, t) });
   assert.equal(fetched, false);
   assert.deepEqual(seen, [0, 0]);
+});
+
+test('a committed last chunk whose answer is lost resumes to done: no re-send, no new begin (reviewer P1-R1)', async () => {
+  const src = file(8);
+  const g = gateway(8);
+  g.fault = (n) => (n === 2 ? { drop: true, keep: 4 } : null); // the last chunk lands and commits; its 201 is lost
+  const seen: number[] = [];
+  await uploadFile({ dest: '/w/a', size: 8, source: sourceOf(src), api: g.api, fetch: g.fetch, sleep: noSleep, onProgress: (sent) => seen.push(sent) });
+  assert.ok(g.committed);
+  assert.deepEqual(g.bytes, [...src]);
+  assert.equal(g.puts.length, 2, 'nothing is sent again');
+  assert.equal(g.begins, 1, 'and nothing begins again');
+  assert.equal(seen.at(-1), 8, 'the line ends complete');
+});
+
+test('a Retry of an upload that had committed resolves at once (reviewer P1-R1)', async () => {
+  const src = file(4);
+  const g = gateway(4);
+  g.fault = () => ({ drop: true, keep: 4 });
+  // Committed on the first PUT, then every answer lost until the budget ends:
+  // the stall path asks resume, which says done.
+  await uploadFile({ dest: '/w/a', size: 4, source: sourceOf(src), api: g.api, fetch: g.fetch, sleep: noSleep });
+  const puts = g.puts.length;
+  await uploadFile({ dest: '/w/a', size: 4, source: sourceOf(src), api: g.api, fetch: g.fetch, sleep: noSleep, resumeId: 'u1' });
+  assert.equal(g.puts.length, puts, 'the retry sends nothing');
+  assert.equal(g.begins, 1);
+});
+
+test('a 409 that names the same offset again is a stall: bounded, backed off, then UploadFailed (reviewer P2-R2)', async () => {
+  const src = file(8);
+  const g = gateway(8);
+  let puts = 0;
+  const sleeps: number[] = [];
+  // The server's answer when the part's name is no longer the file begin
+  // created: 409 naming where it stands, which never moves.
+  const stuck = (async () => { puts += 1; return new Response(null, { status: 409, headers: { 'Upload-Offset': '0' } }); }) as unknown as typeof fetch;
+  const err = await uploadFile({ dest: '/w/a', size: 8, source: sourceOf(src), api: g.api, fetch: stuck,
+    sleep: async (ms) => { sleeps.push(ms); }, maxStalls: 3 }).then(() => null, (e) => e);
+  assert.ok(err instanceof UploadFailed, String(err));
+  assert.match(err.message, /409/);
+  assert.equal(puts, 3, 'one request per attempt, never a loop');
+  assert.equal(sleeps.length, 2, 'with the retry delay between attempts');
+});
+
+test('every byte held is not done: only the server s 201 or done is (reviewer P1-R1, no inference from the count)', async () => {
+  const src = file(4);
+  let puts = 0;
+  const api: UploadApi = {
+    begin: async () => ({ id: 'u1', url: 'http://gw/up/u1', chunk: 4, received: 0 }),
+    // The server holds all four bytes but has not committed them.
+    resume: async () => ({ url: 'http://gw/up/u1', received: 4 }),
+    abort: async () => ({}),
+  };
+  const lost = (async () => { puts += 1; throw new TypeError('Failed to fetch'); }) as unknown as typeof fetch;
+  const err = await uploadFile({ dest: '/w/a', size: 4, source: sourceOf(src), api, fetch: lost, sleep: noSleep, maxStalls: 3 })
+    .then(() => null, (e) => e);
+  assert.ok(err instanceof UploadFailed, `not reported done: ${String(err)}`);
+  assert.equal(err.id, 'u1', 'and a Retry can still ask the same upload');
+  assert.equal(puts, 1, 'the bytes are not sent again');
 });

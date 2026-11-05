@@ -139,9 +139,27 @@ fn on_disk(up: &Upload) -> Option<u64> {
 
 type Slot = Arc<Upload>;
 
-fn registry() -> &'static Mutex<HashMap<String, Slot>> {
-    static R: OnceLock<Mutex<HashMap<String, Slot>>> = OnceLock::new();
-    R.get_or_init(|| Mutex::new(HashMap::new()))
+/// The uploads this process knows: `live` ones, and a `done` receipt for each
+/// committed one (reviewer P1-R1 on 651962df). A receipt lets a client whose
+/// final 201 was lost learn from `fs_upload_resume` that the file landed,
+/// instead of "no such upload" and a Retry from byte 0 over a complete file.
+/// It is written only after the commit's rename succeeded, holds no file or
+/// directory handle, does not hold the destination (a new upload may begin
+/// there), and expires after IDLE like an idle upload; abort forgets it.
+#[derive(Default)]
+struct Registry {
+    live: HashMap<String, Slot>,
+    done: HashMap<String, Receipt>,
+}
+
+struct Receipt {
+    size: u64,
+    at: Instant,
+}
+
+fn registry() -> &'static Mutex<Registry> {
+    static R: OnceLock<Mutex<Registry>> = OnceLock::new();
+    R.get_or_init(|| Mutex::new(Registry::default()))
 }
 
 fn unix_now() -> u64 {
@@ -205,8 +223,9 @@ fn is_part_name(name: &str) -> bool {
 /// Forget every entry idle since before `now - IDLE`, removing its part file.
 /// Entries busy in a PUT are left alone (their lock is held).
 fn expire_idle(now: Instant) {
-    let mut map = registry().lock().unwrap();
-    map.retain(|_, up| {
+    let mut reg = registry().lock().unwrap();
+    reg.done.retain(|_, r| now.saturating_duration_since(r.at) <= IDLE);
+    reg.live.retain(|_, up| {
         let Ok(p) = up.state.try_lock() else { return true };
         if now.saturating_duration_since(p.last) <= IDLE { return true; }
         unlink_in(&up.dir, &up.part_name);
@@ -219,7 +238,7 @@ fn expire_idle(now: Instant) {
 /// and were last written before IDLE. Nothing else in the directory is
 /// touched (orchestrator, #23 design note b).
 fn sweep_stale_parts(dir: &Path) {
-    let live: Vec<PathBuf> = registry().lock().unwrap().values().map(|u| u.part.clone()).collect();
+    let live: Vec<PathBuf> = registry().lock().unwrap().live.values().map(|u| u.part.clone()).collect();
     let Ok(rd) = std::fs::read_dir(dir) else { return };
     for ent in rd.flatten() {
         let name = ent.file_name();
@@ -262,7 +281,8 @@ pub(super) fn begin(token: &str, path: &str, size: u64) -> Result<serde_json::Va
     let part = dir.join(&pname);
     let part_c = cstr(&pname).map_err(|e| format!("upload path: {e}"))?;
     let dest_c = cstr(&name).map_err(|e| format!("upload path: {e}"))?;
-    let mut map = registry().lock().unwrap();
+    let mut reg = registry().lock().unwrap();
+    let map = &mut reg.live;
     // One upload per destination. One that is not writing a chunk and has
     // gained nothing for BODY_STALL is abandoned (a page reload, a closed tab;
     // validator-2, round 1): this begin takes it over, its part removed and its
@@ -293,6 +313,7 @@ pub(super) fn begin(token: &str, path: &str, size: u64) -> Result<serde_json::Va
         let _ = file.set_permissions(std::fs::Permissions::from_mode(mode));
         drop(file);
         rename_in(&dirf, &part_c, &dest_c).map_err(|e| { unlink_in(&dirf, &part_c); format!("upload commit: {e}") })?;
+        reg.done.insert(id.clone(), Receipt { size: 0, at: Instant::now() });
         return Ok(serde_json::json!({ "id": id, "url": "", "chunk": CHUNK_BYTES, "received": 0, "done": true }));
     }
     let _ = file.set_permissions(std::fs::Permissions::from_mode(0o600));
@@ -310,7 +331,13 @@ pub(super) fn begin(token: &str, path: &str, size: u64) -> Result<serde_json::Va
 /// noticed), its count is not final: "busy", and the client asks again.
 pub(super) fn resume(token: &str, id: &str) -> Result<serde_json::Value, String> {
     expire_idle(Instant::now());
-    let up = registry().lock().unwrap().get(id).cloned().ok_or_else(|| format!("no such upload: {id}"))?;
+    let up = {
+        let reg = registry().lock().unwrap();
+        if let Some(r) = reg.done.get(id) {
+            return Ok(serde_json::json!({ "url": "", "received": r.size, "chunk": CHUNK_BYTES, "done": true }));
+        }
+        reg.live.get(id).cloned().ok_or_else(|| format!("no such upload: {id}"))?
+    };
     let mut p = up.state.try_lock().map_err(|_| "upload busy: a chunk is still being written".to_string())?;
     p.received = on_disk(&up).ok_or("cannot read the part file")?;
     p.last = Instant::now();
@@ -322,7 +349,9 @@ pub(super) fn resume(token: &str, id: &str) -> Result<serde_json::Value, String>
 /// its commit finds the part's name no longer that file, so nothing reaches
 /// the destination.
 pub(super) fn abort(id: &str) -> Result<serde_json::Value, String> {
-    if let Some(up) = registry().lock().unwrap().remove(id) {
+    let mut reg = registry().lock().unwrap();
+    reg.done.remove(id);
+    if let Some(up) = reg.live.remove(id) {
         unlink_in(&up.dir, &up.part_name);
     }
     Ok(serde_json::json!({ "ok": true }))
@@ -392,7 +421,7 @@ where
     }
     if method != "PUT" { return answer(&mut stream, "405 Method Not Allowed", None).await; }
     let Some((id, exp, sig)) = parse_target(target) else { return answer(&mut stream, "403 Forbidden", None).await };
-    let up = registry().lock().unwrap().get(id).cloned();
+    let up = registry().lock().unwrap().live.get(id).cloned();
     let Some(up) = up else { return answer(&mut stream, "403 Forbidden", None).await };
     if !verify_upload(&token, id, exp, sig, &up) {
         eprintln!("🚫 HTTP upload rejected (invalid or expired signature)");
@@ -483,7 +512,13 @@ where
             && rename_in(&commit.dir, &commit.part_name, &commit.dest_name).is_ok()
     }).await.unwrap_or(false);
     drop(file);
-    registry().lock().unwrap().remove(id);
+    {
+        // The receipt replaces the live entry in one step, and only after the
+        // rename: resume can never report done for a file that did not land.
+        let mut reg = registry().lock().unwrap();
+        reg.live.remove(id);
+        if ok { reg.done.insert(id.to_string(), Receipt { size: up.size, at: Instant::now() }); }
+    }
     if ok {
         answer(&mut stream, "201 Created", Some(e.received)).await;
     } else {
@@ -696,7 +731,7 @@ mod tests {
         let (old, old_url) = begun(&dest, 4);
         assert_eq!(put(&old_url, 0, b"ab").await.0, 204);
         assert!(begin(TOK, dest.to_str().unwrap(), 4).unwrap_err().contains("upload in progress"), "a live upload is not taken over");
-        let up = registry().lock().unwrap().get(&old).cloned().unwrap();
+        let up = registry().lock().unwrap().live.get(&old).cloned().unwrap();
         up.state.try_lock().unwrap().last = Instant::now() - BODY_STALL - Duration::from_secs(1);
         let (new, new_url) = begun(&dest, 4);
         assert_ne!(new, old);
@@ -712,7 +747,7 @@ mod tests {
         let d = scratch("busy");
         let dest = d.join("f");
         let (id, _url) = begun(&dest, 4);
-        let up = registry().lock().unwrap().get(&id).cloned().unwrap();
+        let up = registry().lock().unwrap().live.get(&id).cloned().unwrap();
         let mut held = up.state.try_lock().unwrap(); // a PUT in progress holds this
         held.last = Instant::now() - IDLE; // however old its last byte
         assert!(begin(TOK, dest.to_str().unwrap(), 4).unwrap_err().contains("upload in progress"));
@@ -790,6 +825,57 @@ mod tests {
         let (_id, url) = begun(&dest, 2);
         assert_eq!(put(&url, 0, b"ab").await.0, 201);
         assert_eq!(std::fs::metadata(&dest).unwrap().permissions().mode() & 0o7777, 0o755);
+    }
+
+    #[tokio::test]
+    async fn a_committed_upload_whose_answer_was_lost_resumes_to_done() {
+        // reviewer P1-R1 on 651962df: the id was forgotten at commit, so a
+        // lost 201 resumed to "no such upload" and Retry began from zero.
+        let d = scratch("receipt");
+        let dest = d.join("f");
+        let (id, url) = begun(&dest, 4);
+        assert_eq!(put(&url, 0, b"ab").await.0, 204);
+        let _lost = put(&url, 2, b"cd").await; // the 201 never reaches the client
+        let r = resume(TOK, &id).unwrap();
+        assert_eq!(r["done"], true, "{r}");
+        assert_eq!(r["received"], 4);
+        assert_eq!(std::fs::read(&dest).unwrap(), b"abcd");
+        assert_eq!(put(&url, 4, b"").await.0, 403, "a done upload takes no more chunks");
+        assert_eq!(resume(TOK, &id).unwrap()["done"], true, "asking again says the same");
+        // The destination is free for a new upload while the receipt stands.
+        let (new, new_url) = begun(&dest, 2);
+        assert_eq!(put(&new_url, 0, b"zz").await.0, 201);
+        assert_eq!(resume(TOK, &id).unwrap()["done"], true, "the old receipt is the old id's");
+        assert_eq!(resume(TOK, &new).unwrap()["done"], true);
+        // Abort of a done id forgets the receipt and leaves the file alone.
+        abort(&id).unwrap();
+        assert!(resume(TOK, &id).unwrap_err().contains("no such upload"));
+        assert_eq!(std::fs::read(&dest).unwrap(), b"zz");
+    }
+
+    #[tokio::test]
+    async fn a_receipt_expires_like_an_idle_upload() {
+        let d = scratch("receipt-exp");
+        let (id, url) = begun(&d.join("f"), 1);
+        assert_eq!(put(&url, 0, b"x").await.0, 201);
+        registry().lock().unwrap().done.get_mut(&id).unwrap().at = Instant::now() - IDLE - Duration::from_secs(1);
+        expire_idle(Instant::now());
+        assert!(resume(TOK, &id).unwrap_err().contains("no such upload"));
+    }
+
+    #[tokio::test]
+    async fn a_failed_commit_leaves_no_receipt() {
+        let d = scratch("receipt-fail");
+        let dest = d.join("f");
+        let (id, url) = begun(&dest, 2);
+        assert_eq!(put(&url, 0, b"a").await.0, 204);
+        // The part's name no longer the held file: the commit refuses.
+        let part = d.join(part_files(&d)[0].clone());
+        std::fs::rename(&part, d.join("elsewhere")).unwrap();
+        assert_ne!(put(&url, 1, b"b").await.0, 201);
+        let r = resume(TOK, &id);
+        assert!(r.as_ref().map_or(true, |v| v["done"] != true), "never done without a commit: {r:?}");
+        assert!(!dest.exists());
     }
 
     #[tokio::test]
@@ -900,7 +986,7 @@ mod tests {
         let fresh = r["url"].as_str().unwrap().to_string();
         assert_eq!(put(&fresh, 3, b"defgh").await.0, 201);
         assert_eq!(std::fs::read(&dest).unwrap(), b"abcdefgh");
-        assert!(resume(TOK, &id).unwrap_err().contains("no such upload"), "a committed id is gone");
+        assert_eq!(resume(TOK, &id).unwrap()["done"], true, "a committed id answers done (its receipt, P1-R1)");
     }
 
     #[tokio::test]
@@ -944,7 +1030,7 @@ mod tests {
         let d = scratch("idle");
         let (id, _url) = begun(&d.join("f"), 4);
         // Backdate THIS upload only: the registry is shared by parallel tests.
-        let up = registry().lock().unwrap().get(&id).cloned().unwrap();
+        let up = registry().lock().unwrap().live.get(&id).cloned().unwrap();
         up.state.try_lock().unwrap().last = Instant::now() - IDLE - Duration::from_secs(1);
         expire_idle(Instant::now());
         assert!(part_files(&d).is_empty());
