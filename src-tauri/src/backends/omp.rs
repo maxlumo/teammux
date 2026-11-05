@@ -456,9 +456,15 @@ export default function hook(pi: any): void {{
   // So a typed line is reported when, and only when, a message carrying it
   // ends: once, by content. Typed state that never reaches a message (a
   // builtin like `/hotkeys`, a line withdrawn from the queue) is never
-  // attributed to another prompt; it waits, bounded to the newest 64, and is
-  // not cleared at `agent_end` (a line typed as a run ends may start the
-  // next one). A message
+  // attributed to another prompt. Only a message omp attributes to the user
+  // (`attribution: "user"`, its own billing/turn-start field; measured on an
+  // idle prompt, a steered line and a skill) can carry a typed line, so a
+  // stale held line is never matched by an agent redirect or injection with
+  // equal text, and a user-attributed message always has its own held entry
+  // (equal text reports the same line). Held lines are never evicted or
+  // cleared at `agent_end`: a queued line must survive any amount of typing
+  // that starts no run, and a line typed as a run ends may start the next
+  // one. The list grows only with lines typed that never ran. A message
   // nobody typed (another extension's, a reminder, runtime context) matches
   // nothing. `context` (every model call) is not read.
   let typed: string[] = [];
@@ -466,11 +472,11 @@ export default function hook(pi: any): void {{
   pi.on("input", async (event: any, _ctx: any) => {{
     if (event?.source !== "interactive" && event?.source !== "rpc") return;
     if (typeof event?.text === "string" && event.text.trim() !== "") typed.push(event.text);
-    if (typed.length > 64) typed.shift();
   }});
   pi.on("message_end", async (event: any, ctx: any) => {{
     try {{
       const m = event?.message;
+      if (m?.attribution !== "user") return;
       let carried = "";
       if (m?.role === "user") carried = textOf(m.content);
       else if (m?.role === "custom" && m?.customType === "skill-prompt" && typeof m?.details?.prompt === "string") carried = m.details.prompt;
@@ -665,8 +671,10 @@ mod tests {
         p
     }
 
+    /// A message a person typed: omp 18.15.0 stamps `attribution: "user"`
+    /// on it (measured on an idle prompt, a steered line and a skill).
     fn user(text: &str) -> Value {
-        json!({"role": "user", "content": [{"type": "text", "text": text}]})
+        json!({"role": "user", "content": [{"type": "text", "text": text}], "attribution": "user"})
     }
 
     /// Board #4, the event order measured on omp 18.15.0 (scratch home,
@@ -694,7 +702,7 @@ mod tests {
             ["before_agent_start", {"reason": "prompt", "prompt": steer}],
             ["context", {"messages": [user(first), user(steer)]}],
             ["turn_start", {}],
-            ["message_end", {"message": {"role": "user", "content": [{"type": "text", "text": steer}], "steering": true}}],
+            ["message_end", {"message": {"role": "user", "content": [{"type": "text", "text": steer}], "attribution": "user", "steering": true}}],
             ["context", {"messages": [user(first), user(steer)]}],
             ["agent_end", {"messages": [{"role": "assistant", "content": [{"type": "text", "text": "DONE BANANA"}]}]}]
         ])) else {
@@ -709,7 +717,7 @@ mod tests {
     }
 
     fn skill_message(typed: &str, body: &str) -> Value {
-        json!({"message": {"role": "custom", "customType": "skill-prompt", "content": body, "display": true,
+        json!({"message": {"role": "custom", "customType": "skill-prompt", "content": body, "display": true, "attribution": "user",
             "details": {"name": "sk", "args": "x", "prompt": typed, "__queueChipText": typed}}})
     }
 
@@ -777,17 +785,29 @@ mod tests {
             ["message_end", skill_message(one, "body one")],
             ["before_agent_start", {"reason": "prompt", "prompt": "[IMPORTANT: … sk-two … ARGS-TWO"}],
             ["message_end", skill_message(two, "body two")],
+            // The withdrawn line's text comes back on a message nobody typed
+            // (agent-attributed, as omp marks redirects and injections):
+            // never the withdrawn line's receipt (reviewer, 06:34).
+            ["message_end", {"message": {"role": "user", "content": [{"type": "text", "text": "WITHDRAWN-SENTINEL"}], "attribution": "agent"}}],
+            ["message_end", {"message": {"role": "custom", "customType": "skill-prompt", "content": "x", "attribution": "agent", "details": {"prompt": "WITHDRAWN-SENTINEL"}}}],
             ["agent_end", {"messages": []}],
             ["input", {"source": "interactive", "text": "NEXT"}],
             ["before_agent_start", {"reason": "prompt", "prompt": "NEXT"}],
             ["agent_start", {}],
             ["message_end", {"message": user("NEXT")}],
-            ["agent_end", {"messages": []}]
-        ])) else {
+            ["agent_end", {"messages": []}],
+            // A queued line is never evicted by later typing that starts no
+            // run (reviewer, 06:34: a 64-entry cap would drop it).
+            ["input", {"source": "interactive", "text": "LATE-QUEUED"}]
+        ]).as_array().unwrap().iter().cloned()
+            .chain((0..70).map(|i| json!(["input", {"source": "interactive", "text": format!("/hotkeys {i}")}])))
+            .chain([json!(["message_end", {"message": user("LATE-QUEUED")}])])
+            .collect::<Vec<_>>()
+            .into()) else {
             eprintln!("skipped: no node");
             return;
         };
-        let mut want = vec!["NEXT", "RUN sleep 25", "STEER-A say APPLE", one, two];
+        let mut want = vec!["NEXT", "RUN sleep 25", "STEER-A say APPLE", one, two, "LATE-QUEUED"];
         want.sort();
         assert_eq!(prompts(&hooks), want);
         let all = serde_json::to_string(&hooks).unwrap();

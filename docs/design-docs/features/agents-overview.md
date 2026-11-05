@@ -286,14 +286,20 @@ directory. Four decisions, each measured rather than guessed:
   args` a `custom` `skill-prompt` message whose `details.prompt` is the
   typed line (its content and `before_agent_start.prompt` are the expanded
   skill body). The extension holds the `input` texts (sources `interactive`,
-  `rpc`; the newest 64) and reports one as `UserPromptSubmit` when a
-  carrying message ends, matched by whitespace-blind equality, then forgets
-  it. So each line is reported once, a line that never reaches the model is
+  `rpc`) and reports one as `UserPromptSubmit` when a carrying message ends,
+  matched by whitespace-blind equality, then forgets it. Only a message omp
+  attributes to the user carries a typed line (`attribution: "user"`, omp's
+  own field for who initiated a message, measured on an idle prompt, a
+  steered line and a skill), so an agent redirect or injection with equal
+  text never matches a stale held line. Held lines are never evicted: a
+  queued line survives any amount of typing that starts no run (review
+  round 1 follow-up: an early 64-entry cap could drop it). So each line is reported once, a line that never reaches the model is
   never attributed to another prompt, and a message nobody typed (a
   reminder, runtime context, another extension's) matches nothing. If omp
   ever rewrote a line, nothing would match and the line would be swept
-  `unconfirmed`, never misattributed. `details.prompt` is measured, not
-  documented. `context` (every model call, a session-title side request
+  `unconfirmed`, never misattributed. `details.prompt` is typed in omp's own
+  source (`SkillPromptDetails.prompt`, "the draft as submitted", v18.15.0
+  `packages/tui/src/chat/messages.ts`) and optional; reviewer accepted it. `context` (every model call, a session-title side request
   included) is not read. Round 1 of the review (reviewer P1-R1, validator
   S2–S4) rejected the first version, which drained every held `input` at the
   next `before_agent_start`: it reported `/hotkeys` with a steered line,
