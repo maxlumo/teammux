@@ -701,6 +701,34 @@ The owner uses Claude through Bedrock ("都用bedrock渠道…复用我们全局
 
 **Claude submits a prompt of its own when a background task finishes** (board #13, measured on 2.1.318, 2026-11-05). A `Bash` call with `run_in_background` (or a background Agent) that ends makes Claude Code submit `<task-notification>\n<task-id>…</task-id>\n<tool-use-id>…</tool-use-id>\n<output-file>…</output-file>\n<status>completed|failed</status>\n<summary>…</summary>\n</task-notification>` as the next prompt (an Agent adds `<note>` and `<result>`), and `UserPromptSubmit` fires for it with no field saying who sent it. `backends/claude.rs::task_notification` is the one recogniser (the whole prompt, the measured children in order), behind `Backend::cli_own_prompt`: such a prompt opens or joins the turn, asks no one, is stored `via: cli` with only its summary, and shows as a step in the agent's lane. Rule, evidence and tests: agent-status.md § A prompt the CLI submits by itself.
 
+### A restart resumes only a conversation the home holds (board #22, Claude Code 2.1.318, 2026-11-05)
+
+**Incident** (clawdbjs, 2026-11-05 13:55). A team redefinition moved `lingting-app`'s builder from kiro to claude. The team restart re-rendered its home, and the respawn line ended in `--continue`. The pane printed "No conversation found to continue", fell back to the shell, and the agent never started.
+
+**Measured on 2.1.318**, in a scratch `CLAUDE_CONFIG_DIR`:
+- `--continue` with no transcript for the cwd: "No conversation found to continue", exit 1.
+- `--resume <id>` with no transcript for that id: "No conversation found with session ID: <id>", exit 1.
+- An interactive start that ends before its first turn writes no transcript, but SessionStart has already recorded an id. So "spawn, then restart before any turn" fails on the exact form too.
+- After one interactive turn, `projects/<D(cwd)>/<id>.jsonl` exists, and both `--continue` and `--resume <id>` resume it. A transcript written only by `claude -p` (entrypoint `sdk-cli`) is not picked by `--continue`. Managed agents are interactive, so this case is left as is.
+- `D(cwd)`, from the binary: every non-alphanumeric UTF-16 unit becomes `-`. A name longer than 200 units is cut to 200 and gets `-<hash>` appended. The hash is not reproduced; a long name is matched on that prefix.
+
+**Rule.** `claude::resume_command` asks the home and has no other caller. Every restart path reaches it: `relaunch_line` (`up`, `tmm agent restart`) and the respawn's `launch_command` (a team restart, or a restart before the slot settles). The respawn now passes the home, where before it passed none. The choice, in order:
+1. `--resume <id>` when the recorded id's `<id>.jsonl` is under `projects/*/`.
+2. Otherwise `--continue` when `projects/<D(workspace)>/` holds a `*.jsonl`.
+3. Otherwise a fresh start.
+
+A home outside the `<ws>/.tmm/agents/<name>` layout counts any transcript. Without a home, the unchecked forms are kept. The strict restore form (`resume_exact`, board #422) is unchanged: it never falls back to fresh.
+
+**The other backends' recent forms, measured with no prior session**, all start fresh and are left alone: omp 18.15.0 `--continue`, codex 0.166.0 `resume --last`, and kimi 2.4.1 `-c` ("No sessions to continue under <cwd>; starting a fresh session."). grok is not installed on this host and is unmeasured.
+
+**Live check** (scratch gateway through `scripts/scratch-env.mjs`, real claude 2.1.318). These were run on this branch's build:
+- spawn, then `tmm agent restart` before any turn: up, fresh;
+- after a turn: `--resume <recorded id>`, and the earlier turn is on screen;
+- spawn a team member, then `tmm agent restart --team` before any turn: up, fresh;
+- after a turn: `--continue`, and the turn is on screen.
+
+Pinned by `spawn::relaunch_tests::a_claude_restart_resumes_only_a_conversation_that_exists`, `restart_spawn_resumes_but_a_new_hire_starts_fresh` and `claude::tests::continue_needs_a_transcript_in_claudes_own_directory_for_the_workspace`.
+
 ### The kimi backend: Kimi Code CLI 2.0.2 on Bedrock (board #224, 2026-09-20)
 
 The owner runs Kimi K3 through Bedrock's OpenAI-compatible endpoint ("kimi code也帮我支持上吧 我应该配置了可以用bedrock"): `~/.kimi-code/config.toml` declares `[providers.bedrock] type="openai"`, `base_url=https://bedrock-runtime.us-west-2.amazonaws.com/openai/v1`, `api_key_env="KIMI_API_KEY"` (the env var is the same long-term Bedrock API key as `AWS_BEARER_TOKEN_BEDROCK`, exported by the interactive zsh, so it reaches every pane; kimi's `openai` provider sends a fixed bearer token and does not SigV4-sign) and one alias `[models.bedrock-kimi-k3]` → `global.moonshotai.kimi-k3`, 1M context. Everything below was measured on 2.0.2 with a scratch `KIMI_CODE_HOME` and hooks that dumped their stdin.

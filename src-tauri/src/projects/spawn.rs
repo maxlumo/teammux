@@ -256,10 +256,10 @@ fn launch_window(req: &SpawnRequest, workspace: &str, def: &RegAgent, window_nam
         .join(" ");
     // The launch line ends with the first prompt ONLY when a brief gave us
     // something for the agent to act on; otherwise the CLI opens and waits.
-    // Restart fallback is different from a new hire: its isolated home already
-    // owns the conversation, so resume recent even when the slot/exact id raced
-    // the capture tick.
-    let launch_cmd = launch_command(&m.cmd, &def.backend, req.brief, req.by, req.resume);
+    // Restart fallback is different from a new hire: its isolated home owns
+    // the conversation, so resume recent even when the slot/exact id raced
+    // the capture tick, when the home holds one (board #22).
+    let launch_cmd = launch_command(&m.cmd, &def.backend, req.brief, req.by, req.resume, &home, window_name);
     // A slot a restore still holds keeps its barrier through a respawn: a
     // new generation for this pane, named on the line (board #422).
     // Nothing is typed when that cannot be settled (review P1-B).
@@ -1575,10 +1575,12 @@ fn first_prompt(brief: &str, by: &str) -> Option<String> {
 /// (`Backend::first_prompt`) gets NO positional — kimi 2.0.2 read the brief
 /// as a subcommand and exited — its brief is typed by `spawn` once the pane
 /// is ready.
-fn launch_command(identity_cmd: &str, backend: &str, brief: &str, by: &str, resume: bool) -> String {
+fn launch_command(identity_cmd: &str, backend: &str, brief: &str, by: &str, resume: bool, home: &Path, agent: &str) -> String {
     let identity_cmd = if resume {
-        // No recorded id here, so there is nothing for a home to vouch for.
-        resume_command(identity_cmd, backend, None, None, "")
+        // No recorded id here; the home still decides whether a recent
+        // conversation exists to resume (board #22: claude's `--continue`
+        // with none exits 1).
+        resume_command(identity_cmd, backend, None, Some(home), agent)
     } else {
         identity_cmd.to_string()
     };
@@ -1719,16 +1721,28 @@ mod relaunch_tests {
 
     #[test]
     fn restart_spawn_resumes_but_a_new_hire_starts_fresh() {
+        let ws = crate::config::test_scratch("tmm-respawn-claude");
+        let home = agent_home(ws.to_str().unwrap(), "cl");
+        std::fs::create_dir_all(&home).unwrap();
         let cmd = "command claude --settings /tmp/settings.json";
-        assert_eq!(launch_command(cmd, "claude", "", "", false), cmd);
+        assert_eq!(launch_command(cmd, "claude", "", "", false, &home, "cl"), cmd);
+        // Board #22, the clawdbjs incident: a team restart re-rendered a claude
+        // home that held no conversation yet. `--continue` there exits 1
+        // ("No conversation found to continue"), so the respawn starts fresh.
+        assert_eq!(launch_command(cmd, "claude", "", "", true, &home, "cl"), cmd, "no transcript: fresh");
+        let dir: String = ws.to_str().unwrap().chars().map(|c| if c.is_ascii_alphanumeric() { c } else { '-' }).collect();
+        std::fs::create_dir_all(home.join("projects").join(&dir)).unwrap();
+        std::fs::write(home.join("projects").join(&dir).join("3f95364d-a13f-478e-9d63-2521242159e0.jsonl"), "{}\n").unwrap();
         assert_eq!(
-            launch_command(cmd, "claude", "", "", true),
-            "command claude --settings /tmp/settings.json --continue"
+            launch_command(cmd, "claude", "", "", true, &home, "cl"),
+            "command claude --settings /tmp/settings.json --continue",
+            "a transcript of this cwd: resume it"
         );
         assert_eq!(
-            launch_command("command codex -c a=b", "codex", "", "", true),
+            launch_command("command codex -c a=b", "codex", "", "", true, &home, "cl"),
             "command codex resume --last -c a=b"
         );
+        std::fs::remove_dir_all(&ws).ok();
     }
 
     /// A brief rides the launch line as one positional for the five CLIs that
@@ -1737,11 +1751,12 @@ mod relaunch_tests {
     /// brief is typed into the ready pane instead.
     #[test]
     fn a_brief_is_positional_except_for_kimi() {
-        let line = launch_command("command claude --settings s.json", "claude", "fix it", "lead", false);
+        let home = Path::new("/nonexistent/.tmm/agents/lead");
+        let line = launch_command("command claude --settings s.json", "claude", "fix it", "lead", false, home, "lead");
         assert!(line.starts_with("command claude --settings s.json '[tmm chat "), "{line}");
         assert!(line.ends_with("] lead: fix it'"), "{line}");
-        assert_eq!(launch_command("command kimi --auto", "kimi", "fix it", "lead", false), "command kimi --auto");
-        assert_eq!(launch_command("command kimi --auto", "kimi", "fix it", "lead", true), "command kimi --auto -c");
+        assert_eq!(launch_command("command kimi --auto", "kimi", "fix it", "lead", false, home, "lead"), "command kimi --auto");
+        assert_eq!(launch_command("command kimi --auto", "kimi", "fix it", "lead", true, home, "lead"), "command kimi --auto -c");
     }
 
     #[test]
@@ -1775,8 +1790,9 @@ mod relaunch_tests {
         // back to the generic backend line.
         assert!(relaunch_line(ws.to_str().unwrap(), "byhand", None).unwrap().is_none());
 
+        // claude is absent here: its resume depends on the transcripts its
+        // home holds (`a_claude_restart_resumes_only_a_conversation_that_exists`).
         for (name, backend, cmd, flag) in [
-            ("cl", "claude", "command claude --settings /tmp/settings.json", "--continue"),
             ("gx", "grok", "command grok --always-approve --agent gx", "--continue"),
         ] {
             let ahome = agent_home(ws.to_str().unwrap(), name);
@@ -1806,6 +1822,44 @@ mod relaunch_tests {
         assert!(
             cx_recent.contains("command codex resume --last -c a=b --dangerously-bypass-approvals-and-sandbox"),
             "isolated CODEX_HOME can safely resume its last cwd session: {cx_recent}"
+        );
+        std::fs::remove_dir_all(&ws).ok();
+    }
+
+    /// Board #22 (measured on Claude Code 2.1.318): `--continue` with no
+    /// transcript, and `--resume <id>` whose transcript does not exist, both
+    /// print "No conversation found…" and exit 1, parking the pane at the
+    /// shell. SessionStart records an id at startup, but the transcript
+    /// appears only after the first turn. A restart therefore resumes only a
+    /// conversation the home holds, and otherwise starts fresh.
+    #[test]
+    fn a_claude_restart_resumes_only_a_conversation_that_exists() {
+        let ws = crate::config::test_scratch("tmm-relaunch-claude.x");
+        let wss = ws.to_str().unwrap();
+        let home = agent_home(wss, "cl");
+        std::fs::create_dir_all(&home).unwrap();
+        let cmd = "command claude --settings /tmp/settings.json";
+        LaunchRecipe { backend: "claude", env: &[], cmd, spawned_by: "", team: None, agent_def: "", member: "", from_member: "", input_mode: "" }.write(&home).unwrap();
+        let id = "3f95364d-a13f-478e-9d63-2521242159e0";
+
+        // Spawned, restarted before any turn: with or without the id its
+        // SessionStart recorded, the agent comes up fresh.
+        assert_eq!(relaunch_line(wss, "cl", None).unwrap().unwrap(), cmd, "no conversation yet: a fresh start");
+        assert_eq!(relaunch_line(wss, "cl", Some(id)).unwrap().unwrap(), cmd, "a recorded id without its transcript: a fresh start");
+
+        // After a turn: claude filed the transcript under its encoding of the
+        // launch cwd (every non-alphanumeric character becomes '-').
+        let dir: String = wss.chars().map(|c| if c.is_ascii_alphanumeric() { c } else { '-' }).collect();
+        assert!(!dir.contains('.'), "{dir}");
+        let transcripts = home.join("projects").join(&dir);
+        std::fs::create_dir_all(&transcripts).unwrap();
+        std::fs::write(transcripts.join(format!("{id}.jsonl")), "{}\n").unwrap();
+        assert_eq!(relaunch_line(wss, "cl", Some(id)).unwrap().unwrap(), format!("{cmd} --resume {id}"), "the same conversation, exactly");
+        assert_eq!(relaunch_line(wss, "cl", None).unwrap().unwrap(), format!("{cmd} --continue"), "no id recorded: the newest of this cwd");
+        assert_eq!(
+            relaunch_line(wss, "cl", Some("11111111-2222-3333-4444-555555555555")).unwrap().unwrap(),
+            format!("{cmd} --continue"),
+            "an id this home does not hold falls back to the cwd's newest"
         );
         std::fs::remove_dir_all(&ws).ok();
     }

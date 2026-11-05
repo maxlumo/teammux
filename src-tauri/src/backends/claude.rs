@@ -477,10 +477,89 @@ pub(crate) fn resume_exact(cmd: &str, id: &str) -> Option<String> {
     (!cmd.trim().is_empty() && super::shared::exact_id_ok(id)).then(|| exact_line(cmd, id))
 }
 
-pub(crate) fn resume_command(cmd: &str, id: Option<&str>) -> String {
-    match id {
-        Some(id) => exact_line(cmd, id),
-        None => format!("{cmd} --continue"),
+/// The restart line (board #22). Measured on Claude Code 2.1.318: `--continue`
+/// with no transcript for the cwd, and `--resume <id>` with no transcript for
+/// that id, both print "No conversation found…" and exit 1, parking the pane
+/// at the shell. A SessionStart id is recorded at startup, but the transcript
+/// is written only after the first turn. So with a home, this resumes only
+/// what the home holds: the exact id when `projects/*/<id>.jsonl` exists,
+/// else the newest transcript of the launch cwd (the workspace) when that cwd
+/// has one, else a fresh start. Without a home it keeps the unchecked forms.
+pub(crate) fn resume_command(cmd: &str, id: Option<&str>, home: Option<&Path>) -> String {
+    let Some(home) = home else {
+        return match id {
+            Some(id) => exact_line(cmd, id),
+            None => format!("{cmd} --continue"),
+        };
+    };
+    if let Some(id) = id.filter(|id| holds_transcript(home, id)) {
+        return exact_line(cmd, id);
+    }
+    if cwd_has_transcript(home) {
+        return format!("{cmd} --continue");
+    }
+    cmd.to_string()
+}
+
+/// Whether the home holds the transcript of conversation `id` under any cwd.
+fn holds_transcript(home: &Path, id: &str) -> bool {
+    if !super::shared::exact_id_ok(id) || id.contains('/') || id.starts_with('.') {
+        return false;
+    }
+    let file = format!("{id}.jsonl");
+    std::fs::read_dir(home.join("projects"))
+        .map(|dirs| dirs.flatten().any(|d| d.path().join(&file).is_file()))
+        .unwrap_or(false)
+}
+
+/// Whether the launch cwd has a transcript `--continue` can pick. The cwd is
+/// the workspace, from the managed layout `<ws>/.tmm/agents/<name>`. A home
+/// outside that layout counts any transcript at all.
+fn cwd_has_transcript(home: &Path) -> bool {
+    let has_jsonl = |dir: &Path| {
+        std::fs::read_dir(dir)
+            .map(|files| files.flatten().any(|f| f.path().extension().is_some_and(|e| e == "jsonl")))
+            .unwrap_or(false)
+    };
+    let projects = home.join("projects");
+    let Ok(dirs) = std::fs::read_dir(&projects) else { return false };
+    let agents = home.parent();
+    let workspace = agents
+        .filter(|a| a.file_name().is_some_and(|n| n == "agents"))
+        .and_then(Path::parent)
+        .filter(|t| t.file_name().is_some_and(|n| n == ".tmm"))
+        .and_then(Path::parent);
+    match workspace {
+        Some(ws) => {
+            let (exact, long_prefix) = project_dir_name(&ws.to_string_lossy());
+            dirs.flatten().any(|d| {
+                let name = d.file_name().to_string_lossy().to_string();
+                let ours = match &long_prefix {
+                    Some(prefix) => name.starts_with(prefix.as_str()),
+                    None => name == exact,
+                };
+                ours && has_jsonl(&d.path())
+            })
+        }
+        None => dirs.flatten().any(|d| has_jsonl(&d.path())),
+    }
+}
+
+/// claude's directory name for a cwd under `projects/`, read from the 2.1.318
+/// binary: `cwd.replace(/[^a-zA-Z0-9]/g, "-")`, per UTF-16 unit; longer than
+/// 200 units it becomes `slice(0, 200) + "-" + hash`. The hash is not
+/// reproduced: a long name returns the `slice + "-"` prefix to match on.
+fn project_dir_name(cwd: &str) -> (String, Option<String>) {
+    let units: Vec<char> = cwd
+        .chars()
+        .flat_map(|c| std::iter::repeat(if c.is_ascii_alphanumeric() { c } else { '-' }).take(c.len_utf16()))
+        .collect();
+    let exact: String = units.iter().collect();
+    if units.len() <= 200 {
+        (exact, None)
+    } else {
+        let prefix: String = units[..200].iter().collect();
+        (exact, Some(format!("{prefix}-")))
     }
 }
 
@@ -647,6 +726,35 @@ mod tests {
     use super::*;
 
     const SENTINEL: &str = "SENTINEL-511";
+
+    /// Board #22: `--continue` is chosen only when claude's OWN directory for
+    /// the workspace holds a transcript. claude 2.1.318 names it by replacing
+    /// each non-alphanumeric UTF-16 unit with '-' (`翻译` is two units, `😀`
+    /// two), and a name over 200 units is cut to 200 plus "-<hash>".
+    #[test]
+    fn continue_needs_a_transcript_in_claudes_own_directory_for_the_workspace() {
+        let scratch = crate::config::test_scratch("tmm-claude-dir");
+        let cmd = "command claude";
+        let case = |ws: &Path, dir: &str| {
+            let home = ws.join(".tmm/agents/cl");
+            let other = home.join("projects/-elsewhere");
+            std::fs::create_dir_all(&other).unwrap();
+            shared::write_atomic(&other.join("a.jsonl"), "{}\n").unwrap();
+            assert_eq!(resume_command(cmd, None, Some(&home)), cmd, "another cwd's transcript is not this one's: {dir}");
+            let ours = home.join("projects").join(dir);
+            std::fs::create_dir_all(&ours).unwrap();
+            assert_eq!(resume_command(cmd, None, Some(&home)), cmd, "an empty directory holds no conversation: {dir}");
+            shared::write_atomic(&ours.join("b.jsonl"), "{}\n").unwrap();
+            assert_eq!(resume_command(cmd, None, Some(&home)), "command claude --continue", "{dir}");
+        };
+        let s = scratch.to_str().unwrap();
+        let s_dir: String = s.chars().map(|c| if c.is_ascii_alphanumeric() { c } else { '-' }).collect();
+        case(&scratch.join("翻译😀.x"), &format!("{s_dir}------x"));
+        let long = scratch.join("a".repeat(240));
+        let prefix: String = format!("{s_dir}-{}", "a".repeat(240)).chars().take(200).collect();
+        case(&long, &format!("{prefix}-1k2j3h"));
+        std::fs::remove_dir_all(&scratch).ok();
+    }
 
     /// Board #511 review P1-C: only the allow-listed model fields leave, and
     /// the baseline default is the CARRIED env's ANTHROPIC_MODEL (P1-B). Every
