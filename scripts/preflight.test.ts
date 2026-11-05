@@ -8,7 +8,7 @@
 import assert from 'node:assert/strict';
 import test, { after } from 'node:test';
 import { spawnSync } from 'node:child_process';
-import { mkdtempSync, mkdirSync, readFileSync, rmSync, symlinkSync, writeFileSync } from 'node:fs';
+import { existsSync, mkdtempSync, mkdirSync, readFileSync, rmSync, symlinkSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { fileURLToPath } from 'node:url';
@@ -181,7 +181,7 @@ const releaseRel = join('outputs', 'apk', 'universal', 'release');
 function checkout(name: string, files: string[] = []) {
   const at = join(base, name);
   mkdirSync(join(at, 'scripts'), { recursive: true });
-  for (const f of ['preflight.mjs', 'dev-ports.mjs', 'env-names.mjs', 'wry-chrome-client.mjs']) {
+  for (const f of ['preflight.mjs', 'dev-ports.mjs', 'env-names.mjs', 'wry-chrome-client.mjs', 'target-lock.mjs']) {
     writeFileSync(join(at, 'scripts', f), readFileSync(new URL(`./${f}`, import.meta.url), 'utf8'));
   }
   const android = join(at, 'src-tauri', 'gen', 'android');
@@ -265,7 +265,8 @@ writeFileSync(join(fakeBin, 'cargo'), '#!/bin/sh\n{ printf \'%s\\n\' "$@"; echo 
 const checkAndroid = (env: Record<string, string>) => {
   const record = join(base, `record-${Math.random().toString(36).slice(2)}`);
   const r = spawnSync(process.execPath, [script, 'android-check'], {
-    env: { PATH: `${fakeBin}:${process.env.PATH ?? ''}`, HOME: home, CARGO_HOME: cargo, CARGO_RECORD: record, ...env },
+    // A private target dir (board #35): the run takes its lock there, never in this checkout's own.
+    env: { PATH: `${fakeBin}:${process.env.PATH ?? ''}`, HOME: home, CARGO_HOME: cargo, CARGO_RECORD: record, CARGO_TARGET_DIR: join(base, 'target'), ...env },
     encoding: 'utf8', stdio: ['ignore', 'pipe', 'pipe'],
   });
   let lines: string[] | null = null;
@@ -288,6 +289,23 @@ test('android-check: cargo checks the lib for aarch64-linux-android with the C t
     'check', '--manifest-path', join(root, 'src-tauri', 'Cargo.toml'), '--lib', '--target', 'aarch64-linux-android',
     `CC=${join(bin, 'aarch64-linux-android24-clang')}`, `AR=${join(bin, 'llvm-ar')}`,
   ], 'minSdk 24, as gen/android/app/build.gradle.kts');
+});
+
+test('android-check: cargo runs under the target directory\'s lock, and a held lock refuses before cargo runs (#35)', async () => {
+  const { lockFile, lockedCommand, targetDir } = await import('./target-lock.mjs');
+  const root = fileURLToPath(new URL('..', import.meta.url));
+  const target = join(base, `target-${Math.random().toString(36).slice(2)}`);
+  const [hcmd, hargs] = lockedCommand(target, 'test:rust', 'sleep', ['30']);
+  const { spawn } = await import('node:child_process');
+  const holder = spawn(hcmd, hargs, { stdio: 'ignore' });
+  try {
+    for (let i = 0; i < 250 && !(existsSync(lockFile(target)) && readFileSync(lockFile(target), 'utf8').includes('test:rust')); i++) await new Promise((r) => setTimeout(r, 20));
+    const refused = checkAndroid({ ANDROID_HOME: sdk, CARGO_TARGET_DIR: target });
+    assert.equal(refused.status, 75, refused.stderr);
+    assert.equal(refused.lines, null, 'cargo never ran');
+    assert.match(refused.stderr, /check:android.*refused[\s\S]*test:rust/u);
+  } finally { holder.kill('SIGKILL'); }
+  assert.equal(targetDir({}, root), join(root, 'src-tauri', 'target'), 'by default the one test:rust uses');
 });
 
 test('android-check: a failing cargo check fails the command with its exit code', () => {

@@ -3,7 +3,12 @@ import { existsSync } from 'node:fs';
 import { readFile } from 'node:fs/promises';
 import { join } from 'node:path';
 import test from 'node:test';
-import { cargoArgs, isolatedEnv, runTestRust, serverSocketsUnder } from './test-rust.mjs';
+import { cargoArgs, isolatedEnv, repoRoot, runTestRust, serverSocketsUnder } from './test-rust.mjs';
+import { lockFile, targetDir } from './target-lock.mjs';
+
+// Board #35: cargo runs under the target directory's lock, so the spawn is
+// perl holding it: `-e <script> <target> <lock> test:rust cargo …`.
+const isCargo = (cmd: string, args: string[]) => cmd === 'perl' && args[5] === 'cargo';
 
 test('pnpm run test:rust is the isolating wrapper', async () => {
   const pkg = JSON.parse(await readFile(new URL('../package.json', import.meta.url), 'utf8'));
@@ -96,7 +101,7 @@ test('a run creates the dir, hands it to cargo, kills only servers under it by -
     log: () => {},
     spawn: ((cmd: string, args: string[], opts: { env?: Record<string, string | undefined> }) => {
       calls.push({ cmd, args, env: opts.env });
-      if (cmd === 'cargo') {
+      if (isCargo(cmd, args)) {
         dirSeen = opts.env?.TMUX_TMPDIR ?? '';
         // What a test that left a server behind looks like: a socket inode
         // under <dir>/tmux-<uid>/. No listener — nothing is started here.
@@ -109,7 +114,10 @@ test('a run creates the dir, hands it to cargo, kills only servers under it by -
     }) as unknown as typeof import('node:child_process').spawnSync,
   });
   assert.equal(code, 3, 'cargo’s exit code is the wrapper’s');
-  assert.equal(calls[0].cmd, 'cargo');
+  assert.ok(isCargo(calls[0].cmd, calls[0].args), 'cargo, under the lock');
+  const target = targetDir({}, repoRoot);
+  assert.deepEqual(calls[0].args.slice(2, 5), [target, lockFile(target), 'test:rust'], 'the lock of the target dir, labelled');
+  assert.deepEqual(calls[0].args.slice(6), cargoArgs(['tmux::tests']));
   assert.ok(dirSeen.includes('tmm-test-rust-'), dirSeen);
   assert.equal(calls[0].env?.TMUX, undefined);
   assert.equal(calls[0].env?.TMUX_PANE, undefined);
@@ -129,8 +137,8 @@ test('cargo runs under a umask that writes no group/other bits, and the caller\'
     try {
       runTestRust({
         extra: [], env: {}, log: () => {},
-        spawn: ((cmd: string) => {
-          if (cmd === 'cargo') seen = process.umask();
+        spawn: ((cmd: string, args: string[]) => {
+          if (isCargo(cmd, args)) seen = process.umask();
           return { status: 0 };
         }) as unknown as typeof import('node:child_process').spawnSync,
       });

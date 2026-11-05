@@ -43,6 +43,7 @@ import { mkdtempSync, readdirSync, rmSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { dirname, join, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
+import { lockedCommand, targetDir } from './target-lock.mjs';
 
 export const repoRoot = resolve(dirname(fileURLToPath(import.meta.url)), '..');
 
@@ -117,9 +118,12 @@ export function runTestRust({ extra = process.argv.slice(2), spawn = spawnSync, 
   const callerUmask = process.umask(0o022);
   process.umask(callerUmask | 0o022);
   try {
-    const result = spawn('cargo', cargoArgs(extra), { cwd: repoRoot, env: isolatedEnv(env, dir), stdio: 'inherit' });
+    // Under the target directory's lock (board #35): a check:android in the
+    // same directory refuses instead of rebuilding under the running tests.
+    const [cmd, args] = lockedCommand(targetDir(env, repoRoot), 'test:rust', 'cargo', cargoArgs(extra));
+    const result = spawn(cmd, args, { cwd: repoRoot, env: isolatedEnv(env, dir), stdio: 'inherit' });
     if (result.error) {
-      log(`[test:rust] cargo: ${result.error.message}`);
+      log(`[test:rust] ${cmd}: ${result.error.message}`);
       return 1;
     }
     return result.status ?? 1;

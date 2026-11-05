@@ -54,6 +54,7 @@ import { createHash } from 'node:crypto';
 import { fileURLToPath } from 'node:url';
 import { DEV_WEB_PORT, devServerPort } from './dev-ports.mjs';
 import { checkChromeClient } from './wry-chrome-client.mjs';
+import { lockedCommand, targetDir } from './target-lock.mjs';
 
 const root = resolve(dirname(fileURLToPath(import.meta.url)), '..');
 const mode = process.argv[2] || 'dev';
@@ -253,11 +254,14 @@ if (mode === 'android-check') {
   }
   const host = process.platform === 'darwin' ? 'darwin-x86_64' : 'linux-x86_64';
   const bin = join(picked, 'toolchains', 'llvm', 'prebuilt', host, 'bin');
-  const r = spawnSync('cargo', ['check', '--manifest-path', join(root, 'src-tauri', 'Cargo.toml'), '--lib', '--target', 'aarch64-linux-android'], {
+  // Under the target directory's lock (board #35): beside a running
+  // test:rust it refuses instead of rebuilding under its test binaries.
+  const [cmd, args] = lockedCommand(targetDir(process.env, root), 'check:android', 'cargo', ['check', '--manifest-path', join(root, 'src-tauri', 'Cargo.toml'), '--lib', '--target', 'aarch64-linux-android']);
+  const r = spawnSync(cmd, args, {
     stdio: 'inherit',
     env: { ...process.env, CC_aarch64_linux_android: join(bin, 'aarch64-linux-android24-clang'), AR_aarch64_linux_android: join(bin, 'llvm-ar') },
   });
-  if (r.error) { console.error(`check:android: cargo: ${r.error.message}`); process.exit(1); }
+  if (r.error) { console.error(`check:android: ${cmd}: ${r.error.message}`); process.exit(1); }
   process.exit(r.status ?? 1);
 }
 
