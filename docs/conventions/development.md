@@ -404,7 +404,9 @@ release build still succeeds but the APK is unsigned, and gradle says so — in
 a Git worktree both files are absent (gitignored), so symlink `key.properties`
 AND `keystore.jks` from the launch checkout before `npm run build:android`
 there (2026-09-09, board #131: the first worktree build produced
-`app-universal-release-unsigned.apk` and the postflight flagged it).
+`app-universal-release-unsigned.apk` and the postflight flagged it). The
+`android-apk` postflight recognises that APK and names the missing files and
+this section, instead of blaming the gradle build dir redirect (board #17).
 
 Why: until 2026-09-03 `keystore.jks` and its passwords were committed in the
 gradle script. Anyone with the repository could sign an update that installed

@@ -245,7 +245,11 @@ on this host that relocates anything):
 `npm run build:android` ends with `scripts/preflight.mjs android-apk`: it
 re-points an `app/build` SYMLINK that is missing, dangling or stale (pointing at
 another checkout), leaves a real directory alone, and exits 0 only when the APK
-exists at the in-project path. A bare `npx tauri android build` skips it, which
+exists at the in-project path. When the only APK there is gradle's
+`app-universal-release-unsigned.apk` it exits 1 naming that path, whichever of
+`gen/android/key.properties` and `keystore.jks` is absent, and *Android
+signing* in `docs/conventions/development.md`: a missing key is not a redirect
+failure, and an unsigned APK is not a release (board #17). A bare `npx tauri android build` skips it, which
 only matters where `app/build` is a symlink that can be dangling or stale.
 
 The cargo target is NOT relocated — it is the checkout's own `src-tauri/target`

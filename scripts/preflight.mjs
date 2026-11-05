@@ -23,7 +23,8 @@
 //    — the only relocation is the launch checkout's hand-made `app/build`
 //    symlink (dated 2026-08-18), and a fresh git worktree builds in-tree: a
 //    real `app/build` directory, left alone here. The postflight then only
-//    insists that the APK exists at the in-project path.
+//    insists that the APK exists at the in-project path; an `-unsigned` one
+//    there is reported as the missing signing key it is (board #17).
 //
 //    Two ways the symlink goes wrong, and the second one is the nasty one:
 //    - DANGLING (cache pruned, or the path canonicalizes differently under the
@@ -151,6 +152,18 @@ if (mode === 'android-apk') {
     if (existsSync(apk)) {
       console.error(`📦 APK: ${apk}`);
       process.exit(0);
+    }
+    // Board #17: gradle names a release APK it could not sign
+    // `-unsigned` (no storeFile in key.properties, app/build.gradle.kts). That
+    // is a missing key, not a redirect, and still not a release.
+    const unsigned = apk.replace(/\.apk$/u, '-unsigned.apk');
+    if (existsSync(unsigned)) {
+      const absent = ['key.properties', 'keystore.jks'].map(f => join(androidRoot, f)).filter(f => !existsSync(f));
+      console.error(`⚠️  the APK is unsigned: ${unsigned}`);
+      console.error(absent.length ? `   missing: ${absent.join(', ')}`
+        : `   ${join(androidRoot, 'key.properties')} has no storeFile gradle could use`);
+      console.error('   see docs/conventions/development.md § Android signing (a worktree symlinks both from the launch checkout).');
+      process.exit(1);
     }
     console.error(`⚠️  build reported success but no APK at ${apk} — check the gradle build dir redirect (scripts/preflight.mjs).`);
     process.exit(1);

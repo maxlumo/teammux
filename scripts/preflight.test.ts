@@ -171,3 +171,83 @@ test('android-env: the locked wry\'s source missing from the registry → refuse
   assert.equal(r.status, 1);
   assert.match(r.stderr, /is not in .*does not skip/u);
 });
+
+// Board #17: `android-apk`, the postflight after `tauri android build`. It runs
+// on a copy of the checkout's scripts in a temp checkout, so `root` is that
+// checkout, and on an empty HOME, so no real gradle cache is read.
+const releaseRel = join('outputs', 'apk', 'universal', 'release');
+/** A checkout whose gen/android holds `files` (relative paths), with
+ * preflight.mjs and its imports copied in. */
+function checkout(name: string, files: string[] = []) {
+  const at = join(base, name);
+  mkdirSync(join(at, 'scripts'), { recursive: true });
+  for (const f of ['preflight.mjs', 'dev-ports.mjs', 'env-names.mjs', 'wry-chrome-client.mjs']) {
+    writeFileSync(join(at, 'scripts', f), readFileSync(new URL(`./${f}`, import.meta.url), 'utf8'));
+  }
+  const android = join(at, 'src-tauri', 'gen', 'android');
+  for (const f of files) {
+    mkdirSync(join(android, f, '..'), { recursive: true });
+    writeFileSync(join(android, f), '');
+  }
+  return { at, android };
+}
+const postflight = (at: string, homeDir: string) => spawnSync(process.execPath, [join(at, 'scripts', 'preflight.mjs'), 'android-apk'], {
+  env: { PATH: process.env.PATH ?? '', HOME: homeDir }, encoding: 'utf8', stdio: ['ignore', 'pipe', 'pipe'],
+});
+const emptyHome = join(base, 'empty-home');
+mkdirSync(emptyHome);
+
+test('android-apk: only an -unsigned APK (no signing files) → refused, naming the unsigned APK, the missing key.properties and keystore.jks, and the doc section — not the gradle redirect', () => {
+  const { at, android } = checkout('unsigned', [join('app', 'build', releaseRel, 'app-universal-release-unsigned.apk')]);
+  const r = postflight(at, emptyHome);
+  assert.equal(r.status, 1);
+  assert.ok(r.stderr.includes(join(android, 'app', 'build', releaseRel, 'app-universal-release-unsigned.apk')), r.stderr);
+  assert.ok(r.stderr.includes(`missing: ${join(android, 'key.properties')}, ${join(android, 'keystore.jks')}`), r.stderr);
+  assert.ok(r.stderr.includes('docs/conventions/development.md § Android signing'), r.stderr);
+  assert.doesNotMatch(r.stderr, /redirect/u);
+});
+
+test('android-apk: only the files actually absent are named; with both present it says key.properties gave gradle no storeFile', () => {
+  const apk = join('app', 'build', releaseRel, 'app-universal-release-unsigned.apk');
+  const one = checkout('unsigned-no-jks', [apk, 'key.properties']);
+  const r = postflight(one.at, emptyHome);
+  assert.equal(r.status, 1);
+  assert.ok(r.stderr.includes(`missing: ${join(one.android, 'keystore.jks')}\n`), r.stderr);
+  const both = checkout('unsigned-both', [apk, 'key.properties', 'keystore.jks']);
+  const s = postflight(both.at, emptyHome);
+  assert.equal(s.status, 1);
+  assert.doesNotMatch(s.stderr, /missing:/u);
+  assert.ok(s.stderr.includes(`${join(both.android, 'key.properties')} has no storeFile gradle could use`), s.stderr);
+});
+
+test('android-apk: a signed APK in a real app/build directory → exit 0, naming it, even beside an older -unsigned one', () => {
+  const { at, android } = checkout('signed', [
+    join('app', 'build', releaseRel, 'app-universal-release.apk'),
+    join('app', 'build', releaseRel, 'app-universal-release-unsigned.apk'),
+  ]);
+  const r = postflight(at, emptyHome);
+  assert.equal(r.status, 0, r.stderr);
+  assert.ok(r.stderr.includes(`📦 APK: ${join(android, 'app', 'build', releaseRel, 'app-universal-release.apk')}`), r.stderr);
+});
+
+test('android-apk: no APK at all → refused with the gradle build dir redirect message', () => {
+  const { at } = checkout('no-apk', [join('app', 'build', releaseRel, 'output-metadata.json')]);
+  const r = postflight(at, emptyHome);
+  assert.equal(r.status, 1);
+  assert.match(r.stderr, /no APK at .*app-universal-release\.apk — check the gradle build dir redirect/u);
+  assert.doesNotMatch(r.stderr, /unsigned/u);
+});
+
+test('android-apk: a dangling app/build symlink is re-pointed at the cache dir holding the APK, then passes', () => {
+  const { at, android } = checkout('dangling');
+  mkdirSync(join(android, 'app'), { recursive: true });
+  symlinkSync(join(base, 'pruned-cache-dir'), join(android, 'app', 'build'));
+  const cacheHome = join(base, 'cache-home');
+  const built = join(cacheHome, '.cache', 'builds', 'gradle-builds', 'android-0123456789ab', 'app');
+  mkdirSync(join(built, releaseRel), { recursive: true });
+  writeFileSync(join(built, releaseRel, 'app-universal-release.apk'), '');
+  const r = postflight(at, cacheHome);
+  assert.equal(r.status, 0, r.stderr);
+  assert.match(r.stderr, /re-pointed \(dangling\)/u);
+  assert.ok(r.stderr.includes(`now:  ${built}`), r.stderr);
+});
