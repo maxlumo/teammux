@@ -3,6 +3,7 @@ import test from 'node:test';
 import { readFileSync } from 'node:fs';
 import { buildIdentity, CLIENT_PATCHES, createViteConfig, devProxy, fsDeny, PROXY_HEADERS, QUIET_RECONNECT_MEASURED_ON, quietDevReconnect, refuseProxied, scanEntries, viteCacheDir, VITE_DEFAULT_FS_DENY, watchIgnored } from '../vite.config.js';
 import { DEV_HOST_ENV, DEV_SERVER_PORT_ENV, devHost } from './dev-ports.mjs';
+import { rootVersions } from './pnpm-lock.mjs';
 
 test('Vite proxies WebSocket and downloads to the same internal Rust server', () => {
   const proxy = devProxy({ [DEV_SERVER_PORT_ENV]: '19099' });
@@ -239,13 +240,14 @@ test('the #441 runbook checks the public root is CLOSED, never 200 (#505 review 
   assert.match(runbook, /"\/\$BP\/"\)" = 200 \]/u, 'and the gateway UI route to answer, its path read from proxy.env');
 });
 
-test('package-lock.json pins the Vite the dev-client patch was measured on: a fresh npm ci installs the stamped version, not only a checkout whose node_modules had drifted (#396)', () => {
+test('pnpm-lock.yaml pins the Vite the dev-client patch was measured on: a fresh install gets the stamped version, not only a checkout whose node_modules had drifted (#396, #33)', () => {
   // The stamp test below reads node_modules, so a checkout whose node_modules had been updated
-  // past the lock stayed green while every fresh `npm ci` (6.4.1 from the lock) failed it.
+  // past the lock stayed green while every fresh install (6.4.1 from the lock) failed it.
   // Reading the lock makes the drift fail HERE, on every machine, in the commit that causes it.
-  const lock = JSON.parse(readFileSync(new URL('../package-lock.json', import.meta.url), 'utf8'));
-  assert.equal(lock.packages['node_modules/vite'].version, QUIET_RECONNECT_MEASURED_ON,
-    `package-lock.json pins Vite ${lock.packages['node_modules/vite'].version} but the dev-client patch was measured on ${QUIET_RECONNECT_MEASURED_ON}: upgrade the lock, the stamp and the patch together (docs/conventions/development.md § The dev server)`);
+  // The lock is pnpm's since board #33.
+  const vite = rootVersions(readFileSync(new URL('../pnpm-lock.yaml', import.meta.url), 'utf8')).vite;
+  assert.equal(vite, QUIET_RECONNECT_MEASURED_ON,
+    `pnpm-lock.yaml pins Vite ${vite} but the dev-client patch was measured on ${QUIET_RECONNECT_MEASURED_ON}: upgrade the lock, the stamp and the patch together (docs/conventions/development.md § The dev server)`);
 });
 
 test('the dev-client patch is stamped with its Vite, lands on every piece of text it replaces, and fails loudly when one is gone (#393)', async () => {

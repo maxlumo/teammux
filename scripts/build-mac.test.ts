@@ -11,7 +11,7 @@ test('build:mac bundles the crate\'s tmm with the UI embedded (#323)', () => {
   assert.equal(pkg.scripts['build:mac'], 'tauri build --features embed-ui');
   const conf = JSON.parse(readFileSync(new URL('../src-tauri/tauri.conf.json', import.meta.url), 'utf8'));
   assert.equal(conf.bundle.externalBin, undefined, 'no sidecar: it would collide with the crate\'s tmm');
-  assert.match(conf.build.beforeBuildCommand, /npm run build/u, 'dist/ exists before cargo, as embed-ui requires');
+  assert.match(conf.build.beforeBuildCommand, /^pnpm run build$/u, 'dist/ exists before cargo, as embed-ui requires');
   const cargo = readFileSync(new URL('../src-tauri/Cargo.toml', import.meta.url), 'utf8');
   assert.match(cargo, /\[\[bin\]\]\nname = "tmm"/u);
 });

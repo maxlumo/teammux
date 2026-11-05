@@ -215,8 +215,9 @@
   allowlist are deliberate — documented as such in `guidance/security.md`
   rule 5 ("document deliberately broad capabilities … the allowlist must not
   imply restrictions it does not enforce").
-- [ ] npm is aliased to pnpm and `package-lock.json` is stale;
-  inspect `npm_config_user_agent` during preflight.
+- [x] npm is aliased to pnpm and `package-lock.json` is stale: the project
+  uses pnpm with one `pnpm-lock.yaml` (board #33, development.md § package
+  manager).
 - [ ] Files Markdown escapes inline HTML, turning README badges into text.
   Accept this cost of one safe renderer or design an allowlist.
 
@@ -313,8 +314,8 @@ closed; kept as the record of what the scattering looked like.
   server-side add/remove RPCs (`bookmark_toggle`, `fs_add_recent`) or merge
   semantics in `set_prefs`, after which the client guards go.
 - iOS target: not implemented (Xcode + xcodegen + Apple Developer account;
-  `rustup target add aarch64-apple-ios aarch64-apple-ios-sim && npx tauri ios
-  init && npx tauri ios dev`).
+  `rustup target add aarch64-apple-ios aarch64-apple-ios-sim && pnpm exec tauri ios
+  init && pnpm exec tauri ios dev`).
 - xterm helper-textarea listeners after a font-size change: if xterm rebuilds
   its hidden textarea (unverified), the `kbTa` reference and blur/focus
   listeners go stale and break the keyboard-lock guard — confirm with a test

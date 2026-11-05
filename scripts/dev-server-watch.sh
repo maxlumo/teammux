@@ -27,7 +27,7 @@
 # `agent mode` it did not have. A rebuilt tmm restarts NOTHING: step 4 hashes
 # the server binary only, and each tmm run execs the file anew.
 #
-# Started by scripts/dev-stack.mjs (`npm run dev:all`); on the dev host that
+# Started by scripts/dev-stack.mjs (`pnpm run dev:all`); on the dev host that
 # runs as the systemd user unit tmux-mobile-dev.service, so do NOT also start
 # it as a task there (a second watcher and server). Elsewhere, a generic
 # example of running it alone so its log survives in a tmux window:

@@ -10,7 +10,7 @@
   // erasableSyntaxOnly keeps us inside the subset Node can strip: no enums,
   // no namespaces, no constructor parameter properties. Types only.
   //
-  // Type-checking happens exclusively via `npm run check` (svelte-check),
+  // Type-checking happens exclusively via `pnpm run check` (svelte-check),
   // which covers .ts, .svelte.ts and .svelte files.
   "compilerOptions": {
     "target": "esnext",

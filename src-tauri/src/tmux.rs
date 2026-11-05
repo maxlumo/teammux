@@ -1843,7 +1843,7 @@ impl Drop for Scratch {
 ///   tmux command or global write it checks the test binary's own argv for
 ///   `--test-threads=1` (or `RUST_TEST_THREADS=1`), and panics with the
 ///   incident and the two allowed commands otherwise. A mistake fails at
-///   once, with no contention needed and before a side effect; `npm run
+///   once, with no contention needed and before a side effect; `pnpm run
 ///   test:rust` passes the flag and is never affected.
 #[cfg(test)]
 pub(crate) mod test_support {
@@ -1855,9 +1855,9 @@ pub(crate) mod test_support {
         L.get_or_init(|| Mutex::new(()))
     }
 
-    pub const PARALLEL_MESSAGE: &str = "tmux-touching tests must run SEQUENTIALLY (incident 2026-10-12 05:51: a bare `cargo test --lib` killed the developer's default tmux server and every session on the host). Run `npm run test:rust`, or `cargo test … -- --test-threads=1`.";
+    pub const PARALLEL_MESSAGE: &str = "tmux-touching tests must run SEQUENTIALLY (incident 2026-10-12 05:51: a bare `cargo test --lib` killed the developer's default tmux server and every session on the host). Run `pnpm run test:rust`, or `cargo test … -- --test-threads=1`.";
 
-    pub const UNISOLATED_MESSAGE: &str = "tmux-touching tests must run in an ISOLATED tmux environment — TMUX and TMUX_PANE unset, TMUX_TMPDIR set to a throwaway directory (incident 2026-10-12 07:12: a test run in the developer's own shell killed the real default tmux server). Run `npm run test:rust`, which sets this up, or wrap cargo in `env -u TMUX -u TMUX_PANE TMUX_TMPDIR=$(mktemp -d)`.";
+    pub const UNISOLATED_MESSAGE: &str = "tmux-touching tests must run in an ISOLATED tmux environment — TMUX and TMUX_PANE unset, TMUX_TMPDIR set to a throwaway directory (incident 2026-10-12 07:12: a test run in the developer's own shell killed the real default tmux server). Run `pnpm run test:rust`, which sets this up, or wrap cargo in `env -u TMUX -u TMUX_PANE TMUX_TMPDIR=$(mktemp -d)`.";
 
     /// Is this test process kept away from any real tmux: no `$TMUX`
     /// (inherited pane), no `$TMUX_PANE`, and a `$TMUX_TMPDIR` so the
@@ -2384,7 +2384,7 @@ mod tests {
         // Parallelism (incident 05:51).
         let (ok, text) = run(&["--test-threads=4"], None, None);
         assert!(!ok, "an explicit parallel run must be refused:\n{text}");
-        assert!(text.contains("2026-10-12 05:51") && text.contains("npm run test:rust"), "the refusal names the incident and the command:\n{text}");
+        assert!(text.contains("2026-10-12 05:51") && text.contains("pnpm run test:rust"), "the refusal names the incident and the command:\n{text}");
         let (ok, text) = run(&[], Some("2"), None);
         assert!(!ok, "RUST_TEST_THREADS=2 must be refused:\n{text}");
         // Isolation (incident 07:12): serial, but in a real shell.

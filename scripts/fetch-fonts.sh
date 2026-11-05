@@ -2,7 +2,7 @@
 # Fetch / generate the two bundled web fonts into public/fonts/.
 #
 # These files are deliberately NOT committed (see .gitignore). Run once
-# after cloning, before `npm run build` / `npm run build:android`.
+# after cloning, before `pnpm run build` / `pnpm run build:android`.
 # Requires fonttools with brotli (`pip install fonttools brotli` or
 # `uv tool install fonttools --with brotli`).
 #

@@ -85,10 +85,10 @@ PWA, or as a native app on macOS and Android.
 ## Getting started
 
 ```bash
-npm install
-npm run build:server   # the server and the tmm CLI, web UI embedded
+pnpm install
+pnpm run build:server  # the server and the tmm CLI, web UI embedded
 src-tauri/target/release/tmm gateway   # the backend, as a background service
-npm run dev:all        # Vite on 127.0.0.1:5173 — open http://localhost:5173 (TEAMMUX_DEV_HOST=0.0.0.0 to reach it from another device)
+pnpm run dev:all       # Vite on 127.0.0.1:5173 — open http://localhost:5173 (TEAMMUX_DEV_HOST=0.0.0.0 to reach it from another device)
 ```
 
 To install the app and the background gateway rather than build from source, see [docs/reference/install.md](docs/reference/install.md).

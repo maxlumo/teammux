@@ -1773,10 +1773,10 @@ fn cmd_task(rest: &[String], cmdv: &[String], flags: &Flags, json: bool) {
     match verb {
         "start" => {
             let Some(name) = arg else {
-                fail(EXIT_USAGE, "task start needs a name: tmm task start dev -- npm run dev");
+                fail(EXIT_USAGE, "task start needs a name: tmm task start dev -- pnpm run dev");
             };
             if cmdv.is_empty() {
-                fail(EXIT_USAGE, "task start needs a command after `--`: tmm task start dev -- npm run dev");
+                fail(EXIT_USAGE, "task start needs a command after `--`: tmm task start dev -- pnpm run dev");
             }
             let session = flags.get("session").cloned().flatten();
             // Who is starting it (board #291): the task and its wake both run

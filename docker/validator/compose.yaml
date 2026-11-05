@@ -16,7 +16,7 @@
 # `-p tmm-e2e` on every call: it outranks a COMPOSE_PROJECT_NAME in your
 # shell, so a `down --remove-orphans` can never be aimed at another project.
 #
-# `npm run test:e2e:docker` (scripts/e2e-docker.mjs) does all of that and the
+# `pnpm run test:e2e:docker` (scripts/e2e-docker.mjs) does all of that and the
 # smoke in between. Host ports are bound to 127.0.0.1 only; override with
 # TMM_E2E_PORT_A/B/C when one is taken.
 name: tmm-e2e

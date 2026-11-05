@@ -344,8 +344,8 @@ xterm's option setter and the slider silently does nothing below `1.00`.
 
 **Trap: Vite dep pre-bundling bypasses plugin transforms.** In dev, optimized
 deps are served from the checkout's `.vite/deps/` (`node_modules/.vite/deps/` before #464) as esbuild output that never
-went through the plugin, so the patch only took effect in `npm run build` while
-`npm run dev` / `npm run tauri:dev` kept the stock `lineHeight >= 1` check.
+went through the plugin, so the patch only took effect in `pnpm run build` while
+`pnpm run dev` / `pnpm run tauri:dev` kept the stock `lineHeight >= 1` check.
 `@xterm/xterm` is therefore excluded via `optimizeDeps.exclude` (safe: the
 addons only type-import the core). Excluded deps get a `?v=<hash>` query on
 their module id in dev, so the transform strips the query before matching.
@@ -367,8 +367,8 @@ overlays, decorations, and touch coordinates stay on the unmoved outer cell;
 foreground color, weight, italics, letter spacing, and text decorations inherit
 into the glyph child. The visible IME composition text uses the same inner
 glyph layer, leaving its containing box and IME candidate-window anchor
-unchanged. `npm test` runs the full frontend suite (including the
-line-geometry test that verifies the split), while `npm run
+unchanged. `pnpm test` runs the full frontend suite (including the
+line-geometry test that verifies the split), while `pnpm run
 build` verifies both xterm renderer signatures before shipping.
 
 ## Alternatives considered

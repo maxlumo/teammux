@@ -56,7 +56,7 @@ On Android the new APK upgrades the installed app in place (same application id 
 
 ## Linux
 
-Build the server and `tmm` (`npm run build:server`: the web UI is embedded), put `src-tauri/target/release/tmm` on your PATH and run `tmm gateway`. It installs a systemd user unit, `tmux-mobile-gateway.service`. On a headless machine, `loginctl enable-linger <user>` lets it start at boot.
+Build the server and `tmm` (`pnpm run build:server`: the web UI is embedded), put `src-tauri/target/release/tmm` on your PATH and run `tmm gateway`. It installs a systemd user unit, `tmux-mobile-gateway.service`. On a headless machine, `loginctl enable-linger <user>` lets it start at boot.
 
 ## Switching a dev host to the gateway
 
@@ -65,7 +65,7 @@ from `scripts/dev-server-watch.sh` inside `tmux-mobile-dev.service`: that
 watcher's `server` IS the gateway binary, just not under the gateway's own
 unit, so `tmm gateway status` says "not installed" while something answers on
 the port. Board #343 splits the two jobs — vite stays in the dev unit, the
-backend becomes `tmux-mobile-gateway.service`, and `npm run gateway:update`
+backend becomes `tmux-mobile-gateway.service`, and `pnpm run gateway:update`
 rebuilds and restarts it after each merge to main.
 
 Run these steps yourself (an agent does not restart your stack), in this order:
@@ -169,11 +169,11 @@ hide that.
    WITHOUT `embed-ui`, so the `tmm` sitting in `target/release` right now
    carries no web UI: installed as it is, the gateway serves none and `tmm ui`
    says so until the first `build:server` (that is also what
-   `npm run gateway:update` would fix afterwards). Build it here, with nothing
+   `pnpm run gateway:update` would fix afterwards). Build it here, with nothing
    watching the tree to relink a UI-less copy over it:
 
    ```bash
-   npm run build:server
+   pnpm run build:server
    ```
 
 5. **Install the gateway** with the `tmm` of this checkout:
@@ -189,7 +189,7 @@ hide that.
    the unit records (this `tmm`, this config root) survives every rebuild.
 
    The unit carries `KillMode=process` (board #350): a restart of the gateway
-   — which `npm run gateway:update` does after every merge — signals the
+   — which `pnpm run gateway:update` does after every merge — signals the
    gateway alone, and the tmux servers it forked live on. A unit installed
    before #350 lacks the line; `tmm gateway status` says so (reading the
    manager's EFFECTIVE value, drop-ins included), and a plain
@@ -236,8 +236,8 @@ hide that.
    machine); `ss -ltn | grep -E '5173|9899'` shows both; `tmm ui` prints the
    URL the gateway itself serves; open the app.
 
-From then on, after every merge to main: `npm run gateway:update`. It runs
-`npm run build:server`, then restarts the gateway unless the binary is already
+From then on, after every merge to main: `pnpm run gateway:update`. It runs
+`pnpm run build:server`, then restarts the gateway unless the binary is already
 the one the gateway is running — the receipt beside the binary
 (`.tmm-gateway-deployed.json`, naming the binary, the config root and the
 service, as the service's own identity does) records a deploy the gateway was
@@ -252,7 +252,7 @@ a `CARGO_TARGET_DIR`, a `--target`, or a `target-dir` in a cargo config moves
 the artifact, and the run stops and asks you to name it with
 `TEAMMUX_GATEWAY_TMM` (the old `TMUX_MOBILE_GATEWAY_TMM` is still read) rather than hash one file and restart another.
 
-**One restart after the rename.** The unit text carries `Description=Teammux gateway` now; a unit installed earlier has the old text. `tmm gateway install` compares the whole file, so on an existing host the next explicit install plans an Update, which stops the running gateway and starts it again once (`KillMode=process` keeps the tmux servers and the agents). Nothing else changes, and `npm run gateway:update` restarts the gateway anyway.
+**One restart after the rename.** The unit text carries `Description=Teammux gateway` now; a unit installed earlier has the old text. `tmm gateway install` compares the whole file, so on an existing host the next explicit install plans an Update, which stops the running gateway and starts it again once (`KillMode=process` keeps the tmux servers and the agents). Nothing else changes, and `pnpm run gateway:update` restarts the gateway anyway.
 
 To go back: `tmm gateway uninstall`, then run the dev stack with the watcher
 again (`TEAMMUX_DEV_WITH_SERVER=1`).

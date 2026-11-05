@@ -6928,7 +6928,7 @@ while True:
     /// these files that reads it MUST carry the desktop cfg gate. Nothing in
     /// the normal loop catches a missing one: `cargo test`, `cargo build` and
     /// the dev server all target the desktop, where the module exists — the
-    /// error only appears in `npm run build:android`, which nobody runs per
+    /// error only appears in `pnpm run build:android`, which nobody runs per
     /// change. It broke exactly that way (board #16): `deliver_chat_line` was
     /// inserted directly beneath `deliver_mentions`' `#[cfg]`, adopted the
     /// gate (a doc comment between an attribute and its item is legal, so the

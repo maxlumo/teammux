@@ -1,5 +1,5 @@
 #!/usr/bin/env node
-// `npm run test:rust` — the Rust suite, SEQUENTIAL and in an ISOLATED tmux
+// `pnpm run test:rust` — the Rust suite, SEQUENTIAL and in an ISOLATED tmux
 // environment (board #349).
 //
 // Two incidents on 2026-10-12 killed the developer's default tmux server and
@@ -47,7 +47,7 @@ import { fileURLToPath } from 'node:url';
 export const repoRoot = resolve(dirname(fileURLToPath(import.meta.url)), '..');
 
 /** The cargo command this wrapper runs. `extra` is what the caller added
- * after `npm run test:rust`, in cargo's own grammar: everything before the
+ * after `pnpm run test:rust`, in cargo's own grammar: everything before the
  * caller's first `--` goes to cargo (a filter, `--lib`, `-p`), everything
  * after it to the test harness (`--nocapture`, `--exact`, …).
  *

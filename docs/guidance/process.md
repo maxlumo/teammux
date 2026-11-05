@@ -88,7 +88,7 @@
 - [ ] Is the design rule updated with its date and incident?
 - [ ] Were both layouts checked? Which build was tested, and can the owner's client see it?
 - [ ] Do external-system claims name a version?
-- [ ] Are `npm test`, `npm run check` and `test:rust` results reported?
+- [ ] Are `pnpm test`, `pnpm run check` and `test:rust` results reported?
 - [ ] Was every addressed message answered? Was `tmm done` used and the board moved to review?
 - [ ] Were design-level changes discussed beforehand?
 
@@ -124,7 +124,7 @@
 - Repeated owner guidance: "先讨论方案，不要直接修改代码";
   "保持中文语言风格干练，不啰嗦"; "流程应该用英文，保持一致性".
 - 2026-09-08: "大家要分工明确，lead 不要过分代劳，不同人要对抗评审，对立统一".
-- A dependency change (package.json / Cargo.toml) is installed in the launch checkout at merge time, and the reviewer runs the suite THERE, not only in the branch worktree — a worktree with private node_modules can be green while the integration checkout is red (2026-09-09: jsdom from board #115 lived only in one worktree; main’s npm test failed for an hour before anyone ran it in place). Match the checkout’s package-manager layout (this host: pnpm) when installing.
+- A dependency change (package.json / Cargo.toml) is installed in the launch checkout at merge time, and the reviewer runs the suite THERE, not only in the branch worktree — a worktree with private node_modules can be green while the integration checkout is red (2026-09-09: jsdom from board #115 lived only in one worktree; main’s pnpm test failed for an hour before anyone ran it in place). Match the checkout’s package-manager layout (this host: pnpm) when installing.
 - An evidence run closes what it opened, in a `finally`: browser, playwright/agent-browser daemon, preview server. 2026-09-12: five leaked playwright-cli daemons with headless Chromium (17 h to 3.8 days old, two GPU processes at 99% CPU) drove the host to load average 54, and every render test in a review run timed out at 60 s — read first as a branch defect (board #177). A reviewer who sees a burst of timeouts checks the host (`uptime`, `pgrep -fa headless`) before returning FIX FIRST.
 
 ## 5. The Review Flow (board #105, 2026-09-10)
@@ -165,7 +165,7 @@ when the branch is on main, cherry-pick when main has moved under it
 their judgement). The implementer never merges its own work — a deletion
 merged ahead of review on 2026-09-09 was accepted only because tests and a
 grep backed it. **Once a host has switched to the gateway (install.md §
-Switching a dev host), every merge is followed by `npm run gateway:update` in
+Switching a dev host), every merge is followed by `pnpm run gateway:update` in
 the launch checkout** (board #343): nothing watches the sources for the
 gateway, so the running backend stays on the pre-merge binary until someone
 says now. It rebuilds, restarts only when the binary differs from the one the

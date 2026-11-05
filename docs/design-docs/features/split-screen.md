@@ -111,8 +111,8 @@ or at a file's root) is refused rather than guessed. It fails on main's
 `SplitView.svelte`.
 
 ## Verification
-See the plan's verification section: build (`npm run build`), run
-`npm run tauri:dev`, then check single-pane regression, two panes streaming at
+See the plan's verification section: build (`pnpm run build`), run
+`pnpm run tauri:dev`, then check single-pane regression, two panes streaming at
 once, per-cell input/resize, close, pane death, reconnect, the narrow gate, and
 persistence. Backend multi-subscribe + single-pane routing were verified against
 the live server over one WS connection.

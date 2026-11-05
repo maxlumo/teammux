@@ -2175,7 +2175,7 @@ mod tests {
             .status()
             .map(|s| s.success())
             .unwrap_or(false);
-        assert!(created, "a tmux server is required (npm run test:rust provides one)");
+        assert!(created, "a tmux server is required (pnpm run test:rust provides one)");
         let pane_id = String::from_utf8(
             std::process::Command::new("tmux").args(["display-message", "-p", "-t", &session, "#{pane_id}"]).output().unwrap().stdout,
         )

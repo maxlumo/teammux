@@ -46,7 +46,7 @@ Cache by (text, theme) so a stable pane doesn't re-transform on every frame.
 
 ## Verification
 
-`npm test` (the ansi-colors suite) covers dark and light themes, truecolor, indexed and basic ANSI colors, reset behavior, reverse video, default-background preservation, and a 288-pair representative color matrix. Every mapped pair must retain at least 4.5:1 contrast.
+`pnpm test` (the ansi-colors suite) covers dark and light themes, truecolor, indexed and basic ANSI colors, reset behavior, reverse video, default-background preservation, and a 288-pair representative color matrix. Every mapped pair must retain at least 4.5:1 contrast.
 
 ## Lessons Learned
 - The original symptom was reported as "dark mode renders as white background, light mode as black background" — it was literally the symptom of a blind RGB inversion; the fix required separating the *role* (FG vs BG) from the *color space* (perceptual vs nominal).

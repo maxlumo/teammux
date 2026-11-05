@@ -32,7 +32,7 @@
 
 **Required: TypeScript / Svelte**
 - Explicit `.ts` in relative imports, erasable syntax only, and
-  `npm run check` as the sole type check.
+  `pnpm run check` as the sole type check.
 - Import platform decisions only from `core/platform.ts`; check
   `isAndroid` before `isTauri` and `await tauriReady`.
 - New modules include `<module>.test.ts` in the same commit.
@@ -75,7 +75,7 @@
 - [ ] Were booleans added? How many writers does each have?
 - [ ] Are numbers or colors hardcoded?
 - [ ] Are platform checks ordered correctly, with plugin calls awaiting `tauriReady`?
-- [ ] Did type checking, `npm test` and `test:rust` pass? Was a negative control run?
+- [ ] Did type checking, `pnpm test` and `test:rust` pass? Was a negative control run?
 
 ## 4. Lessons
 

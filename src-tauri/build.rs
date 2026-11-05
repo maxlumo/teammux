@@ -39,7 +39,7 @@ fn embed_ui() {
     let dist = manifest.parent().unwrap().join("dist");
     println!("cargo:rerun-if-changed={}", dist.display());
     if !dist.join("index.html").is_file() {
-        panic!("embed-ui: {} has no index.html — run `npm run build` first", dist.display());
+        panic!("embed-ui: {} has no index.html — run `pnpm run build` first", dist.display());
     }
     let mut files = Vec::new();
     let mut stack = vec![dist.clone()];

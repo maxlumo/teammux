@@ -58,16 +58,16 @@ WebSocket JSON-RPC with token auth + optional E2E encryption. Targets: Android
 ## Commands
 
 ```bash
-npm run dev:all          # Vite :5173, proxying /ws to the gateway (browser dev loop)
-npm run gateway:update   # rebuild + restart the gateway (after each merge, once switched)
-npm run tauri:dev        # desktop app + server
-npm run build:server     # server + tmm, no webview needed
-npm run build:android    # APK (aarch64) — ends with the build-dir postflight
-npm test                 # frontend + script tests (node --test, no tmux)
-npm run check            # svelte-check (the ONLY type check)
-npm run check:android    # Rust lib for the phone's target; every src-tauri change (board #32)
-npm run test:rust        # Rust tests, sequential, needs a running tmux
-npm run test:e2e:docker  # 3 isolated gateways in Docker: the environment smoke for multi-server work
+pnpm run dev:all         # Vite :5173, proxying /ws to the gateway (browser dev loop)
+pnpm run gateway:update  # rebuild + restart the gateway (after each merge, once switched)
+pnpm run tauri:dev       # desktop app + server
+pnpm run build:server    # server + tmm, no webview needed
+pnpm run build:android   # APK (aarch64) — ends with the build-dir postflight
+pnpm test                # frontend + script tests (node --test, no tmux)
+pnpm run check           # svelte-check (the ONLY type check)
+pnpm run check:android   # Rust lib for the phone's target; every src-tauri change (board #32)
+pnpm run test:rust       # Rust tests, sequential, needs a running tmux
+pnpm run test:e2e:docker # 3 isolated gateways in Docker: the environment smoke for multi-server work
 ```
 
 Everything else about running and building — the supervised units on this host
@@ -80,10 +80,10 @@ Everything else about running and building — the supervised units on this host
 Each links to the doc that holds the reason and the details.
 
 1. **The design language is a contract** — six type steps, three font roles, the radius scale, two hover families, ONE popover mechanism, `--t-fast/--t-move`, 760px compact, 44px touch. A new visual species is a regression; source tests enforce it. → [design-language.md](docs/design-docs/features/design-language.md)
-2. **TypeScript rules**: explicit `.ts` in relative imports, erasable syntax only, `npm run check` is the type check, convert `.js` file-by-file with no logic change in the same commit. → [conventions/frontend.md](docs/conventions/frontend.md)
+2. **TypeScript rules**: explicit `.ts` in relative imports, erasable syntax only, `pnpm run check` is the type check, convert `.js` file-by-file with no logic change in the same commit. → [conventions/frontend.md](docs/conventions/frontend.md)
 3. **Platform checks**: `isAndroid` before `isTauri`; `await tauriReady` before any plugin; Android opens files through `AndroidFileOpener`, never `tauri-plugin-opener`. → [conventions/frontend.md](docs/conventions/frontend.md)
 4. **Isolate, verify, then commit** — coding agents develop each tracked-file task in its own Git worktree under `<repo>/worktree/<agent>-<task>` (gitignored; never outside the repo; the launch checkout is coordination/integration only), then commit every verified logical change with the active agent's co-author trailer; never absorb another dirty tree or commit `agent-team-page/`. → [conventions/development.md](docs/conventions/development.md)
-5. **Tests**: `npm test` for the frontend, `npm run test:rust` (sequential, shared tmux) for Rust; source-contract tests (`*.source.test.ts`) pin markup and CSS on purpose — read the test before "fixing" it. → [conventions/testing.md](docs/conventions/testing.md)
+5. **Tests**: `pnpm test` for the frontend, `pnpm run test:rust` (sequential, shared tmux) for Rust; source-contract tests (`*.source.test.ts`) pin markup and CSS on purpose — read the test before "fixing" it. → [conventions/testing.md](docs/conventions/testing.md)
 6. **One mechanism per UI job**: `ui/Dialog` for every modal (`ui/ConfirmDialog` is the one confirm inside it), `ui/Select` for every dropdown, `ui/ContextMenu` + `ui/longpress` for right-click/long-press, `menuPlacement` for every fixed popover, `.to-tail` for every back-to-tail control, `.live-dot`/`stateDotColor` for the one status colour language (at rest is achromatic). → [design-language.md](docs/design-docs/features/design-language.md), [ui-unification.md](docs/design-docs/features/ui-unification.md), [hub-feed.md](docs/design-docs/features/hub-feed.md)
 7. **Terminal key encoding**: Ctrl keys go to tmux as NAMED keys (`extended-keys on` drops raw C0 bytes); device-attribute responses are filtered before forwarding; a hidden terminal records frames and never renders them. → [terminal-rendering.md](docs/design-docs/pages/terminal-rendering.md)
 8. **The keyboard is an overlay for agent TUIs** (`.keep-rows`), a resize for everything else; printable keys bypass xterm's keydown so CJK IMEs work; only `unlockKeyboard()` and friends may touch `kbLocked`. → [terminal-keyboard.md](docs/design-docs/pages/terminal-keyboard.md)

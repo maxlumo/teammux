@@ -32,11 +32,9 @@ crew/__pycache__/
 *.db-wal
 *.db-shm
 
-# Project uses npm; stray pnpm lockfile/workspace files would create a
-# dual-package-manager conflict (pnpm auto-creates the workspace file when
-# invoked directly, e.g. pnpm run tauri:dev)
-/pnpm-lock.yaml
-/pnpm-workspace.yaml
+# The project uses pnpm (owner, 2026-11-05, board #33): a stray npm lockfile
+# would be a second, unread source of versions.
+/package-lock.json
 # Backup left by a git history filter/rewrite — keep locally, never commit
 /.git.backup-before-filter/
 

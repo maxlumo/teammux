@@ -28,7 +28,7 @@ path = "src/bin/tmm.rs"
 
 [features]
 default = ["gui"]
-# `embed-ui` builds the web UI (`dist/`, from `npm run build`) INTO the binary,
+# `embed-ui` builds the web UI (`dist/`, from `pnpm run build`) INTO the binary,
 # so `tmm gateway` serves it on its own port with no files beside it (board
 # #323). build.rs fails clearly when dist/index.html is missing. Off by
 # default: the desktop app has its own webview and needs no copy.
@@ -38,7 +38,7 @@ embed-ui = []
 # and `build:android` behave exactly as before.
 #
 # Off, the crate builds only what the WebSocket server and the `tmm` CLI need,
-# with no webview in the dependency graph at all (`npm run build:server`). That
+# with no webview in the dependency graph at all (`pnpm run build:server`). That
 # is the supported build on any host without a WebKit webview — a Linux box with
 # no WebKitGTK development package, a CI runner, a container — because on Linux
 # `tauri` reaches gtk3 and webkit2gtk-4.1 through wry, so a `--bin server` build
@@ -114,7 +114,7 @@ chrono = { version = "0.4.44", default-features = false, features = ["clock", "s
 # XML or binary, never by string splitting. Already in the graph via tauri.
 plist = "1.8"
 
-# `npm run tauri:dev:release` and `tauri build` use this profile.
+# `pnpm run tauri:dev:release` and `tauri build` use this profile.
 #
 # incremental was ON here to shorten edit-rebuild cycles, and it has been turned
 # OFF because it stopped working on this crate: every release build after a

@@ -8,13 +8,13 @@ import { spawn, spawnSync } from 'node:child_process';
 import { chmodSync, existsSync, mkdtempSync, mkdirSync, readFileSync, realpathSync, rmSync, symlinkSync, utimesSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
-import { ancestry, dockerArgs, forbiddenPaths, installRefusal, nodeRuntime, npmInstallsIn, Refusal, selfCheck, target, withTripwire } from './isolated.mjs';
+import { ancestry, dockerArgs, forbiddenPaths, installRefusal, nodeRuntime, pnpmInstallsIn, Refusal, selfCheck, target, withTripwire } from './isolated.mjs';
 
 const home = '/local/home/u';
 const worktree = '/local/home/u/work/repo/worktree/a-1';
 const args = () => dockerArgs({
   worktree, gitDirs: { common: '/local/home/u/work/repo/.git', own: '/local/home/u/work/repo/.git/worktrees/a-1' },
-  uid: 1000, gid: 100, home, forbidden: forbiddenPaths({ home, env: {}, worktree }), command: ['npm', 'test'],
+  uid: 1000, gid: 100, home, forbidden: forbiddenPaths({ home, env: {}, worktree }), command: ['pnpm', 'test'],
 });
 
 test('the container has no network and runs as the caller; the self-check shell stays PID 1 to reap', () => {
@@ -295,19 +295,20 @@ test('a listener that dies, or cannot write its record, fails closed', { skip: !
   assert.equal(quiet.r.status, 97, `a final record that cannot be written is never a clean run: ${quiet.r.stderr}`);
 });
 
-// ---- board #514: refuse while the worktree's npm install is incomplete ----
-// Sentinel directories only; the process scan is injected, except the rows
-// that read the real /proc: stand-ins in each argv shape, and a REAL `npm ci`
-// held in its root install script by a sentinel file.
+// ---- board #514: refuse while the worktree's install is incomplete ----
+// pnpm since board #33. Sentinel directories only; the process scan is
+// injected, except the rows that read the real /proc: stand-ins in argv
+// shape, and a REAL `pnpm install --frozen-lockfile` held in its root
+// install script by a sentinel file.
 
 function installTree(opts: { pkg?: boolean; marker?: boolean; markerOlder?: boolean }) {
   const t = realpathSync(mkdtempSync(join(tmpdir(), 'tmm-isolated-install-')));
   if (opts.pkg !== false) writeFileSync(join(t, 'package.json'), '{}');
-  writeFileSync(join(t, 'package-lock.json'), '{}');
+  writeFileSync(join(t, 'pnpm-lock.yaml'), "lockfileVersion: '9.0'\n");
   if (opts.marker !== false) {
     mkdirSync(join(t, 'node_modules'));
-    writeFileSync(join(t, 'node_modules', '.package-lock.json'), '{}');
-    if (opts.markerOlder) utimesSync(join(t, 'node_modules', '.package-lock.json'), new Date(1000), new Date(1000));
+    writeFileSync(join(t, 'node_modules', '.modules.yaml'), '{}');
+    if (opts.markerOlder) utimesSync(join(t, 'node_modules', '.modules.yaml'), new Date(1000), new Date(1000));
   }
   return t;
 }
@@ -321,12 +322,34 @@ test('a complete install runs; a missing marker, a stale marker and a running in
   try {
     assert.equal(installRefusal({ worktree: ok, installs: none }), null, 'a complete install is never refused');
     assert.equal(installRefusal({ worktree: nopkg, installs: none }), null, 'nothing to install, nothing refused');
-    const fix = `run \`npm ci\` alone in ${missing}, wait for it to exit, then retry`;
-    assert.equal(installRefusal({ worktree: missing, installs: none }), `node_modules is missing or its install did not finish (no node_modules/.package-lock.json); ${fix}`, 'the refusal names the worktree and the fix');
-    assert.match(installRefusal({ worktree: stale, installs: none }) ?? '', /older than package-lock\.json.*run `npm ci` alone in /);
-    assert.equal(installRefusal({ worktree: ok, installs: () => [4242] }), `an npm install is still running in ${ok} (pid 4242); wait for it to exit, then retry`, 'a running install refuses even beside a marker');
+    const fix = `run \`pnpm install --frozen-lockfile\` alone in ${missing}, wait for it to exit, then retry`;
+    assert.equal(installRefusal({ worktree: missing, installs: none }), `node_modules is missing or its install did not finish (no node_modules/.modules.yaml); ${fix}`, 'the refusal names the worktree and the fix');
+    assert.match(installRefusal({ worktree: stale, installs: none }) ?? '', /older than pnpm-lock\.yaml.*run `pnpm install --frozen-lockfile` alone in /);
+    assert.equal(installRefusal({ worktree: ok, installs: () => [4242] }), `a pnpm install is still running in ${ok} (pid 4242); wait for it to exit, then retry`, 'a running install refuses even beside a marker');
   } finally {
     for (const d of [ok, missing, stale, nopkg]) rmSync(d, { recursive: true, force: true });
+  }
+});
+
+// Measured with pnpm 12.16.1 (#33): `pnpm install --lockfile-only` rewrote the
+// lock with the same content, and the named fix, `pnpm install
+// --frozen-lockfile`, answered "Lockfile is up to date" without touching
+// node_modules/.modules.yaml, so the refusal sent its reader round in a loop.
+// pnpm's record of what it installed, node_modules/.pnpm/lock.yaml, is the
+// lock's project document byte for byte; equal means the tree is the lock's.
+test('a marker older than a lock whose content pnpm already installed runs; one whose content differs still refuses', () => {
+  const project = "lockfileVersion: '9.0'\n\nimporters:\n\n  .:\n    dependencies:\n      marked:\n        specifier: 17.0.3\n        version: 17.0.3\n";
+  const lock = `---\nlockfileVersion: '9.0'\n\nimporters:\n\n  .:\n    packageManagerDependencies:\n      pnpm:\n        specifier: 12.16.1\n        version: 12.16.1\n\n---\n${project}`;
+  const same = installTree({ markerOlder: true });
+  const differs = installTree({ markerOlder: true });
+  try {
+    for (const t of [same, differs]) { writeFileSync(join(t, 'pnpm-lock.yaml'), lock); mkdirSync(join(t, 'node_modules', '.pnpm')); }
+    writeFileSync(join(same, 'node_modules', '.pnpm', 'lock.yaml'), project);
+    writeFileSync(join(differs, 'node_modules', '.pnpm', 'lock.yaml'), project.replaceAll('17.0.3', '17.0.2'));
+    assert.equal(installRefusal({ worktree: same, installs: none }), null, 'what pnpm installed is what the lock says');
+    assert.match(installRefusal({ worktree: differs, installs: none }) ?? '', /older than pnpm-lock\.yaml/);
+  } finally {
+    for (const d of [same, differs]) rmSync(d, { recursive: true, force: true });
   }
 });
 
@@ -335,13 +358,13 @@ test('a marker that is not a regular file refuses; an unreadable lock refuses, a
   const badLock = installTree({});
   const noLock = installTree({});
   try {
-    mkdirSync(join(dirMarker, 'node_modules', '.package-lock.json'), { recursive: true });
-    assert.match(installRefusal({ worktree: dirMarker, installs: none }) ?? '', /^node_modules\/\.package-lock\.json is not a regular file; run `npm ci` alone in /);
+    mkdirSync(join(dirMarker, 'node_modules', '.modules.yaml'), { recursive: true });
+    assert.match(installRefusal({ worktree: dirMarker, installs: none }) ?? '', /^node_modules\/\.modules\.yaml is not a regular file; run `pnpm install --frozen-lockfile` alone in /);
     // A self-loop symlink: stat fails with ELOOP, not ENOENT, whoever runs it.
-    rmSync(join(badLock, 'package-lock.json'));
-    symlinkSync('package-lock.json', join(badLock, 'package-lock.json'));
-    assert.equal(installRefusal({ worktree: badLock, installs: none }), 'package-lock.json cannot be read (ELOOP), so the install cannot be judged; fix it, then retry');
-    rmSync(join(noLock, 'package-lock.json'));
+    rmSync(join(badLock, 'pnpm-lock.yaml'));
+    symlinkSync('pnpm-lock.yaml', join(badLock, 'pnpm-lock.yaml'));
+    assert.equal(installRefusal({ worktree: badLock, installs: none }), 'pnpm-lock.yaml cannot be read (ELOOP), so the install cannot be judged; fix it, then retry');
+    rmSync(join(noLock, 'pnpm-lock.yaml'));
     assert.equal(installRefusal({ worktree: noLock, installs: none }), null, 'no lock: no staleness to judge');
   } finally {
     for (const d of [dirMarker, badLock, noLock]) rmSync(d, { recursive: true, force: true });
@@ -356,57 +379,61 @@ function waitFor(cond: () => boolean, ms: number) {
   return cond();
 }
 
-test('the process scan finds an npm install by its cwd, in both argv shapes, and nothing else', () => {
-  const t = realpathSync(mkdtempSync(join(tmpdir(), 'tmm-isolated-npm-')));
+test('the process scan finds a pnpm install by its cwd and argv words, and nothing else', () => {
+  const t = realpathSync(mkdtempSync(join(tmpdir(), 'tmm-isolated-pnpm-')));
   const other = realpathSync(mkdtempSync(join(tmpdir(), 'tmm-isolated-other-')));
-  // Startup shape: argv `npm … ci`, one element per word (exec -a sets argv[0]).
-  const words = (cwd: string) => spawn('bash', ['-c', "exec -a npm bash -c 'sleep 30; :' ci"], { cwd, stdio: 'ignore', detached: true });
-  // npm 10's own title: ONE element `npm ci`, set the way lib/npm.js does,
-  // through process.title, which node writes over the argv area.
-  const title = (cwd: string) => spawn(process.execPath, ['-e', "process.title = 'npm ci'; setTimeout(() => {}, 30000)"], { cwd, stdio: 'ignore', detached: true });
-  // A shell whose argument string reads `npm ci`: several elements, not npm.
-  const shell = (cwd: string) => spawn('bash', ['-c', "exec -a sh bash -c 'sleep 30; :' 'npm ci'"], { cwd, stdio: 'ignore', detached: true });
-  const procs = [words(t), title(t), shell(t), words(other), title(other)];
-  const [here, titled, sh, ...there] = procs;
+  // pnpm 12.16.1's argv, measured: `pnpm install --frozen-lockfile`, one
+  // element per word. The stand-in is a script NAMED pnpm, so its argv is
+  // `bash …/pnpm install --frozen-lockfile`: a path ending in /pnpm, then the verb.
+  const bin = realpathSync(mkdtempSync(join(tmpdir(), 'tmm-isolated-bin-')));
+  writeFileSync(join(bin, 'pnpm'), '#!/bin/bash\nsleep 30\n', { mode: 0o755 });
+  const stand = join(bin, 'pnpm');
+  const install = (cwd: string, verb = 'install') => spawn(stand, [verb, '--frozen-lockfile'], { cwd, stdio: 'ignore', detached: true });
+  const pathed = (cwd: string) => spawn(stand, ['i'], { cwd, stdio: 'ignore', detached: true });
+  // `pnpm test` is not an install; nor is a shell string that reads `pnpm install`.
+  const run = (cwd: string) => spawn(stand, ['test'], { cwd, stdio: 'ignore', detached: true });
+  const shell = (cwd: string) => spawn('bash', ['-c', "exec -a sh bash -c 'sleep 30; :' 'pnpm install'"], { cwd, stdio: 'ignore', detached: true });
+  const procs = [install(t), pathed(t), install(t, 'add'), run(t), shell(t), install(other)];
+  const [here, path, added, notInstall, sh, there] = procs;
   try {
     let found: number[] = [];
-    waitFor(() => (found = npmInstallsIn(t)).includes(here.pid!) && found.includes(titled.pid!), 5000);
-    assert.ok(found.includes(here.pid!), `startup argv shape found: ${found}`);
-    assert.ok(found.includes(titled.pid!), `npm 10 title shape found: ${found}`);
-    assert.ok(!found.includes(sh.pid!), 'a shell string that mentions npm ci is not an install');
-    for (const p of there) assert.ok(!found.includes(p.pid!), 'another worktree\'s install is not this one\'s');
-    assert.deepEqual(npmInstallsIn(join(t, 'nope')), [], 'a directory with no install has none');
+    waitFor(() => [here, path, added].every((p) => (found = pnpmInstallsIn(t)).includes(p.pid!)), 5000);
+    for (const p of [here, path, added]) assert.ok(found.includes(p.pid!), `found: ${found}`);
+    assert.ok(!found.includes(notInstall.pid!), 'pnpm test is not an install');
+    assert.ok(!found.includes(sh.pid!), 'a shell string that mentions pnpm install is not an install');
+    assert.ok(!found.includes(there.pid!), 'another worktree\'s install is not this one\'s');
+    assert.deepEqual(pnpmInstallsIn(join(t, 'nope')), [], 'a directory with no install has none');
   } finally {
     for (const c of procs) killGroup(c.pid);
-    rmSync(t, { recursive: true, force: true }); rmSync(other, { recursive: true, force: true });
+    for (const d of [t, other, bin]) rmSync(d, { recursive: true, force: true });
   }
 });
 
-test('a REAL npm ci is refused while its root scripts run after the marker, and passes once it exits', () => {
-  const t = realpathSync(mkdtempSync(join(tmpdir(), 'tmm-isolated-realnpm-')));
+test('a REAL pnpm install is refused while its root scripts run after the marker, and passes once it exits', () => {
+  const t = realpathSync(mkdtempSync(join(tmpdir(), 'tmm-isolated-realpnpm-')));
   const other = realpathSync(mkdtempSync(join(tmpdir(), 'tmm-isolated-other-')));
-  // A local file: dependency gives npm a node_modules to write (offline);
-  // the root install script holds npm until the sentinel `go` appears.
+  // A local file: dependency gives pnpm a node_modules to write (offline, a
+  // private store); the root install script holds pnpm until `go` appears.
   mkdirSync(join(t, 'dep'));
   writeFileSync(join(t, 'dep', 'package.json'), '{"name":"dep","version":"1.0.0"}');
-  writeFileSync(join(t, 'package.json'), JSON.stringify({ name: 'sentinel', version: '1.0.0', dependencies: { dep: 'file:./dep' }, scripts: { install: 'while [ ! -e go ]; do sleep 0.1; done' } }));
-  const env = { ...process.env, npm_config_cache: join(t, '.npm-cache'), npm_config_offline: 'true', npm_config_audit: 'false', npm_config_fund: 'false', npm_config_update_notifier: 'false' };
-  const lock = spawnSync('npm', ['install', '--package-lock-only', '--ignore-scripts'], { cwd: t, env, stdio: 'ignore' });
+  writeFileSync(join(t, 'package.json'), JSON.stringify({ name: 'sentinel', version: '1.0.0', private: true, dependencies: { dep: 'file:./dep' }, scripts: { install: 'while [ ! -e go ]; do sleep 0.1; done' } }));
+  const env = { ...process.env, npm_config_store_dir: join(t, '.store'), npm_config_cache_dir: join(t, '.cache'), npm_config_offline: 'true' };
+  const lock = spawnSync('pnpm', ['install', '--lockfile-only', '--ignore-scripts'], { cwd: t, env, stdio: 'ignore' });
   assert.equal(lock.status, 0, 'the sentinel lockfile is written');
-  utimesSync(join(t, 'package-lock.json'), new Date(1000), new Date(1000));
-  const npm = spawn('npm', ['ci'], { cwd: t, env, stdio: 'ignore', detached: true });
+  utimesSync(join(t, 'pnpm-lock.yaml'), new Date(1000), new Date(1000));
+  const pnpm = spawn('pnpm', ['install', '--frozen-lockfile'], { cwd: t, env, stdio: 'ignore', detached: true });
   let exited = false;
-  npm.on('exit', () => { exited = true; });
-  const marker = join(t, 'node_modules', '.package-lock.json');
+  pnpm.on('exit', () => { exited = true; });
+  const marker = join(t, 'node_modules', '.modules.yaml');
   try {
-    assert.ok(waitFor(() => existsSync(marker) && existsSync(join(t, 'node_modules', 'dep')) && npmInstallsIn(t).length > 0, 30000), 'npm wrote the marker and is still running');
-    assert.match(installRefusal({ worktree: t }) ?? '', /^an npm install is still running in /, 'the marker exists, npm runs its root script: refused');
-    assert.equal(npmInstallsIn(other).length, 0, 'another cwd sees no install');
+    assert.ok(waitFor(() => existsSync(marker) && existsSync(join(t, 'node_modules', 'dep')) && pnpmInstallsIn(t).length > 0, 30000), 'pnpm wrote the marker and is still running');
+    assert.match(installRefusal({ worktree: t }) ?? '', /^a pnpm install is still running in /, 'the marker exists, pnpm runs its root script: refused');
+    assert.equal(pnpmInstallsIn(other).length, 0, 'another cwd sees no install');
     writeFileSync(join(t, 'go'), '');
-    assert.ok(waitFor(() => npmInstallsIn(t).length === 0, 30000), 'npm exits once the sentinel is there');
-    assert.equal(installRefusal({ worktree: t }), null, 'after npm exits, the run goes ahead');
+    assert.ok(waitFor(() => pnpmInstallsIn(t).length === 0, 30000), 'pnpm exits once the sentinel is there');
+    assert.equal(installRefusal({ worktree: t }), null, 'after pnpm exits, the run goes ahead');
   } finally {
-    if (!exited) killGroup(npm.pid);
+    if (!exited) killGroup(pnpm.pid);
     rmSync(t, { recursive: true, force: true }); rmSync(other, { recursive: true, force: true });
   }
 });
@@ -429,10 +456,12 @@ const forbidden = forbiddenPaths({ home, env: {}, worktree });
 // `pathNode` stands in for the node the container's PATH would pick (the
 // real one reads /usr/local/bin, /usr/bin and /bin on the host running the
 // test); null when PATH has none.
-const argsWith = (execPath: string, pathNode: string | null = null) => dockerArgs({
+// `pnpm` stands in for the pnpm the host's PATH finds (board #33); null here,
+// so the node rows see node alone.
+const argsWith = (execPath: string, pathNode: string | null = null, pnpm: string | null = null) => dockerArgs({
   worktree, gitDirs: { common: '/local/home/u/work/repo/.git', own: '/local/home/u/work/repo/.git/worktrees/a-1' },
-  uid: 1000, gid: 100, home, forbidden, command: ['npm', 'test'],
-  node: nodeRuntime({ execPath, pathNode: () => pathNode }),
+  uid: 1000, gid: 100, home, forbidden, command: ['pnpm', 'test'],
+  node: nodeRuntime({ execPath, pathNode: () => pathNode, pnpm: () => pnpm }),
 });
 
 test('the node PATH already picks adds nothing: no mount, the same PATH, the tripwire runs that node', () => {
@@ -469,33 +498,28 @@ test('the tripwire quotes the node path: a system install with a space runs', ()
   assert.equal(r.status, 0, r.stderr);
 });
 
-/** A node install on disk: `<prefix>/bin/node` and, unless `npm` is false,
- * npm's package at `<prefix>/lib/node_modules/npm`, inside a dir that also
- * holds a SECRET sibling, as ~/.local/share or ~/.ssh would (validator-2,
- * #9 round 1). */
-function install(parentName: string, { npm = true } = {}) {
+/** A node install on disk, `<prefix>/bin/node`, inside a dir that also holds
+ * a SECRET sibling, as ~/.local/share or ~/.ssh would (validator-2, #9 round
+ * 1). npm beside it is never mounted since board #33: pnpm is the one
+ * package manager. */
+function install(parentName: string) {
   const t = realpathSync(mkdtempSync(join(tmpdir(), 'tmm-node-')));
   const prefix = join(t, parentName, 'x');
   mkdirSync(join(prefix, 'bin'), { recursive: true });
   writeFileSync(join(prefix, 'bin', 'node'), '');
+  mkdirSync(join(prefix, 'lib', 'node_modules', 'npm', 'bin'), { recursive: true });
+  writeFileSync(join(prefix, 'lib', 'node_modules', 'npm', 'package.json'), '{"name":"npm"}');
   writeFileSync(join(t, parentName, 'SECRET'), 'never mounted');
-  if (npm) {
-    mkdirSync(join(prefix, 'lib', 'node_modules', 'npm', 'bin'), { recursive: true });
-    writeFileSync(join(prefix, 'lib', 'node_modules', 'npm', 'package.json'), '{"name":"npm"}');
-  }
   return { t, prefix, execPath: join(prefix, 'bin', 'node') };
 }
 
-test('a node elsewhere mounts ONLY its binary and npm\'s package, read-only, at /opt/node', () => {
+test('a node elsewhere mounts ONLY its binary, read-only, at /opt/node; npm beside it is not mounted (board #33)', () => {
   for (const parent of ['.local/share', '.ssh', '.aws', '.config/teammux', '.tmm/agents/a']) {
     const { t, prefix, execPath } = install(parent);
     const a = argsWith(execPath);
     const before = mountsOf(args());
     const added = mountsOf(a).filter((m) => !before.includes(m));
-    assert.deepEqual(added, [
-      `${prefix}/bin/node:/opt/node/bin/node:ro`,
-      `${prefix}/lib/node_modules/npm:/opt/node/lib/node_modules/npm:ro`,
-    ], `${parent}: the binary and npm only, never the prefix or its parent`);
+    assert.deepEqual(added, [`${prefix}/bin/node:/opt/node/bin/node:ro`], `${parent}: the binary only, never the prefix, its parent or npm`);
     assert.ok(!mountsOf(a).some((m) => [prefix, join(t, parent)].includes(m.split(':')[0])), `${parent}: the dir holding SECRET is not mounted`);
     assert.deepEqual(mountsOf(a).filter((m) => !m.endsWith(':ro')).sort(), mountsOf(args()).filter((m) => !m.endsWith(':ro')).sort(), 'nothing new is writable');
     assert.deepEqual(a.slice(0, 6), args().slice(0, 6), 'network and user unchanged');
@@ -503,21 +527,58 @@ test('a node elsewhere mounts ONLY its binary and npm\'s package, read-only, at 
     const s = a[a.indexOf('-c') + 1];
     assert.ok(s.includes("'/opt/node/bin/node' -e"), 'the tripwire runs the mounted node, quoted');
     assert.ok(s.includes("'/opt/node/bin/node' /tmp/node-bin/node"), 'node is linked');
-    assert.ok(s.includes("'/opt/node/lib/node_modules/npm/bin/npm-cli.js' /tmp/node-bin/npm"), 'npm is linked to its own cli');
-    assert.ok(s.includes("'/opt/node/lib/node_modules/npm/bin/npx-cli.js' /tmp/node-bin/npx"), 'npx is linked to its own cli');
+    assert.ok(!s.includes('/tmp/node-bin/npm') && !s.includes('/tmp/node-bin/npx'), 'npm and npx are not linked');
     assert.ok(s.indexOf('/tmp/node-bin') < s.indexOf('self-check passed'), 'the links are made in the setup, before the probes');
     assert.ok(s.indexOf('/tmp/node-bin') > s.indexOf('a host path is visible'), 'and after the host-path refusals');
     rmSync(t, { recursive: true, force: true });
   }
 });
 
-test('a node without npm beside it mounts the binary alone and links only node', () => {
-  const { t, prefix, execPath } = install('.local/share', { npm: false });
-  const a = argsWith(execPath);
-  assert.deepEqual(mountsOf(a).filter((m) => !mountsOf(args()).includes(m)), [`${prefix}/bin/node:/opt/node/bin/node:ro`]);
-  const s = a[a.indexOf('-c') + 1];
-  assert.ok(!s.includes('/tmp/node-bin/npm') && !s.includes('/tmp/node-bin/npx'));
+// Board #33: pnpm is the package manager. On this host it is ONE native
+// binary, ~/.local/share/pnpm-app/pnpm, with `dist/` beside it (measured,
+// pnpm 12.16.1). Like node's binary (#9), exactly those two are mounted
+// read-only, never the directory holding them.
+function pnpmInstall(parentName: string, { dist = true } = {}) {
+  const t = realpathSync(mkdtempSync(join(tmpdir(), 'tmm-pnpm-')));
+  const app = join(t, parentName, 'pnpm-app');
+  mkdirSync(app, { recursive: true });
+  writeFileSync(join(app, 'pnpm'), '');
+  if (dist) mkdirSync(join(app, 'dist'));
+  writeFileSync(join(t, parentName, 'SECRET'), 'never mounted');
+  return { t, app, bin: join(app, 'pnpm') };
+}
+
+test('a pnpm elsewhere mounts ONLY its binary and its dist, read-only, at /opt/pnpm, and is linked on PATH (board #33)', () => {
+  for (const parent of ['.local/share', '.ssh', '.config/teammux']) {
+    const { t, app, bin } = pnpmInstall(parent);
+    const a = argsWith('/usr/bin/node', '/usr/bin/node', bin);
+    const added = mountsOf(a).filter((m) => !mountsOf(args()).includes(m));
+    assert.deepEqual(added, [`${app}/pnpm:/opt/pnpm/pnpm:ro`, `${app}/dist:/opt/pnpm/dist:ro`], `${parent}: the binary and dist only`);
+    assert.ok(!mountsOf(a).some((m) => [app, join(t, parent)].includes(m.split(':')[0])), `${parent}: the dir holding SECRET is not mounted`);
+    assert.equal(envOf(a).PATH, '/tmp/node-bin:/tmp/cargo-home/bin:/usr/local/bin:/usr/bin:/bin', 'linked first on PATH, even when node needs no link');
+    const s = a[a.indexOf('-c') + 1];
+    assert.ok(s.includes("'/opt/pnpm/pnpm' /tmp/node-bin/pnpm"), 'pnpm is linked to the mounted binary');
+    assert.ok(!s.includes('/tmp/node-bin/node'), 'node, already on PATH, gets no link');
+    assert.ok(s.includes("'/usr/bin/node' -e"), 'the tripwire still runs node');
+    rmSync(t, { recursive: true, force: true });
+  }
+  const { t, app, bin } = pnpmInstall('.local/share', { dist: false });
+  assert.deepEqual(mountsOf(argsWith('/usr/bin/node', '/usr/bin/node', bin)).filter((m) => !mountsOf(args()).includes(m)), [`${app}/pnpm:/opt/pnpm/pnpm:ro`], 'no dist: the binary alone');
   rmSync(t, { recursive: true, force: true });
+});
+
+test('a pnpm under a system dir is linked at its own path with nothing mounted; no pnpm links nothing', () => {
+  const a = argsWith('/usr/bin/node', '/usr/bin/node', '/usr/lib/pnpm/pnpm');
+  assert.deepEqual(mountsOf(a), mountsOf(args()));
+  assert.ok(a[a.indexOf('-c') + 1].includes("'/usr/lib/pnpm/pnpm' /tmp/node-bin/pnpm"));
+  assert.deepEqual(argsWith('/usr/bin/node', '/usr/bin/node', null), args(), 'with no pnpm on the host, the default argv');
+});
+
+test('a pnpm that cannot be mounted refuses, naming the path', () => {
+  for (const [bin, why] of [['/local/home/u/odd:dir/pnpm', /`:` or `,`/], ['/local/home/u/no-such-pnpm', /not a regular file/]] as const) {
+    assert.throws(() => nodeRuntime({ execPath: '/usr/bin/node', pathNode: () => '/usr/bin/node', pnpm: () => bin }),
+      (e: unknown) => e instanceof Refusal && why.test(e.message) && e.message.includes(bin));
+  }
 });
 
 test('a node that cannot be mounted refuses, naming the path and the fix', () => {
@@ -535,5 +596,6 @@ test('the runner resolves node from the running process, and refuses before any 
   const body = src.slice(src.indexOf('export function main('));
   assert.ok(body.indexOf('installRefusal(') < body.indexOf('nodeRuntime(') && body.indexOf('nodeRuntime(') < body.indexOf('ensureImage()'));
   assert.match(src, /nodeRuntime\(\{ execPath: realpathSync\(process\.execPath\) \}\)/);
+  assert.match(src, /pnpm = pnpmOnHost/, 'pnpm comes from the host PATH unless a test names one');
   assert.ok(!/^\s*['`]\/usr\/bin\/node -e/m.test(src), 'no hardcoded tripwire node');
 });

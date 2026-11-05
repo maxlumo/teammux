@@ -14,7 +14,7 @@ const walk = async (dir: URL): Promise<URL[]> => (await Promise.all((await readd
 test('there is no native scanner plugin anywhere: not in the packages, the crate, the registration or a capability', async () => {
   const pkg = await read('package.json');
   assert.doesNotMatch(pkg, /barcode/u);
-  assert.doesNotMatch(await read('package-lock.json'), /barcode-scanner/u);
+  assert.doesNotMatch(await read('pnpm-lock.yaml'), /barcode-scanner/u);
   assert.doesNotMatch(await read('src-tauri/Cargo.toml'), /barcode/u);
   assert.doesNotMatch(await read('src-tauri/Cargo.lock'), /barcode/u);
   assert.doesNotMatch(await read('src-tauri/src/lib.rs'), /barcode/u);

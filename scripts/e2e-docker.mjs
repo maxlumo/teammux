@@ -1,5 +1,5 @@
 #!/usr/bin/env node
-// `npm run test:e2e:docker` — the Docker-isolated multi-gateway environment
+// `pnpm run test:e2e:docker` — the Docker-isolated multi-gateway environment
 // (board #352) and its smoke.
 //
 // Why containers: #335 ③ (several servers in one app) was verified against ONE

@@ -3,7 +3,7 @@
 //
 // Vite 6's `createServer` in middleware mode opens its OWN http server for
 // the HMR websocket on the fixed default port 24678 — even with
-// `server.hmr: false`, which only stops the update messages. Two `npm test`
+// `server.hmr: false`, which only stops the update messages. Two `pnpm test`
 // runs on one machine (the launch checkout and a worktree, lead 2026-09-12)
 // fought over that port and one of them stalled: every render/mount case
 // timed out at 60 s behind "WebSocket server error: Port 24678 is already in

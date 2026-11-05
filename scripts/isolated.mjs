@@ -34,6 +34,7 @@ import { spawnSync } from 'node:child_process';
 import { existsSync, readdirSync, readFileSync, readlinkSync, realpathSync, statSync } from 'node:fs';
 import { homedir } from 'node:os';
 import { basename, dirname, join, resolve } from 'node:path';
+import { projectDocument } from './pnpm-lock.mjs';
 
 export const IMAGE = 'tmm-hostfs:empty';
 
@@ -87,7 +88,7 @@ export function selfCheck(forbidden, chain = [], node = SYSTEM_NODE) {
     // wizard, which swallows the first typed command (measured, 2026-11-02:
     // a_session_is_adopted_at_the_directory_it_was_made_in timed out on it).
     ': > "$HOME/.zshrc" || fail "the private .zshrc could not be written"',
-    // A node outside the system mounts (board #9): only node, npm and npx
+    // A node outside the system mounts (board #9): only node (and pnpm, #33)
     // of its read-only prefix go on PATH, never the prefix's other globals.
     ...(node.links ? [`mkdir -p ${NODE_BIN} || fail "the node links could not be made"`,
       ...node.links.map(([b, at]) => `ln -sfn ${sq(at)} ${NODE_BIN}/${b} || fail ${sq(`the node link ${b} could not be made`)}`)] : []),
@@ -202,6 +203,7 @@ const SYSTEM_NODE = { bin: '/usr/bin/node', mounts: [], links: null };
  * its real one, because a real path under HOME (~/.local) is exactly what
  * the self-check refuses to see (validator, #8, 2026-11-05). */
 const NODE_AT = '/opt/node';
+const PNPM_AT = '/opt/pnpm';
 const NODE_BIN = '/tmp/node-bin';
 
 /** The dirs of the container PATH a system node can sit in, in PATH order
@@ -217,8 +219,16 @@ function pathNodeOnHost() {
   return null;
 }
 
+/** The pnpm the host's PATH finds, by its real path, or null (board #33). */
+function pnpmOnHost() {
+  for (const d of (process.env.PATH ?? '').split(':').filter(Boolean)) {
+    try { const p = realpathSync(join(d, 'pnpm')); if (statSync(p).isFile()) return p; } catch { /* not in this dir */ }
+  }
+  return null;
+}
+
 /** The node the container runs (board #9), from `execPath`, the RUNNING
- * node's real path; every node the command starts (`npm`, `env node`) and
+ * node's real path; every node the command starts (`pnpm`, `env node`) and
  * the tripwire are that node.
  * - Under a system dir it is visible at its own path. When it is also the
  *   node the container's PATH picks (`pathNode`), nothing is added. When it
@@ -226,38 +236,47 @@ function pathNodeOnHost() {
  *   off PATH, or PATH finds another node first), it is linked first on PATH.
  * - Elsewhere an ALLOWLIST is mounted read-only under /opt/node, never the
  *   install prefix (validator-2, round 1): the binary itself.
- * - Either way npm's own package `<prefix>/lib/node_modules/npm`, when one
- *   sits beside it and its package.json names npm, is what `npm`/`npx` run
- *   whenever node is linked: at its own path when visible, else mounted.
- * A path docker's `-v` cannot carry (`:` or `,`) or a node that is not a
+ * - pnpm (board #33, the one package manager; npm and npx are no longer
+ *   linked): the pnpm the host's PATH finds, by its real path. Under a system
+ *   dir it is linked at its own path; elsewhere exactly its binary and the
+ *   `dist/` beside it are mounted read-only under /opt/pnpm (measured, pnpm
+ *   12.16.1 here: ~/.local/share/pnpm-app/{pnpm,dist}), never the directory
+ *   holding them, and linked first on PATH. With no pnpm on the host, nothing.
+ * A path docker's `-v` cannot carry (`:` or `,`) or a file that is not a
  * regular file refuses before any mount, naming the path and the fix. */
-export function nodeRuntime({ execPath, pathNode = pathNodeOnHost }) {
+export function nodeRuntime({ execPath, pathNode = pathNodeOnHost, pnpm = pnpmOnHost }) {
   const holds = (outer, inner) => inner === outer || inner.startsWith(`${outer}/`);
   const visible = (p) => SYSTEM_DIRS.some((d) => holds(d, p));
-  const fix = 'install node under /usr (for example /usr/bin/node), or at a path without `:` or `,`, then run the runner with that node';
-  const refuse = (why) => { throw new Refusal(`node ${execPath} cannot be mounted: ${why}; ${fix}`); };
-  if (visible(execPath) && pathNode() === execPath) return { bin: execPath, mounts: [], links: null };
+  const mountable = (p, fix) => {
+    const refuse = (why) => { throw new Refusal(`${p} cannot be mounted: ${why}; ${fix}`); };
+    if (/[:,]/u.test(p)) refuse('its path holds `:` or `,`, which a docker volume cannot carry');
+    let st;
+    try { st = statSync(p); } catch { st = null; }
+    if (!st?.isFile()) refuse('it is not a regular file');
+  };
   const mounts = [];
+  const links = [];
   let bin = execPath;
   if (!visible(execPath)) {
-    if (/[:,]/u.test(execPath)) refuse('its path holds `:` or `,`, which a docker volume cannot carry');
-    let st;
-    try { st = statSync(execPath); } catch { st = null; }
-    if (!st?.isFile()) refuse('it is not a regular file');
+    mountable(execPath, 'install node under /usr (for example /usr/bin/node), or at a path without `:` or `,`, then run the runner with that node');
     bin = `${NODE_AT}/bin/node`;
     mounts.push([execPath, bin]);
   }
-  const links = [['node', bin]];
-  let npm = null;
-  try { npm = realpathSync(join(dirname(dirname(execPath)), 'lib', 'node_modules', 'npm')); } catch { /* no npm beside this node */ }
-  let named = false;
-  try { named = !!npm && JSON.parse(readFileSync(join(npm, 'package.json'), 'utf8')).name === 'npm'; } catch { /* not npm */ }
-  if (named && (visible(npm) || !/[:,]/u.test(npm))) {
-    const at = visible(npm) ? npm : `${NODE_AT}/lib/node_modules/npm`;
-    if (!visible(npm)) mounts.push([npm, at]);
-    links.push(['npm', `${at}/bin/npm-cli.js`], ['npx', `${at}/bin/npx-cli.js`]);
+  if (!(visible(execPath) && pathNode() === execPath)) links.push(['node', bin]);
+  const pm = pnpm();
+  if (pm) {
+    if (visible(pm)) links.push(['pnpm', pm]);
+    else {
+      mountable(pm, 'install pnpm under /usr, or at a path without `:` or `,`');
+      mounts.push([pm, `${PNPM_AT}/pnpm`]);
+      const dist = join(dirname(pm), 'dist');
+      let isDir = false;
+      try { isDir = statSync(dist).isDirectory(); } catch { /* no dist beside it */ }
+      if (isDir && !/[:,]/u.test(dist)) mounts.push([dist, `${PNPM_AT}/dist`]);
+      links.push(['pnpm', `${PNPM_AT}/pnpm`]);
+    }
   }
-  return { bin, mounts, links };
+  return { bin, mounts, links: links.length ? links : null };
 }
 
 const GIT_OVERRIDES = ['GIT_DIR', 'GIT_WORK_TREE', 'GIT_COMMON_DIR', 'GIT_INDEX_FILE'];
@@ -317,19 +336,17 @@ function ensureImage() {
   if (r.status !== 0) throw new Error(`could not create ${IMAGE}`);
 }
 
-/** The npm install processes running in `worktree` right now: an `npm` or
- * `npm-cli.js` process whose argv names `ci`, `install`, `i` or `add` and
- * whose cwd is the worktree. Two argv shapes, both measured with npm 10.9.9
- * (2026-11-04): at startup `node …/npm-cli.js ci` (or `npm ci`), one element
- * per word; once loaded, npm sets `process.title` to its positional args
- * (`lib/npm.js`: `['npm', ...remain].join(' ')`), so /proc shows ONE element,
- * `npm ci`. npm keeps that title while it runs the root scripts AFTER it has
- * written `node_modules/.package-lock.json`, which is why this scan is needed
- * beside the marker. Only a single element that starts with the word `npm`
- * is split, so a shell string like `sh -c "npm ci"` (three elements) is not
- * matched. Read from /proc; a process that ends meanwhile, or one this user
- * cannot read, is skipped; the raw cmdline is never printed. */
-export function npmInstallsIn(worktree, proc = '/proc') {
+/** The pnpm install processes running in `worktree` right now (board #514;
+ * pnpm since #33): a process whose cwd is the worktree and whose argv has a
+ * `pnpm` word (bare or a path ending in `/pnpm`) followed by `install`, `i`
+ * or `add`. pnpm 12.16.1 is a native binary; its argv is plain words,
+ * measured: `pnpm install --frozen-lockfile`. It writes
+ * `node_modules/.modules.yaml` BEFORE it runs the root scripts, which is why
+ * this scan is needed beside the marker. A shell string like
+ * `sh -c "pnpm install"` is one element and is not matched. Read from /proc;
+ * a process that ends meanwhile, or one this user cannot read, is skipped;
+ * the raw cmdline is never printed. */
+export function pnpmInstallsIn(worktree, proc = '/proc') {
   const found = [];
   let pids = [];
   try { pids = readdirSync(proc).filter((n) => /^\d+$/.test(n)); } catch { return found; }
@@ -340,44 +357,55 @@ export function npmInstallsIn(worktree, proc = '/proc') {
       argv = readFileSync(join(proc, pid, 'cmdline'), 'latin1').split('\0').filter(Boolean);
     } catch { continue; }
     if (cwd !== worktree) continue;
-    const words = argv.length === 1 && /^npm /.test(argv[0]) ? argv[0].split(' ').filter(Boolean) : argv;
-    const npm = words.findIndex((a) => /(^|\/)npm(-cli\.js)?$/.test(a));
-    if (npm !== -1 && words.slice(npm + 1).some((a) => ['ci', 'install', 'i', 'add'].includes(a))) found.push(Number(pid));
+    const at = argv.findIndex((a) => /(^|\/)pnpm$/.test(a));
+    if (at !== -1 && ['install', 'i', 'add'].includes(argv[at + 1])) found.push(Number(pid));
   }
   return found;
 }
 
-/** Why the worktree's npm install is not complete, or null (board #514).
- * A start-time preflight, NOT mutual exclusion for the whole run: an install
- * that starts after the scan, or one this user cannot read in /proc, is not
- * seen, so `npm ci` still runs alone and the test run starts after it exits.
- * Refused: an `npm ci`/`install` still running in the worktree (npm writes
- * `node_modules/.package-lock.json` after every package, then still runs the
- * root scripts, and `npm ci` first removes node_modules, so a marker can exist
- * while an install is running); a marker that is missing or not a regular
- * file; a marker older than `package-lock.json` (a conservative staleness
- * test, not proof the contents match); and a `package-lock.json` that cannot
- * be stat'ed for any reason but absence. The marker is not proof npm exited
- * successfully. A worktree with no package.json has nothing to install. One
- * rule for every command: this is a workspace policy with a named fix, not a
- * guess at which command needs node_modules (`test:rust` does not). A test
- * run on a half-written node_modules gave a partial red run (validator,
- * #511: 2978 tests, 20 fails, "Cannot find package …/jsdom"). */
-export function installRefusal({ worktree, installs = npmInstallsIn }) {
+/** Why the worktree's install is not complete, or null (board #514; pnpm
+ * since #33). A start-time preflight, NOT mutual exclusion for the whole run:
+ * an install that starts after the scan, or one this user cannot read in
+ * /proc, is not seen, so `pnpm install --frozen-lockfile` still runs alone
+ * and the test run starts after it exits. Refused: a pnpm install still
+ * running in the worktree (pnpm writes `node_modules/.modules.yaml`, then
+ * still runs the root scripts); a marker that is missing or not a regular
+ * file; a marker older than `pnpm-lock.yaml` whose project document is not
+ * what pnpm recorded as installed (a conservative staleness test,
+ * not proof the contents match); and a `pnpm-lock.yaml` that cannot be
+ * stat'ed for any reason but absence. A worktree with no package.json has
+ * nothing to install. One rule for every command: this is a workspace policy
+ * with a named fix, not a guess at which command needs node_modules
+ * (`test:rust` does not). A test run on a half-written node_modules gave a
+ * partial red run (validator, #511: 2978 tests, 20 fails, "Cannot find
+ * package …/jsdom"). */
+/** A lock rewritten with the content pnpm already installed (`pnpm install
+ * --lockfile-only`) is newer than the marker, and `pnpm install
+ * --frozen-lockfile` then skips the work and leaves the marker as it was:
+ * pnpm's own record of the install, node_modules/.pnpm/lock.yaml, equal to
+ * the lock's project document, says the tree is the lock's (#33). */
+function installedIsLocked(worktree) {
+  try {
+    return readFileSync(join(worktree, 'node_modules', '.pnpm', 'lock.yaml'), 'utf8')
+      === projectDocument(readFileSync(join(worktree, 'pnpm-lock.yaml'), 'utf8'));
+  } catch { return false; }
+}
+
+export function installRefusal({ worktree, installs = pnpmInstallsIn }) {
   if (!existsSync(join(worktree, 'package.json'))) return null;
-  const fix = `run \`npm ci\` alone in ${worktree}, wait for it to exit, then retry`;
+  const fix = `run \`pnpm install --frozen-lockfile\` alone in ${worktree}, wait for it to exit, then retry`;
   const running = installs(worktree);
-  if (running.length) return `an npm install is still running in ${worktree} (pid ${running.join(', ')}); wait for it to exit, then retry`;
-  const marker = join(worktree, 'node_modules', '.package-lock.json');
+  if (running.length) return `a pnpm install is still running in ${worktree} (pid ${running.join(', ')}); wait for it to exit, then retry`;
+  const marker = join(worktree, 'node_modules', '.modules.yaml');
   let m;
-  try { m = statSync(marker); } catch { return `node_modules is missing or its install did not finish (no node_modules/.package-lock.json); ${fix}`; }
-  if (!m.isFile()) return `node_modules/.package-lock.json is not a regular file; ${fix}`;
+  try { m = statSync(marker); } catch { return `node_modules is missing or its install did not finish (no node_modules/.modules.yaml); ${fix}`; }
+  if (!m.isFile()) return `node_modules/.modules.yaml is not a regular file; ${fix}`;
   let lock;
-  try { lock = statSync(join(worktree, 'package-lock.json')); } catch (e) {
+  try { lock = statSync(join(worktree, 'pnpm-lock.yaml')); } catch (e) {
     if (e?.code === 'ENOENT') return null;
-    return `package-lock.json cannot be read (${e?.code ?? 'error'}), so the install cannot be judged; fix it, then retry`;
+    return `pnpm-lock.yaml cannot be read (${e?.code ?? 'error'}), so the install cannot be judged; fix it, then retry`;
   }
-  if (m.mtimeMs < lock.mtimeMs) return `node_modules is older than package-lock.json (its .package-lock.json predates the lock); ${fix}`;
+  if (m.mtimeMs < lock.mtimeMs && !installedIsLocked(worktree)) return `node_modules is older than pnpm-lock.yaml (its .modules.yaml predates the lock); ${fix}`;
   return null;
 }
 

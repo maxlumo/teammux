@@ -11,7 +11,7 @@ const STOP_TIMEOUT_MS = 5000;
 /** Set to `1` to run the Rust watcher beside Vite (the pure-browser loop on
  * a machine with no gateway). Off by default since board #343: the backend
  * is the tmm-managed gateway (`tmm gateway`), rebuilt and restarted by
- * `npm run gateway:update`, so the dev stack is Vite alone. */
+ * `pnpm run gateway:update`, so the dev stack is Vite alone. */
 export const DEV_WITH_SERVER_ENV = 'TEAMMUX_DEV_WITH_SERVER';
 export const DEV_WITH_SERVER_ENV_LEGACY = 'TMUX_MOBILE_DEV_WITH_SERVER';
 
@@ -109,7 +109,7 @@ export async function runDevStack({
 
   console.log(withServer
     ? '[dev] starting web (Vite HMR) + server (Rust rebuild/restart watcher)'
-    : '[dev] starting web (Vite HMR); the backend is the tmm gateway (npm run gateway:update)');
+    : '[dev] starting web (Vite HMR); the backend is the tmm gateway (pnpm run gateway:update)');
 
   const children = [];
   let resolveSignal;

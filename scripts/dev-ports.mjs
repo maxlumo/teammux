@@ -29,7 +29,7 @@ export function devServerTargets(env = process.env, read = readEnv) {
 // SSH tunnel, which dials 127.0.0.1, and a 0.0.0.0 listener was reachable from
 // the whole security group — it served `.tmm/agents/*/launch.json` (agents'
 // environments) and `temp/` in the clear, measured. A person who wants the dev
-// server on the LAN says so: `TEAMMUX_DEV_HOST=0.0.0.0 npm run dev:all`
+// server on the LAN says so: `TEAMMUX_DEV_HOST=0.0.0.0 pnpm run dev:all`
 // (`TAURI_DEV_HOST` is Tauri's own name for mobile dev and is honoured too).
 export const DEV_HOST_ENV = 'TEAMMUX_DEV_HOST';
 export const DEV_HOST_ENV_LEGACY = 'TMUX_MOBILE_DEV_HOST';

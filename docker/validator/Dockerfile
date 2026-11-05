@@ -7,10 +7,13 @@
 # --- 1. the web UI (embedded into the gateway binary) -----------------------
 FROM node:22-trixie-slim AS ui
 WORKDIR /src
-COPY package.json package-lock.json ./
-# --ignore-scripts: no dependency's install hook is needed for `vite build`
-# (esbuild's platform binary arrives as an optional dependency).
-RUN --mount=type=cache,target=/root/.npm npm ci --ignore-scripts
+COPY package.json pnpm-lock.yaml pnpm-workspace.yaml ./
+# pnpm, the version package.json's packageManager names, through the image's
+# corepack (board #33). --ignore-scripts: no dependency's install hook is
+# needed for `vite build` (esbuild's platform binary arrives as an optional
+# dependency).
+RUN corepack enable
+RUN --mount=type=cache,target=/root/.local/share/pnpm/store pnpm install --frozen-lockfile --ignore-scripts
 COPY index.html vite.config.js svelte.config.js tsconfig.json ./
 # vite.config.js imports the dev-port table from scripts/.
 COPY scripts/dev-ports.mjs scripts/env-names.mjs scripts/hover-guard.mjs ./scripts/
@@ -22,7 +25,7 @@ COPY src ./src
 ARG SOURCE_COMMIT=
 ARG SOURCE_TIME=
 ENV SOURCE_COMMIT=$SOURCE_COMMIT SOURCE_TIME=$SOURCE_TIME
-RUN npx vite build
+RUN pnpm exec vite build
 
 # --- 2. tmm + server, release, no webview, UI embedded -----------------------
 # `rust:1` floats to the current stable; the crate pins no toolchain, so this

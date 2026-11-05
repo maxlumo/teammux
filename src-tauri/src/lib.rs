@@ -48,7 +48,7 @@ use config::Config;
 
 // Everything from here to the end of `run()` is the Tauri shell: the IPC
 // commands the webview calls and the app entry point. Gated on the `gui`
-// feature so a headless build (`npm run build:server`) drops the webview
+// feature so a headless build (`pnpm run build:server`) drops the webview
 // dependency chain entirely — see src-tauri/Cargo.toml.
 #[cfg(feature = "gui")]
 #[derive(serde::Serialize)]

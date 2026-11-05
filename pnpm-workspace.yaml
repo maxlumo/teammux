@@ -1,0 +1,5 @@
+allowBuilds:
+  esbuild: true
+  fsevents: true
+# A run with stale node_modules fails instead of running old code (board #33).
+verifyDepsBeforeRun: error

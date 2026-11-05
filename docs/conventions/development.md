@@ -10,11 +10,11 @@ Everything about RUNNING and BUILDING the project. Testing conventions are in `t
   `webkit2gtk-4.1`), or skip it with the headless build below.
 
 ```bash
-npm install
-npm run build:server            # the server and tmm, web UI embedded
+pnpm install
+pnpm run build:server           # the server and tmm, web UI embedded
 ln -s "$PWD/src-tauri/target/release/tmm" ~/.local/bin/tmm   # or call it by path
 tmm gateway                     # the backend, as a per-user background service
-npm run dev:all                 # Vite on :5173
+pnpm run dev:all                # Vite on :5173
 ```
 
 The build puts `tmm` in `src-tauri/target/release`; nothing installs it on your
@@ -27,7 +27,7 @@ with `ws://localhost:5173/ws`, because Vite proxies `/ws` and `/dl` to the
 loopback-only Rust server. Only port 5173 needs to be reachable — and Vite
 listens on the LOOPBACK only (board #393, see [The dev server](#the-dev-server-what-it-watches-and-a-lost-hmr-socket-393)):
 to open it from another device on your network, start it with
-`TEAMMUX_DEV_HOST=0.0.0.0 npm run dev:all` and open
+`TEAMMUX_DEV_HOST=0.0.0.0 pnpm run dev:all` and open
 `http://<your-machine-ip>:5173`, which then pre-fills `ws://<your-machine-ip>:5173/ws`.
 
 **Environment variable names (board #472, phase B2).** The `TMUX_MOBILE_*` variables of these scripts are now `TEAMMUX_*` (`DEV_HOST`, `DEV_SERVER_PORT`, `DEV_WITH_SERVER`, `GATEWAY_TMM`). The old names are still read: alone they work and each prints one line, once per process, naming the variable (never its value); with both set and different the new one wins and the line says so; a provided new value that is invalid or empty is the new value's problem, never a silent return to the old one. `scripts/env-names.mjs` is the one rule; `TMM_*` are not renamed.
@@ -48,12 +48,61 @@ since the jsdom 30 client-mount tier (board #115, 2026-09-09).
 Verified here with Node 22.23.2. This is a development-tool prerequisite,
 not a change to the browser runtime.
 
-`package-lock.json` is canonical; install with `npm ci`. This host aliases
-`npm` to `pnpm` in its login shell, so use `bash -c 'npm ci'` (and real npm
-for dependency changes) to honor and regenerate the tracked lock.
-`pnpm-lock.yaml` is intentionally gitignored to avoid a second package
-manager's dependency graph. Do not upgrade unrelated locked packages when
-adding a test dependency.
+**pnpm is the one package manager** (owner, 2026-11-05: "都统一用pnpm吧";
+board #33). `pnpm-lock.yaml` is canonical and tracked; `package.json` names
+the version (`packageManager: pnpm@12.16.1`). Install with
+`pnpm install --frozen-lockfile`, which refuses rather than re-resolve when the
+lock and `package.json` disagree. Change a dependency with `pnpm add`/`pnpm
+remove`, which rewrites the lock, and commit both. Do not upgrade unrelated
+locked packages when adding a test dependency. `package-lock.json` is gone and
+gitignored, so a stray `pnpm install` cannot leave a second, unread source of
+versions.
+
+The lock has two YAML documents (pnpm 12 with `packageManager` set): the
+first pins pnpm itself (`packageManagerDependencies`, every platform's
+`@pnpm/exe.*`), the second is the project. Readers of the lock use the project
+document (`scripts/pnpm-lock.mjs`). A lock without the first document is
+refused by `pnpm install --frozen-lockfile` ("Cannot update
+packageManagerDependencies with frozen-lockfile"), so commit the lock pnpm
+wrote, both documents.
+
+**The supervised units after the switch (board #33, checked 2026-11-05).**
+Both start with no tty and no prompt:
+- the gateway unit runs `<repo>/src-tauri/target/release/tmm gateway start
+  --service` directly and calls no package manager. Only `pnpm run
+  gateway:update`, which a person or agent runs, builds through pnpm.
+- the dev unit, `tmux-mobile-dev.service`, should run `pnpm run dev:all`
+  instead of `npm run dev:all`. Measured from a worktree with `setsid pnpm run
+  dev:all </dev/null`: Vite listened on 127.0.0.1:5173 and answered 200. The
+  unit was not installed on this host at the time (`systemctl --user status`:
+  not found), so its line is the owner's to change. Its `PATH` must reach
+  `pnpm` (`~/.local/share/pnpm` here), and the launch checkout needs one
+  `pnpm install --frozen-lockfile` before it starts.
+
+`pnpm-workspace.yaml` holds the two settings that make that deterministic:
+- `allowBuilds`: the dependencies whose install scripts run. They are
+  exactly the lock's two: `esbuild` and `fsevents`, which is optional and
+  macOS-only. Without the entry `pnpm install` stops with
+  `ERR_PNPM_IGNORED_BUILDS` (measured, pnpm 12.16.1).
+- `verifyDepsBeforeRun: error`: a `pnpm run` whose `node_modules` does not
+  match the lock stops and says so. pnpm's default re-installs first.
+
+**The incident behind both.** 2026-11-05, before the switch, the owner's shell
+aliased `npm` to `pnpm`. pnpm ignored `package-lock.json` and resolved newer
+versions within the ranges (`@tauri-apps/api` 2.12.4, vite 6.4.5), and it
+re-installed before every `run`, overwriting a real-npm install. An
+untracked, gitignored `pnpm-lock.yaml` in the launch checkout kept those
+versions alive. `tauri android build` then refused: "Found version
+mismatched Tauri packages" (the crate is tauri 2.10.2).
+
+**The conversion.** `pnpm import` from `package-lock.json` deduped
+`@tauri-apps/api` to 2.11.1. The lock had pinned the root copy at 2.10.1 and
+the plugins' nested copies at 2.11.1. `package.json` therefore pins
+`@tauri-apps/api` EXACTLY at 2.10.1, the constraint the crate imposes. After
+that, all 302 resolved packages and their integrity hashes equal
+package-lock's. `scripts/tauri-versions.test.ts` pins every `@tauri-apps/*`
+to its crate's major.minor in `src-tauri/Cargo.lock`, so a bump on either
+side fails in `pnpm test`, not at the APK build.
 
 When changing dependencies in a worktree, use that worktree's own
 `node_modules`, not a symlink into the live checkout: installation must not
@@ -70,34 +119,32 @@ that is in the branch but not installed there breaks both at once: the dev
 app gets a 500 on the import and does not load, and `gateway:update`
 refuses to build and leaves the gateway on the previous version. A green
 gate in a worktree proves nothing about it, because the worktree ran its
-own `npm ci`. Incident (10-16): #403 added `qr` 0.7.2, passed review and
+own install. Incident (10-16): #403 added `qr` 0.7.2, passed review and
 validation, was merged as 9845e69f, broke :5173 at once, and was reverted
 as 39dd125e until the owner approves the install; #392's `css-tree` was
 caught before its merge by a read-only check of the live checkout. The
-owner's checkout is installed with pnpm, a different layout from the
-`package-lock.json` that `npm ci` installs (#396, #392), so the review of a
-dependency change names the exact install step for that checkout (add
-these packages, or a full `bash -c 'npm ci'`, which empties `node_modules`
-and needs the dev server restarted), and the owner runs it or approves it
-before the merge.
+review of a dependency change names the exact install step for that
+checkout (`pnpm install --frozen-lockfile` after the merge, which rewrites
+`node_modules` and needs the dev server restarted), and the owner runs it or
+approves it before the merge.
 
 ## Commands
 
 ```bash
-npm run dev:all          # one :5173 (loopback unless TEAMMUX_DEV_HOST says otherwise); proxies /ws + /dl to the gateway
-npm run dev              # Vite dev server only (web UI on 127.0.0.1:5173; TEAMMUX_DEV_HOST=0.0.0.0 for the LAN)
-npm run gateway:update   # rebuild; restart the gateway if it is not running these bytes
-npm run dev:server:watch # standalone WS server; rebuild/restart on Rust changes
-npm run tauri:dev        # Desktop app + WS server (dev mode)
-npm run tauri:dev:release # Release-mode desktop app + WS server
-npm run build:mac        # macOS .app + .dmg
-npm run build:android    # Android APK (aarch64)
-npm test                 # Frontend + dev-script tests (node --test; see docs/conventions/testing.md)
-npm run check            # svelte-check: type-checks .ts/.svelte.ts/.svelte files
-npm run check:android    # cargo check of the Rust lib for the phone (aarch64-linux-android); every src-tauri change
-npm run build:server     # web UI (vite build) + server + tmm with it embedded (embed-ui), no webview needed (release)
-npm run dev:server       # standalone WS server (pair with `npm run dev`)
-npm run test:rust        # Rust tests, sequential (needs tmux running)
+pnpm run dev:all         # one :5173 (loopback unless TEAMMUX_DEV_HOST says otherwise); proxies /ws + /dl to the gateway
+pnpm run dev             # Vite dev server only (web UI on 127.0.0.1:5173; TEAMMUX_DEV_HOST=0.0.0.0 for the LAN)
+pnpm run gateway:update  # rebuild; restart the gateway if it is not running these bytes
+pnpm run dev:server:watch # standalone WS server; rebuild/restart on Rust changes
+pnpm run tauri:dev       # Desktop app + WS server (dev mode)
+pnpm run tauri:dev:release # Release-mode desktop app + WS server
+pnpm run build:mac       # macOS .app + .dmg
+pnpm run build:android   # Android APK (aarch64)
+pnpm test                # Frontend + dev-script tests (node --test; see docs/conventions/testing.md)
+pnpm run check           # svelte-check: type-checks .ts/.svelte.ts/.svelte files
+pnpm run check:android   # cargo check of the Rust lib for the phone (aarch64-linux-android); every src-tauri change
+pnpm run build:server    # web UI (vite build) + server + tmm with it embedded (embed-ui), no webview needed (release)
+pnpm run dev:server     # standalone WS server (pair with `pnpm run dev`)
+pnpm run test:rust       # Rust tests, sequential (needs tmux running)
 ```
 
 Run Tauri through these project scripts. Do not use `pnpx tauri`: `pnpx` is
@@ -107,17 +154,17 @@ positional `release` argument.
 
 On a memory-constrained machine, lower Cargo concurrency per invocation without
 changing the project default:
-`CARGO_BUILD_JOBS=2 npm run tauri:dev:release`.
+`CARGO_BUILD_JOBS=2 pnpm run tauri:dev:release`.
 
 ### Headless build (server + CLI, no webview)
 
 ```bash
-npm run build:server     # vite build, then server + tmm (embed-ui), release
-npm run dev:all          # Vite alone (the recommended browser dev loop)
-npm run gateway:update   # rebuild; restart the gateway if it is not running these bytes
-npm run dev:server:watch # watched server only; pair with `npm run dev`
-npm run dev:server       # one-shot server only; pair with `npm run dev`
-npm run test:rust        # the Rust tests
+pnpm run build:server    # vite build, then server + tmm (embed-ui), release
+pnpm run dev:all         # Vite alone (the recommended browser dev loop)
+pnpm run gateway:update  # rebuild; restart the gateway if it is not running these bytes
+pnpm run dev:server:watch # watched server only; pair with `pnpm run dev`
+pnpm run dev:server     # one-shot server only; pair with `pnpm run dev`
+pnpm run test:rust       # the Rust tests
 ```
 
 **On this dev host both halves are supervised — do not restart either.** Since
@@ -135,9 +182,9 @@ The two units, after the switch:
   `KillMode=process` and `OOMPolicy=continue` (#350, #438): a kernel OOM kill of
   a pane's process ends that process, not the gateway; the unit's cgroup holds
   every pane (by process inheritance), so its memory figure is theirs. It is rebuilt and
-  restarted by `npm run gateway:update`, never by a file watcher.
+  restarted by `pnpm run gateway:update`, never by a file watcher.
 - **the frontend** is the systemd user unit `tmux-mobile-dev.service`
-  (`Restart=always`) → `scripts/dev-stack.mjs` (`npm run dev:all`) → vite on
+  (`Restart=always`) → `scripts/dev-stack.mjs` (`pnpm run dev:all`) → vite on
   :5173, which proxies `/ws` and `/dl` to the gateway. Vite serves from disk,
   so a frontend edit needs a browser reload, not a restart.
 
@@ -146,7 +193,7 @@ Neither is a `tmm task` (verified with `ps` and `systemctl --user status`,
 beside the first. Restarting a unit is the owner's call, which he makes
 himself; a reviewer or an issue never does it.
 
-`npm run dev:all` therefore preflights :5173 only. The server port is held for
+`pnpm run dev:all` therefore preflights :5173 only. The server port is held for
 good by the installed gateway, and the old `dev` preflight (both ports) would
 have refused to start the frontend at all.
 
@@ -155,9 +202,9 @@ the runbook in
 [install.md § Switching a dev host](../reference/install.md#switching-a-dev-host-to-the-gateway).
 
 **The watcher is still there, for a machine with no gateway**:
-`TEAMMUX_DEV_WITH_SERVER=1 npm run dev:all` puts
+`TEAMMUX_DEV_WITH_SERVER=1 pnpm run dev:all` puts
 `scripts/dev-server-watch.sh` back beside vite (and preflights both ports), and
-`npm run dev:server:watch` runs it alone. It is what
+`pnpm run dev:server:watch` runs it alone. It is what
 `tauri dev` would have given us for the server half, which cannot build here (no
 webkit2gtk-4.1, no DISPLAY): it restarts the server when it EXITS (2 s backoff),
 polls Rust source mtimes every 3 s (no inotify — NFS-safe, ~4 ms per scan),
@@ -270,11 +317,11 @@ not exist afterwards; pinned on a scratch root with the real config's plugins), 
 
 ## Build targets
 
-- **macOS** — `npm run build:mac` → `src-tauri/target/release/bundle/dmg/`.
+- **macOS** — `pnpm run build:mac` → `src-tauri/target/release/bundle/dmg/`.
   `tauri.conf.json` sets `app.macOSPrivateApi` (and `Cargo.toml` the matching
   `macos-private-api` tauri feature) for WebKit's element fullscreen (board
   #454): a private API, so the app is a dmg and never a Mac App Store build.
-- **Android** — `rustup target add aarch64-linux-android && npm run build:android`.
+- **Android** — `rustup target add aarch64-linux-android && pnpm run build:android`.
   Needs the Android SDK, NDK 28+ and Java 17+; signing is below. The build
   needs `ANDROID_HOME` (or `ANDROID_SDK_ROOT`) naming an SDK that holds an NDK
   under `ndk/<version>/`, and `build:android` refuses to start without one
@@ -297,7 +344,7 @@ not exist afterwards; pinned on a scratch root with the real config's plugins), 
     (capital S) also exists, is empty, and is what the auto-detect picks:
 
     ```bash
-    ANDROID_HOME=/home/cfu/Android/sdk npm run build:android
+    ANDROID_HOME=/home/cfu/Android/sdk pnpm run build:android
     ```
   - `ubuntu` (board #16): the SDK is `/home/ubuntu/Android/Sdk` with one NDK,
     `ndk/28.2.13676358`, plus platform-tools 37.0.1, `platforms;android-36`
@@ -306,10 +353,10 @@ not exist afterwards; pinned on a scratch root with the real config's plugins), 
     08:59:34 UTC), so the build uses it. `~/.zshrc` exports
     `ANDROID_HOME` and `NDK_HOME` from that directory, so a login shell needs
     no prefix. First build 2026-11-05, about 08:55 to 09:02 UTC (7 min, gradle
-    8.14.3), at main `49882cd0` in a detached worktree with `command npm ci`
+    8.14.3), at main `49882cd0` in a detached worktree with `pnpm install --frozen-lockfile`
     (the shell's `npm` is pnpm). No signing files exist on this host, so the
     APK is `app-universal-release-unsigned.apk` and the postflight exits 1.
-- **Linux server only** — `npm run build:server` needs no WebKitGTK; it is all
+- **Linux server only** — `pnpm run build:server` needs no WebKitGTK; it is all
   the browser UI and the phone talk to. It runs `vite build` first and embeds
   `dist/` (`embed-ui`), so `tmm gateway` serves the web UI on its own port and
   `tmm ui` prints its URL (board #323). The dev watcher builds without it.
@@ -332,7 +379,7 @@ Never `serve` (or `funnel`) the dev server's `:5173`: see the next section.
 on the loopback, or from the LAN when a person opts in with `TEAMMUX_DEV_HOST`.
 It is never put behind a reverse SSH tunnel, a reverse proxy, a CDN or
 `tailscale serve`/`funnel`. A browser anywhere else uses the gateway's own UI
-(`npm run build:server` embeds `dist/`, `server/ui.rs` serves it with `/ws` and
+(`pnpm run build:server` embeds `dist/`, `server/ui.rs` serves it with `/ws` and
 `/dl` on the gateway's port), so the dev server is never a production origin. An
 edge's catch-all route answers `404`; it is never a fallback to Vite. Forwarding
 `:5173` anywhere is a forbidden config, not a known risk.
@@ -413,7 +460,7 @@ reads `src-tauri/gen/android/key.properties` (gitignored; copy
 `keyPassword`; `storeFile` is relative to `gen/android/`). Without the file a
 release build still succeeds but the APK is unsigned, and gradle says so — in
 a Git worktree both files are absent (gitignored), so symlink `key.properties`
-AND `keystore.jks` from the launch checkout before `npm run build:android`
+AND `keystore.jks` from the launch checkout before `pnpm run build:android`
 there (2026-09-09, board #131: the first worktree build produced
 `app-universal-release-unsigned.apk` and the postflight flagged it). The
 `android-apk` postflight recognises that APK and names the missing files and
@@ -561,9 +608,10 @@ transform throws "Unsupported Vite dev client: … not found exactly once" when 
 the four pieces of text it replaces is gone or doubled, and `scripts/vite-config.test.ts`
 fails when the installed Vite is another version OR any piece is gone, so an upgrade
 can never quietly lose the patch (or quietly keep one that no longer does anything).
-`package-lock.json` pins the same version and a second test compares the lock with the
+`pnpm-lock.yaml` pins the same version (the `package-lock.json` of the time, until
+board #33) and a second test compares the lock with the
 stamp (board #396: the first test reads `node_modules`, so a checkout whose
-`node_modules` had been updated past the lock stayed green while every fresh `npm ci` —
+`node_modules` had been updated past the lock stayed green while every fresh install —
 6.4.1 from the lock — failed it): an upgrade moves the lock, the stamp and the patch
 in one commit.
 `scripts/vite-client-reconnect.test.ts` RUNS the patched client of the installed Vite
@@ -620,7 +668,7 @@ before the connect card is in
   nested 304-entry `worktree/`: 304 → 0 watches there, and the scan stopped
   following its imports; `scripts/vite-config.test.ts` pins it; the same
   ignore list now covers the rest of what is not the web app, see
-  [The dev server](#the-dev-server-what-it-watches-and-a-lost-hmr-socket-393)). `npm test`'s
+  [The dev server](#the-dev-server-what-it-watches-and-a-lost-hmr-socket-393)). `pnpm test`'s
   globs and tsconfig's `include` are anchored at `src/`/`scripts/`, so they
   never reach it.
 - **Three places say where a worktree goes, and only the first two are the
@@ -719,7 +767,7 @@ env -u TMUX -u TMUX_PANE -u TMUX_SOCKET TMUX_TMPDIR="$D" tmux kill-server
 - **Scope.** This removes INHERITED ROUTING to the live tmux server and
   gateway. `isolatedEnv` keeps `HOME` and the network, so a child that dials
   the live gateway's port on purpose still can; it is not a sandbox
-  (`scripts/isolated.mjs` is). `npm run test:rust` and `isolated.mjs` are
+  (`scripts/isolated.mjs` is). `pnpm run test:rust` and `isolated.mjs` are
   already isolated. A scratch server started without the helper is
   unguarded; the closest manual form is `env -u TMUX -u TMUX_PANE -u
   TMUX_SOCKET -u TMM_SOCKET TMUX_TMPDIR=<private> <command>`, but only the
@@ -781,9 +829,9 @@ command exists to stop.
 
 ```bash
 tmux new-session -d -s test
-npm run test:rust
+pnpm run test:rust
 ```
 Rust tests are sequential (shared tmux state), spread across `src-tauri/src/*.rs`
 (`main.rs`, `tmux.rs`, and the `server/` and `projects/` modules — unit tests
-live in the submodule they test). Frontend tests: `npm test` (node --test,
+live in the submodule they test). Frontend tests: `pnpm test` (node --test,
 `src/**/*.test.{js,ts}`, no tmux needed; conventions in

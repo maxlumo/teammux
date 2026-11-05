@@ -27,8 +27,8 @@ smallest thing that works, at the cost of coupling to minified output.
 
 The transform **throws at build time** if any expected pattern is missing or
 appears the wrong number of times. A silent no-match would ship a broken
-terminal; a loud build failure points here instead. If `npm run build` or
-`npm run dev` fails with `Unsupported @xterm/xterm ...`, an xterm upgrade
+terminal; a loud build failure points here instead. If `pnpm run build` or
+`pnpm run dev` fails with `Unsupported @xterm/xterm ...`, an xterm upgrade
 changed the minified output — do NOT weaken the assertion to make the build
 pass.
 
@@ -38,8 +38,8 @@ pass.
 even a patch release can rename minified locals and break the string match.
 To upgrade:
 
-1. Bump the pinned version, `npm install`.
-2. Run `npm run build`. If the transform throws, open
+1. Bump the pinned version, `pnpm install`.
+2. Run `pnpm run build`. If the transform throws, open
    `node_modules/@xterm/xterm/lib/xterm.mjs`, find the new equivalents of the
    three patterns (search for `cannot be less than`, the glyph
    `textContent=` assignment, `_compositionView.textContent`), and update the

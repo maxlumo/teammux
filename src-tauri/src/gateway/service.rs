@@ -152,7 +152,7 @@ fn unquote_env(s: &str) -> Option<(String, String)> {
 /// `KillMode=process` (board #350): the gateway forks tmux servers (`tmm
 /// project up`, the scratch session), and a child inherits its parent's
 /// cgroup — so with systemd's default `control-group`, a `systemctl --user
-/// restart` of this unit (every `npm run gateway:update`) would kill every
+/// restart` of this unit (every `pnpm run gateway:update`) would kill every
 /// tmux server the gateway ever started and every agent pane in them.
 /// `process` signals the main process only; children live on. Measured on
 /// this host 2026-10-12 08:02: the owner's default tmux server sat inside
@@ -331,8 +331,8 @@ fn unit_service_key(text: &str, key: &str) -> Option<String> {
 /// gateway; an unknown value is treated as the dangerous one.
 pub fn kill_mode_warning(name: &str, found: Option<&str>) -> String {
     let hazard = match found {
-        None => "no KillMode= in effect (systemd's default, control-group): a restart of this service (every `npm run gateway:update`) would kill every tmux server the gateway started and every agent in them".to_string(),
-        Some("control-group") | Some("mixed") => format!("KillMode={} in effect: a restart of this service (every `npm run gateway:update`) would kill every tmux server the gateway started and every agent in them", found.unwrap()),
+        None => "no KillMode= in effect (systemd's default, control-group): a restart of this service (every `pnpm run gateway:update`) would kill every tmux server the gateway started and every agent in them".to_string(),
+        Some("control-group") | Some("mixed") => format!("KillMode={} in effect: a restart of this service (every `pnpm run gateway:update`) would kill every tmux server the gateway started and every agent in them", found.unwrap()),
         Some("none") => "KillMode=none in effect: a stop would spare the tmux servers but could never end a wedged gateway".to_string(),
         Some(other) => format!("KillMode={other} in effect, which tmm does not know; treated as unsafe"),
     };
@@ -993,7 +993,7 @@ pub fn uninstall(sys: &Sys, name: &str) -> Result<bool, String> {
 
 pub fn restart(sys: &Sys, name: &str) -> Result<u32, String> {
     let file = ours_installed(sys, name)?.ok_or_else(|| format!("{name} is not installed: run tmm gateway install"))?;
-    // `npm run gateway:update` comes through here after every merge: the
+    // `pnpm run gateway:update` comes through here after every merge: the
     // manager's effective KillMode decides whether this restart is safe.
     sys.stop_allowed(name)?;
     if sys.mac {

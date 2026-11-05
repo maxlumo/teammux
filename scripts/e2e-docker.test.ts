@@ -1,6 +1,6 @@
 // The Docker multi-gateway environment (board #352): the harness's judgement
 // and the shape of the compose/Dockerfile pair, pinned without Docker. The
-// environment itself is exercised by `npm run test:e2e:docker`.
+// environment itself is exercised by `pnpm run test:e2e:docker`.
 import assert from 'node:assert/strict';
 import { readFile } from 'node:fs/promises';
 import { posix } from 'node:path';
@@ -13,7 +13,7 @@ import {
 
 const read = (rel: string) => readFile(new URL(`../${rel}`, import.meta.url), 'utf8');
 
-test('npm run test:e2e:docker is the harness', async () => {
+test('pnpm run test:e2e:docker is the harness', async () => {
   const pkg = JSON.parse(await read('package.json'));
   assert.equal(pkg.scripts['test:e2e:docker'], 'node scripts/e2e-docker.mjs');
 });
@@ -66,7 +66,7 @@ test('the image copies every local module the vite build loads (board #493: #472
 test('the image builds this checkout inside the container and copies no host binary', async () => {
   const df = await read('docker/validator/Dockerfile');
   assert.match(df, /cargo build --locked --manifest-path src-tauri\/Cargo\.toml[\s\\]+--no-default-features --features embed-ui --release --bins/);
-  assert.match(df, /^RUN npx vite build$/m, 'the web UI is built in the image, then embedded');
+  assert.match(df, /^RUN pnpm exec vite build$/m, 'the web UI is built in the image, then embedded');
   // The only COPY from outside the build context's sources is from the build stages.
   for (const line of df.split('\n').filter((l) => /^COPY /.test(l))) {
     assert.doesNotMatch(line, /target\/release/, `a host build artifact must not enter the image: ${line}`);
@@ -399,7 +399,7 @@ test('the e2e image is handed the checkout\'s PUBLIC source revision as build ar
   assert.equal(dockerfile.match(/^ARG SOURCE_COMMIT=$/gm)?.length, 2);
   assert.equal(dockerfile.match(/^ARG SOURCE_TIME=$/gm)?.length, 2);
   assert.equal(dockerfile.match(/^ENV SOURCE_COMMIT=\$SOURCE_COMMIT SOURCE_TIME=\$SOURCE_TIME$/gm)?.length, 2);
-  assert.ok(dockerfile.indexOf('ENV SOURCE_COMMIT') < dockerfile.indexOf('RUN npx vite build'), 'set before the UI build runs');
+  assert.ok(dockerfile.indexOf('ENV SOURCE_COMMIT') < dockerfile.indexOf('RUN pnpm exec vite build'), 'set before the UI build runs');
   assert.ok(dockerfile.lastIndexOf('ENV SOURCE_COMMIT') < dockerfile.indexOf('cargo build'), 'and before cargo does');
   assert.match(yaml, /args:\s*\n\s+SOURCE_COMMIT: \$\{SOURCE_COMMIT:-\}\s*\n\s+SOURCE_TIME: \$\{SOURCE_TIME:-\}/u);
   // Still no way to carry a .git or a host path in: the context and ignore file are as before.

@@ -41,7 +41,7 @@ The owner wanted the video player's fullscreen in the app (2026-10-25: "如果�
 - **Back** leaves fullscreen first. An `OnBackPressedCallback`, enabled only while the view shows, is registered after wry's go-back callback, so it runs first. It hides the view and calls `onCustomViewHidden()`; the page leaves fullscreen and its own `onHideCustomView` is then a no-op. An activity destroyed with a view up takes the same exit.
 - **The button shows only where it works.** Android's WebView reports `document.fullscreenEnabled` whether or not the app hosts the custom view, so on Android the API cannot decide. `AndroidFullscreen` is attached in `onWebViewCreate` (a later interface is invisible until a reload) and re-attached in `onResume` with `AndroidFileOpener`. Its `available()` is `FullscreenReadiness`, which owns the whole flow (review P1-A). The REQUEST is synchronous: `onWebViewCreate` calls `attach(webView)`, which makes that view current, withdraws the previous answer at once (telling that page), and queues the install with its ticket. The posted install and its next-frame read-back (`postOnAnimation`, the wrapper still in the view) both do nothing unless the ticket is still the current request of a live host, so a stale task neither wraps, publishes, nor takes the current view back. `onDestroy` (`release`) revokes the answer and cancels everything in flight. The same WebView hooked again reuses its wrapper, never a second layer; `FullscreenHost` only backs the gate's `FullscreenPlatform` with the WebView. Every failure answers false and logs one `tmux-mobile` line naming why. Fail closed, never a half install (orchestrator rulings, 2026-10-25). The gate has no Android types, so `./gradlew :app:testUniversalReleaseUnitTest` (in `gen/android`) runs the request → queue → install → read-back flow against a fake platform whose tasks the tests run in any order: A ready, then B requested before its post runs (false at once); B's tasks then A's (A wraps, publishes and re-takes nothing); release before a queued task (no install side effect); B failing after A (no stale true); the activity gone; a replaced wrapper; the page told of the revocation and the new readiness; and the four bar states.
 - **The page follows the answer.** Each flip of the answer dispatches `androidfullscreenchange` on `window`. The player asks once at mount and again on every such event (`ANDROID_FULLSCREEN_EVENT`), so an install that lands after the player mounted shows the control on the same player, a revocation takes it away, and an unmounted player no longer listens (`MediaPlayer.mount.test.ts`). Fullscreen itself stays the page's one `requestFullscreen`/`fullscreenchange` path.
-- **Drift.** A method a LATER wry overrides would be dropped by the wrapper silently; a dropped `onShowFileChooser` is a dead attachment picker. `npm run build:android`'s `android-env` preflight (`scripts/wry-chrome-client.mjs`) reads the wry version `Cargo.lock` locks, finds its `RustWebChromeClient.kt` in the cargo registry, and compares class-level override SIGNATURES (name and parameter types as the JVM sees them, so an overload is its own entry; review P1-B). It refuses to build when wry overrides a signature the wrapper does not, or when the wrapper's method of that signature does not call `inner.<name>(` in its OWN body. A declaration it cannot read, a signature declared twice, the source missing (offline, vendored), or a lock with no wry or two: the preflight FAILS, it does not skip. `scripts/fixtures/RustWebChromeClient-0.54.2.kt` holds the locked wry's real signatures; a test on a host that has fetched wry checks the fixture against it.
+- **Drift.** A method a LATER wry overrides would be dropped by the wrapper silently; a dropped `onShowFileChooser` is a dead attachment picker. `pnpm run build:android`'s `android-env` preflight (`scripts/wry-chrome-client.mjs`) reads the wry version `Cargo.lock` locks, finds its `RustWebChromeClient.kt` in the cargo registry, and compares class-level override SIGNATURES (name and parameter types as the JVM sees them, so an overload is its own entry; review P1-B). It refuses to build when wry overrides a signature the wrapper does not, or when the wrapper's method of that signature does not call `inner.<name>(` in its OWN body. A declaration it cannot read, a signature declared twice, the source missing (offline, vendored), or a lock with no wry or two: the preflight FAILS, it does not skip. `scripts/fixtures/RustWebChromeClient-0.54.2.kt` holds the locked wry's real signatures; a test on a host that has fetched wry checks the fixture against it.
 - **After `tauri android init --force`** (review P2-D). Before running it, read `git status src-tauri/gen/android` and commit or stash any change of your own there: init overwrites tracked files. Afterwards `git status src-tauri/gen/android` lists what init rewrote. Read each file's diff, then restore the reviewed version file by file, `git restore -- <file>` (`MainActivity.kt` holds the `AndroidFileOpener` and `AndroidFullscreen` wiring), never the whole directory. `FullscreenChromeClient.kt` and `FullscreenReadiness.kt` are extra files and survive. `scripts/wry-chrome-client.test.ts` fails until MainActivity attaches `AndroidFullscreen` and calls `fullscreen.attach(webView)` in `onWebViewCreate`, and `fullscreen.release()` in `onDestroy`, again.
 - **Verified:** the Kotlin compiles (`./gradlew :app:compileUniversalReleaseKotlin`, 2026-10-25), the readiness gate's JVM tests pass, and the preflight passes against wry 0.54.2. **Not verified here** (no emulator, no KVM): a custom view on a device. The owner's phone holds the final row: fullscreen a video, rotate, leave with the back gesture, see the bars come back, then check that the composer keyboard still opens (a known WebView failure after a custom view) and the attachment picker still opens.
 - `addJavascriptInterface` must run in `onWebViewCreate`; attaching after the initial page load requires a reload before JavaScript can see it
@@ -242,14 +242,14 @@ on this host that relocates anything):
   script `00-build-dir.gradle.kts` that is not on this host; its comments were
   corrected on 2026-10-15, behaviour unchanged.)
 
-`npm run build:android` ends with `scripts/preflight.mjs android-apk`: it
+`pnpm run build:android` ends with `scripts/preflight.mjs android-apk`: it
 re-points an `app/build` SYMLINK that is missing, dangling or stale (pointing at
 another checkout), leaves a real directory alone, and exits 0 only when the APK
 exists at the in-project path. When the only APK there is gradle's
 `app-universal-release-unsigned.apk` it exits 1 naming that path, whichever of
 `gen/android/key.properties` and `keystore.jks` is absent, and *Android
 signing* in `docs/conventions/development.md`: a missing key is not a redirect
-failure, and an unsigned APK is not a release (board #17). A bare `npx tauri android build` skips it, which
+failure, and an unsigned APK is not a release (board #17). A bare `pnpm exec tauri android build` skips it, which
 only matters where `app/build` is a symlink that can be dangling or stale.
 
 The cargo target is NOT relocated — it is the checkout's own `src-tauri/target`
@@ -283,18 +283,18 @@ and misses a worktree build.
 
 ## The Android compile check is the lib, never the bins (board #378)
 
-`npm run build:android` compiles ONE crate target for the phone: the `[lib]`
+`pnpm run build:android` compiles ONE crate target for the phone: the `[lib]`
 (`libtmux_mobile.so`, the cdylib the Gradle `rustBuild` task asks Tauri for).
 The three `[[bin]]`s (`tmm`, `server`, the desktop `tmux-mobile`) are host
 programs and are never built for Android: a real build leaves only
 `libtmux_mobile.{a,rlib,so}` in the cargo target's `aarch64-linux-android/release`
 (no bin artifact, in `deps/` either), and the APK's `arm64-v8a/` holds that one
 `.so`. So the check that matches the build is
-`cargo check` on the lib alone, which is `npm run check:android`
+`cargo check` on the lib alone, which is `pnpm run check:android`
 (`scripts/preflight.mjs android-check`, board #32):
 
 ```bash
-npm run check:android    # cargo check --lib --target aarch64-linux-android, default features (gui)
+pnpm run check:android   # cargo check --lib --target aarch64-linux-android, default features (gui)
 ```
 
 It takes the SDK and NDK through the same guard as `build:android`

@@ -5,7 +5,7 @@ import { join } from 'node:path';
 import test from 'node:test';
 import { cargoArgs, isolatedEnv, runTestRust, serverSocketsUnder } from './test-rust.mjs';
 
-test('npm run test:rust is the isolating wrapper', async () => {
+test('pnpm run test:rust is the isolating wrapper', async () => {
   const pkg = JSON.parse(await readFile(new URL('../package.json', import.meta.url), 'utf8'));
   assert.equal(pkg.scripts['test:rust'], 'node scripts/test-rust.mjs');
 });

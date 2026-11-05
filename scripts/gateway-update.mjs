@@ -1,5 +1,5 @@
 #!/usr/bin/env node
-// `npm run gateway:update` — bring THIS machine's gateway up to the checkout
+// `pnpm run gateway:update` — bring THIS machine's gateway up to the checkout
 // it already runs from (board #343).
 //
 // The backend here is the tmm-managed gateway service: it runs
@@ -229,8 +229,8 @@ export async function gatewayUpdate({
   const service = serviceName(env);
   const home = configHome(root, env);
 
-  log('[gateway:update] building (npm run build:server)');
-  const built = await run('npm', ['run', 'build:server']);
+  log('[gateway:update] building (pnpm run build:server)');
+  const built = await run('pnpm', ['run', 'build:server']);
   if (built !== 0) {
     warn('[gateway:update] build FAILED — the running gateway was left alone');
     return built;

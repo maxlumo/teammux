@@ -50,7 +50,7 @@ async function host(t: { after: (fn: () => Promise<void> | void) => void }, env:
         warn: (line: string) => h.said.push(line),
         run: async (command: string, args: string[]) => {
           h.calls.push([command, args]);
-          if (command === 'npm') {
+          if (command === 'pnpm') {
             if (h.build === 0) {
               if (h.bytes === null) await unlink(bin).catch(() => {});
               else await writeFile(bin, h.bytes);
@@ -84,7 +84,7 @@ test('a first update deploys and records what is running', async (t) => {
   const h = await host(t);
   assert.equal(await h.update(), 0);
 
-  assert.deepEqual(h.calls[0], ['npm', ['run', 'build:server']]);
+  assert.deepEqual(h.calls[0], ['pnpm', ['run', 'build:server']]);
   assert.equal(h.restarts(), 1);
   assert.ok(h.told('no receipt for these bytes'), h.said.join('\n'));
   assert.ok(h.told('now at abc1234 a merged commit'));
@@ -127,7 +127,7 @@ test('a binary built by hand between updates is deployed, not assumed', async (t
   const h = await host(t);
   await h.update();
 
-  // What `npm run build:server` on its own leaves behind: new bytes on disk
+  // What `pnpm run build:server` on its own leaves behind: new bytes on disk
   // that no restart has ever accepted. The build in this run produces the
   // same bytes again, so a before/after hash of the file would see no change.
   await writeFile(h.bin, 'built by hand');
@@ -239,7 +239,7 @@ test('a run killed between the restart and the check leaves no stale receipt', a
     log: () => {},
     warn: () => {},
     run: async (command: string, args: string[]) => {
-      if (command === 'npm') {
+      if (command === 'pnpm') {
         await writeFile(h.bin, 'B');
         return 0;
       }
@@ -280,7 +280,7 @@ test('a receipt from another config root is not evidence', async (t) => {
     log: (line: string) => said.push(line),
     warn: (line: string) => said.push(line),
     run: async (command: string, args: string[]) => {
-      if (command !== 'npm') calls.push([command, args]);
+      if (command !== 'pnpm') calls.push([command, args]);
       return 0;
     },
   });
@@ -348,7 +348,7 @@ test('a failed build exits non-zero and leaves the running gateway alone', async
   const h = await host(t);
   h.build = 101;
   assert.equal(await h.update(), 101);
-  assert.deepEqual(h.calls, [['npm', ['run', 'build:server']]]);
+  assert.deepEqual(h.calls, [['pnpm', ['run', 'build:server']]]);
   assert.ok(h.told('build FAILED'), h.said.join('\n'));
 });
 
@@ -375,7 +375,7 @@ test('the tmm it drives belongs to the checkout it builds, never PATH', async (t
   const h = await host(t);
   await h.update();
   for (const [command] of h.calls) {
-    assert.ok(command === 'npm' || command === h.bin, `spawned ${command}`);
+    assert.ok(command === 'pnpm' || command === h.bin, `spawned ${command}`);
   }
   // Which is why an update run from a worktree is refused: the unit's
   // ExecStart names the launch checkout's tmm, and tmm's own identity check
@@ -425,7 +425,7 @@ test('a missing file hashes to null instead of throwing', () => {
   assert.equal(receiptPath('/repo/src-tauri/target/release/tmm'), `/repo/src-tauri/target/release/${RECEIPT_FILE}`);
 });
 
-test('npm run gateway:update runs this script', async () => {
+test('pnpm run gateway:update runs this script', async () => {
   const pkg = JSON.parse(await readFile(new URL('../package.json', import.meta.url), 'utf8'));
   assert.equal(pkg.scripts['gateway:update'], 'node scripts/gateway-update.mjs');
 });

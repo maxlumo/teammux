@@ -295,7 +295,7 @@ export function devServerIdentity(now = new Date()) {
 // adds on the way in is refused (403) before Vite sees it — page, `/@fs`, HMR
 // and the `/ws` + `/dl` proxy alike, an upgrade before any upstream is dialled.
 // A browser on this host or the LAN talks to Vite directly and sends none of
-// them. A remote browser uses the gateway's own UI (`npm run build:server`,
+// them. A remote browser uses the gateway's own UI (`pnpm run build:server`,
 // embed-ui), never this server.
 export const PROXY_HEADERS = ['forwarded', 'x-forwarded-for', 'x-forwarded-host', 'x-forwarded-proto', 'x-real-ip', 'via', 'cloudfront-viewer-address', 'x-amz-cf-id'];
 export const proxiedRequest = (headers) => PROXY_HEADERS.some((name) => headers[name] !== undefined);

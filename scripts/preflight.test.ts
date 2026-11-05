@@ -149,7 +149,7 @@ test('android-env: NDK_HOME is optional, and when set must be the SDK s NDK — 
 
 test('build:android runs the guard before tauri, so a missing NDK stops it before tauri can ask', () => {
   const pkg = JSON.parse(readFileSync(new URL('../package.json', import.meta.url), 'utf8'));
-  assert.match(pkg.scripts['build:android'], /^node scripts\/preflight\.mjs android-env && npx tauri android build /u);
+  assert.match(pkg.scripts['build:android'], /^node scripts\/preflight\.mjs android-env && pnpm exec tauri android build /u);
 });
 
 // Board #454: android-env also refuses when the fullscreen wrapper does not

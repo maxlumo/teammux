@@ -2,7 +2,7 @@
 
 ## Context
 The web UI (Vite + Svelte, served over a browser — Tailscale HTTPS, a reverse
-proxy, or `npm run preview`) is a long-lived companion screen. Browsers can
+proxy, or `pnpm run preview`) is a long-lived companion screen. Browsers can
 "install" such a page as a standalone app (own window, home-screen icon, no
 URL bar). We surface that offer in-app instead of leaving it to the browser's
 easily-missed mini-infobar. The Tauri desktop/Android shells are already

@@ -1,14 +1,14 @@
 # Testing Conventions
 
-Frontend tests and repository development-script tests run with `npm test`
-(`node --test`, no framework, no tmux needed). Rust tests: `npm run test:rust`
+Frontend tests and repository development-script tests run with `pnpm test`
+(`node --test`, no framework, no tmux needed). Rust tests: `pnpm run test:rust`
 (`cargo test -- --test-threads=1`, needs a running tmux). Multi-server work has a
-third environment, Docker, with its own smoke `npm run test:e2e:docker`
+third environment, Docker, with its own smoke `pnpm run test:e2e:docker`
 (below). This file governs the frontend side, the one Rust rule below, and
 that environment.
 
 Every change under `src-tauri/` also runs the Android compile check,
-`npm run check:android` (`cargo check --lib` for `aarch64-linux-android` with
+`pnpm run check:android` (`cargo check --lib` for `aarch64-linux-android` with
 the NDK `build:android` uses; no emulator), and it must report zero errors. A
 builder runs it before handing over, and a validator runs it on every such
 change (board #32: main stopped compiling for Android after three desktop-green
@@ -40,7 +40,7 @@ helper must destroy its server before anything restores the global.
 Four mechanical rules replaced the comment, the first in `scripts/test-rust.mjs`
 and the rest in `tmux::test_support`:
 
-- **A full `npm run test:rust` runs EVERY test target** (board #11): the
+- **A full `pnpm run test:rust` runs EVERY test target** (board #11): the
   wrapper always passes `--no-fail-fast` (a caller's own is not repeated;
   `--lib`, `-p` and filters still narrow). Without it cargo stops at the
   first failing test binary, and on this host the lib always has its known
@@ -49,7 +49,7 @@ and the rest in `tmux::test_support`:
   validator, 2026-11-05). #8 measured the cost of running them: about 45 s
   for all non-lib targets together, against about 330 s for the lib. The
   exit status is still non-zero when any test in any target fails.
-- **`npm run test:rust` isolates the test process from every real tmux.** It
+- **`pnpm run test:rust` isolates the test process from every real tmux.** It
   runs cargo with `TMUX`, `TMUX_PANE`, every `TMM_*` and `TOKEN` unset and
   `TMUX_TMPDIR` set to a fresh `mkdtemp` directory, with `--test-threads=1` FIRST in libtest's option region
   (right after the cargo/harness `--`, before any second `--` the caller
@@ -72,7 +72,7 @@ and the rest in `tmux::test_support`:
   `config.toml` still resolve, so a test that talks to a gateway sets its own
   endpoint, token and config dir on its child process.
   Any other cargo test invocation on this host goes through the wrapper,
-  which takes cargo's own arguments: `npm run test:rust -- <filter|--lib|-p …>
+  which takes cargo's own arguments: `pnpm run test:rust -- <filter|--lib|-p …>
   [-- <harness args>]`. When cargo must be run by hand, the equivalent is
   `env -u TMUX -u TMUX_PANE -u TOKEN $(env | sed -n 's/^\(TMM_[A-Za-z0-9_]*\)=.*/-u \1/p')
   TMUX_TMPDIR=$(mktemp -d /tmp/tmm-iso-XXXX) cargo test --no-fail-fast … -- --test-threads=1`
@@ -131,7 +131,7 @@ and the rest in `tmux::test_support`:
   the global because the restore had already happened. A test pins both the
   body's statement order and the field order.
 
-So `npm run test:rust` is the command, and the only one: a bare `cargo test`
+So `pnpm run test:rust` is the command, and the only one: a bare `cargo test`
 fails fast at the first tmux-touching test — on parallelism, or on seeing a
 real tmux — and kills nothing. Negative controls that touch a destroy path
 (`kill-server`, socket removal, a sweep) are run only by the validator, on an
@@ -271,7 +271,7 @@ Incident, 2026-11-02: every full gate of the day left 3 loopback `Auth failed �
 - `unshare --map-current-user -n` (and `unshare -rn` for a whole suite): a user namespace cannot show real root, so `/`, `/tmp` and `/local` stat as uid 65534 and `safe_fs::trusted` refuses every state.db; with `--map-current-user`, `ip link set lo up` is also not permitted. The trust check is never relaxed for tests.
 - `docker run --network none` with the real HOME mounted: no TCP, but the live socket, config, token, state.db and agent homes are all reachable by path (reviewer, 13:29).
 
-The rule: **on this Linux host, a full `npm test` or `npm run test:rust` runs through `node scripts/isolated.mjs -- <command>`, started from a LINKED worktree** (orchestrator, 2026-11-02: required on any host that runs a live gateway, after #503 lands too, because only a physical boundary stops the next regression; it is not wired into `npm test` itself, which would change every developer's loop). It is Linux-only: it mounts this host's `/usr`, `/lib` and toolchain into a container from an empty image. It is not verified on macOS or any other platform. Elsewhere the protection is only that the tests themselves keep off the default port, which #503 fixes and guards. Before any docker call it refuses:
+The rule: **on this Linux host, a full `pnpm test` or `pnpm run test:rust` runs through `node scripts/isolated.mjs -- <command>`, started from a LINKED worktree** (orchestrator, 2026-11-02: required on any host that runs a live gateway, after #503 lands too, because only a physical boundary stops the next regression; it is not wired into `pnpm test` itself, which would change every developer's loop). It is Linux-only: it mounts this host's `/usr`, `/lib` and toolchain into a container from an empty image. It is not verified on macOS or any other platform. Elsewhere the protection is only that the tests themselves keep off the default port, which #503 fixes and guards. Before any docker call it refuses:
 - the main or launch checkout (its git dir is the repository's own);
 - a target that is HOME or holds it, or holds the main checkout;
 - a worktree with `.tmm/`;
@@ -282,7 +282,8 @@ The container has:
 - the host's system dirs and toolchain mounted READ-ONLY, so real root ownership is what the trust check sees;
 - only the worktree, its own git dir and a private `/tmp` writable;
 - HOME, XDG_*, CARGO_HOME and TMPDIR inside that `/tmp`, and an empty environment, so no `TMM_*`, `TOKEN` or `TMUX*` crosses.
-- node, resolved from the RUNNING node (`realpathSync(process.execPath)`, `nodeRuntime`), never a guessed path, and it is the node everything inside runs: the tripwire, and `npm` and `env node` through PATH. Under `/usr`, `/lib`, `/lib64`, `/bin` or `/sbin` it is already visible at its own path. When it is also the node the container's PATH (`/usr/local/bin`, `/usr/bin`, `/bin`) picks, nothing is added; when it is not (reviewer, #9 round 2: `/usr/local/node-v26/bin/node` is visible but off PATH, or PATH finds another node first), it and npm's CLIs are linked first on PATH, with no mount. A `/usr/bin/node` that is a symlink OUT of `/usr` resolves to its real file, which is then mounted like any other; before #9 that link was broken inside. The tripwire quotes the node path, so an install path with a space is one shell word. Elsewhere an ALLOWLIST is mounted read-only under the neutral `/opt/node`: the node binary itself, and npm's own package `<prefix>/lib/node_modules/npm` when one sits beside it and its `package.json` names npm. Never the install prefix: a prefix inside `~/.ssh`, `~/.aws`, the config dir, `.tmm` or `~/.local/share` would expose that dir (validator-2, #9 round 1), and a denylist misses the next sensitive dir. Never the real path either: under HOME that is `~/.local`, which the self-check refuses to see (validator, #8). PATH gains a private `/tmp/node-bin` holding links to node and to npm's and npx's own CLIs only. A node path holding `:` or `,` (docker's `-v` cannot carry it) or a node that is not a regular file refuses before any docker call, naming the path and the fix.
+- node, resolved from the RUNNING node (`realpathSync(process.execPath)`, `nodeRuntime`), never a guessed path, and it is the node everything inside runs: the tripwire, and `pnpm`'s scripts and `env node` through PATH. Under `/usr`, `/lib`, `/lib64`, `/bin` or `/sbin` it is already visible at its own path. When it is also the node the container's PATH (`/usr/local/bin`, `/usr/bin`, `/bin`) picks, nothing is added; when it is not (reviewer, #9 round 2: `/usr/local/node-v26/bin/node` is visible but off PATH, or PATH finds another node first), it is linked first on PATH, with no mount. A `/usr/bin/node` that is a symlink OUT of `/usr` resolves to its real file, which is then mounted like any other; before #9 that link was broken inside. The tripwire quotes the node path, so an install path with a space is one shell word. Elsewhere an ALLOWLIST is mounted read-only under the neutral `/opt/node`: the node binary itself. Never the install prefix: a prefix inside `~/.ssh`, `~/.aws`, the config dir, `.tmm` or `~/.local/share` would expose that dir (validator-2, #9 round 1), and a denylist misses the next sensitive dir. Never the real path either: under HOME that is `~/.local`, which the self-check refuses to see (validator, #8). PATH gains a private `/tmp/node-bin` holding the links. A node path holding `:` or `,` (docker's `-v` cannot carry it) or a node that is not a regular file refuses before any docker call, naming the path and the fix.
+- pnpm (board #33; npm and npx are no longer linked), the one the host's PATH finds, by its real path. Under a system dir it is linked at its own path. Elsewhere exactly its binary and the `dist/` beside it are mounted read-only under `/opt/pnpm`, never the directory holding them: here that is `~/.local/share/pnpm-app/{pnpm,dist}`, measured with pnpm 12.16.1, a native binary. It is linked in `/tmp/node-bin`. The same `:`/`,` and regular-file refusals apply. With no pnpm on the host, nothing is linked.
 
 **The runner could not start on this host while its node lived outside `/usr`** (board #9, found by validator on #8, 2026-11-05). The tripwire ran a hardcoded `/usr/bin/node`, and this host's node is `~/.local/share/node/bin/node`, outside every mount: the runner refused in under 3 s ("/usr/bin/node: No such file or directory", "the default-port tripwire could not start", exit 97). The full runs cited on #2 to #7 were run without it. (The image's creation time, 07:36 that day, shows only that it was created then, not that no earlier run happened; reviewer on #8.) The tripwire, the inside-only behaviour rows of `scripts/isolated.test.ts` and the command's own `npm`/`node` now all use the resolved node. Measured after the fix: `node scripts/isolated.mjs -- npm run test:rust -- backends::omp::tests` passed the self-check and ran 3 tests inside (exit 0), and `node scripts/isolated.mjs -- node --test scripts/isolated.test.ts` ran all 30 rows, the 4 tripwire rows included (re-measured in review round 2; npm ran inside with only its own package mounted). Pinned by the #9 rows in `scripts/isolated.test.ts` (the node PATH already picks changes nothing; a visible node PATH would not pick is linked first on PATH with no mount; the tripwire quotes its node; a node inside `.local/share`, `.ssh`, `.aws`, `.config/teammux` or `.tmm/agents/<x>` mounts only its binary and npm's package, never the dir holding a SECRET sibling; a node without npm mounts the binary alone; each refusal names the path and the fix; node comes from the running process and is checked before any docker call).
 
@@ -295,13 +296,15 @@ A self-check runs first and refuses to start the command (exit 97), in this orde
 
 It tests the socket only with `[ -e ]` and never opens it. Every refusal that a test triggers on the host comes before the TCP probes, so no test probes the real 9899.
 
-**An incomplete npm install refuses the run** (board #514). Before any docker call, after the target checks, a worktree with a `package.json` must have a finished install. If it doesn't, the runner exits 97 with a fixed reason that names the worktree and the fix: run `npm ci` alone there, wait for it to exit, then retry. It refuses when:
-- an `npm ci`, `install`, `i` or `add` process is running with the worktree as its cwd, read from `/proc`. npm 10 shows two argv shapes, measured with npm 10.9.9: `node …/npm-cli.js ci` at startup, then ONE element `npm ci` once it sets `process.title` (`lib/npm.js`). npm keeps running the root scripts (`preinstall`, `install`, `postinstall`, `prepare`, …) after it has written the marker, and `npm ci` first removes `node_modules`, so a marker alone does not show that npm has exited. Only a single element that starts with the word `npm` is split into words, so a shell string such as `sh -c "npm ci"` does not match, and the raw cmdline is never printed;
-- `node_modules/.package-lock.json` is missing or is not a regular file. npm writes it after every package: measured with `npm ci`, npm 10, 2026-11-04, where jsdom's files were in place before it. It is not proof that npm exited successfully;
-- that file is older than `package-lock.json`. This is a conservative staleness test, not proof that the contents match;
-- `package-lock.json` cannot be stat'ed for any reason other than being absent. An absent lock only skips the staleness test.
+**An incomplete pnpm install refuses the run** (board #514). Before any docker call, after the target checks, a worktree with a `package.json` must have a finished install. If it doesn't, the runner exits 97 with a fixed reason that names the worktree and the fix: run `pnpm install --frozen-lockfile` alone there, wait for it to exit, then retry. It refuses when:
+- a pnpm `install`, `i` or `add` process is running with the worktree as its cwd, read from `/proc`. pnpm 12.16.1 is a native binary and its argv is plain words (measured: `pnpm install --frozen-lockfile`), so the scan matches a `pnpm` word, bare or a path ending in `/pnpm`, followed by the verb. pnpm writes the marker BEFORE it runs the root scripts (`install`, `postinstall`, …; measured with a root `postinstall` held by a sentinel), so a marker alone does not show that pnpm has exited. A shell string such as `sh -c "pnpm install"` is one element and does not match, and the raw cmdline is never printed;
+- `node_modules/.modules.yaml` is missing or is not a regular file. It is not proof that pnpm exited successfully;
+- that file is older than `pnpm-lock.yaml` and `node_modules/.pnpm/lock.yaml`, pnpm's record of what it installed, differs from the lock's project document. This is a conservative staleness test, not proof that the contents match. The content check exists because `pnpm install --frozen-lockfile` on a lock rewritten with the same content (by `pnpm install --lockfile-only`) answers "Lockfile is up to date" and leaves `.modules.yaml` as it was; without the check, the refusal's own fix never cleared it (measured, pnpm 12.16.1, #33);
+- `pnpm-lock.yaml` cannot be stat'ed for any reason other than being absent. An absent lock only skips the staleness test.
 
-This is a start-time preflight, not mutual exclusion for the whole run. An install that starts after the scan, or a process this user cannot read in `/proc`, is not seen. So the rule stands: run `npm ci` alone, and start the run only after it has exited.
+Until board #33 (2026-11-05) this rule read npm's marker (`node_modules/.package-lock.json`) and npm 10's two argv shapes (`node …/npm-cli.js ci`, then the one-element title `npm ci`, measured with npm 10.9.9 on 2026-11-04).
+
+This is a start-time preflight, not mutual exclusion for the whole run. An install that starts after the scan, or a process this user cannot read in `/proc`, is not seen. So the rule stands: run `pnpm install --frozen-lockfile` alone, and start the run only after it has exited.
 
 The incident: a test run that started while `npm ci` was still writing gave a partial red run (validator, #511: 2978 tests, 20 fails, `Cannot find package …/jsdom`). The trigger was an install and a run issued as parallel tool calls. The rule is one check for every command. `test:rust` itself loads only node built-ins, so this is a workspace policy with a named fix, not a guess at which command needs `node_modules`.
 
@@ -323,6 +326,8 @@ Every verification on 2026-11-05 rebuilt a clean-main baseline from scratch, abo
 **Measured** on `49882cd0` (main after #11), 2026-11-05 08:34–08:42 UTC, with the default isolated command: `node scripts/isolated.mjs -- npm run test:rust` from a frozen linked worktree (no extra args: `--no-fail-fast` is the default since #11, so every target runs). Result: all 25 targets ran (self-check passed, tripwire silent, exit 101, about 8 minutes). The lib had 1273 passed and 34 failed, `tests/merge_cli.rs` 2 passed and 3 failed, every other target passed: the 36 fixed rows below plus the flaky `projects::scratch` row, which failed this time. Isolated `npm test` on the same commit: 3723 of 3723 passed, so the frontend has no entry.
 
 **It is not a pass list** (reviewer, #7, 07:33). A listed name that fails for a DIFFERENT reason is a failure: compare the failure message with the one below, not only the name. Nine `merge::tests` rows print only an assertion, never the git refusal (for example `no_hook_runs`: `left: Refused`, `right: Landed`). Their git cause was proven only by a throwaway probe that printed the refusal reason (#12), so a name and message match on those rows does NOT prove the git cause: a different refusal would print the same assertion. Rows marked so are re-proven with the probe whenever their message is the only evidence.
+
+The record above was measured with npm, before board #33. Re-measure with `node scripts/isolated.mjs -- pnpm run test:rust` after a `pnpm install --frozen-lockfile`. The Rust suite loads no `node_modules`, so the switch changes nothing in this record; board #33 measured it again with pnpm on `3c7d1f7e` (2026-11-05, about 7 minutes, exit 101): the lib had 1358 passed and 34 failed, `tests/merge_cli.rs` 3 failed, and the 37 failures are the 36 fixed rows plus the flaky `projects::scratch` row, as in the npm run.
 
 **Re-measure** when a host fact changes (git, openssl, tmux, node, the kernel), or when a commit touches a listed test or the code it exercises, and replace the whole record with the new run.
 
@@ -429,7 +434,7 @@ host's kernel, users, `/tmp` and the owner's tmux server. Every incident above
 came from test infrastructure sharing the host with the owner's sessions.
 
 Every change that touches more than one server is verified in this
-environment, and in two parts: `npm run test:e2e:docker`
+environment, and in two parts: `pnpm run test:e2e:docker`
 (`scripts/e2e-docker.mjs`) is the ENVIRONMENT SMOKE — it proves the machines
 are real, distinct and isolated, nothing more — and the validator's browser
 pass against the kept machines is the functional verdict (the ③ matrix:
@@ -473,7 +478,7 @@ signal). Every compose call carries `-p tmm-e2e`, which outranks a
 at another local project; one fixed name also means one environment per
 host — two checkouts running it at once would tear each other down. So a
 kept environment is EXCLUSIVE: while someone holds one (`--keep`), nobody
-else on the host runs `npm run test:e2e:docker` or a compose `down` on
+else on the host runs `pnpm run test:e2e:docker` or a compose `down` on
 `tmm-e2e` — say so in the room before starting, and ask before ending one
 you did not start (incident 2026-10-12 16:19: the validator's kept
 environment on the review tip was torn down by the builder's own P2 check,
@@ -486,7 +491,7 @@ each `ws://` address and token for a browser session by hand. The image is
 built from the CHECKOUT THAT RUNS THE SCRIPT — the build context is the repo
 root the script resolves from its own path — so the UI the containers serve
 is that checkout's: to verify a branch's UI in the browser (the ③ pass needs
-the Aggregate UI), run `npm run test:e2e:docker -- --keep` FROM that branch's
+the Aggregate UI), run `pnpm run test:e2e:docker -- --keep` FROM that branch's
 worktree, not from main. The first run compiles
 tmm + server in release inside the image (minutes; the cargo registry and
 target are BuildKit cache mounts, so later builds are incremental); a warm
@@ -642,7 +647,7 @@ creeps back, that every `*.render.ts` is on the collector's list, uses the
 harness, sets no literal timeout and reaches for neither vite nor jsdom.
 
 **A test harness holds no fixed port** (board #177, lead 2026-09-12). Several
-agents share this host, so two `npm test` runs at once — the launch checkout
+agents share this host, so two `pnpm test` runs at once — the launch checkout
 and a worktree — are normal, not a mistake. They collided: every render and
 mount case in one run timed out at 60 s behind "WebSocket server error: Port
 24678 is already in use", and a rerun minutes later was green. Vite 6's
@@ -655,7 +660,7 @@ therefore obtains its one server from the ONE helper, `src/lib/test/ssr.ts`
 no port), and the mount tier builds without serving.
 `src/lib/test/harness.source.test.ts` pins both and that `createServer(`
 appears nowhere else under `src/` or `scripts/`. Proof: two concurrent
-`npm test` runs on the fix are both green with 24678 never bound; with
+`pnpm test` runs on the fix are both green with 24678 never bound; with
 `ws: false` removed the guard fails and a single render test binds the port.
 The same holds for the Rust suite (board #476, 2026-10-28): two agents' Rust
 gates ran at once and `tests/setup_cli.rs`'s gateway, told to listen on the
@@ -743,7 +748,7 @@ flaky wall-clock assertions in the test.
 
 - New module → its `<module>.test.ts` lands in the same commit.
 - Tests are TypeScript (`.test.ts`) — node executes them natively via
-  type stripping, and `npm run check` verifies test code against the
+  type stripping, and `pnpm run check` verifies test code against the
   typed modules it exercises. Deliberately-partial test doubles are cast
   once at the boundary (`as unknown as X`) with a comment; don't build
   full fakes just to satisfy the checker.
@@ -872,7 +877,7 @@ flaky wall-clock assertions in the test.
     bytes.
   Reason: board #265 (t06 flaked during #264) and #268 (the lib tests #265
   missed; validator 15:30, the per-process store dir grew by one per run).
-  A passing full `npm run test:rust` leaves nothing in the temp dir but one
+  A passing full `pnpm run test:rust` leaves nothing in the temp dir but one
   `fresh_process_dir` per prefix (board #269, measured by diffing `/tmp`
   across a run: `tmm-gp-*` and `tmm-spawn-codex-*` had grown by one per run,
   ~130 each, and the symlink fixtures used fixed names). Board #500

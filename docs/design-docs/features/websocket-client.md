@@ -16,7 +16,7 @@ reference to a session, pane, room, issue or project carries its `ServerId`
 (§ A name stopped being an address).
 
 ## How It Works
-- **Browser development has one public origin.** `npm run dev:all` exposes
+- **Browser development has one public origin.** `pnpm run dev:all` exposes
   Vite on `:5173`; Vite proxies WebSocket upgrades at `/ws` and streaming
   downloads at `/dl` to the loopback-bound backend (the gateway service, or
   the watched server with `TEAMMUX_DEV_WITH_SERVER=1`). A fresh

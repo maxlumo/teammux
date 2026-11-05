@@ -32,7 +32,7 @@ import androidx.webkit.WebViewFeature
 // callback.onCustomViewHidden()), it is a final class, and its Kotlin is
 // regenerated from the wry crate on every build. So the app WRAPS it: this
 // client hosts the custom view and forwards every other method wry overrides
-// to wry's own client. `npm run build:android`'s android-env preflight fails
+// to wry's own client. `pnpm run build:android`'s android-env preflight fails
 // when the locked wry overrides a method this file does not (scripts/
 // wry-chrome-client.mjs) — a dropped onShowFileChooser would be a dead
 // attachment picker, silently.
