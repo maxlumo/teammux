@@ -635,6 +635,49 @@ before the connect card is in
   separate free-port preview); do not mistake the existing server's UI for the
   worktree's code and do not restart the supervised server.
 
+### A scratch gateway never reaches the live tmux server (board #14)
+
+A scratch gateway or server you start from an agent's pane (or any shell
+inside tmux) inherits `TMUX` and `TMUX_PANE`, and `src-tauri/src/tmux.rs`
+reads `$TMUX` BEFORE `TMUX_TMPDIR`: the server then drives the LIVE tmux
+server, whatever `TMUX_TMPDIR` says. The pane also carries `TMM_SOCKET`, the
+live gateway's local socket, plus `TMM_PROJECT` and `TMM_AGENT`.
+Incident 2026-11-05 (builder-3, #6 at about 06:10 and #7 at about 06:57 and
+08:06): three scratch gateways started this way used the live tmux server,
+and the 08:06 one's UI listed the live sessions. The live `tmux
+list-sessions` was unchanged and the scratch stores held no projects, so
+nothing was restored; option or hook writes could not be ruled out.
+
+Start every scratch process through `scripts/scratch-env.mjs`, which gives it
+`isolatedEnv` from `scripts/test-rust.mjs`, the same environment every Rust
+test run gets. That drops `TMUX`, `TMUX_PANE`, `TMUX_SOCKET` (Config prefers
+it to `TMUX_TMPDIR`), `TOKEN` and every `TMM_*`, and puts `TMUX_TMPDIR` and
+the XDG roots under one private dir. It also makes every level of the
+server's config root 0700: the store refuses a `state.db` under any level
+others can change, and `mkdir -m 700 -p` sets only the last one.
+
+```bash
+D="$(mktemp -d)/gw"
+node scripts/scratch-env.mjs run "$D" -- src-tauri/target/debug/server   # pid in $D/pid
+# write $D/xdg-config/teammux/config.toml (a free port, a token), then restart it the same way
+node scripts/scratch-env.mjs check "$(cat "$D/pid")"   # exit 0, or names each leaked variable
+kill "$(cat "$D/pid")"                                 # by its own pid, never pkill -f
+```
+
+The check reads `/proc/<pid>/environ`. A process started without the helper
+fails it, naming `TMUX`, `TMUX_PANE`, the `TMM_*` names and an unset
+`TMUX_TMPDIR` (measured 2026-11-05 from a pane). Before relying on the
+scratch gateway, also confirm it sees only its private tmux server: `tmm
+project list` against it (`XDG_CONFIG_HOME=$D/xdg-config TMM_SERVER=ws://127.0.0.1:<port>
+TMM_TOKEN=<token>`, run with `env -u TMUX -u TMUX_PANE -u TMM_SOCKET`) names
+none of the live `tmux list-sessions` names. Without the helper the
+equivalent is `env -u TMUX -u TMUX_PANE -u TMUX_SOCKET -u TMM_SOCKET
+TMUX_TMPDIR=<private> <command>`, but the helper is the one that also drops
+the rest of `TMM_*` and `TOKEN`. `npm run test:rust` and
+`scripts/isolated.mjs` are already isolated. Pinned by
+`scripts/scratch-env.test.ts` (the leak list over this pane's real shape; the
+env, the 0700 levels and the pid file; a shared or relative dir refused).
+
 ### Integrating a reviewed branch (`tmm merge`, board #445)
 
 The integration checkout merges a branch only after reviewer CLEAR and
