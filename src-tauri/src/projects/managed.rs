@@ -126,7 +126,7 @@ fn stop_home_workers(home: &std::path::Path) -> Result<(), String> {
             }
             match (before, observe(pid)) {
                 (_, Seen::Gone) => continue,
-                (_, Seen::Foreign) => return Err(format!("process {pid} holds its home and changed owner while it was read")),
+                (_, Seen::Foreign) => return Err(format!("process {pid} holds its home and cannot be observed (permission denied)")),
                 (Seen::Alive(a), Seen::Alive(b)) if a == b => workers.push((pid, a)),
                 (_, Seen::Unknown(e)) | (Seen::Unknown(e), _) => return Err(format!("process {pid} holds its home and cannot be observed ({e})")),
                 _ => return Err(format!("process {pid} holds its home and changed identity while it was read")),
@@ -153,7 +153,7 @@ fn stop_home_workers(home: &std::path::Path) -> Result<(), String> {
                     .filter_map(|&(pid, start)| match observe(pid) {
                         Seen::Alive(s) if s == start => Some((pid, start, None)),
                         Seen::Unknown(e) => Some((pid, start, Some(e))),
-                        Seen::Foreign => Some((pid, start, Some("it now belongs to another user".into()))),
+                        Seen::Foreign => Some((pid, start, Some("permission denied".into()))),
                         Seen::Alive(_) | Seen::Gone => None,
                     })
                     .collect();
@@ -253,7 +253,8 @@ fn all_pids() -> Result<Vec<libc::pid_t>, String> {
 /// One process's environment as `K=V` byte strings. `Ok(None)` when it has
 /// exited, or when its environment is unreadable (`EACCES`/`EPERM`). That is
 /// another user's process, OR one of ours that is non-dumpable (measured by
-/// validator-2 on #26: ssh-agent reads that way), so it is skipped, not
+/// validator-2 on #26 with a python child that set PR_SET_DUMPABLE=0;
+/// ssh-agent and gpg-agent do the same), so it is skipped, not
 /// proven foreign. Refusing on it would block every remove while such a
 /// process runs. Residual: a worker that hid its environment before
 /// discovery is not found; omp's text-predict worker (18.15.0, 18.16.0)
