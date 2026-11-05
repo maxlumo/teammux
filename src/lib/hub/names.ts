@@ -56,3 +56,9 @@ export function patchNames(rows: readonly AgentLabel[], renamed: AgentLabel): Ag
 
 /** No labels: every name is its own (an older server, a room not read yet). */
 export const NO_LABELS: Names = agentNames([]);
+
+/** The words the server refuses as a label in any case (names.rs
+ * `label_allowed`: address.rs `is_routing_word`, plus the system's sender
+ * `tmm`). The rename dialog says them as you type; the server stays the
+ * judge. names.test.ts reads both Rust functions and fails if they differ. */
+export const RESERVED_LABELS: readonly string[] = ['all', 'human', 'tmm'];

@@ -43,7 +43,7 @@
   import { alertOf } from './notify-centre.svelte.ts';
   import HubSearch from './HubSearch.svelte';
   import { createHubSearch } from './hub-search.svelte.ts';
-  import { agentNames, patchNames } from './names.ts';
+  import { agentNames, patchNames, RESERVED_LABELS } from './names.ts';
   import { HUMAN, agentHue, quotePreview, stateDotColor, mergeMessages, mergeEvents, backendColor as colorOf, feedBlocks, filterBlocks, mergeStates, pickLead, pickDrawerAgent, addressed, addressedTeam, mentionTokens, mentionedAgents, unreadSenders, stoppedAgents, slashCommand, inputModeSwitch, issueSpans, systemLine } from './hub.ts';
   import { issueRef } from './board.ts';
   import { AGENT_TEAM, lacksCap } from '../core/login-caps.ts';
@@ -2394,9 +2394,8 @@
     const draft = agentDraft.trim();
     if (!agentRenaming || !draft) return '';
     if (mentionTokens(`@${draft}`).join(' ') !== draft || !/^[\p{Alphabetic}\p{N}]/u.test(draft)) return t('hubRenameRule');
-    // The server's reserved words (names.rs label_allowed, #21 round 1): the
-    // routing words and the system's own sender, in any case.
-    if (['all', 'human', 'tmm'].includes(draft.toLowerCase())) return t('hubRenameReserved').replace('{name}', draft);
+    // The server's reserved words (#21 round 1), pinned to names.rs.
+    if (RESERVED_LABELS.includes(draft.toLowerCase())) return t('hubRenameReserved').replace('{name}', draft);
     const holder = names.resolve(draft);
     const others = [...managedNames, ...stopped];
     if (holder !== agentRenaming.name && (holder !== draft || others.includes(draft))) return t('hubRenameTaken').replace('{name}', draft).replace('{agent}', names.shown(holder));

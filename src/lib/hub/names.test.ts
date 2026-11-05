@@ -1,6 +1,7 @@
 import assert from 'node:assert/strict';
 import test from 'node:test';
-import { agentNames, patchNames } from './names.ts';
+import { readFileSync } from 'node:fs';
+import { agentNames, patchNames, RESERVED_LABELS } from './names.ts';
 
 // The cases of address.rs's `Names` tests (board #20), read on the client
 // over the same wire table: the client APPLIES the server's labels, it never
@@ -43,4 +44,18 @@ test('an agent_renamed push patches the table in place (#21)', () => {
   assert.deepEqual(after, [{ agent: 'builder', label: 'robert', aliases: ['bob'] }, { agent: 'qa', label: 'tess', aliases: [] }]);
   assert.deepEqual(patchNames(after, { agent: 'new', label: 'n', aliases: [] }).map((l) => l.agent), ['builder', 'qa', 'new'], 'a first label is added');
   assert.deepEqual(before[0]!.label, 'bob', 'the old table is not mutated');
+});
+
+test('the reserved words the rename hint says are exactly the server\'s (#21 round 1)', () => {
+  const read = (p: string) => readFileSync(new URL(`../../../src-tauri/src/${p}`, import.meta.url), 'utf8');
+  const body = (src: string, fn: string) => {
+    const at = src.indexOf(`fn ${fn}(`);
+    assert.ok(at >= 0, `${fn} exists`);
+    return src.slice(at, src.indexOf('\n}\n', at));
+  };
+  const words = (src: string) => [...src.matchAll(/eq_ignore_ascii_case\("([^"]+)"\)/gu)].map((m) => m[1]);
+  const allowed = body(read('projects/names.rs'), 'label_allowed');
+  assert.match(allowed, /crate::address::is_routing_word\(l\)/u, 'label_allowed refuses the routing words');
+  const server = [...words(body(read('address.rs'), 'is_routing_word')), ...words(allowed)];
+  assert.deepEqual([...RESERVED_LABELS].sort(), server.sort());
 });

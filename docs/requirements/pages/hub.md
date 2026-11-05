@@ -147,7 +147,8 @@ completion).
   type: its window, home and `TMM_AGENT` keep the physical name, its old names
   still reach it, and its own prompt follows at its next start (the note says
   so). While you type, the name rule (one `@address`), the server's reserved
-  words (`all`, `human`, `tmm`, any case; round 1) and a name another agent
+  words (`all`, `human`, `tmm`, any case; round 1, `names.ts` `RESERVED_LABELS`, which
+  `names.test.ts` pins to `names.rs` `label_allowed`) and a name another agent
   of this project has in the server's table are said inline as a hint; the
   server decides, and its refusal (a reserved word such as `tmm`, a name taken
   meanwhile) is said in the same line, the dialog staying open. **Reset to
