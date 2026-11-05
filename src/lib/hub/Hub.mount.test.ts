@@ -2233,6 +2233,35 @@ test('a peer Stop captures its room, deduplicates pending clicks and never selec
   }
 });
 
+test('two overlapping stage jobs in one project both land while the uploads .gitignore is still in flight (#25 round 1)', { timeout: 60000 }, async (context) => {
+  // validator-2 S1: every stage re-uploaded .tmm/uploads/.gitignore, and the
+  // server refuses a second live begin for one destination ("upload in
+  // progress"), so the second job's files all failed. The first job's
+  // .gitignore commit is held here, so the second job meets it live.
+  let release!: () => void;
+  const gate = new Promise<void>((r) => { release = r; });
+  let held = false;
+  const ch = uploadChannel(undefined, (path) => {
+    if (!path.endsWith('/.gitignore') || held) return;
+    held = true;
+    return gate;
+  });
+  const app = await composerFixture(context, { ...ch.rpc, fetch: ch.fetch });
+  const file = (name: string) => new app.window.File([name], name, { type: 'text/plain' });
+  try {
+    await app.paste([file('first.txt')]);
+    await app.wait(() => ch.begun.includes('/fixture/.tmm/uploads/.gitignore'));
+    await app.paste([file('second.txt')]);
+    await app.wait(() => ch.committed.some((c) => c.path.endsWith('-second.txt') || c.path.endsWith('/second.txt')));
+    assert.equal(app.document.querySelector('.pend-chip.err'), null, 'the second job is not failed by the first job\'s .gitignore');
+    release();
+    await app.wait(() => ch.committed.some((c) => c.path.endsWith('first.txt')));
+    await app.wait(() => app.input.value.includes('[file:2]'));
+    assert.equal(app.document.querySelector('.pend-chip.err'), null, 'both landed');
+    assert.equal(ch.committed.filter((c) => c.path.endsWith('/.gitignore')).length, 1, 'written once');
+  } finally { release(); await app.close(); }
+});
+
 test('Composer paste keeps Office words, stages files once and isolates overlapping generations', { timeout: 60000 }, async (context) => {
   const uploads: Array<{ path: string; job: ReturnType<typeof deferred<object>> }> = [];
   const posts: string[] = [];

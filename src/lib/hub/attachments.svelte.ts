@@ -45,7 +45,7 @@ export type StagerHost = {
   /** The RPCs the uploads go through, the host's own server's (board #335
    * ②b-3). A module, not a component: it has no context to read, so its
    * host hands it the api it read at init. */
-  api: Pick<WsApi, 'fsMkdir' | 'fsUploadBegin' | 'fsUploadResume' | 'fsUploadAbort'>;
+  api: Pick<WsApi, 'fsMkdir' | 'fsStat' | 'fsUploadBegin' | 'fsUploadResume' | 'fsUploadAbort'>;
   /** The project directory uploads land under (none: nothing stages). */
   ws: () => string | null | undefined;
   getText: () => string;
@@ -83,10 +83,26 @@ export function attachPaste(e: ClipboardEvent, stage: (files: File[]) => unknown
 }
 
 export function createStager(host: StagerHost) {
-  const { fsMkdir, fsUploadBegin, fsUploadResume, fsUploadAbort } = host.api;
+  const { fsMkdir, fsStat, fsUploadBegin, fsUploadResume, fsUploadAbort } = host.api;
   // One file, sliced chunk by chunk, never read whole or base64'd.
   const api = { begin: fsUploadBegin, resume: fsUploadResume, abort: fsUploadAbort };
   const put = (dest: string, blob: Blob) => uploadFile({ dest, size: blob.size, source: async (start, end) => blob.slice(start, end), api });
+  // The uploads dir ignores itself, written only when MISSING (board #25
+  // round 1, validator-2 S1): the channel holds one upload per destination
+  // ("upload in progress", upload.rs `begin`), so writing it on every stage
+  // failed every file of a second, overlapping job. A lost race on this one
+  // file is fine: another writer is writing the same two bytes, and if that
+  // one fails, the next stage finds it missing and writes it.
+  const ignoreSelf = async (path: string) => {
+    if (await fsStat(path).then(() => true, () => false)) return;
+    try {
+      await put(path, new Blob(['*\n']));
+    } catch (err) {
+      if (/upload in progress/.test(errText(err))) return;
+      if (await fsStat(path).then(() => true, () => false)) return;
+      throw err;
+    }
+  };
   // The staged set's generation: bumped whenever it is invalidated (project
   // switch, explicit clear). An async stage job snapshots it at entry and
   // refuses to touch the staged set or the text once stale — without this,
@@ -158,7 +174,7 @@ export function createStager(host: StagerHost) {
         if (stale()) return;
         // Self-gitignored like the other .tmm runtime dirs — an attachment
         // must never show up in the project's `git status`.
-        await put(`${ws}/.tmm/uploads/.gitignore`, new Blob(['*\n']));
+        await ignoreSelf(`${ws}/.tmm/uploads/.gitignore`);
         if (stale()) return;
         for (const f of files) {
           let item: Attachment;

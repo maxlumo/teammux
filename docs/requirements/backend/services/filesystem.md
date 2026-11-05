@@ -14,7 +14,6 @@ Server-side filesystem operations. File: `src-tauri/src/fs.rs`
 - `delete_path(path)` — delete file or directory (recursive for dirs)
 - `rename_path(from, to)` — rename/move
 - `download_file(path)` — read file into memory + base64 encode (≤50MB `MAX_READ_SIZE`), returns `(filename, data)`. Used for inline PDF/image preview. User-initiated file downloads go through the streaming HTTP `/dl` endpoint instead (no size limit, no base64 overhead); see `docs/design-docs/features/file-handling.md`.
-- `upload_file(path, data_b64)` — upload from base64, creates parent dirs
 
 ## Helpers
 - `mime_hint(name)` — infer MIME type from file extension (supports ~45 extensions, incl. `video/*` for mp4/m4v/webm/mov/mkv/ogv and `audio/*` for mp3/m4a/aac/ogg/oga/opus/wav/flac/weba, via the shared `streamed_media_type`)
