@@ -6364,12 +6364,19 @@ test('Rename on the card menu opens one dialog: the label goes to the server, a 
     await typeLabel('bob');
     assert.match(app.document.querySelector('.dlg [role=alert]')?.textContent ?? '', /bob is already a name of bob/u, 'another agent’s name in the table is said before asking');
     assert.equal(button('Rename')!.disabled, true);
-    refuse = "'tmm' is reserved: it is the system's sender, and an agent shown as it would read as the system";
-    await typeLabel('tmm');
+    // #21 round 0 (validator): the routing words and the system's sender are
+    // the server's rule too (names.rs label_allowed), said as you type.
+    for (const word of ['all', 'human', 'tmm', 'ALL', 'Tmm']) {
+      await typeLabel(word);
+      assert.match(app.document.querySelector('.dlg [role=alert]')?.textContent ?? '', new RegExp(`${word} is reserved`, 'u'), `${word} is reserved, said as you type`);
+      assert.equal(button('Rename')!.disabled, true);
+    }
+    refuse = "'carol' is being spawned in this project";
+    await typeLabel('carol');
     button('Rename')!.click();
     await settleHub(app);
-    assert.deepEqual(calls.at(-1), ['fixture', 'alice', 'tmm']);
-    assert.match(app.document.querySelector('.dlg [role=alert]')?.textContent ?? '', /'tmm' is reserved/u, 'the server decides; its reason is said inline');
+    assert.deepEqual(calls.at(-1), ['fixture', 'alice', 'carol']);
+    assert.match(app.document.querySelector('.dlg [role=alert]')?.textContent ?? '', /'carol' is being spawned/u, 'the server decides; its reason is said inline');
     assert.ok(app.document.querySelector('.dlg'), 'and the dialog stays');
     refuse = '';
     await typeLabel('robin');

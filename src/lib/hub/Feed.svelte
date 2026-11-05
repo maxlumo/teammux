@@ -20,7 +20,7 @@
   import { FONT_CHANGE_EVENT } from '../app/fonts.svelte.ts';
   import { askTurns, blockKey } from './hub-turns.ts';
   import { NO_LABELS } from './names.ts';
-  import { parseQuote, TAIL_GAP, bottomGap, tailAfterScroll, markMentions, mentionedAgents, splitImages, toolColor, pickAnchor, toolEventParts, elideTail, foldedCommandArgs, markIssueRefs, foldLines, statusNote, noteStateColor, runtimeLabel, agentHue, sysParts, sysVerbColor, boardLine, boardStatusColor, promptParts, sameDay, continuesRun, perLineOf, STEPS_ROWS, stateIsLive } from './hub.ts';
+  import { parseQuote, TAIL_GAP, bottomGap, tailAfterScroll, markMentions, showMentions, mentionedAgents, splitImages, toolColor, pickAnchor, toolEventParts, elideTail, foldedCommandArgs, markIssueRefs, foldLines, statusNote, noteStateColor, runtimeLabel, agentHue, sysParts, sysVerbColor, boardLine, boardStatusColor, promptParts, sameDay, continuesRun, perLineOf, STEPS_ROWS, stateIsLive } from './hub.ts';
 
   let {
     blocks = [], agents = [], managedNames = [], names = NO_LABELS, issueIds = [], selected = '', visible = false, compact = false,
@@ -1083,7 +1083,7 @@
       <div class="note" class:warn={b.event.kind === 'warn'} class:appear-rise={b.ts > openedAt}>
         {#if b.event.kind === 'warn'}<Icon name="info" size={11} />{/if}
         <span class="n-who">{windowName(b.window)}</span>
-        <span class="n-text">{activityLabel(b.event)}</span>
+        <span class="n-text">{showMentions(activityLabel(b.event), names)}</span>
         <span class="n-ts">{fmtTime(b.ts)}</span>
       </div>
     {:else}

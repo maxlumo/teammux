@@ -3,7 +3,7 @@ import { ALL_TARGET, teamTarget } from './hub-composer.ts';
 import assert from 'node:assert/strict';
 import { readFileSync } from 'node:fs';
 import type { FeedBlock } from './hub.ts';
-import { needsPerson, PERSON_DETAILS, wakeLine, localWhen, listWhen, gapWalkStep, TAIL_GAP, bottomGap, tailAfterScroll, uploadImagePath, uploadFilePath, imageId, pastedFiles, textIsThePaste, isSessionStart, STEPS_ROWS, clampStepsRows, markMentions, mergeMessages, stateDotColor, stateIsLive, stateNeedsYou, feedBlocks, systemLine, sysParts, sysVerbColor, pickLead, pickDrawerAgent, addressed, addressedTeam, isSelfReport, toolEventParts, splitImages, isDirectUrl, fmtElapsed, agoShort, unreadSenders, stoppedAgents, toolColor, pickAnchor, elideTail, ELIDE, slashCommand, commandPalette, KIRO_COMMANDS, OFFERED_COMMANDS, DSH_COMMANDS, ctxColor, statusNote, noteStateColor, fuzzyRank, sameDay, draftUpdate, DRAFT_MAX, readlineEdit, squashWs, mentionsAgent, mentionTokens, mentionedAgents, chipExtras, filterBlocks, HUMAN, parseQuote, quotePreview, foldLines, PHONE_FOLD_LINES, mergeStates, mergeEvents , boardLine, boardStatusColor, promptParts, perLineOf, modelLabel, runtimeLabel, agentHue, AGENT_HUES, echoContains, echoTruncated, PROMPT_ECHO_MAX, sentCommand, foldedCommandArgs, inputModeSwitch, continuesRun, RUN_GAP_MS } from './hub.ts';
+import { needsPerson, PERSON_DETAILS, wakeLine, localWhen, listWhen, gapWalkStep, TAIL_GAP, bottomGap, tailAfterScroll, uploadImagePath, uploadFilePath, imageId, pastedFiles, textIsThePaste, isSessionStart, STEPS_ROWS, clampStepsRows, markMentions, showMentions, mergeMessages, stateDotColor, stateIsLive, stateNeedsYou, feedBlocks, systemLine, sysParts, sysVerbColor, pickLead, pickDrawerAgent, addressed, addressedTeam, isSelfReport, toolEventParts, splitImages, isDirectUrl, fmtElapsed, agoShort, unreadSenders, stoppedAgents, toolColor, pickAnchor, elideTail, ELIDE, slashCommand, commandPalette, KIRO_COMMANDS, OFFERED_COMMANDS, DSH_COMMANDS, ctxColor, statusNote, noteStateColor, fuzzyRank, sameDay, draftUpdate, DRAFT_MAX, readlineEdit, squashWs, mentionsAgent, mentionTokens, mentionedAgents, chipExtras, filterBlocks, HUMAN, parseQuote, quotePreview, foldLines, PHONE_FOLD_LINES, mergeStates, mergeEvents , boardLine, boardStatusColor, promptParts, perLineOf, modelLabel, runtimeLabel, agentHue, AGENT_HUES, echoContains, echoTruncated, PROMPT_ECHO_MAX, sentCommand, foldedCommandArgs, inputModeSwitch, continuesRun, RUN_GAP_MS } from './hub.ts';
 import type { HubActivityEvent, HubAgent } from '../core/ws.ts';
 import { renderMarkdown } from '../core/markdown.ts';
 import { drawerWindowPills, mentionPalette, occurrenceKeys, rosterGroups, rosterMarker, sortAgentsForRoster, stoppedGroups } from './hub.ts';
@@ -2305,4 +2305,16 @@ test('issueSpans and markIssueRefs: only a word-start #number this project has b
   assert.equal(markIssueRefs(html, new Set()), html, 'no board known: the html as it was');
   // The shared walker still serves mentions the same way.
   assert.match(markMentions(markIssueRefs(renderMarkdown('@bob see #336'), ids), ['bob']), /<span class="m-to"[^>]*>@bob<\/span> see <a class="issue-ref"/u);
+});
+
+test('showMentions shows each address by its label, the quoted ＠ form too, and leaves the rest word for word (#21 round 1)', async () => {
+  const { agentNames } = await import('./names.ts');
+  const names = agentNames([{ agent: 'dev', label: 'robin', aliases: [] }]);
+  // validator's rows after renaming dev to robin (#21 round 0, finding 2)
+  assert.equal(showMentions('unconfirmed: [tmm chat 16:53] lead: ＠dev please check the build', names),
+    'unconfirmed: [tmm chat 16:53] lead: ＠robin please check the build');
+  assert.equal(showMentions('your message of 16:53 to @dev was not confirmed; @lead and @all too', names),
+    'your message of 16:53 to @robin was not confirmed; @lead and @all too');
+  assert.equal(showMentions('mail dev@dev.io, not @devx', names), 'mail dev@dev.io, not @devx', 'not an address, or another name');
+  assert.equal(showMentions('@dev', agentNames([])), '@dev', 'no labels: unchanged');
 });

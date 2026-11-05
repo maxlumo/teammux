@@ -1411,6 +1411,23 @@ export function markMentions(html: string, names: readonly string[], labels: Nam
   });
 }
 
+/** Plain text with each `@address` shown by its label (board #21 round 1):
+ * the feed's notes quote a delivery line word for word (`unconfirmed: [tmm
+ * chat …] lead: ＠dev …`), and the room quotes with `＠` so the quote routes
+ * nowhere (address.rs). The addresses are `mentionSpans`'s, read with `＠`
+ * as `@` (one UTF-16 unit each, so the spans fit the original), and each keeps
+ * its own sigil; a name the table does not know stays as written. */
+export function showMentions(text: string, labels: Names): string {
+  let out = '', from = 0;
+  for (const { at, name } of mentionSpans(text.replace(/＠/gu, '@'))) {
+    const shown = labels.shown(name);
+    if (shown === name) continue;
+    out += `${text.slice(from, at + 1)}${shown}`;
+    from = at + 1 + name.length;
+  }
+  return out + text.slice(from);
+}
+
 /** The spawn kick's echo: `[YYYY-MM-DD HH:MM] (session start)`. Also matches
  * the pre-2026-08-18 instruction kick, because rooms are persisted. */
 export function isSessionStart(text: string | null | undefined): boolean {
