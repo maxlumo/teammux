@@ -1267,3 +1267,50 @@ test('an older server names no group: the flat list stays, with no headings (#7)
     assert.equal(app.document.querySelector('.agent-group'), null);
   } finally { await app.close(); }
 });
+
+// Board #7 round 2 (reviewer 08:57, orchestrator D2: "the page updates when it
+// lands"): an Agents page opened on a server that has not checked yet reads
+// every agent as unknown, waits for the server's ONE in-flight check
+// (backends_check {first}), and greys by itself when it lands: no reload, no
+// visibility change, no second probe.
+test('an open Agents page greys an unusable harness when the first background check lands, by itself (#7 round 2)', async context => {
+  let landed = false;
+  let release!: () => void;
+  const firstCalls: unknown[] = [];
+  let lists = 0;
+  const unknown = listed.map((d) => ({ ...d, availability: { state: 'unknown' } }));
+  const app = await (await compiled).mount(context, {
+    props: { visible: true, section: 'agents' },
+    modules: [rpc({
+      registryList: async () => { lists++; return { agents: landed ? listed : unknown }; },
+      backendsCheck: (...args: unknown[]) => { firstCalls.push(args); return new Promise<void>((ok) => { release = () => { landed = true; ok(); }; }); },
+    })],
+  });
+  try {
+    const grok = () => [...app.document.querySelectorAll<HTMLButtonElement>('.agent-group .side-row')].find((r) => r.querySelector('.r-name')?.textContent === 'grok');
+    for (let i = 0; i < 12 && !grok(); i++) await app.flush();
+    assert.ok(grok(), 'the grouped list is shown');
+    assert.ok(!grok()!.classList.contains('unavailable'), 'unknown greys nothing');
+    assert.equal(firstCalls.length, 1, 'the page waits for the one check');
+    assert.equal(JSON.stringify(firstCalls[0]), '[{"first":true}]', 'through backends_check {first}');
+    const before = lists;
+    release();
+    for (let i = 0; i < 12 && !grok()?.classList.contains('unavailable'); i++) await app.flush();
+    assert.ok(grok()!.classList.contains('unavailable'), 'greyed when the check lands, with nothing else happening');
+    assert.equal(lists, before + 1, 'one re-list');
+    assert.equal(firstCalls.length, 1, 'and no second wait');
+  } finally { await app.close(); }
+});
+
+test('a page whose list is already decided waits for nothing (#7 round 2)', async context => {
+  let firstCalls = 0;
+  const app = await (await compiled).mount(context, {
+    props: { visible: true, section: 'agents' },
+    modules: [rpc({ registryList: async () => ({ agents: listed }), backendsCheck: async () => { firstCalls++; } })],
+  });
+  try {
+    for (let i = 0; i < 12 && !app.document.querySelector('.agent-group'); i++) await app.flush();
+    await app.flush();
+    assert.equal(firstCalls, 0);
+  } finally { await app.close(); }
+});

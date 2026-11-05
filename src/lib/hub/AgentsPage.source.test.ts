@@ -170,10 +170,22 @@ test('the Agents list groups use the shared atoms, and every spawn surface reads
   // validator-2 P1 (round 1): a TEAM start is a spawn too; both team surfaces
   // read the one team reader and offer no start for an unavailable team.
   const hub = spawners['Hub.svelte'];
-  assert.match(hub, /import \{ teamUnavailableText, unavailableText \} from '\.\/backends-view\.ts'/u);
+  assert.match(hub, /import \{ firstReport, settleAvailability, teamUnavailableText, unavailableText \} from '\.\/backends-view\.ts'/u);
   assert.match(hub, /<button class="start-row team" class:unavailable=\{!!why\} disabled=\{starting \|\| !!why\}/u, 'the roster start list team row');
   assert.match(hub, /<button class="agent-pick team" disabled=\{starting \|\| !!why\}/u, 'the start dialog team row');
   assert.equal(hub.match(/@const why = teamUnavailableText\(tm, t\)/gu)?.length, 2);
+  // Round 2 (reviewer 08:57): every spawn surface waits for the first
+  // readiness report through the ONE helper, guarded to once.
+  assert.match(source, /settleAvailability\(defs, firstReport\(guardOwner\.api\)\)/u);
+  assert.match(hub, /settleAvailability\(\[\.\.\.registry, \.\.\.teams\], firstReport\(scope\.runtime\.api\)\)/u);
+  assert.match(spawners['CreateProjectDialog.svelte'], /settleAvailability\(registry, firstReport\(scope\.runtime\.api\)\)/u);
+  for (const [file, text] of Object.entries(spawners)) assert.doesNotMatch(text, /backends_check/u, `${file}: no direct probe`);
+  // The waits are one call each, never a timer or a poll.
+  for (const [file, name] of [['Hub.svelte', 'loadStartLists'], ['CreateProjectDialog.svelte', 'loadRegistry']] as const) {
+    const body = new RegExp(`async function ${name}\\([^)]*\\) \\{[\\s\\S]*?\\n  \\}`, 'u').exec(spawners[file])?.[0] ?? '';
+    assert.ok(body, `${file}: ${name}`);
+    assert.doesNotMatch(body, /setTimeout|setInterval|poll\(/u, `${file}: ${name} waits once, it never polls`);
+  }
   // English and Chinese strings exist for every new key.
   for (const key of ['agentsGroupDefaults', 'agentsGroupCustom', 'agentsUnavailable', 'agentsUnavailableMissing', 'teamsUnavailable', 'teamsUnavailableMissing']) {
     assert.equal(i18n.match(new RegExp(`\\b${key}:`, 'gu'))?.length, 2, key);

@@ -15,7 +15,7 @@
   import { useServerScope } from '../app/server-context.ts';
   import { backendColor as colorOf } from '../hub/hub.ts';
   import { t } from '../core/i18n.svelte.ts';
-  import { unavailableText } from '../hub/backends-view.ts';
+  import { firstReport, settleAvailability, unavailableText } from '../hub/backends-view.ts';
 
   let { compact = false, oncreated, oncancel } = $props();
   // This server's RPCs and backend catalog, read once at init (board #335 ②b).
@@ -49,9 +49,17 @@
   let creating = $state(false);
   let error = $state('');
 
-  $effect(() => {
-    registryList().then((r) => { registry = r.agents ?? []; }).catch(() => {});
-  });
+  // Board #7 round 2: listed before the server's first readiness check, the
+  // dialog waits ONCE for that check and re-reads when it lands.
+  let alive = true;
+  $effect(() => () => { alive = false; });
+  async function loadRegistry(settle) {
+    const r = await registryList().catch(() => null);
+    if (!r || !alive) return;
+    registry = r.agents ?? [];
+    if (settle && await settleAvailability(registry, firstReport(scope.runtime.api)) && alive) void loadRegistry(false);
+  }
+  $effect(() => { void loadRegistry(true); });
 
   function toggle(n) {
     agents = agents.includes(n) ? agents.filter((x) => x !== n) : [...agents, n];

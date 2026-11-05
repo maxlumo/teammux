@@ -38,7 +38,7 @@
   import Icon from '../ui/Icon.svelte';
   import { onDestroy, untrack, tick as settled } from 'svelte';
   import { t } from '../core/i18n.svelte.ts';
-  import { teamUnavailableText, unavailableText } from './backends-view.ts';
+  import { firstReport, settleAvailability, teamUnavailableText, unavailableText } from './backends-view.ts';
   import { sortRows } from '../projects/projects.ts';
   import { alertOf } from './notify-centre.svelte.ts';
   import HubSearch from './HubSearch.svelte';
@@ -1704,6 +1704,21 @@
     return String(e?.message ?? e);
   }
 
+  /** The start surfaces' lists: registry agents and configured teams. Read
+   * before the server's first readiness check, they say `unknown`; the Hub
+   * then waits ONCE for that check and re-reads them when it lands (board #7
+   * round 2, the same settleAvailability the Agents page uses). */
+  let settleAsked = false;
+  async function loadStartLists() {
+    const [r, tm] = await Promise.all([registryList().catch(() => null), teamsList().catch(() => null)]);
+    if (!alive) return;
+    if (r) registry = r.agents ?? [];
+    if (tm) teams = tm.teams ?? [];
+    if (settleAsked || (!r && !tm)) return;
+    settleAsked = true;
+    if (await settleAvailability([...registry, ...teams], firstReport(scope.runtime.api)) && alive) void loadStartLists();
+  }
+
   /** Member names of a configured team, for the preset rows. */
   function teamMembers(tm) {
     try { return (JSON.parse(tm.members) ?? []).map((m) => (m.team ? `+${m.team}` : m.name)).filter(Boolean); } catch { return []; }
@@ -2081,8 +2096,7 @@
   });
   $effect(() => {
     if (!visible) return;
-    registryList().then((r) => { registry = r.agents ?? []; }).catch(() => {});
-    teamsList().then((r) => { teams = r.teams ?? []; }).catch(() => {});
+    void loadStartLists();
     // One request of each kind in flight at most (core/poll.ts, #444).
     const stops = [poll(loadAgents.tick, 5000), poll(loadActivity.tick, 5000), poll(loadFeed.tick, 10000)];
     return () => { for (const stop of stops) stop(); };

@@ -282,3 +282,24 @@ export function teamUnavailableText(team: { availability?: Availability & { memb
   return t(key).replace('{member}', a.member ?? '').replace('{program}', a.backend ?? '')
     .replace('{names}', missing.join(', ')).replace('{reason}', t(reasonKey(a.reason)));
 }
+
+/** Board #7 round 2 (reviewer 08:57; orchestrator D2: "the page updates when
+ * it lands"). A list read before the server's first readiness check says
+ * `unknown`; the server has started that one check. If any listed agent or
+ * team is unknown this waits for it through `ask` (backends_check {first}:
+ * joined, never a second probe) and resolves true, so the caller re-lists
+ * ONCE; false when nothing was unknown, there is no `ask` (an older server),
+ * or the wait failed. The caller asks at most once per page and runtime, so a
+ * check that keeps failing never loops. */
+export async function settleAvailability(rows: { availability?: Availability }[], ask: (() => Promise<unknown>) | undefined): Promise<boolean> {
+  if (!ask || !rows.some((r) => r?.availability?.state === 'unknown')) return false;
+  try { await ask(); return true; } catch { return false; }
+}
+
+/** The wait settleAvailability uses: `backends_check {first: true}` through
+ * the runtime's one `backendsCheck` wrapper (one declaration per RPC), or
+ * undefined when the API has none (a test double, an older client). */
+export function firstReport(api: { backendsCheck?: (arg?: string | { first: true }) => Promise<unknown> } | undefined): (() => Promise<unknown>) | undefined {
+  const check = api?.backendsCheck;
+  return check ? () => check({ first: true }) : undefined;
+}

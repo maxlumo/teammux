@@ -176,3 +176,15 @@ test('a team names the member that makes it unavailable, in words (#7 round 1)',
     assert.equal(teamUnavailableText({ availability }, t), '', JSON.stringify(availability));
   }
 });
+
+test('a list read before the first check waits once for it; a decided list or an older server waits for nothing (#7 round 2)', async () => {
+  const { settleAvailability } = await import('./backends-view.ts');
+  let asks = 0;
+  const ask = async () => { asks++; };
+  assert.equal(await settleAvailability([{ availability: { state: 'available' } }, { availability: { state: 'unknown' } }], ask), true);
+  assert.equal(asks, 1);
+  assert.equal(await settleAvailability([{ availability: { state: 'unavailable' } }, {}], ask), false, 'decided, or an older server that names no availability');
+  assert.equal(await settleAvailability([{ availability: { state: 'unknown' } }], undefined), false, 'no backendsCheck');
+  assert.equal(await settleAvailability([{ availability: { state: 'unknown' } }], async () => { throw new Error('down'); }), false, 'a failed wait re-lists nothing');
+  assert.equal(asks, 1);
+});

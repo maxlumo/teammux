@@ -26,7 +26,7 @@
   import BackendsSection from './BackendsSection.svelte';
   import { FAILED_MODELS, NO_MODELS, defaultLabel, readModels } from './models-view.ts';
   import { watchBackendsCap } from './backends-cap.svelte.ts';
-  import { agentGroups, unavailableText } from './backends-view.ts';
+  import { agentGroups, firstReport, settleAvailability, unavailableText } from './backends-view.ts';
 
   // The backends a registry agent can run on and the effort levels each
   // accepts come from the SERVER (`backends_list`, board #130) — the client
@@ -136,6 +136,9 @@
   // reactive: it orders answers, it is never shown.
   const readGen = { agents: 0, teams: 0, mcp: 0 };
   let alive = true;
+  // One wait for the first readiness report per page (board #7 round 2):
+  // the page is bound to one server for life (guardOwner).
+  let settleAsked = false;
   $effect(() => () => { alive = false; });
   let editing = $state(null);   // agent working copy or null
   let isNew = $state(false);
@@ -521,6 +524,12 @@
       }
     };
     const a = await read('agents', registryList); if (a) defs = a.agents ?? [];
+    // Board #7 round 2: listed before the server's first readiness check,
+    // the page waits for that one check and re-lists when it lands.
+    if (a && !settleAsked) {
+      settleAsked = true;
+      void settleAvailability(defs, firstReport(guardOwner.api)).then((again) => { if (again && alive) void reload(); });
+    }
     const tm = await read('teams', teamsList); if (tm) teams = tm.teams ?? [];
     try { skills = (await skillsList()).skills ?? []; } catch { /* keep last */ }
     const m = await read('mcp', mcpList); if (m) mcps = m.mcp ?? [];

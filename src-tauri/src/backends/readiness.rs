@@ -1176,6 +1176,37 @@ pub fn availability() -> (bool, impl Fn(&str) -> Option<Value>) {
     (checked, |backend: &str| LAST.unavailable(backend))
 }
 
+/// One Refresh through the bounded REFRESH flight (joining one in flight),
+/// whose answer becomes the last report (board #7): the Backends button, the
+/// background check a first list starts, and `first`.
+fn refresh_once() -> Value {
+    REFRESH.run(REFRESH_BUDGET, refresh_timed_out, |deadline| {
+        // Every Refresh's answer, a late one or a background one included,
+        // is what availability reads.
+        let v = refresh(deadline);
+        LAST.remember(&v);
+        v
+    })
+}
+
+/// `backends_check {first: true}` (board #7 round 2, reviewer 08:57: an open
+/// page must update when the first background Refresh lands). With a report
+/// it answers `{checked: true}` at once and probes nothing; without one it
+/// runs the one Refresh, which JOINS the flight a first `registry_list`
+/// started, so the waiting page gets that check's end and no second probe.
+/// Bounded by REFRESH_BUDGET. `tmm registry list` never asks it: tmm never
+/// blocks.
+pub fn first() -> Value {
+    first_with(&LAST, refresh_once)
+}
+
+fn first_with(last: &LastReport, run: impl FnOnce() -> Value) -> Value {
+    if last.checked() {
+        return json!({ "checked": true });
+    }
+    run()
+}
+
 /// A Test that did not answer by its deadline.
 fn test_timed_out(b: Backend) -> Value {
     json!({ "test": { "name": b.name(), "set_up": SetUp::unknown("check_timeout").to_json(), "answers": { "state": "unknown", "count": null, "reason": "check_timeout" } } })
@@ -1185,13 +1216,7 @@ fn test_timed_out(b: Backend) -> Value {
 /// `TESTABLE` backend. `Err` is an invalid-params message.
 pub fn check(test_of: Option<&str>) -> Result<Value, String> {
     match test_of {
-        None => Ok(REFRESH.run(REFRESH_BUDGET, refresh_timed_out, |deadline| {
-            // Every Refresh's answer, a late one or a background one
-            // included, is what availability reads (board #7).
-            let v = refresh(deadline);
-            LAST.remember(&v);
-            v
-        })),
+        None => Ok(refresh_once()),
         Some(name) => {
             let b = Backend::parse(name).ok_or_else(|| format!("unknown backend '{name}'"))?;
             if !TESTABLE.contains(&b) {
@@ -1226,6 +1251,21 @@ mod tests {
         assert_eq!(unavailable(&timed_out), None, "a failed check greys nothing");
         assert_eq!(unavailable(&json!({ "name": "x" })), None, "absent facts grey nothing");
         assert_eq!(unavailable(&r(json!({ "state": "present" }), json!({ "state": "present" }))), None);
+    }
+
+    /// Board #7 round 2 (reviewer 08:57): `first` waits for the report an
+    /// open page needs and never probes twice. With a report it answers at
+    /// once and runs nothing; without one it runs (joins) the one Refresh.
+    #[test]
+    fn first_answers_from_the_report_or_runs_the_one_refresh() {
+        let last = LastReport::default();
+        let runs = std::cell::Cell::new(0);
+        let found = json!({ "backends": [{ "name": "grok", "installed": { "state": "missing", "reason": "not_found" } }] });
+        let run = || { runs.set(runs.get() + 1); last.remember(&found); found.clone() };
+        assert_eq!(first_with(&last, run), found, "no report yet: the Refresh's own answer");
+        assert_eq!(runs.get(), 1);
+        assert_eq!(first_with(&last, || { runs.set(runs.get() + 1); json!({}) }), json!({ "checked": true }), "a report exists: answered at once");
+        assert_eq!(runs.get(), 1, "and nothing probed");
     }
 
     /// Board #7: the server keeps its last Refresh that FOUND something; one

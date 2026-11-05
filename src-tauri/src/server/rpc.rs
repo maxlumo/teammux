@@ -221,9 +221,17 @@ fn dispatch(req: &Request, token: &str) -> Result<serde_json::Value, RpcError> {
         // the readiness budgets, which is what this spawn_blocking door is for.
         #[cfg(not(any(target_os = "android", target_os = "ios")))]
         "backends_check" => {
-            let allowed = p.is_null() || p.as_object().is_some_and(|o| o.keys().all(|k| k == "test"));
-            if !allowed || p.get("test").is_some_and(|t| !t.is_string() && !t.is_null()) {
-                return Err(RpcError::InvalidParams("backends_check takes only an optional test: <backend>".into()));
+            let allowed = p.is_null() || p.as_object().is_some_and(|o| o.keys().all(|k| k == "test" || k == "first"));
+            if !allowed || p.get("test").is_some_and(|t| !t.is_string() && !t.is_null()) || p.get("first").is_some_and(|f| !f.is_boolean()) {
+                return Err(RpcError::InvalidParams("backends_check takes only an optional test: <backend> or first: true".into()));
+            }
+            // Board #7 round 2: `first` waits for the report an open Agents
+            // page needs (answered at once when one exists), never a 2nd probe.
+            if p.get("first") == Some(&serde_json::Value::Bool(true)) {
+                if p.get("test").is_some_and(|t| !t.is_null()) {
+                    return Err(RpcError::InvalidParams("backends_check: first and test are exclusive".into()));
+                }
+                return Ok(crate::backends::readiness::first());
             }
             crate::backends::readiness::check(p.get("test").and_then(|t| t.as_str())).map_err(RpcError::InvalidParams)
         }
@@ -913,6 +921,9 @@ mod tests {
             serde_json::json!({ "test": "claude" }),
             serde_json::json!({ "test": "nope" }),
             serde_json::json!({ "test": "kiro", "extra": true }),
+            // Board #7 round 2: `first` is a boolean and excludes `test`.
+            serde_json::json!({ "first": "yes" }),
+            serde_json::json!({ "first": true, "test": "kiro" }),
         ] {
             let r = call(p.clone());
             assert_eq!(r.error.as_ref().map(|e| e.code), Some(ERR_INVALID_PARAMS), "{p}");
