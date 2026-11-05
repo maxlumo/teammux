@@ -210,6 +210,9 @@ hide that.
    comes from the manager's `DefaultOOMPolicy`; on this host it was `stop`.
    With `continue` the gateway keeps running and only the killed process is
    lost. It does not make the gateway itself immune to being the OOM victim.
+   The gateway also ignores SIGXFSZ (board #34): under a file-size limit
+   (`RLIMIT_FSIZE`), a write past it fails with EFBIG on that request alone
+   instead of the signal's default, which terminates the whole gateway.
    A unit from before #438 gains the line the way `KillMode` was added: a
    plain `tmm gateway install` writes it, runs `daemon-reload` and reads the
    manager's value back, with nothing restarted. The running manager's value

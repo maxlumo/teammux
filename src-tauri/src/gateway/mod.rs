@@ -209,8 +209,24 @@ fn drain_stamped(within: std::time::Duration) {
     }
 }
 
+/// Board #34: under a file-size limit (RLIMIT_FSIZE) a write past it sends
+/// SIGXFSZ, whose default action terminates the process: one oversized
+/// upload took the whole gateway, and every client and agent, with it
+/// (validator-2 on #23). Ignored, the write fails with EFBIG and only that
+/// request sees it. Set once, at the start every gateway runs through. A
+/// full disk or a quota sends no signal; only a configured limit does.
+fn ignore_file_size_signal() {
+    // SAFETY: setting a standard signal's disposition to SIG_IGN, once,
+    // before any thread of ours depends on it.
+    #[cfg(unix)]
+    unsafe {
+        libc::signal(libc::SIGXFSZ, libc::SIG_IGN);
+    }
+}
+
 /// `start`, telling `ready` once the listener is bound (board #323).
 pub async fn start_ready(cfg: Config, ready: Option<tokio::sync::oneshot::Sender<()>>) -> Result<(), String> {
+    ignore_file_size_signal();
     crate::tmux::set_scrollback(cfg.scrollback);
     crate::server::ui::configure(cfg.ui_dir.clone());
     crate::server::start_with_socket_ready(
@@ -367,5 +383,45 @@ mod stamp_tests {
         assert_eq!(line_with(&out, "out line"), "out line");
         assert_eq!(line_with(&err, "err line"), "err line (fds added 0)", "nothing of ours left open");
         assert!(out.contains("out tail with no newline"));
+    }
+}
+
+#[cfg(test)]
+mod sigxfsz_tests {
+    /// The child half: run by `a_write_past_a_file_size_limit_fails_and_the_process_lives`
+    /// as its own process, under a 4 KiB RLIMIT_FSIZE. A plain test run
+    /// skips it (`#[ignore]`, and the env var is unset).
+    #[test]
+    #[ignore]
+    fn sigxfsz_child() {
+        let Ok(path) = std::env::var("TMM_TEST_SIGXFSZ_FILE") else { return };
+        let lim = libc::rlimit { rlim_cur: 4096, rlim_max: libc::RLIM_INFINITY };
+        // SAFETY: setrlimit on this process with a valid struct.
+        assert_eq!(unsafe { libc::setrlimit(libc::RLIMIT_FSIZE, &lim) }, 0);
+        super::ignore_file_size_signal();
+        let err = std::fs::write(&path, vec![b'x'; 8192]).expect_err("a write past the limit fails");
+        println!("SURVIVED errno={:?}", err.raw_os_error());
+    }
+
+    /// Board #34 (validator-2 on #23, 17:19): one write past a configured
+    /// file-size limit must fail as that request's error (EFBIG), not kill
+    /// the gateway with SIGXFSZ. The child applies the gateway's start-time
+    /// disposition, then writes 8 KiB under a 4 KiB limit.
+    #[test]
+    #[cfg(unix)]
+    fn a_write_past_a_file_size_limit_fails_and_the_process_lives() {
+        use std::os::unix::process::ExitStatusExt;
+        let dir = crate::config::test_scratch("tmm-sigxfsz");
+        std::fs::create_dir_all(&dir).unwrap();
+        let out = std::process::Command::new(std::env::current_exe().unwrap())
+            .args(["--ignored", "--exact", "gateway::sigxfsz_tests::sigxfsz_child", "--nocapture", "--test-threads=1"])
+            .env("TMM_TEST_SIGXFSZ_FILE", dir.join("big"))
+            .output()
+            .unwrap();
+        let stdout = String::from_utf8_lossy(&out.stdout);
+        assert_eq!(out.status.signal(), None, "the process was killed by signal {:?}", out.status.signal());
+        assert!(out.status.success(), "{stdout}\n{}", String::from_utf8_lossy(&out.stderr));
+        assert!(stdout.contains(&format!("SURVIVED errno=Some({})", libc::EFBIG)), "the write failed with EFBIG: {stdout}");
+        let _ = std::fs::remove_dir_all(&dir);
     }
 }
