@@ -95,9 +95,11 @@ fn agent_remove_now(session: &str, agent: &str) -> Result<Value, String> {
 /// `kill()` (checking first narrows that window, it does not close it); and
 /// a worker whose environment is unreadable (non-dumpable) is not found
 /// (`process_env`).
-/// Linux only; elsewhere nothing is stopped.
+/// Linux reads `/proc`; macOS `proc_listallpids`, `sysctl(KERN_PROCARGS2)`
+/// and `proc_pidinfo` (board #27). The three readers are the only platform
+/// switch. Elsewhere nothing is stopped.
 fn stop_home_workers(home: &std::path::Path) -> Result<(), String> {
-    #[cfg(target_os = "linux")]
+    #[cfg(any(target_os = "linux", target_os = "macos"))]
     {
         let keys: Vec<&str> = crate::backends::Backend::ALL.iter().filter_map(|b| b.home_worker_env()).collect();
         let mut wanted: Vec<String> = Vec::new();
@@ -115,7 +117,7 @@ fn stop_home_workers(home: &std::path::Path) -> Result<(), String> {
             // Identity before and after the environment read: the match is
             // this instance's, not a pid reused in between.
             let before = observe(pid);
-            if before == Seen::Gone {
+            if matches!(before, Seen::Gone | Seen::Foreign) {
                 continue;
             }
             let Some(env) = process_env(pid).map_err(|e| format!("process {pid}'s environment could not be read ({e})"))? else { continue };
@@ -124,6 +126,7 @@ fn stop_home_workers(home: &std::path::Path) -> Result<(), String> {
             }
             match (before, observe(pid)) {
                 (_, Seen::Gone) => continue,
+                (_, Seen::Foreign) => return Err(format!("process {pid} holds its home and changed owner while it was read")),
                 (Seen::Alive(a), Seen::Alive(b)) if a == b => workers.push((pid, a)),
                 (_, Seen::Unknown(e)) | (Seen::Unknown(e), _) => return Err(format!("process {pid} holds its home and cannot be observed ({e})")),
                 _ => return Err(format!("process {pid} holds its home and changed identity while it was read")),
@@ -150,6 +153,7 @@ fn stop_home_workers(home: &std::path::Path) -> Result<(), String> {
                     .filter_map(|&(pid, start)| match observe(pid) {
                         Seen::Alive(s) if s == start => Some((pid, start, None)),
                         Seen::Unknown(e) => Some((pid, start, Some(e))),
+                        Seen::Foreign => Some((pid, start, Some("it now belongs to another user".into()))),
                         Seen::Alive(_) | Seen::Gone => None,
                     })
                     .collect();
@@ -174,20 +178,25 @@ fn stop_home_workers(home: &std::path::Path) -> Result<(), String> {
             return Err(format!("a process holding its home is not known to have exited ({})", why.join("; ")));
         }
     }
-    #[cfg(not(target_os = "linux"))]
+    #[cfg(not(any(target_os = "linux", target_os = "macos")))]
     let _ = home;
     Ok(())
 }
 
 /// What one look at a process shows (board #26 round 2): alive with its
 /// start time; CONFIRMED gone (the pid does not exist, it is a zombie that
-/// can write nothing more, or the read says so); or unknown, which is never
-/// taken for gone.
+/// can write nothing more, or the read says so); `Foreign`, an `EPERM`
+/// answer (macOS: another user's process, or, unmeasured, one of ours the
+/// kernel will not describe; skipped while finding workers, and for a
+/// worker already found, not known to have exited); or unknown, which is
+/// never taken for gone.
 #[derive(Debug, Clone, PartialEq, Eq)]
-#[cfg_attr(not(target_os = "linux"), allow(dead_code))]
+#[cfg_attr(not(any(target_os = "linux", target_os = "macos")), allow(dead_code))]
 enum Seen {
     Alive(u64),
     Gone,
+    #[cfg_attr(not(target_os = "macos"), allow(dead_code))]
+    Foreign,
     Unknown(String),
 }
 
@@ -259,6 +268,127 @@ fn process_env(pid: libc::pid_t) -> Result<Option<Vec<Vec<u8>>>, String> {
     }
 }
 
+
+/// macOS (board #27, measured on 27.0.1): `proc_pidinfo(PROC_PIDTBSDINFO)`
+/// answers 136 bytes for our own processes, 0 with `ESRCH` for a pid that
+/// does not exist AND for a zombie, and 0 with `EPERM` for another user's
+/// (measured on root's; EPERM alone does not prove the owner). A short or
+/// other answer is Unknown.
+#[cfg(target_os = "macos")]
+fn observe(pid: libc::pid_t) -> Seen {
+    #[cfg(test)]
+    if let Some(e) = fault::observe(pid) {
+        return Seen::Unknown(e);
+    }
+    let mut info: libc::proc_bsdinfo = unsafe { std::mem::zeroed() };
+    let size = std::mem::size_of::<libc::proc_bsdinfo>() as libc::c_int;
+    // SAFETY: proc_pidinfo writes at most `size` bytes into `info`.
+    let got = unsafe { libc::proc_pidinfo(pid, libc::PROC_PIDTBSDINFO, 0, (&mut info as *mut libc::proc_bsdinfo).cast(), size) };
+    let err = std::io::Error::last_os_error();
+    pidinfo_seen(got, size, err.raw_os_error(), info.pbi_status == libc::SZOMB, info.pbi_start_tvsec * 1_000_000 + info.pbi_start_tvusec)
+}
+
+/// What a `proc_pidinfo(PROC_PIDTBSDINFO)` answer means (board #27):
+/// `got` bytes of `size`, the errno when it failed, then the record's zombie
+/// flag and start time. Platform-free so it is pinned on every host.
+#[cfg_attr(not(target_os = "macos"), allow(dead_code))]
+fn pidinfo_seen(got: libc::c_int, size: libc::c_int, errno: Option<i32>, zombie: bool, start: u64) -> Seen {
+    if got == size {
+        return if zombie { Seen::Gone } else { Seen::Alive(start) };
+    }
+    match errno {
+        _ if got > 0 => Seen::Unknown(format!("a short process record ({got} of {size} bytes)")),
+        Some(libc::ESRCH) => Seen::Gone,
+        Some(libc::EPERM) => Seen::Foreign,
+        Some(e) => Seen::Unknown(std::io::Error::from_raw_os_error(e).to_string()),
+        None => Seen::Unknown("proc_pidinfo failed with no errno".into()),
+    }
+}
+
+/// macOS: `proc_listallpids`; a failed call is an `Err`, never an empty list.
+#[cfg(target_os = "macos")]
+fn all_pids() -> Result<Vec<libc::pid_t>, String> {
+    #[cfg(test)]
+    if let Some(e) = fault::enumerate() {
+        return Err(e);
+    }
+    // SAFETY: the first call sizes the buffer; the second fills at most that
+    // many pids, and the count it returns bounds what is read.
+    unsafe {
+        let n = libc::proc_listallpids(std::ptr::null_mut(), 0);
+        if n <= 0 {
+            return Err(format!("proc_listallpids: {}", std::io::Error::last_os_error()));
+        }
+        let mut pids: Vec<libc::pid_t> = vec![0; n as usize + 64];
+        let got = libc::proc_listallpids(pids.as_mut_ptr().cast(), (pids.len() * std::mem::size_of::<libc::pid_t>()) as libc::c_int);
+        if got <= 0 {
+            return Err(format!("proc_listallpids: {}", std::io::Error::last_os_error()));
+        }
+        pids.truncate(got as usize);
+        Ok(pids)
+    }
+}
+
+/// macOS: `sysctl(KERN_PROCARGS2)`, which keeps argv and the environment
+/// apart (`ps -E` prints both on one line split by spaces). It answers
+/// `EINVAL` alike for a pid that is gone, a zombie and another user's
+/// process (measured), so `observe` tells them apart: Gone or Foreign is
+/// `Ok(None)` (skipped, not proven another user's: the residual of
+/// `process_env` on Linux, a worker that hides its environment before
+/// discovery is not found, holds here too); our own live process with no
+/// readable arguments, or a malformed buffer, is an `Err`.
+#[cfg(target_os = "macos")]
+fn process_env(pid: libc::pid_t) -> Result<Option<Vec<Vec<u8>>>, String> {
+    let mut mib = [libc::CTL_KERN, libc::KERN_PROCARGS2, pid];
+    let mut size: libc::size_t = 0;
+    let unreadable = |e: std::io::Error| match observe(pid) {
+        Seen::Gone | Seen::Foreign => Ok(None),
+        _ => Err(format!("KERN_PROCARGS2: {e}")),
+    };
+    // SAFETY: sysctl with a null buffer reports the size; the second call
+    // writes at most `size` bytes into a buffer of that length.
+    unsafe {
+        if libc::sysctl(mib.as_mut_ptr(), 3, std::ptr::null_mut(), &mut size, std::ptr::null_mut(), 0) != 0 {
+            return unreadable(std::io::Error::last_os_error());
+        }
+        let mut buf = vec![0u8; size];
+        if libc::sysctl(mib.as_mut_ptr(), 3, buf.as_mut_ptr().cast(), &mut size, std::ptr::null_mut(), 0) != 0 {
+            return unreadable(std::io::Error::last_os_error());
+        }
+        buf.truncate(size);
+        procargs2_env(&buf).map(Some).ok_or_else(|| "KERN_PROCARGS2: a malformed argument buffer".to_string())
+    }
+}
+
+/// The environment strings of a `KERN_PROCARGS2` buffer: a native-endian
+/// i32 argc, the exec path, NUL padding, argc argv strings, the environment,
+/// then an empty string before the kernel's own "apple" strings. `None` when
+/// the buffer ends before argv does. Platform-free so a captured sample is
+/// tested on every host.
+#[cfg_attr(not(target_os = "macos"), allow(dead_code))]
+fn procargs2_env(buf: &[u8]) -> Option<Vec<Vec<u8>>> {
+    let argc = i32::from_ne_bytes(buf.get(..4)?.try_into().ok()?);
+    let mut at = 4;
+    let next_nul = |from: usize| buf[from..].iter().position(|b| *b == 0).map(|i| from + i);
+    at = next_nul(at)?; // the exec path
+    while buf.get(at) == Some(&0) {
+        at += 1;
+    }
+    for _ in 0..argc.max(0) {
+        at = next_nul(at)? + 1;
+    }
+    let mut env = Vec::new();
+    while at < buf.len() {
+        let end = next_nul(at).unwrap_or(buf.len());
+        if end == at {
+            break;
+        }
+        env.push(buf[at..end].to_vec());
+        at = end + 1;
+    }
+    Some(env)
+}
+
 /// Test-only faults at the observation boundary (board #26 round 2): a pid
 /// whose look answers Unknown, or a process list that cannot be read.
 #[cfg(test)]
@@ -272,7 +402,7 @@ pub(super) mod fault {
     pub fn set_observe(pid: libc::pid_t, good: u32, why: &str) { OBSERVE.with(|o| *o.borrow_mut() = Some((pid, good, why.into()))); }
     pub fn set_enumerate(why: &str) { ENUMERATE.with(|o| *o.borrow_mut() = Some(why.into())); }
     pub fn clear() { OBSERVE.with(|o| *o.borrow_mut() = None); ENUMERATE.with(|o| *o.borrow_mut() = None); }
-    #[cfg_attr(not(target_os = "linux"), allow(dead_code))]
+    #[cfg_attr(not(any(target_os = "linux", target_os = "macos")), allow(dead_code))]
     pub(super) fn observe(pid: libc::pid_t) -> Option<String> {
         OBSERVE.with(|o| match o.borrow_mut().as_mut() {
             Some((p, good, why)) if *p == pid => {
@@ -285,7 +415,7 @@ pub(super) mod fault {
             _ => None,
         })
     }
-    #[cfg_attr(not(target_os = "linux"), allow(dead_code))]
+    #[cfg_attr(not(any(target_os = "linux", target_os = "macos")), allow(dead_code))]
     pub(super) fn enumerate() -> Option<String> { ENUMERATE.with(|o| o.borrow().clone()) }
 }
 
@@ -642,6 +772,35 @@ mod tests {
         let _ = std::fs::remove_dir_all(&dir);
     }
 
+    /// Board #27: on macOS a process's environment is read through
+    /// `sysctl(KERN_PROCARGS2)`. Captured on clawdbjs (macOS 27.0.1, arm64)
+    /// from `env -i OMP_TEXT_PREDICT_AGENT_DIR=/tmp/ws/.tmm/agents/om
+    /// OTHER='a b' node -e … OMP_TEXT_PREDICT_AGENT_DIR=/tmp/argv-not-env`,
+    /// cut after the first two of the kernel's "apple" strings (the rest names
+    /// the host's boot and binary hashes). The layout: argc, the exec path,
+    /// NUL padding, argc argv strings, the environment, an empty string, then
+    /// the apple strings. Only the environment is returned: the same text in
+    /// argv is not a holder, which `ps -E` cannot tell apart (it prints argv
+    /// and environment as one line split by spaces).
+    #[test]
+    fn the_macos_process_arguments_yield_exactly_the_environment() {
+        let hex: String = [
+            "040000002f6f70742f686f6d65627265772f62696e2f6e6f646500002f6f70742f686f6d65627265772f62696e2f6e6f",
+            "6465002d650073657454696d656f75742828293d3e7b7d2c333030303029004f4d505f544558545f505245444943545f",
+            "4147454e545f4449523d2f746d702f617267762d6e6f742d656e76004f4d505f544558545f505245444943545f414745",
+            "4e545f4449523d2f746d702f77732f2e746d6d2f6167656e74732f6f6d004f544845523d612062000000000000000000",
+            "000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000",
+            "000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000",
+            "7074725f6d756e67653d000000000000000000000000000000000000006d61696e5f737461636b3d00",
+        ]
+        .concat();
+        let buf: Vec<u8> = (0..hex.len()).step_by(2).map(|i| u8::from_str_radix(&hex[i..i + 2], 16).unwrap()).collect();
+        let env = procargs2_env(&buf).unwrap();
+        assert_eq!(env, vec![b"OMP_TEXT_PREDICT_AGENT_DIR=/tmp/ws/.tmm/agents/om".to_vec(), b"OTHER=a b".to_vec()]);
+        assert_eq!(procargs2_env(&buf[..3]), None, "too short for argc");
+        assert_eq!(procargs2_env(&buf[..60]), None, "argv cut short: no environment to trust");
+    }
+
     /// Board #26 (measured on omp 18.15.0): omp's text-predict worker is a
     /// child of omp's global daemon broker, not of the pane. It holds
     /// `OMP_TEXT_PREDICT_AGENT_DIR=<home>`, survives the window kill, and
@@ -712,7 +871,7 @@ mod tests {
     /// time; a zombie has exited (it can write nothing more), and so has a
     /// reaped pid.
     #[test]
-    #[cfg(target_os = "linux")]
+    #[cfg(any(target_os = "linux", target_os = "macos"))]
     fn a_process_identity_is_live_and_stable_and_a_zombie_has_none() {
         let me = std::process::id() as libc::pid_t;
         let Seen::Alive(start) = observe(me) else { panic!("this process is alive") };
@@ -746,7 +905,7 @@ mod tests {
     /// the same way. Both faults are injected at the observation boundary.
     #[test]
     #[cfg(target_os = "linux")]
-    fn a_worker_that_cannot_be_observed_or_a_list_that_cannot_be_read_refuses_the_remove() {
+    fn a_worker_that_cannot_be_observed_refuses_the_remove() {
         use_test_store();
         let dir = crate::config::test_scratch("tmm-rm-unknown");
         std::fs::create_dir_all(&dir).unwrap();
@@ -766,12 +925,6 @@ mod tests {
         })
         .unwrap();
         let declared = || with_store(|store| store.slots(&id)).unwrap().iter().any(|s| s.window_name == "om");
-
-        fault::set_enumerate("injected: /proc unreadable");
-        let err = agent_remove(&session, "om").unwrap_err();
-        fault::clear();
-        assert!(err.contains("not removed") && err.contains("could not be listed"), "{err}");
-        assert!(declared() && home.join("launch.json").is_file(), "nothing was removed");
 
         let mut worker = std::process::Command::new("sleep").arg("30").env("OMP_TEXT_PREDICT_AGENT_DIR", &home).spawn().unwrap();
         let pid = worker.id() as libc::pid_t;
@@ -795,6 +948,42 @@ mod tests {
         worker.kill().unwrap();
         worker.wait().unwrap();
         let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// Board #26 round 2 / #27: a process list that cannot be read is an
+    /// error, never "no workers": the remove refuses and removes nothing.
+    #[test]
+    #[cfg(any(target_os = "linux", target_os = "macos"))]
+    fn a_process_list_that_cannot_be_read_refuses_the_remove() {
+        use_test_store();
+        let dir = crate::config::test_scratch("tmm-rm-nolist");
+        std::fs::create_dir_all(&dir).unwrap();
+        let made = create(&dir.to_string_lossy(), Some("rmnolist"), None, None).unwrap();
+        let session = made["session"].as_str().unwrap().to_string();
+        let home = dir.join(".tmm").join("agents").join("om");
+        std::fs::create_dir_all(&home).unwrap();
+        std::fs::write(home.join("launch.json"), r#"{"backend":"omp"}"#).unwrap();
+        fault::set_enumerate("injected: the process list is unreadable");
+        let err = agent_remove(&session, "om").unwrap_err();
+        fault::clear();
+        assert!(err.contains("not removed") && err.contains("could not be listed"), "{err}");
+        assert!(home.join("launch.json").is_file(), "the home is kept");
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// Board #27, the macOS answers measured on 27.0.1: our own process gives
+    /// the full 136-byte record; a pid that does not exist and a zombie give
+    /// 0 with ESRCH; another user's gives 0 with EPERM. A short record or any
+    /// other failure is not an exit.
+    #[test]
+    fn a_pidinfo_answer_is_gone_only_when_the_kernel_says_so() {
+        assert_eq!(pidinfo_seen(136, 136, None, false, 42), Seen::Alive(42));
+        assert_eq!(pidinfo_seen(136, 136, None, true, 42), Seen::Gone, "a zombie record");
+        assert_eq!(pidinfo_seen(0, 136, Some(libc::ESRCH), false, 0), Seen::Gone);
+        assert_eq!(pidinfo_seen(0, 136, Some(libc::EPERM), false, 0), Seen::Foreign);
+        assert!(matches!(pidinfo_seen(0, 136, Some(libc::EIO), false, 0), Seen::Unknown(_)));
+        assert!(matches!(pidinfo_seen(-1, 136, None, false, 0), Seen::Unknown(_)));
+        assert!(matches!(pidinfo_seen(100, 136, Some(libc::ESRCH), false, 0), Seen::Unknown(_)), "a short record is not an exit, whatever errno says");
     }
 
     /// Board #362 c, the cleanup of accepted person-needed paints (the
