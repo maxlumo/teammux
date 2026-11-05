@@ -91,8 +91,10 @@ fn agent_remove_now(session: &str, agent: &str) -> Result<Value, String> {
 /// worker that cannot be observed (`Seen::Unknown`) is kept through the
 /// wait and then refuses, like one still alive; so does a process list that
 /// cannot be read (review round 2: a failed read is not empty data).
-/// Residual: the pid may be reused between the last identity read and
-/// `kill()`; checking first narrows that window, it does not close it.
+/// Residuals: the pid may be reused between the last identity read and
+/// `kill()` (checking first narrows that window, it does not close it); and
+/// a worker whose environment is unreadable (non-dumpable) is not found
+/// (`process_env`).
 /// Linux only; elsewhere nothing is stopped.
 fn stop_home_workers(home: &std::path::Path) -> Result<(), String> {
     #[cfg(target_os = "linux")]
@@ -239,9 +241,14 @@ fn all_pids() -> Result<Vec<libc::pid_t>, String> {
     Ok(pids)
 }
 
-/// One process's environment as `K=V` byte strings. `Ok(None)` when it is not
-/// ours to read or stop (`EACCES`/`EPERM`: another user's) or has exited;
-/// any other failure is an `Err`, never "holds nothing".
+/// One process's environment as `K=V` byte strings. `Ok(None)` when it has
+/// exited, or when its environment is unreadable (`EACCES`/`EPERM`). That is
+/// another user's process, OR one of ours that is non-dumpable (measured by
+/// validator-2 on #26: ssh-agent reads that way), so it is skipped, not
+/// proven foreign. Refusing on it would block every remove while such a
+/// process runs. Residual: a worker that hid its environment before
+/// discovery is not found; omp's text-predict worker (18.15.0, 18.16.0)
+/// is readable. Any other failure is an `Err`, never "holds nothing".
 #[cfg(target_os = "linux")]
 fn process_env(pid: libc::pid_t) -> Result<Option<Vec<Vec<u8>>>, String> {
     match std::fs::read(format!("/proc/{pid}/environ")) {
