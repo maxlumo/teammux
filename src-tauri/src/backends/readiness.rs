@@ -1102,6 +1102,80 @@ fn refresh_timed_out() -> Value {
     json!({ "backends": rows, "scope": "default", "baseline": "check_timeout" })
 }
 
+// ── Availability (board #7) ─────────────────────────────────────────────
+// Owner 2026-11-05 05:43: "如果本地系统配置没有安装或者配置，就灰掉". ONE rule
+// decides whether an agent's harness is usable on this server, and every
+// place that offers a spawn reads it through `registry_list` (the Agents
+// page, the roster and project pickers, the team member picker, `tmm
+// registry list`). It reads the server's LAST Refresh; nothing waits on a
+// check (tenet 4, orchestrator ruling on #7): with no report yet, every
+// agent's availability is unknown and one background Refresh starts.
+
+/// Why a backend row makes its agents unavailable, or None. Only a DEFINITE
+/// missing fact greys (the Backends rule, board #492: a failed or absent
+/// check never turns a fact into "not installed"): the CLI first, then its
+/// set up. `unknown` never greys.
+pub fn unavailable(row: &Value) -> Option<Value> {
+    let missing = |k: &str| row.get(k).filter(|f| f.get("state").and_then(Value::as_str) == Some("missing"));
+    if let Some(f) = missing("installed") {
+        return Some(json!({ "reason": f.get("reason").cloned().unwrap_or(Value::Null), "missing": [] }));
+    }
+    missing("set_up").map(|f| json!({
+        "reason": f.get("reason").cloned().unwrap_or(Value::Null),
+        "missing": f.get("missing").cloned().filter(Value::is_array).unwrap_or_else(|| json!([])),
+    }))
+}
+
+/// The last Refresh that FOUND a fact. One that found nothing (timed out,
+/// failed, every fact undecided) keeps the report before it. In memory only:
+/// a disposable projection (tenet 7), gone with the process.
+#[derive(Default)]
+pub struct LastReport(std::sync::Mutex<Option<Vec<Value>>>);
+
+impl LastReport {
+    pub const fn new() -> LastReport {
+        LastReport(std::sync::Mutex::new(None))
+    }
+
+    pub fn remember(&self, answer: &Value) {
+        let Some(rows) = answer.get("backends").and_then(Value::as_array) else { return };
+        let decided = |f: Option<&Value>| f.and_then(|f| f.get("state")).and_then(Value::as_str).is_some_and(|s| s != "unknown");
+        if !rows.iter().any(|r| decided(r.get("installed")) || decided(r.get("set_up"))) {
+            return;
+        }
+        *self.0.lock().unwrap_or_else(|p| p.into_inner()) = Some(rows.clone());
+    }
+
+    pub fn checked(&self) -> bool {
+        self.0.lock().unwrap_or_else(|p| p.into_inner()).is_some()
+    }
+
+    /// `unavailable` for the row named `backend`; None when there is no
+    /// report or it names no such row.
+    pub fn unavailable(&self, backend: &str) -> Option<Value> {
+        let guard = self.0.lock().unwrap_or_else(|p| p.into_inner());
+        guard.as_ref()?.iter().find(|r| r.get("name").and_then(Value::as_str) == Some(backend)).and_then(unavailable)
+    }
+}
+
+static LAST: LastReport = LastReport::new();
+static KICKED: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
+
+/// The server's availability view for `registry_list`: whether a report
+/// exists, and a per-backend reader. With none, ONE background Refresh
+/// starts (once per process: a check that keeps failing is not re-run on
+/// every list; the Backends section's Refresh is the way to try again).
+pub fn availability() -> (bool, impl Fn(&str) -> Option<Value>) {
+    let checked = LAST.checked();
+    if !checked && !KICKED.swap(true, std::sync::atomic::Ordering::SeqCst) {
+        #[cfg(not(test))]
+        std::thread::spawn(|| {
+            let _ = check(None);
+        });
+    }
+    (checked, |backend: &str| LAST.unavailable(backend))
+}
+
 /// A Test that did not answer by its deadline.
 fn test_timed_out(b: Backend) -> Value {
     json!({ "test": { "name": b.name(), "set_up": SetUp::unknown("check_timeout").to_json(), "answers": { "state": "unknown", "count": null, "reason": "check_timeout" } } })
@@ -1111,7 +1185,13 @@ fn test_timed_out(b: Backend) -> Value {
 /// `TESTABLE` backend. `Err` is an invalid-params message.
 pub fn check(test_of: Option<&str>) -> Result<Value, String> {
     match test_of {
-        None => Ok(REFRESH.run(REFRESH_BUDGET, refresh_timed_out, refresh)),
+        None => Ok(REFRESH.run(REFRESH_BUDGET, refresh_timed_out, |deadline| {
+            // Every Refresh's answer, a late one or a background one
+            // included, is what availability reads (board #7).
+            let v = refresh(deadline);
+            LAST.remember(&v);
+            v
+        })),
         Some(name) => {
             let b = Backend::parse(name).ok_or_else(|| format!("unknown backend '{name}'"))?;
             if !TESTABLE.contains(&b) {
@@ -1125,6 +1205,50 @@ pub fn check(test_of: Option<&str>) -> Result<Value, String> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// Board #7: THE availability rule, over this host's rows of 2026-11-05
+    /// (`tmm agent backends`). Only a DEFINITE missing greys: installed
+    /// first, then set up; unknown and absent facts never do.
+    #[test]
+    fn an_agent_is_unavailable_only_on_a_definite_missing_fact() {
+        let r = |installed: Value, set_up: Value| json!({ "name": "x", "installed": installed, "set_up": set_up, "answers": { "state": "unknown", "reason": "first_run" } });
+        let grok = r(json!({ "state": "missing", "reason": "not_found" }), json!({ "state": "missing", "reason": "no_auth", "missing": [] }));
+        assert_eq!(unavailable(&grok), Some(json!({ "reason": "not_found", "missing": [] })), "the CLI is the first fact");
+        let dsh = r(json!({ "state": "missing", "reason": "needs_zsh" }), json!({ "state": "missing", "reason": "env_unset", "missing": ["DEEPSEEK_API_KEY"] }));
+        assert_eq!(unavailable(&dsh), Some(json!({ "reason": "needs_zsh", "missing": [] })));
+        let unset = r(json!({ "state": "present" }), json!({ "state": "missing", "reason": "env_unset", "missing": ["DEEPSEEK_API_KEY"] }));
+        assert_eq!(unavailable(&unset), Some(json!({ "reason": "env_unset", "missing": ["DEEPSEEK_API_KEY"] })), "set up definitively missing");
+        for (reason, state) in [("test_only", "unknown"), ("credential_store_unverified", "unknown"), ("config_absent", "unknown"), ("check_timeout", "unknown")] {
+            let row = r(json!({ "state": "present" }), json!({ "state": state, "reason": reason, "missing": [] }));
+            assert_eq!(unavailable(&row), None, "{reason}: unknown is not unavailable");
+        }
+        let timed_out = r(json!({ "state": "unknown", "reason": "check_timeout" }), json!({ "state": "unknown", "reason": "check_timeout", "missing": [] }));
+        assert_eq!(unavailable(&timed_out), None, "a failed check greys nothing");
+        assert_eq!(unavailable(&json!({ "name": "x" })), None, "absent facts grey nothing");
+        assert_eq!(unavailable(&r(json!({ "state": "present" }), json!({ "state": "present" }))), None);
+    }
+
+    /// Board #7: the server keeps its last Refresh that FOUND something; one
+    /// that found nothing (every fact not decided) keeps the one before.
+    #[test]
+    fn the_last_report_is_the_last_refresh_that_found_a_fact() {
+        let found = |s: &str| json!({ "backends": [{ "name": "grok", "installed": { "state": s, "reason": null }, "set_up": { "state": "unknown", "reason": "first_run" } }], "baseline": null });
+        let last = LastReport::default();
+        assert!(!last.checked(), "nothing is known before the first Refresh");
+        assert_eq!(last.unavailable("grok"), None, "no report greys nothing");
+        last.remember(&refresh_timed_out());
+        assert!(!last.checked(), "a Refresh that found nothing is not a report");
+        last.remember(&found("missing"));
+        assert!(last.checked());
+        assert_eq!(last.unavailable("grok"), Some(json!({ "reason": null, "missing": [] })));
+        last.remember(&refresh_timed_out());
+        assert_eq!(last.unavailable("grok"), Some(json!({ "reason": null, "missing": [] })), "a timed-out Refresh keeps the last facts");
+        last.remember(&json!({ "error": "check_failed" }));
+        assert!(last.unavailable("grok").is_some(), "an error answer keeps them too");
+        last.remember(&found("present"));
+        assert_eq!(last.unavailable("grok"), None);
+        assert_eq!(last.unavailable("nope"), None, "a backend the report does not name greys nothing");
+    }
 
     /// Board #511: dsh's pane IS zsh, so dsh present without zsh on the
     /// managed PATH is not a usable install; every other backend is as found.

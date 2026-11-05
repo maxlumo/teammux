@@ -1154,11 +1154,7 @@ async fn main() {
             if ctx.json {
                 println!("{r}");
             } else {
-                let empty = Vec::new();
-                for a in r.get("agents").and_then(|v| v.as_array()).unwrap_or(&empty) {
-                    let s = |k: &str| a.get(k).and_then(|v| v.as_str()).unwrap_or("");
-                    println!("{} [{}] — {}", s("name"), s("backend"), s("system").chars().take(60).collect::<String>());
-                }
+                print!("{}", registry_text(&r));
             }
         }
         // Board #492: the readiness the Agents page's Backends section shows,
@@ -3290,6 +3286,52 @@ fn models_text(answers: &[Value]) -> String {
     out
 }
 
+/// What `tmm registry list` prints (board #7): the Agents page's two groups,
+/// harness defaults then custom agents, with the one divider between; an
+/// agent the server's last readiness report makes unusable says why on the
+/// line under it. An older server sends no `group`: its flat list.
+fn registry_text(r: &Value) -> String {
+    use tmux_mobile::backends::readiness::reason_text;
+    let empty = Vec::new();
+    let agents = r.get("agents").and_then(|v| v.as_array()).unwrap_or(&empty);
+    let s = |a: &Value, k: &str| a.get(k).and_then(|v| v.as_str()).unwrap_or("").to_string();
+    let line = |a: &Value| format!("{} [{}] — {}", s(a, "name"), s(a, "backend"), s(a, "system").chars().take(60).collect::<String>());
+    if !agents.iter().any(|a| a.get("group").is_some()) {
+        return agents.iter().map(|a| format!("{}\n", line(a))).collect();
+    }
+    let mut out = String::new();
+    let mut unknown = false;
+    for (head, group) in [("Harness defaults", "default"), ("Custom agents", "custom")] {
+        if group == "custom" {
+            out.push_str("──\n");
+        }
+        out.push_str(head);
+        out.push('\n');
+        let rows: Vec<&Value> = agents.iter().filter(|a| a.get("group").and_then(|g| g.as_str()).unwrap_or("custom") == group).collect();
+        if rows.is_empty() {
+            out.push_str("  (none)\n");
+        }
+        for a in rows {
+            out.push_str(&format!("  {}\n", line(a)));
+            let av = a.get("availability").cloned().unwrap_or(Value::Null);
+            match av.get("state").and_then(|v| v.as_str()) {
+                Some("unavailable") => {
+                    let why = av.get("reason").and_then(|v| v.as_str()).map(reason_text).unwrap_or("its readiness check found it unusable");
+                    let names: Vec<&str> = av.get("missing").and_then(|v| v.as_array()).map(|m| m.iter().filter_map(|n| n.as_str()).collect()).unwrap_or_default();
+                    let what = if names.is_empty() { why.to_string() } else { format!("missing {} ({why})", names.join(", ")) };
+                    out.push_str(&format!("    unavailable: {} {what}\n", s(a, "backend")));
+                }
+                Some("available") => {}
+                _ => unknown = true,
+            }
+        }
+    }
+    if unknown {
+        out.push_str("Availability is not known yet: this server has not checked its CLIs. A check has started; run tmm agent backends to see it.\n");
+    }
+    out
+}
+
 /// What `tmm agent backends` prints (board #492): one line per backend, the
 /// three facts in words, then the scope. A Test's answer is its own block,
 /// with what the Test wrote.
@@ -3774,6 +3816,44 @@ fn managed_names(agents: &Value) -> Vec<String> {
 
 #[cfg(test)]
 mod tests {
+    /// Board #7: `tmm registry list` prints the Agents page's two groups and
+    /// greys an unavailable agent in words, with the readiness reason.
+    #[test]
+    fn registry_list_prints_the_two_groups_and_why_an_agent_is_unavailable() {
+        use super::registry_text;
+        let r = serde_json::json!({ "agents": [
+            { "name": "kiro", "backend": "kiro", "system": "K", "group": "default", "availability": { "state": "available" } },
+            { "name": "grok", "backend": "grok", "system": "G", "group": "default", "availability": { "state": "unavailable", "reason": "not_found", "missing": [] } },
+            { "name": "dsh", "backend": "dsh", "system": "D", "group": "default", "availability": { "state": "unavailable", "reason": "env_unset", "missing": ["DEEPSEEK_API_KEY"] } },
+            { "name": "pentester", "backend": "kiro", "system": "P", "group": "custom", "availability": { "state": "available" } },
+        ] });
+        assert_eq!(registry_text(&r), "\
+Harness defaults
+  kiro [kiro] — K
+  grok [grok] — G
+    unavailable: grok not on the managed PATH
+  dsh [dsh] — D
+    unavailable: dsh missing DEEPSEEK_API_KEY (not set in the login shell's environment)
+──
+Custom agents
+  pentester [kiro] — P
+");
+        let unknown = serde_json::json!({ "agents": [
+            { "name": "kiro", "backend": "kiro", "system": "K", "group": "default", "availability": { "state": "unknown" } },
+        ] });
+        assert_eq!(registry_text(&unknown), "\
+Harness defaults
+  kiro [kiro] — K
+──
+Custom agents
+  (none)
+Availability is not known yet: this server has not checked its CLIs. A check has started; run tmm agent backends to see it.
+");
+        // An older server sends no group: the flat list it always printed.
+        let old = serde_json::json!({ "agents": [{ "name": "kiro", "backend": "kiro", "system": "K" }] });
+        assert_eq!(registry_text(&old), "kiro [kiro] — K\n");
+    }
+
     /// `--notify`'s recipients, as the CLI reads them (board #507). Resolving
     /// belongs to the server's one door; this is the SHAPE, and the one trap
     /// it must catch is the full-width `＠` the feed renders mentions with —
@@ -3782,6 +3862,7 @@ mod tests {
     #[test]
     fn notify_names_reads_at_names_and_refuses_the_full_width_sigil() {
         use super::notify_names;
+
         assert_eq!(notify_names(Some("@orchestrator")).unwrap(), vec!["orchestrator".to_string()]);
         // Commas, spaces and both together; duplicates collapse, order kept.
         assert_eq!(

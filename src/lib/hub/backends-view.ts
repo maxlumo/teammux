@@ -236,3 +236,36 @@ export function clock(at: number): string {
   const d = new Date(at);
   return `${String(d.getHours()).padStart(2, '0')}:${String(d.getMinutes()).padStart(2, '0')}`;
 }
+
+// ── Availability and groups (board #7) ──────────────────────────────────
+// The SERVER decides both (`registry_list`: projects::registry::annotate over
+// readiness::unavailable); every place that lists agents to spawn reads them
+// here, so the Agents page and the pickers cannot disagree with each other
+// or with `tmm registry list`.
+
+export type Availability = { state?: string; reason?: string | null; missing?: string[] };
+type Listed = { name: string; backend: string; group?: string; availability?: Availability };
+
+/** The harness defaults and the custom agents, each in the server's order;
+ * null for an older server that names no group (its flat list stays). */
+export function agentGroups<T extends Listed>(defs: T[]): { defaults: T[]; custom: T[] } | null {
+  if (!defs.some((d) => typeof d.group === 'string')) return null;
+  return { defaults: defs.filter((d) => d.group === 'default'), custom: defs.filter((d) => d.group !== 'default') };
+}
+
+/** Why this agent cannot start on this server, or null. Only the server's
+ * `unavailable` greys: `unknown` (no report yet) and `available` never do. */
+export function unavailableOf(def: Listed): { reason: string | null; missing: string[] } | null {
+  const a = def.availability;
+  if (a?.state !== 'unavailable') return null;
+  return { reason: a.reason ?? null, missing: Array.isArray(a.missing) ? a.missing : [] };
+}
+
+/** The words for an unavailable agent (colour is never the only signal). */
+export function unavailableText(def: Listed, t: (key: string) => string): string {
+  const why = unavailableOf(def);
+  if (!why) return '';
+  const reason = t(reasonKey(why.reason));
+  const key = why.missing.length ? 'agentsUnavailableMissing' : 'agentsUnavailable';
+  return t(key).replace('{program}', def.backend).replace('{names}', why.missing.join(', ')).replace('{reason}', reason);
+}

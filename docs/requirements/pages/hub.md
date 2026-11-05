@@ -212,7 +212,20 @@ completion).
   `backends_check` cap, board #492), the main column shows the chosen category's rows
   and a "+" in its head, and picking a row opens its editor there (the
   chosen category persists). On the phone each category is its own Settings
-  page (`section`) whose list IS the screen. "Instructions for every agent"
+  page (`section`) whose list IS the screen.
+  The Agents list has two groups (board #7, owner 2026-11-05: "kiro claude
+  codex dsh omp 这些可以认为是每个 harness 默认 agent，下边再加一个分割线，是
+  我们自己定义的 agent"), on the desktop and the phone alike: **Harness
+  defaults** (one per supported backend, in the fixed default order), the
+  page's hairline divider, then **Custom agents** (the saved definitions, in
+  their order). Each group has its heading. An agent whose harness this
+  server cannot run (its CLI is not installed, or its setup is definitely
+  missing, per the server's last Backends check) is greyed and says why in
+  words; it can still be opened and read, and the roster's start list, the
+  start dialog and New project offer no start for it, while the team member
+  picker names the reason. Unknown or untested setup, and a failed or absent
+  check, grey nothing. We install and configure nothing. Also
+  `tmm registry list`, in the same two groups. "Instructions for every agent"
   edits the app-wide `<config>/AGENTS.md` that leads every managed agent's
   system prompt (also `tmm prompt`).
   Backends (board #492) has no rows and no editor: the section itself is the

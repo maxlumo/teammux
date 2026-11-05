@@ -13,7 +13,7 @@
   import { scrollFade } from '../core/scrollFade.ts';
   import { t } from '../core/i18n.svelte.ts';
   import { renderMarkdown } from '../core/markdown.ts';
-  import { backendColor as colorOf } from '../hub/hub.ts';
+  import { backendColor as colorOf, stateDotColor, stateIsLive } from '../hub/hub.ts';
   import { moveMs, revealMs } from '../ui/motion.ts';
   import { hoverInfo } from '../ui/hover.ts';
   import Select from '../ui/Select.svelte';
@@ -26,6 +26,7 @@
   import BackendsSection from './BackendsSection.svelte';
   import { FAILED_MODELS, NO_MODELS, defaultLabel, readModels } from './models-view.ts';
   import { watchBackendsCap } from './backends-cap.svelte.ts';
+  import { agentGroups, unavailableText } from './backends-view.ts';
 
   // The backends a registry agent can run on and the effort levels each
   // accepts come from the SERVER (`backends_list`, board #130) — the client
@@ -859,6 +860,18 @@
 {#snippet inputModeHint(draft, inherited = null)}
   {#if (draft.input_mode || inherited) === 'steer'}<p class="hint">{t('agentsInputSteerHint')}</p>{/if}
 {/snippet}
+{#snippet agentRow(d)}
+  {@const why = unavailableText(d, t)}
+  <button class="side-row" class:open={editing?.name === d.name && !isNew} class:unavailable={!!why} onclick={() => startEdit(d)}>
+    {#if backendIcon(d.backend)}<img class="ava" src={backendIcon(d.backend)} alt={d.backend} />{:else}<span class="ava" style:background={backendColor(d.backend)}>{d.name.slice(0, 1).toUpperCase()}</span>{/if}
+    {#if why}
+      <span class="r-col"><span class="r-name">{d.name}</span><span class="r-sub r-why"><span class="r-dot" class:live-dot={stateIsLive('waiting')} style:background={stateDotColor('waiting')} aria-hidden="true"></span>{why}</span></span>
+    {:else}
+      <span class="r-name">{d.name}</span>
+    {/if}
+    <span class="r-backend">{d.backend}</span>
+  </button>
+{/snippet}
 {#snippet rows(kind)}
   <!-- One kind's definitions as rows — the phone's sidebar list (narrowed by
        `section`) and the desktop's main list (the chosen category) render the
@@ -874,13 +887,21 @@
         <span class="r-backend">AGENTS.md</span>
       </button>
       {/if}
-      {#each (listErrors.agents ? [] : defs) as d (d.name)}
-        <button class="side-row" class:open={editing?.name === d.name && !isNew} onclick={() => startEdit(d)}>
-          {#if backendIcon(d.backend)}<img class="ava" src={backendIcon(d.backend)} alt={d.backend} />{:else}<span class="ava" style:background={backendColor(d.backend)}>{d.name.slice(0, 1).toUpperCase()}</span>{/if}
-          <span class="r-name">{d.name}</span>
-          <span class="r-backend">{d.backend}</span>
-        </button>
-      {/each}
+      <!-- Board #7 (owner 2026-11-05): harness defaults, the divider, then
+           the custom agents, as registry_list groups them; an older server
+           names no group and keeps its flat list. An unavailable agent is
+           greyed and says why in words; its definition still opens. -->
+      {@const groups = listErrors.agents ? null : agentGroups(defs)}
+      {#if groups}
+        {#each [['default', 'agentsGroupDefaults', groups.defaults], ['custom', 'agentsGroupCustom', groups.custom]] as [id, label, list] (id)}
+          <div class="agent-group" class:divided={id === 'custom'} role="group" aria-label={t(label)}>
+            <div class="side-h">{t(label)}</div>
+            {#each list as d (d.name)}{@render agentRow(d)}{/each}
+          </div>
+        {/each}
+      {:else}
+        {#each (listErrors.agents ? [] : defs) as d (d.name)}{@render agentRow(d)}{/each}
+      {/if}
       {#if !listErrors.agents}
       <button class="side-row add" onclick={() => startEdit(null)}>
         <Icon name="plus" size={13} />{t('agentsNew')}
@@ -1152,7 +1173,7 @@
                         <Select value={kindOf(m)} disabled={saving || removing} ariaLabel={t('teamsBase')}
                           options={[
                             { value: '', label: t('teamsBare') },
-                            ...defs.map((d) => ({ value: d.name, label: `${t('teamsCustomAgent')}: ${d.name}`, icon: backendIcon(d.backend) ?? undefined })),
+                            ...defs.map((d) => ({ value: d.name, label: `${t('teamsCustomAgent')}: ${d.name}`, icon: backendIcon(d.backend) ?? undefined, hint: unavailableText(d, t) || undefined })),
                             ...subTeams.map((x) => ({ value: `team:${x.name}`, label: `${t('teamsSubTeam')}: ${x.name}` })),
                           ]}
                           onchange={(v) => setBase(i, v)} />
@@ -1316,7 +1337,7 @@
         </div>
       </fieldset></div>
     {:else if showsBackends}
-      <BackendsSection runtime={guardOwner} active={backendsActive} cap={backendsCap.state} head={!section} onReport={(r) => { readiness = r; }}
+      <BackendsSection runtime={guardOwner} active={backendsActive} cap={backendsCap.state} head={!section} onReport={(r) => { readiness = r; void reload(); }}
         tag={scope?.tag} icon={backendIcon} onBack={backendsDrill ? () => categoryOpen = false : null} />
     {:else if !section}
       <!-- Desktop, nothing being edited: the rows live in their own column
@@ -1506,6 +1527,17 @@
   .team-row { align-items: flex-start; }
   .r-col { display: flex; flex-direction: column; min-width: 0; gap: 1px; }
   .r-sub { font-family: var(--font-mono); font-size: var(--fs-sub); color: var(--text2); overflow-wrap: anywhere; }
+  /* Board #7: the two groups of the Agents list. The headings are the shared
+     .side-h; the custom group opens with the page's one hairline (--border).
+     An unavailable row keeps its name in full ink (it is still opened and
+     read) and greys its identity marks; the words under it say why, with the
+     one status dot (stateDotColor 'waiting': a person has to act), the same
+     7px dot the Backends section wears. */
+  .agent-group.divided { border-top: 1px solid var(--border); margin-top: 6px; padding-top: 2px; }
+  .side-row.unavailable { align-items: flex-start; }
+  .side-row.unavailable .ava, .side-row.unavailable .r-backend { opacity: 0.45; }
+  .r-why { display: flex; align-items: baseline; gap: 6px; font-family: var(--font-ui); }
+  .r-dot { flex: none; width: 7px; height: 7px; border-radius: 50%; align-self: center; }
   @media (max-width: 760px) {
     .member-head { min-height: 72px; }
     .member-summary { grid-template-columns: 34px minmax(0, 1fr) auto; min-height: 72px; padding: 10px 8px 10px 10px; }

@@ -134,3 +134,33 @@ test('entity errors use the same readable alert atom as Settings (#156)', () => 
   assert.equal((source.match(/class="err config-error appear" role="alert"/gu) ?? []).length, 7);
   assert.doesNotMatch(source, /\.err \{/u, 'no private error frame or low-contrast ink');
 });
+
+test('the Agents list groups use the shared atoms, and every spawn surface reads the one availability reader (#7)', async () => {
+  // Headings are the shared .side-h, the divider is the --border hairline,
+  // the reason dot is the one state colour language; no literal colour.
+  assert.match(source, /<div class="agent-group" class:divided=\{id === 'custom'\} role="group" aria-label=\{t\(label\)\}>\s*<div class="side-h">\{t\(label\)\}<\/div>/u);
+  assert.match(source, /\.agent-group\.divided \{ border-top: 1px solid var\(--border\);/u);
+  assert.match(source, /<span class="r-dot" class:live-dot=\{stateIsLive\('waiting'\)\} style:background=\{stateDotColor\('waiting'\)\} aria-hidden="true"><\/span>\{why\}/u);
+  const block = /\/\* Board #7: the two groups[\s\S]*?\.r-dot \{[^}]*\}/u.exec(source)?.[0] ?? '';
+  assert.ok(block, 'the group CSS block');
+  assert.doesNotMatch(block, /#[0-9a-f]{3,8}\b|rgb\(|font-size:/iu, 'tokens only: no literal colour, no raw font size');
+  // Every place that lists agents to start, and the team member picker, asks
+  // the ONE reader; none re-derives availability from readiness itself.
+  const spawners = {
+    'AgentsPage.svelte': source,
+    'Hub.svelte': await readFile(new URL('./Hub.svelte', import.meta.url), 'utf8'),
+    'CreateProjectDialog.svelte': await readFile(new URL('../projects/CreateProjectDialog.svelte', import.meta.url), 'utf8'),
+  };
+  for (const [file, text] of Object.entries(spawners)) {
+    assert.match(text, /import \{[^}]*\bunavailableText\b[^}]*\} from '(\.\/|\.\.\/hub\/)backends-view\.ts'/u, file);
+    assert.doesNotMatch(text, /availability\?*\.state/u, `${file} reads availability only through backends-view`);
+  }
+  assert.match(spawners['Hub.svelte'], /disabled=\{starting \|\| !!why\}/u, 'the roster start list offers no start');
+  assert.match(spawners['Hub.svelte'], /disabled=\{!!why && !startPick\.includes\(r\.name\)\}/u, 'the start dialog offers no pick');
+  assert.match(spawners['CreateProjectDialog.svelte'], /disabled=\{!!why && !agents\.includes\(r\.name\)\}/u);
+  assert.match(source, /hint: unavailableText\(d, t\) \|\| undefined/u, 'the team member picker says why');
+  // English and Chinese strings exist for every new key.
+  for (const key of ['agentsGroupDefaults', 'agentsGroupCustom', 'agentsUnavailable', 'agentsUnavailableMissing']) {
+    assert.equal(i18n.match(new RegExp(`\\b${key}:`, 'gu'))?.length, 2, key);
+  }
+});

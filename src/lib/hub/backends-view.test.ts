@@ -125,3 +125,36 @@ test('config_invalid says the same format-neutral words in tmm and on the page (
   assert.equal(page, server, 'the CLI and the page say the same thing');
   assert.doesNotMatch(`${server} ${page}`, /TOML/u);
 });
+
+// Board #7: the Agents list's two groups and an agent's availability, as
+// `registry_list` states them (the server's ONE rule, readiness::unavailable).
+import { agentGroups, unavailableOf, unavailableText } from './backends-view.ts';
+
+const def = (name: string, backend: string, group?: string, availability?: object) => ({ name, backend, group, availability });
+
+test('the list partitions into harness defaults then custom agents, in the server order (#7)', () => {
+  const defs = [def('kiro', 'kiro', 'default'), def('codex', 'claude', 'custom'), def('grok', 'grok', 'default'), def('pentester', 'kiro', 'custom')];
+  const g = agentGroups(defs)!;
+  assert.deepEqual(g.defaults.map((d) => d.name), ['kiro', 'grok']);
+  assert.deepEqual(g.custom.map((d) => d.name), ['codex', 'pentester']);
+  assert.equal(agentGroups([def('kiro', 'kiro')]), null, 'an older server names no group: no groups');
+});
+
+test('only a stated unavailable greys, and the words say why (#7)', () => {
+  const t = (k: string) => ({
+    agentsUnavailable: 'Unavailable: {program} {reason}',
+    agentsUnavailableMissing: 'Unavailable: {program} missing {names} ({reason})',
+    backendsReasonNotFound: 'not on the managed PATH',
+    backendsReasonEnvUnset: "not set in the login shell's environment",
+    backendsReasonUnknown: 'unknown reason',
+  } as Record<string, string>)[k] ?? k;
+  const grok = def('grok', 'grok', 'default', { state: 'unavailable', reason: 'not_found', missing: [] });
+  const dsh = def('dsh', 'dsh', 'default', { state: 'unavailable', reason: 'env_unset', missing: ['DEEPSEEK_API_KEY'] });
+  assert.deepEqual(unavailableOf(grok), { reason: 'not_found', missing: [] });
+  assert.equal(unavailableText(grok, t), 'Unavailable: grok not on the managed PATH');
+  assert.equal(unavailableText(dsh, t), "Unavailable: dsh missing DEEPSEEK_API_KEY (not set in the login shell's environment)");
+  for (const a of [{ state: 'available' }, { state: 'unknown' }, undefined, { state: 'unavailable-ish' }]) {
+    assert.equal(unavailableOf(def('x', 'kiro', 'default', a)), null, JSON.stringify(a));
+  }
+  assert.equal(unavailableText(def('x', 'kiro', 'custom', { state: 'unavailable', reason: 'brand_new_code' }), t), 'Unavailable: kiro unknown reason');
+});

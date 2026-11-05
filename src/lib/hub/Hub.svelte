@@ -38,6 +38,7 @@
   import Icon from '../ui/Icon.svelte';
   import { onDestroy, untrack, tick as settled } from 'svelte';
   import { t } from '../core/i18n.svelte.ts';
+  import { unavailableText } from './backends-view.ts';
   import { sortRows } from '../projects/projects.ts';
   import { alertOf } from './notify-centre.svelte.ts';
   import HubSearch from './HubSearch.svelte';
@@ -2697,11 +2698,14 @@
             <div class="start">
               <div class="start-h">{t('hubStartTitle')}</div>
               <div class="start-list">
+                <!-- Board #7: an agent whose harness this server cannot run
+                     offers no start; the words say why (registry_list). -->
                 {#each registry as r (r.name)}
-                  <button class="start-row" disabled={starting} onclick={() => addAgents([r.name], '', 'start')}>
+                  {@const why = unavailableText(r, t)}
+                  <button class="start-row" class:unavailable={!!why} disabled={starting || !!why} onclick={() => addAgents([r.name], '', 'start')}>
                     {#if backendIcon(r.backend)}<img class="ava" src={backendIcon(r.backend)} alt={r.backend} />{:else}<span class="ava" style:background={backendColor(r.backend)}>{r.name.slice(0, 1).toUpperCase()}</span>{/if}
                     <span class="sr-name">{r.name}</span>
-                    <span class="sr-backend">{r.backend}</span>
+                    <span class="sr-backend">{why || r.backend}</span>
                   </button>
                 {/each}
                 <!-- Configured TEAMS (board #74): one tap starts every member
@@ -2832,10 +2836,11 @@
       {/if}
       <div class="dlg-agents" class:touch={compact}>
         {#each registry as r (r.name)}
-          <button class="agent-pick" class:sel={startPick.includes(r.name)} aria-pressed={startPick.includes(r.name)}
+          {@const why = unavailableText(r, t)}
+          <button class="agent-pick" class:sel={startPick.includes(r.name)} aria-pressed={startPick.includes(r.name)} disabled={!!why && !startPick.includes(r.name)}
             onclick={() => { startPick = startPick.includes(r.name) ? startPick.filter((n) => n !== r.name) : [...startPick, r.name]; }}>
             {#if backendIcon(r.backend)}<img class="ava" src={backendIcon(r.backend)} alt={r.backend} />{:else}<span class="ava" style:background={backendColor(r.backend)}>{r.name.slice(0, 1).toUpperCase()}</span>{/if}
-            <span class="ap-name">{r.name} · {r.backend}</span>
+            <span class="ap-name">{r.name} · {why || r.backend}</span>
             {#if startPick.includes(r.name)}<Icon name="check" size={13} />{/if}
           </button>
         {/each}
@@ -3053,6 +3058,7 @@
   .dlg-agents.touch .agent-pick { min-height: 44px; }
   .agent-pick { display: flex; align-items: center; gap: 8px; background: var(--surface); border: 1px solid var(--border); border-radius: var(--ui-radius-control); color: var(--text2); padding: 8px 11px; font-size: var(--fs-ui); cursor: pointer; text-align: left; }
   .agent-pick.sel { border-color: var(--accent); color: var(--text); background: var(--accent-bg); }
+  .agent-pick:disabled { opacity: 0.5; cursor: default; }
   .agent-pick > :global(svg) { flex: none; color: var(--accent); }
   .dlg-actions { display: flex; justify-content: flex-end; gap: 8px; margin-top: 6px; }
 </style>

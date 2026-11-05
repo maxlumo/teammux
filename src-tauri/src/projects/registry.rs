@@ -14,8 +14,45 @@ pub fn registry_list() -> Result<Value, String> {
         for a in &mut agents {
             a.mcp = mcp_mask::masked_agent(&a.name, &a.mcp)?;
         }
-        Ok(json!({ "agents": agents }))
+        #[cfg(not(any(target_os = "android", target_os = "ios")))]
+        let (checked, grey) = crate::backends::readiness::availability();
+        // A phone-hosted server runs no readiness check: nothing is known.
+        #[cfg(any(target_os = "android", target_os = "ios"))]
+        let (checked, grey) = (false, |_: &str| None::<Value>);
+        Ok(annotate(agents, checked, grey))
     })
+}
+
+/// The listed shape (board #7): each definition with its `group` and its
+/// `availability`, in the store's order. ONE place decides both, so the
+/// Agents page, every spawn picker and `tmm registry list` agree.
+/// - group `default`: named after a supported backend and on it (the seeds,
+///   agents-overview.md § Registry defaults); everything else is `custom`.
+/// - availability: `unknown` with no readiness report; otherwise
+///   `unavailable` (with the reason and any missing names) where the one rule
+///   (`readiness::unavailable`) says so, else `available`.
+pub(crate) fn annotate(agents: Vec<crate::projects::store::RegAgent>, checked: bool, grey: impl Fn(&str) -> Option<Value>) -> Value {
+    let rows: Vec<Value> = agents
+        .into_iter()
+        .map(|a| {
+            let default = crate::backends::Backend::parse(&a.name).is_some() && a.backend == a.name;
+            let availability = if !checked {
+                json!({ "state": "unknown" })
+            } else {
+                match grey(&a.backend) {
+                    Some(why) => json!({ "state": "unavailable", "reason": why["reason"], "missing": why["missing"] }),
+                    None => json!({ "state": "available" }),
+                }
+            };
+            let mut v = serde_json::to_value(&a).unwrap_or_else(|_| json!({}));
+            if let Some(o) = v.as_object_mut() {
+                o.insert("group".into(), json!(if default { "default" } else { "custom" }));
+                o.insert("availability".into(), availability);
+            }
+            v
+        })
+        .collect();
+    json!({ "agents": rows })
 }
 
 /// Whether a def NAMES an input mode. Absent and null both mean "not named"
@@ -342,4 +379,41 @@ pub fn registry_get(name: &str) -> Result<Option<store::RegAgent>, String> {
         store.reg_seed(now())?;
         store.reg_get(name)
     })
+}
+
+#[cfg(test)]
+mod listing_tests {
+    use super::*;
+    use crate::projects::store::RegAgent;
+
+    fn a(name: &str, backend: &str) -> RegAgent {
+        RegAgent { name: name.into(), backend: backend.into(), model: String::new(), effort: String::new(), input_mode: "queue".into(), system: String::new(), skills: "[]".into(), mcp: "[]".into() }
+    }
+
+    /// Board #7: each listed agent says its group and its availability. A
+    /// harness default is a definition named after a supported backend AND
+    /// on it; anything else, a renamed or rebased one included, is custom.
+    /// Availability comes from the one rule over the server's last report;
+    /// with none it is unknown and nothing greys.
+    #[test]
+    fn the_list_says_each_agents_group_and_availability() {
+        let agents = vec![a("kiro", "kiro"), a("grok", "grok"), a("dsh", "dsh"), a("codex", "claude"), a("pentester", "kiro"), a("grokker", "grok")];
+        let grey = |b: &str| (b == "grok" || b == "dsh").then(|| json!({ "reason": "not_found", "missing": [] }));
+        let listed = annotate(agents.clone(), true, grey);
+        let rows = listed["agents"].as_array().unwrap();
+        let view: Vec<(&str, &str, &str)> = rows.iter().map(|r| (r["name"].as_str().unwrap(), r["group"].as_str().unwrap(), r["availability"]["state"].as_str().unwrap())).collect();
+        assert_eq!(view, [
+            ("kiro", "default", "available"),
+            ("grok", "default", "unavailable"),
+            ("dsh", "default", "unavailable"),
+            ("codex", "custom", "available"),
+            ("pentester", "custom", "available"),
+            ("grokker", "custom", "unavailable"),
+        ], "the list order is kept; the client partitions it");
+        assert_eq!(rows[1]["availability"], json!({ "state": "unavailable", "reason": "not_found", "missing": [] }));
+        assert_eq!(rows[0]["system"], "", "the definition's own fields are all still there");
+
+        let unchecked = annotate(agents, false, grey);
+        assert!(unchecked["agents"].as_array().unwrap().iter().all(|r| r["availability"] == json!({ "state": "unknown" })), "no report greys nothing");
+    }
 }

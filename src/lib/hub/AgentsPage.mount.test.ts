@@ -1210,3 +1210,60 @@ test('team members show a failed or cut model list with Retry, and a derived mem
     assert.equal(field(2).placeholder, 'same as base', 'and inherits its base, never the backend default');
   } finally { await app.close(); }
 });
+
+// Board #7 (owner 2026-11-05 05:43): harness defaults, the one divider, then
+// custom agents; an agent whose harness this server cannot run is greyed,
+// says why in words, and still opens. Grouping and availability are the
+// server's (registry_list); this pins how the page shows them.
+const listed = [
+  { ...alpha, name: 'kiro', backend: 'kiro', group: 'default', availability: { state: 'available' } },
+  { ...alpha, name: 'grok', backend: 'grok', group: 'default', availability: { state: 'unavailable', reason: 'not_found', missing: [] } },
+  { ...alpha, name: 'dsh', backend: 'dsh', group: 'default', availability: { state: 'unavailable', reason: 'not_found', missing: [] } },
+  { ...alpha, name: 'pentester', backend: 'kiro', group: 'custom', availability: { state: 'available' } },
+];
+async function groupedList(app: App) {
+  for (let i = 0; i < 12 && !app.document.querySelector('.agent-group'); i++) await app.flush();
+  const groups = [...app.document.querySelectorAll('.agent-group')];
+  return groups.map((g) => ({
+    head: g.querySelector('.side-h')?.textContent?.trim(),
+    rows: [...g.querySelectorAll('.side-row:not(.add)')].map((r) => r.querySelector('.r-name')?.textContent),
+  }));
+}
+for (const layout of ['desktop', 'compact'] as const) {
+  test(`the Agents list shows harness defaults, a divider, then custom agents, greying an unusable harness in words (${layout}, #7)`, async context => {
+    const app = await (await compiled).mount(context, {
+      props: layout === 'compact' ? { visible: true, section: 'agents' } : { visible: true },
+      modules: [rpc({ registryList: async () => ({ agents: listed }) })],
+      setup(window) {
+        if (layout !== 'compact') return;
+        const match = window.matchMedia;
+        window.matchMedia = query => Object.assign(match(query), { matches: query === '(max-width: 760px)' });
+      },
+    });
+    try {
+      assert.deepEqual(await groupedList(app), [
+        { head: 'Harness defaults', rows: ['kiro', 'grok', 'dsh'] },
+        { head: 'Custom agents', rows: ['pentester'] },
+      ]);
+      const custom = app.document.querySelectorAll('.agent-group')[1]!;
+      assert.ok(custom.classList.contains('divided'), 'the custom group opens with the divider');
+      const row = (name: string) => [...app.document.querySelectorAll<HTMLButtonElement>('.agent-group .side-row')].find((r) => r.querySelector('.r-name')?.textContent === name)!;
+      assert.ok(row('grok').classList.contains('unavailable'));
+      assert.equal(row('grok').querySelector('.r-sub')?.textContent?.trim(), 'Unavailable: grok not on the managed PATH', 'the reason in words, not colour alone');
+      assert.equal(row('grok').querySelector<HTMLElement>('.r-dot')?.style.background, 'var(--status-warn)', 'the one status-dot language: a person has to act');
+      assert.ok(!row('kiro').classList.contains('unavailable'));
+      assert.equal(row('kiro').querySelector('.r-sub'), null);
+      // Unavailable is still readable: its definition opens.
+      row('grok').click(); await app.flush();
+      assert.ok(app.document.querySelector('.editor'), 'an unavailable definition still opens');
+    } finally { await app.close(); }
+  });
+}
+
+test('an older server names no group: the flat list stays, with no headings (#7)', async context => {
+  const app = await (await compiled).mount(context, { props: { visible: true, section: 'agents' }, modules: [rpc()] });
+  try {
+    await openAgent(app);
+    assert.equal(app.document.querySelector('.agent-group'), null);
+  } finally { await app.close(); }
+});

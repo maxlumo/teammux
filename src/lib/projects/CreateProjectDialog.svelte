@@ -15,6 +15,7 @@
   import { useServerScope } from '../app/server-context.ts';
   import { backendColor as colorOf } from '../hub/hub.ts';
   import { t } from '../core/i18n.svelte.ts';
+  import { unavailableText } from '../hub/backends-view.ts';
 
   let { compact = false, oncreated, oncancel } = $props();
   // This server's RPCs and backend catalog, read once at init (board #335 ②b).
@@ -98,9 +99,10 @@
     <div class="dlg-h">{t('hubCreateAgents')}</div>
     <div class="dlg-agents" class:touch={compact}>
       {#each registry as r (r.name)}
-        <button class="agent-pick" class:sel={agents.includes(r.name)} onclick={() => toggle(r.name)}>
+        {@const why = unavailableText(r, t)}
+        <button class="agent-pick" class:sel={agents.includes(r.name)} disabled={!!why && !agents.includes(r.name)} onclick={() => toggle(r.name)}>
           {#if backendIcon(r.backend)}<img class="ava" src={backendIcon(r.backend)} alt={r.backend} />{:else}<span class="ava" style:background={backendColor(r.backend)}>{r.name.slice(0, 1).toUpperCase()}</span>{/if}
-          {r.name} · {r.backend}
+          {r.name} · {why || r.backend}
           {#if agents.includes(r.name)}<Icon name="check" size={13} />{/if}
         </button>
       {/each}
@@ -134,6 +136,7 @@
   .path-row :global(.chip-btn) { flex: none; }
   .agent-pick { display: flex; align-items: center; gap: 8px; background: var(--surface); border: 1px solid var(--border); border-radius: var(--ui-radius-control); color: var(--text2); padding: 8px 11px; font-size: var(--fs-ui); cursor: pointer; text-align: left; }
   .agent-pick.sel { border-color: var(--accent-line); background: var(--accent-bg); color: var(--text); }
+  .agent-pick:disabled { opacity: 0.5; cursor: default; }
   .agent-pick :global(svg) { margin-left: auto; color: var(--accent); }
   .ava { width: 20px; height: 20px; border-radius: 6px; display: grid; place-items: center; color: white; font-size: var(--fs-meta); font-weight: 700; flex: none; }
 </style>
