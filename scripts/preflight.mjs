@@ -161,7 +161,7 @@ if (mode === 'android-apk') {
       const absent = ['key.properties', 'keystore.jks'].map(f => join(androidRoot, f)).filter(f => !existsSync(f));
       console.error(`⚠️  the APK is unsigned: ${unsigned}`);
       console.error(absent.length ? `   missing: ${absent.join(', ')}`
-        : `   ${join(androidRoot, 'key.properties')} has no storeFile gradle could use`);
+        : `   ${join(androidRoot, 'key.properties')} and ${join(androidRoot, 'keystore.jks')} both exist: the APK predates them or gradle did not use them. Rebuild; if it is still unsigned, check storeFile in key.properties.`);
       console.error('   see docs/conventions/development.md § Android signing (a worktree symlinks both from the launch checkout).');
       process.exit(1);
     }

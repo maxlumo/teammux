@@ -207,17 +207,19 @@ test('android-apk: only an -unsigned APK (no signing files) → refused, naming 
   assert.doesNotMatch(r.stderr, /redirect/u);
 });
 
-test('android-apk: only the files actually absent are named; with both present it says key.properties gave gradle no storeFile', () => {
+test('android-apk: only the files actually absent are named; with both present it claims nothing about their contents and says to rebuild (reviewer P2-R1)', () => {
   const apk = join('app', 'build', releaseRel, 'app-universal-release-unsigned.apk');
   const one = checkout('unsigned-no-jks', [apk, 'key.properties']);
   const r = postflight(one.at, emptyHome);
   assert.equal(r.status, 1);
   assert.ok(r.stderr.includes(`missing: ${join(one.android, 'keystore.jks')}\n`), r.stderr);
-  const both = checkout('unsigned-both', [apk, 'key.properties', 'keystore.jks']);
+  // A valid configuration placed after an unsigned build: the APK is the old one.
+  const both = checkout('unsigned-both', [apk, 'keystore.jks']);
+  writeFileSync(join(both.android, 'key.properties'), 'storeFile=keystore.jks\nstorePassword=x\nkeyAlias=x\nkeyPassword=x\n');
   const s = postflight(both.at, emptyHome);
   assert.equal(s.status, 1);
-  assert.doesNotMatch(s.stderr, /missing:/u);
-  assert.ok(s.stderr.includes(`${join(both.android, 'key.properties')} has no storeFile gradle could use`), s.stderr);
+  assert.doesNotMatch(s.stderr, /missing|has no storeFile/u);
+  assert.ok(s.stderr.includes(`${join(both.android, 'key.properties')} and ${join(both.android, 'keystore.jks')} both exist: the APK predates them or gradle did not use them. Rebuild; if it is still unsigned, check storeFile in key.properties.`), s.stderr);
 });
 
 test('android-apk: a signed APK in a real app/build directory → exit 0, naming it, even beside an older -unsigned one', () => {
