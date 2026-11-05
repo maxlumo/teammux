@@ -982,6 +982,16 @@ fn dispatch_hub(req: &Request, notifications: Option<&crate::agent_notifications
             // project at runtime; absent or empty = standalone, as before.
             // The team's definition is never edited (tenet 7).
             let join = p.get("join").and_then(|v| v.as_str()).map(str::trim).filter(|t| !t.is_empty());
+            // Board #15: an agent whose harness this server cannot run is
+            // refused before anything starts, by the one availability rule
+            // (`registry::agent_refusal`), as `hub_spawn_team` refuses a team.
+            // An agent not in the registry is `spawn`'s error to name.
+            if let Some(def) = crate::projects::registry_get(agent).map_err(RpcError::InvalidParams)? {
+                let (checked, grey) = crate::projects::registry::availability_view();
+                if let Some(refusal) = crate::projects::registry::agent_refusal(&def, checked, &*grey) {
+                    return Err(RpcError::InvalidParams(refusal));
+                }
+            }
             let mut result = crate::projects::spawn::spawn(&crate::projects::spawn::SpawnRequest {
                 session, agent, brief, by, team: join.map(str::to_string), ..Default::default()
             })

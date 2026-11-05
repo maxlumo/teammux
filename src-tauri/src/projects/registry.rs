@@ -69,10 +69,35 @@ pub(crate) fn team_refusal(team: &str, availability: &Value) -> Option<String> {
         return None;
     }
     let s = |k: &str| availability[k].as_str().unwrap_or("").to_string();
-    let why = availability["reason"].as_str().map(crate::backends::readiness::reason_text).unwrap_or("its readiness check found it unusable");
-    let names: Vec<&str> = availability["missing"].as_array().map(|m| m.iter().filter_map(|n| n.as_str()).collect()).unwrap_or_default();
-    let what = if names.is_empty() { why.to_string() } else { format!("missing {} ({why})", names.join(", ")) };
+    let what = crate::backends::readiness::unusable_text(availability);
     Some(format!("team '{team}' cannot start on this server: member '{}' runs on {}, which is {what}. Nothing was started.", s("member"), s("backend")))
+}
+
+/// One agent's availability (board #7): `unknown` with no readiness report,
+/// else `unavailable` with the reason and any missing names where the one
+/// rule greys its BACKEND, else `available`.
+fn agent_availability(backend: &str, checked: bool, grey: &dyn Fn(&str) -> Option<Value>) -> Value {
+    if !checked {
+        return json!({ "state": "unknown" });
+    }
+    match grey(backend) {
+        Some(why) => json!({ "state": "unavailable", "reason": why["reason"], "missing": why["missing"] }),
+        None => json!({ "state": "available" }),
+    }
+}
+
+/// The refusal a single start gives (board #15: `hub_spawn`, so `tmm spawn
+/// <agent>` and the UI's start alike) when the agent's availability is
+/// unavailable, in the team refusal's words; None otherwise (unknown never
+/// refuses).
+#[cfg(not(any(target_os = "android", target_os = "ios")))]
+pub(crate) fn agent_refusal(def: &store::RegAgent, checked: bool, grey: &dyn Fn(&str) -> Option<Value>) -> Option<String> {
+    let availability = agent_availability(&def.backend, checked, grey);
+    if availability["state"] != "unavailable" {
+        return None;
+    }
+    let what = crate::backends::readiness::unusable_text(&availability);
+    Some(format!("agent '{}' cannot start on this server: it runs on {}, which is {what}. Nothing was started.", def.name, def.backend))
 }
 
 /// The listed shape (board #7): each definition with its `group` and its
@@ -88,14 +113,7 @@ pub(crate) fn annotate(agents: Vec<crate::projects::store::RegAgent>, checked: b
         .into_iter()
         .map(|a| {
             let default = crate::backends::Backend::parse(&a.name).is_some() && a.backend == a.name;
-            let availability = if !checked {
-                json!({ "state": "unknown" })
-            } else {
-                match grey(&a.backend) {
-                    Some(why) => json!({ "state": "unavailable", "reason": why["reason"], "missing": why["missing"] }),
-                    None => json!({ "state": "available" }),
-                }
-            };
+            let availability = agent_availability(&a.backend, checked, &grey);
             let mut v = serde_json::to_value(&a).unwrap_or_else(|_| json!({}));
             if let Some(o) = v.as_object_mut() {
                 o.insert("group".into(), json!(if default { "default" } else { "custom" }));
@@ -512,5 +530,26 @@ mod listing_tests {
         assert_eq!(team_refusal("t", &dsh).as_deref(), Some("team 't' cannot start on this server: member 'd' runs on dsh, which is missing DEEPSEEK_API_KEY (not set in the login shell's environment). Nothing was started."));
         assert_eq!(team_refusal("t", &json!({ "state": "unknown" })), None, "unknown never refuses");
         assert_eq!(team_refusal("t", &json!({ "state": "available" })), None);
+    }
+
+    /// Board #15: a single start refuses an agent whose harness the one rule
+    /// greys, in the words the team refusal and `tmm registry list` use; the
+    /// agent's BACKEND decides, so a custom agent on grok is refused too.
+    /// No report (unknown) never refuses.
+    #[test]
+    fn a_single_start_refuses_an_unavailable_agent_in_the_team_refusals_words() {
+        let grey = |b: &str| match b {
+            "grok" => Some(json!({ "reason": "not_found", "missing": [] })),
+            "dsh" => Some(json!({ "reason": "env_unset", "missing": ["DEEPSEEK_API_KEY"] })),
+            _ => None,
+        };
+        assert_eq!(agent_refusal(&a("grok", "grok"), true, &grey).as_deref(),
+            Some("agent 'grok' cannot start on this server: it runs on grok, which is not on the managed PATH. Nothing was started."));
+        assert_eq!(agent_refusal(&a("grokker", "grok"), true, &grey).as_deref(),
+            Some("agent 'grokker' cannot start on this server: it runs on grok, which is not on the managed PATH. Nothing was started."));
+        assert_eq!(agent_refusal(&a("dsh", "dsh"), true, &grey).as_deref(),
+            Some("agent 'dsh' cannot start on this server: it runs on dsh, which is missing DEEPSEEK_API_KEY (not set in the login shell's environment). Nothing was started."));
+        assert_eq!(agent_refusal(&a("kiro", "kiro"), true, &grey), None);
+        assert_eq!(agent_refusal(&a("grok", "grok"), false, &grey), None, "unknown never refuses");
     }
 }

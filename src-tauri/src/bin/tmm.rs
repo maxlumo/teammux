@@ -1080,27 +1080,7 @@ async fn main() {
             if ctx.json {
                 println!("{r}");
             } else {
-                let empty = Vec::new();
-                for t in r.get("teams").and_then(|v| v.as_array()).unwrap_or(&empty) {
-                    let s = |k: &str| t.get(k).and_then(|v| v.as_str()).unwrap_or("");
-                    let members: Vec<serde_json::Value> = serde_json::from_str(s("members")).unwrap_or_default();
-                    let names: Vec<String> = members
-                        .iter()
-                        .map(|m| {
-                            let n = m.get("name").and_then(|v| v.as_str()).unwrap_or("");
-                            let base = m.get("base").and_then(|v| v.as_str()).unwrap_or("");
-                            let model = m.get("model").and_then(|v| v.as_str()).unwrap_or("");
-                            let sub = m.get("team").and_then(|v| v.as_str()).unwrap_or("");
-                            if !sub.is_empty() { return format!("+{sub}"); }
-                            match (base.is_empty(), model.is_empty()) {
-                                (true, _) => n.to_string(),
-                                (false, true) => format!("{n}←{base}"),
-                                (false, false) => format!("{n}←{base}({model})"),
-                            }
-                        })
-                        .collect();
-                    println!("{} — {} [{}]", s("name"), s("description"), names.join(", "));
-                }
+                print!("{}", teams_text(&r));
             }
         }
         ("teams", rest) if rest.first().map(String::as_str) == Some("save") => {
@@ -3286,12 +3266,47 @@ fn models_text(answers: &[Value]) -> String {
     out
 }
 
+/// What plain-text `tmm teams list` prints: one line per team, and under a
+/// team its availability makes unstartable, the member and the reason in the
+/// words `tmm spawn --team` refuses with (board #15).
+fn teams_text(r: &Value) -> String {
+    use tmux_mobile::backends::readiness::unusable_text;
+    let mut out = String::new();
+    let empty = Vec::new();
+    for t in r.get("teams").and_then(|v| v.as_array()).unwrap_or(&empty) {
+        let s = |k: &str| t.get(k).and_then(|v| v.as_str()).unwrap_or("");
+        let members: Vec<serde_json::Value> = serde_json::from_str(s("members")).unwrap_or_default();
+        let names: Vec<String> = members
+            .iter()
+            .map(|m| {
+                let n = m.get("name").and_then(|v| v.as_str()).unwrap_or("");
+                let base = m.get("base").and_then(|v| v.as_str()).unwrap_or("");
+                let model = m.get("model").and_then(|v| v.as_str()).unwrap_or("");
+                let sub = m.get("team").and_then(|v| v.as_str()).unwrap_or("");
+                if !sub.is_empty() { return format!("+{sub}"); }
+                match (base.is_empty(), model.is_empty()) {
+                    (true, _) => n.to_string(),
+                    (false, true) => format!("{n}←{base}"),
+                    (false, false) => format!("{n}←{base}({model})"),
+                }
+            })
+            .collect();
+        out.push_str(&format!("{} — {} [{}]\n", s("name"), s("description"), names.join(", ")));
+        let av = t.get("availability").cloned().unwrap_or(Value::Null);
+        if av.get("state").and_then(|v| v.as_str()) == Some("unavailable") {
+            let m = |k: &str| av.get(k).and_then(|v| v.as_str()).unwrap_or("").to_string();
+            out.push_str(&format!("  unavailable: member '{}' runs on {}, which is {}\n", m("member"), m("backend"), unusable_text(&av)));
+        }
+    }
+    out
+}
+
 /// What `tmm registry list` prints (board #7): the Agents page's two groups,
 /// harness defaults then custom agents, with the one divider between; an
 /// agent the server's last readiness report makes unusable says why on the
 /// line under it. An older server sends no `group`: its flat list.
 fn registry_text(r: &Value) -> String {
-    use tmux_mobile::backends::readiness::reason_text;
+    use tmux_mobile::backends::readiness::unusable_text;
     let empty = Vec::new();
     let agents = r.get("agents").and_then(|v| v.as_array()).unwrap_or(&empty);
     let s = |a: &Value, k: &str| a.get(k).and_then(|v| v.as_str()).unwrap_or("").to_string();
@@ -3316,10 +3331,7 @@ fn registry_text(r: &Value) -> String {
             let av = a.get("availability").cloned().unwrap_or(Value::Null);
             match av.get("state").and_then(|v| v.as_str()) {
                 Some("unavailable") => {
-                    let why = av.get("reason").and_then(|v| v.as_str()).map(reason_text).unwrap_or("its readiness check found it unusable");
-                    let names: Vec<&str> = av.get("missing").and_then(|v| v.as_array()).map(|m| m.iter().filter_map(|n| n.as_str()).collect()).unwrap_or_default();
-                    let what = if names.is_empty() { why.to_string() } else { format!("missing {} ({why})", names.join(", ")) };
-                    out.push_str(&format!("    unavailable: {} {what}\n", s(a, "backend")));
+                    out.push_str(&format!("    unavailable: {} {}\n", s(a, "backend"), unusable_text(&av)));
                 }
                 Some("available") => {}
                 _ => unknown = true,
@@ -3852,6 +3864,30 @@ Availability is not known yet: this server has not checked its CLIs. A check has
         // An older server sends no group: the flat list it always printed.
         let old = serde_json::json!({ "agents": [{ "name": "kiro", "backend": "kiro", "system": "K" }] });
         assert_eq!(registry_text(&old), "kiro [kiro] — K\n");
+    }
+
+    /// Board #15: plain-text `tmm teams list` says a team is unavailable, with
+    /// the member and the reason words its JSON carries and `tmm spawn --team`
+    /// prints; available and unknown add nothing.
+    #[test]
+    fn teams_list_says_which_member_makes_a_team_unavailable() {
+        use super::teams_text;
+        let r = serde_json::json!({ "teams": [
+            { "name": "squad", "description": "S", "members": r#"[{"name":"b","base":"builder"},{"name":"s","base":"scout"}]"#,
+              "availability": { "state": "unavailable", "member": "s", "backend": "grok", "reason": "not_found", "missing": [] } },
+            { "name": "deep", "description": "D", "members": r#"[{"name":"d"}]"#,
+              "availability": { "state": "unavailable", "member": "d", "backend": "dsh", "reason": "env_unset", "missing": ["DEEPSEEK_API_KEY"] } },
+            { "name": "ok", "description": "O", "members": r#"[{"name":"b","base":"builder","model":"m"}]"#, "availability": { "state": "available" } },
+            { "name": "old", "description": "X", "members": "[]" },
+        ] });
+        assert_eq!(teams_text(&r), "\
+squad — S [b←builder, s←scout]
+  unavailable: member 's' runs on grok, which is not on the managed PATH
+deep — D [d]
+  unavailable: member 'd' runs on dsh, which is missing DEEPSEEK_API_KEY (not set in the login shell's environment)
+ok — O [b←builder(m)]
+old — X []
+");
     }
 
     /// `--notify`'s recipients, as the CLI reads them (board #507). Resolving

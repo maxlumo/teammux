@@ -1126,6 +1126,17 @@ pub fn unavailable(row: &Value) -> Option<Value> {
     }))
 }
 
+/// What makes a harness unusable, in words, from an `unavailable`
+/// availability's `reason` and `missing`: "not on the managed PATH", or
+/// "missing DEEPSEEK_API_KEY (not set in the login shell's environment)".
+/// The ONE wording (board #15) `tmm registry list`, `tmm teams list` and both
+/// start refusals (an agent's, a team's) print.
+pub fn unusable_text(availability: &Value) -> String {
+    let why = availability.get("reason").and_then(Value::as_str).map(reason_text).unwrap_or("its readiness check found it unusable");
+    let names: Vec<&str> = availability.get("missing").and_then(Value::as_array).map(|m| m.iter().filter_map(Value::as_str).collect()).unwrap_or_default();
+    if names.is_empty() { why.to_string() } else { format!("missing {} ({why})", names.join(", ")) }
+}
+
 /// The last Refresh that FOUND a fact. One that found nothing (timed out,
 /// failed, every fact undecided) keeps the report before it. In memory only:
 /// a disposable projection (tenet 7), gone with the process.
