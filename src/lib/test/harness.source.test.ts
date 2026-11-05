@@ -10,6 +10,7 @@
 import assert from 'node:assert/strict';
 import { readdirSync, readFileSync } from 'node:fs';
 import { readFile } from 'node:fs/promises';
+import { join, relative, sep } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import test from 'node:test';
 
@@ -18,14 +19,16 @@ const root = fileURLToPath(new URL('../../../', import.meta.url));
 // tool. The test used to shell out to ripgrep, which a host need not have
 // and the isolation runner rightly does not mount: under isolation it failed
 // with `spawnSync rg ENOENT`. Like rg, the walk skips hidden entries and
-// node_modules. Paths are repo-relative with `/`.
-const files = (...dirs: string[]): string[] => dirs.flatMap((dir) => readdirSync(new URL(dir, `file://${root}`), { recursive: true, withFileTypes: true })
+// node_modules. Paths are repo-relative with `/`, built with path functions,
+// never a URL: a checkout path holding `#` or `%` is read as a fragment or
+// an escape by URL parsing (reviewer, #10 round 1).
+const files = (...dirs: string[]): string[] => dirs.flatMap((dir) => readdirSync(join(root, dir), { recursive: true, withFileTypes: true })
   .filter((e) => e.isFile())
-  .map((e) => `${e.parentPath.slice(root.length)}/${e.name}`.replace(/^\/+/u, ''))
+  .map((e) => relative(root, join(e.parentPath, e.name)).split(sep).join('/'))
   .filter((f) => !f.split('/').some((part) => part.startsWith('.') || part === 'node_modules')))
   .sort();
 const listed = (pattern: RegExp) => files('src', 'scripts')
-  .filter((f) => /\.(?:ts|mjs|js)$/u.test(f) && !f.endsWith('harness.source.test.ts') && pattern.test(readFileSync(`${root}${f}`, 'utf8')));
+  .filter((f) => /\.(?:ts|mjs|js)$/u.test(f) && !f.endsWith('harness.source.test.ts') && pattern.test(readFileSync(join(root, f), 'utf8')));
 
 test('the ONE Vite SSR helper opens no socket: ws:false, hmr:false, no port', async () => {
   const ssr = await readFile(new URL('./ssr.ts', import.meta.url), 'utf8');
@@ -54,7 +57,7 @@ test('the render tier is ONE process: every *.render.ts suite is collected by re
   for (const f of suites) {
     const rel = f.replace(/^src\/lib\//u, '../').replace(/\.ts$/u, '.ts');
     assert.ok(collector.includes(`import '${rel}';`), `${f} is collected by render.test.ts`);
-    const src = await readFile(new URL(`../../../${f}`, import.meta.url), 'utf8');
+    const src = await readFile(join(root, f), 'utf8');
     assert.match(src, /import \{ (?:[^}]*, )?renderHarness(?:, [^}]*)? \} from '\.\.\/test\/ssr\.ts'/u, `${f} uses the shared harness`);
     assert.doesNotMatch(src, /from '(?:vite|jsdom)'/u, `${f} does not reach for vite or jsdom itself`);
     assert.doesNotMatch(src, /timeout:\s*\d/u, `${f}: the budget is the harness constant, not a literal`);
