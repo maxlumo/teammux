@@ -25,6 +25,13 @@ use super::*;
 /// The slot is what makes it a member of the project, so the slot is what
 /// authorizes the removal. `home_removed` reports whether there was a home.
 pub fn agent_remove(session: &str, agent: &str) -> Result<Value, String> {
+    // Inside the one name-allocation boundary (board #20 review P1-R1): a
+    // rename of this agent is either before the remove (its names deleted
+    // here) or after it (refused, not an agent), never in between.
+    spawn::with_allocation(|| agent_remove_now(session, agent))
+}
+
+fn agent_remove_now(session: &str, agent: &str) -> Result<Value, String> {
     // Before anything is looked up or killed: the name is about to be a
     // `remove_dir_all` target under `.tmm/agents/`, and `managed_home` would
     // answer "yes, a directory" for `..`.

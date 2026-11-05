@@ -861,6 +861,34 @@ fn in_flight() -> std::sync::MutexGuard<'static, std::collections::HashSet<(Stri
     SET.get_or_init(Default::default).lock().unwrap_or_else(|e| e.into_inner())
 }
 
+/// Run `f` inside the name-allocation critical section, refusing a `name`
+/// a spawn holds in flight in `workspace` (board #20 review, reviewer 15:17).
+/// A label is a name too: a rename checks and writes it under the SAME lock
+/// every new spawn reserves under, so a spawn that reserved `bob` before its
+/// window exists and a rename to `bob` can never both get it. `f` must not
+/// re-enter the allocator.
+pub(crate) fn allocating<T>(workspace: &str, name: &str, f: impl FnOnce() -> Result<T, String>) -> Result<T, String> {
+    let flight = in_flight();
+    if flight.contains(&(workspace.to_string(), name.to_string())) {
+        return Err(format!("the name '{name}' is being created by another request — try again, or pick another"));
+    }
+    let out = f();
+    drop(flight);
+    out
+}
+
+/// Run `f` inside the same allocation boundary, with no name to check: the
+/// LIFETIME half (board #20 review P1-R1). `agent_remove` runs under it, and
+/// so does a rename's "is it an agent here" check and its write, so a rename
+/// can never write names for an agent a remove has just deleted. A remove can
+/// hold it for a few seconds while a CLI's workers exit (#26).
+pub(crate) fn with_allocation<T>(f: impl FnOnce() -> T) -> T {
+    let flight = in_flight();
+    let out = f();
+    drop(flight);
+    out
+}
+
 /// A claim on a NEW agent identity (board #383 review P1-A): its name is reserved
 /// against every other new spawn in `in_flight` until the claim is dropped, so
 /// the name check and the taking of the name are one step. A fork's claim also
@@ -4435,6 +4463,56 @@ hooks = [ { type = "command", command = "/opt/guard.sh" } ]
     /// or a previous label in the project, or one name would address two
     /// agents. An explicit name (a team member's, a fork's `--as`) is refused
     /// by name; an automatic one steps past it as past a live window.
+    /// Board #20 review (reviewer 15:17): a rename and a spawn reaching for
+    /// the same name share ONE allocation boundary. A spawn's reservation
+    /// held before its window exists refuses a rename to that name; once the
+    /// reservation is given back the rename goes through and a later spawn is
+    /// refused by the label. At a barrier, both ways round, exactly one of
+    /// them gets the name, never both.
+    #[test]
+    fn a_rename_and_a_spawn_reaching_for_the_same_name_never_both_get_it() {
+        super::super::tests::use_test_store();
+        let ws = crate::config::test_scratch("tmm-label-race");
+        let ws_str = ws.to_string_lossy().to_string();
+        let home = ws.join(".tmm/agents/dev");
+        std::fs::create_dir_all(&home).unwrap();
+        std::fs::write(home.join("launch.json"), "{}").unwrap();
+        let id = format!("label-race-{}", std::process::id());
+        let p = crate::projects::store::Project {
+            id: id.clone(), name: id.clone(), path: ws_str.clone(), icon: None, session: id.clone(),
+            adopted: false, autostart: false, created_at: 1, last_up_at: None, last_seen_at: None, archived: false, room: String::new(),
+        };
+        super::super::with_store(|s| s.insert_project(&p)).unwrap();
+        let none = || Ok(Vec::new());
+        let who = Starting { agent_def: "bob", team: "", member: "" };
+
+        // Deterministic: the spawn's reservation is HELD.
+        let held = reserve_name(&ws_str, &none, &who, Some("bob"), "bob").unwrap();
+        assert_eq!(super::super::names::rename(&id, "dev", Some("bob")).unwrap_err(),
+            "the name 'bob' is being created by another request — try again, or pick another");
+        assert_eq!(super::super::names::names(&id).shown("dev"), "dev", "the refused rename wrote nothing");
+        drop(held);
+        super::super::names::rename(&id, "dev", Some("bob")).expect("free once given back");
+        assert!(reserve_name(&ws_str, &none, &who, Some("bob"), "bob").is_err(), "and the spawn is refused by the label");
+
+        // At a barrier, many rounds: exactly one wins each name.
+        for round in 0..30 {
+            let name = format!("n{round}");
+            let barrier = std::sync::Arc::new(std::sync::Barrier::new(2));
+            let (b1, w1, n1, i1) = (barrier.clone(), ws_str.clone(), name.clone(), id.clone());
+            // The claim is KEPT until both have answered (a spawn holds it
+            // until its window exists).
+            let spawn = std::thread::spawn(move || {
+                b1.wait();
+                reserve_name(&w1, &|| Ok(Vec::new()), &Starting { agent_def: "", team: "", member: "" }, Some(&n1), &n1)
+            });
+            let rename = std::thread::spawn(move || { barrier.wait(); super::super::names::rename(&i1, "dev", Some(&name)) });
+            let (claim, renamed) = (spawn.join().unwrap(), rename.join().unwrap());
+            assert!(claim.is_ok() != renamed.is_ok(), "round {round}: exactly one gets the name (spawn {:?}, rename {:?})", claim.as_ref().map(|c| c.name().to_string()), renamed);
+            drop(claim);
+        }
+    }
+
     #[test]
     fn a_new_agent_never_takes_a_name_that_is_a_label_here() {
         super::super::tests::use_test_store();
