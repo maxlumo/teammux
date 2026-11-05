@@ -192,8 +192,11 @@ pub fn sniff_claude(pane: &str) -> Vitals {
 
 
 use serde_json::{json, Value};
+// `Path` is shared: the restart line (`resume_command`, board #22) is built
+// on every platform; `PathBuf` only by the desktop-only home renderer.
+use std::path::Path;
 #[cfg(not(any(target_os = "android", target_os = "ios")))]
-use std::path::{Path, PathBuf};
+use std::path::PathBuf;
 
 #[cfg(not(any(target_os = "android", target_os = "ios")))]
 use crate::projects::spawn::{effort_flag, patch_hooks, Rendered};

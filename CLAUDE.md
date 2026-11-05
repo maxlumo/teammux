@@ -65,6 +65,7 @@ npm run build:server     # server + tmm, no webview needed
 npm run build:android    # APK (aarch64) — ends with the build-dir postflight
 npm test                 # frontend + script tests (node --test, no tmux)
 npm run check            # svelte-check (the ONLY type check)
+npm run check:android    # Rust lib for the phone's target; every src-tauri change (board #32)
 npm run test:rust        # Rust tests, sequential, needs a running tmux
 npm run test:e2e:docker  # 3 isolated gateways in Docker: the environment smoke for multi-server work
 ```

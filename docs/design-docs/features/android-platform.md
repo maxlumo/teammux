@@ -290,17 +290,34 @@ programs and are never built for Android: a real build leaves only
 `libtmux_mobile.{a,rlib,so}` in the cargo target's `aarch64-linux-android/release`
 (no bin artifact, in `deps/` either), and the APK's `arm64-v8a/` holds that one
 `.so`. So the check that matches the build is
-`cargo check` on the lib alone:
+`cargo check` on the lib alone, which is `npm run check:android`
+(`scripts/preflight.mjs android-check`, board #32):
 
 ```bash
-export NDK_HOME="$ANDROID_HOME/ndk/$(ls "$ANDROID_HOME/ndk" | sort -V | tail -1)"
-TC="$NDK_HOME/toolchains/llvm/prebuilt/linux-x86_64/bin"
-CC_aarch64_linux_android="$TC/aarch64-linux-android24-clang" \
-AR_aarch64_linux_android="$TC/llvm-ar" \
-CARGO_TARGET_AARCH64_LINUX_ANDROID_LINKER="$TC/aarch64-linux-android24-clang" \
-  cargo check --manifest-path src-tauri/Cargo.toml --features gui \
-    --target aarch64-linux-android --lib
+npm run check:android    # cargo check --lib --target aarch64-linux-android, default features (gui)
 ```
+
+It takes the SDK and NDK through the same guard as `build:android`
+(`androidNdk()`: the SDK from `ANDROID_HOME`, else `ANDROID_SDK_ROOT`, and the
+NDK whose name sorts last, as tauri picks it), sets the target's C compiler and
+archiver from that NDK (`aarch64-linux-android24-clang`, minSdk 24 as in
+`gen/android/app/build.gradle.kts`, and `llvm-ar`), and exits with cargo's
+code. It needs no emulator, device or gradle. The hand-written recipe it
+replaces picked the NDK with `sort -V`, which is not tauri's pick when several
+NDKs are installed.
+
+**Every change under `src-tauri/` runs it before merge** (board #32). Incident,
+2026-11-05 17:05: the owner's `build:android release` of main `4f6e2925`
+failed with 10 errors, all from code merged that day after the last good
+Android build (`6cf2b819`, #18). #22's transcript lookup in
+`backends/claude.rs` used `Path`, whose import was gated off on the phone, and
+#20 and #28 called the desktop-only `projects` module from
+`agent_notifications.rs` and `server/hub_rpc.rs`. Each passed the desktop
+suites, because nothing in the gate compiled the phone's target. Fixed in #32
+by gating the leaking items with the cfg of what they use; desktop is
+unchanged. iOS shares that cfg (`any(target_os = "android", target_os =
+"ios")` on every gated item), but it is not checked: an iOS check needs the
+Apple SDK for the C dependencies, which this Linux host does not have.
 
 Without `--lib`, cargo also checks the bins for Android and fails on main
 (`tmm` 28 errors, `server` 1): `chrono` and the desktop-only modules are

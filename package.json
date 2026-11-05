@@ -12,6 +12,7 @@
     "build": "vite build",
     "test": "node --test 'src/**/*.test.js' 'src/**/*.test.ts' 'scripts/**/*.test.js' 'scripts/**/*.test.ts'",
     "check": "svelte-check --tsconfig ./tsconfig.json",
+    "check:android": "node scripts/preflight.mjs android-check",
     "preview": "vite preview",
     "tauri": "tauri",
     "tauri:dev": "node scripts/preflight.mjs dev && tauri dev",

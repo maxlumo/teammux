@@ -94,6 +94,7 @@ npm run build:mac        # macOS .app + .dmg
 npm run build:android    # Android APK (aarch64)
 npm test                 # Frontend + dev-script tests (node --test; see docs/conventions/testing.md)
 npm run check            # svelte-check: type-checks .ts/.svelte.ts/.svelte files
+npm run check:android    # cargo check of the Rust lib for the phone (aarch64-linux-android); every src-tauri change
 npm run build:server     # web UI (vite build) + server + tmm with it embedded (embed-ui), no webview needed (release)
 npm run dev:server       # standalone WS server (pair with `npm run dev`)
 npm run test:rust        # Rust tests, sequential (needs tmux running)

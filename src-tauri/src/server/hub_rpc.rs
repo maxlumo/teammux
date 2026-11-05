@@ -2418,6 +2418,7 @@ fn team_context(
     Some(out)
 }
 
+#[cfg(not(any(target_os = "android", target_os = "ios")))]
 /// An answer with the project's `labels` beside its rows (board #20).
 fn with_labels(session: &str, mut v: serde_json::Value) -> serde_json::Value {
     if let Some(obj) = v.as_object_mut() {
@@ -2426,6 +2427,7 @@ fn with_labels(session: &str, mut v: serde_json::Value) -> serde_json::Value {
     v
 }
 
+#[cfg(not(any(target_os = "android", target_os = "ios")))]
 /// The LIVE agent a request names (board #20): its `agent` param through the
 /// one resolution, so a label or a previous label reaches the physical agent.
 /// `hub_spawn`'s `agent` is a registry definition and does not come here.
@@ -2433,6 +2435,7 @@ fn live_agent(session: &str, p: &serde_json::Value) -> Result<String, RpcError> 
     Ok(crate::projects::names::resolve(session, param(p, "agent")?))
 }
 
+#[cfg(not(any(target_os = "android", target_os = "ios")))]
 /// The PHYSICAL agents a body addresses (board #20): `mention_names`, each
 /// through the one resolution. What is stored as `to` and what delivery
 /// matches against window names.

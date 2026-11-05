@@ -47,7 +47,7 @@
 //    client overrides (board #454, scripts/wry-chrome-client.mjs).
 //
 // Zero dependencies; runs everywhere node does.
-import { execSync } from 'node:child_process';
+import { execSync, spawnSync } from 'node:child_process';
 import { existsSync, readlinkSync, realpathSync, unlinkSync, symlinkSync, readdirSync, statSync, lstatSync } from 'node:fs';
 import { basename, dirname, join, resolve } from 'node:path';
 import { createHash } from 'node:crypto';
@@ -173,7 +173,8 @@ if (mode === 'android-apk') {
   }
 }
 
-if (mode === 'android-env') {
+/** The SDK and NDK tauri builds with, and what is wrong with them. */
+function androidNdk() {
   // Board #460, measured with tauri-cli 2.10.0 (validator) and 2.11.1 (the
   // version build:android runs here): tauri takes the SDK from ANDROID_HOME,
   // else ANDROID_SDK_ROOT, else an auto-detected one, and the NDK from that
@@ -211,6 +212,11 @@ if (mode === 'android-env') {
   else if (ndkHome && real(ndkHome) !== real(picked)) {
     problems.push(`NDK_HOME=${ndkHome} is not ${picked}, the NDK tauri builds with (the name under ${ndkDir} that sorts last); unset NDK_HOME or name that one`);
   }
+  return { problems, names, ndkDir, picked };
+}
+
+if (mode === 'android-env') {
+  const { problems, names, ndkDir, picked } = androidNdk();
   if (problems.length) {
     console.error('\n✋ build:android needs an Android SDK that holds an NDK — refusing to start (tauri would stop at an interactive NDK prompt).\n');
     for (const p of problems) console.error(`   ${p}`);
@@ -226,6 +232,33 @@ if (mode === 'android-env') {
   for (const p of chrome) console.error(`   ${p}`);
   console.error('\n   See docs/design-docs/features/android-platform.md § Element fullscreen.\n');
   process.exit(1);
+}
+
+if (mode === 'android-check') {
+  // Board #32 (incident 2026-11-05 17:05): main compiled on the desktop but
+  // not for the phone. Code merged that day reached the desktop-only
+  // `projects` module and a desktop-gated import from shared files, and
+  // nothing in the gate compiled the mobile target, so it surfaced only when
+  // the owner built the APK. This compiles the Rust lib for the APK's target
+  // with the C toolchain of the NDK tauri would pick (the same guard as
+  // build:android), so a leak is caught before merge. It needs only the NDK:
+  // no emulator, no device, no gradle. minSdk 24 is
+  // gen/android/app/build.gradle.kts's.
+  const { problems, picked } = androidNdk();
+  if (problems.length) {
+    console.error('\n✋ check:android needs the Android SDK and NDK that build:android uses — refusing to start.\n');
+    for (const p of problems) console.error(`   ${p}`);
+    console.error('\n   See docs/conventions/development.md § Build targets (Android).\n');
+    process.exit(1);
+  }
+  const host = process.platform === 'darwin' ? 'darwin-x86_64' : 'linux-x86_64';
+  const bin = join(picked, 'toolchains', 'llvm', 'prebuilt', host, 'bin');
+  const r = spawnSync('cargo', ['check', '--manifest-path', join(root, 'src-tauri', 'Cargo.toml'), '--lib', '--target', 'aarch64-linux-android'], {
+    stdio: 'inherit',
+    env: { ...process.env, CC_aarch64_linux_android: join(bin, 'aarch64-linux-android24-clang'), AR_aarch64_linux_android: join(bin, 'llvm-ar') },
+  });
+  if (r.error) { console.error(`check:android: cargo: ${r.error.message}`); process.exit(1); }
+  process.exit(r.status ?? 1);
 }
 
 console.error(`unknown preflight mode: ${mode}`);

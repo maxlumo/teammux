@@ -1405,6 +1405,7 @@ fn join_targets(targets: &mut Vec<String>, more: Vec<String>) {
 /// agents: the one parser and the one resolution (`telemetry::requesters_in`,
 /// board #20), shared with the activity log's stored column. A typed line
 /// shows its sender's label, and the reply is typed to the physical window.
+#[cfg(not(any(target_os = "android", target_os = "ios")))]
 fn reply_targets(session: &str, prompt: &str) -> Vec<String> {
     crate::projects::telemetry::requesters_in(session, prompt)
 }

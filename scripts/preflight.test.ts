@@ -253,3 +253,52 @@ test('android-apk: a dangling app/build symlink is re-pointed at the cache dir h
   assert.match(r.stderr, /re-pointed \(dangling\)/u);
   assert.ok(r.stderr.includes(`now:  ${built}`), r.stderr);
 });
+
+// Board #32: `check:android` compiles the Rust lib for the phone's target with
+// the NDK tauri would build with, so desktop-only code leaking into a shared
+// file is caught before merge (incident 17:05: main 4f6e2925 had 10 Android
+// errors nobody had compiled). It needs only the NDK, no emulator. A fake
+// `cargo` on PATH records what it was asked and with which C toolchain.
+const fakeBin = join(base, 'fake bin');
+mkdirSync(fakeBin);
+writeFileSync(join(fakeBin, 'cargo'), '#!/bin/sh\n{ printf \'%s\\n\' "$@"; echo "CC=$CC_aarch64_linux_android"; echo "AR=$AR_aarch64_linux_android"; } > "$CARGO_RECORD"\nexit "${CARGO_EXIT:-0}"\n', { mode: 0o755 });
+const checkAndroid = (env: Record<string, string>) => {
+  const record = join(base, `record-${Math.random().toString(36).slice(2)}`);
+  const r = spawnSync(process.execPath, [script, 'android-check'], {
+    env: { PATH: `${fakeBin}:${process.env.PATH ?? ''}`, HOME: home, CARGO_HOME: cargo, CARGO_RECORD: record, ...env },
+    encoding: 'utf8', stdio: ['ignore', 'pipe', 'pipe'],
+  });
+  let lines: string[] | null = null;
+  try { lines = readFileSync(record, 'utf8').trim().split('\n'); } catch { /* cargo never ran */ }
+  return { ...r, lines };
+};
+const prebuilt = process.platform === 'darwin' ? 'darwin-x86_64' : 'linux-x86_64';
+
+test('check:android runs the android-check preflight', () => {
+  const pkg = JSON.parse(readFileSync(new URL('../package.json', import.meta.url), 'utf8'));
+  assert.equal(pkg.scripts['check:android'], 'node scripts/preflight.mjs android-check');
+});
+
+test('android-check: cargo checks the lib for aarch64-linux-android with the C toolchain of the NDK tauri picks', () => {
+  const r = checkAndroid({ ANDROID_HOME: sdk });
+  assert.equal(r.status, 0, r.stderr);
+  const root = fileURLToPath(new URL('..', import.meta.url));
+  const bin = join(ndk, 'toolchains', 'llvm', 'prebuilt', prebuilt, 'bin');
+  assert.deepEqual(r.lines, [
+    'check', '--manifest-path', join(root, 'src-tauri', 'Cargo.toml'), '--lib', '--target', 'aarch64-linux-android',
+    `CC=${join(bin, 'aarch64-linux-android24-clang')}`, `AR=${join(bin, 'llvm-ar')}`,
+  ], 'minSdk 24, as gen/android/app/build.gradle.kts');
+});
+
+test('android-check: a failing cargo check fails the command with its exit code', () => {
+  const r = checkAndroid({ ANDROID_HOME: sdk, CARGO_EXIT: '101' });
+  assert.equal(r.status, 101);
+});
+
+test('android-check: the same NDK guard as build:android refuses before cargo runs', () => {
+  for (const env of [{}, { ANDROID_HOME: empty }, { ANDROID_HOME: hollow }]) {
+    const r = checkAndroid(env);
+    assert.equal(r.status, 1, JSON.stringify(env));
+    assert.equal(r.lines, null, `cargo never ran: ${JSON.stringify(env)}`);
+  }
+});
