@@ -2069,6 +2069,12 @@ fn build_prompt_as(def: &RegAgent, name: &str, physical: &str, session: &str, gl
          - Delegate independent parallel work with `tmm spawn <agent> --brief \"...\"` or `tmm spawn --team <team> --brief \"...\"`. State the objective, inputs, outputs, and completion criteria; results return automatically.\n\
          - With no message, wait. If tmm is temporarily unavailable, continue local work. Use `tmm --help` for the remaining commands."
     );
+    // A backend whose composer completes a typed `@` gets every `@` typed as
+    // `＠` (boards #436, #36), and is told so here, once for all of them.
+    if crate::backends::Backend::parse(&def.backend).is_some_and(|b| b.at_opens_picker()) {
+        s += "\n";
+        s += crate::backends::Backend::AT_TYPED_NOTE;
+    }
     s
 }
 
@@ -2249,6 +2255,20 @@ mod tests {
         assert!(p.contains("- @tess — tests"), "{p}");
         assert!(!p.contains("You are \"dev\"") && !p.contains("@qa"), "{p}");
         assert_eq!(labelled_prompt(&d, "dev", &Names::default(), "proj", ""), build_prompt(&d, "dev", "proj", "", "", ""), "no label: unchanged");
+    }
+
+    /// Board #36: every backend whose composer completes a typed `@` (kiro, omp,
+    /// codex, kimi, measured) is told once that its `＠` stands for `@`; claude
+    /// (measured not to) and the unmeasured grok and dsh are not.
+    #[test]
+    fn an_agent_typed_at_as_fullwidth_is_told_so_and_no_other_is() {
+        for (backend, told) in [("kiro", true), ("omp", true), ("codex", true), ("kimi", true), ("claude", false), ("grok", false), ("dsh", false)] {
+            let prompt = build_prompt(&def(backend), "dev", "proj", "", "", "");
+            assert_eq!(prompt.matches(crate::backends::Backend::AT_TYPED_NOTE).count(), usize::from(told), "{backend}");
+            if told {
+                assert!(prompt.ends_with(crate::backends::Backend::AT_TYPED_NOTE), "the flow's last bullet: {backend}");
+            }
+        }
     }
 
     fn def(backend: &str) -> RegAgent {
@@ -2477,7 +2497,7 @@ mod tests {
         assert!(!prompt.contains("fix the bug"), "brief is delivered as the first user message");
         // Board #436: a kiro agent reads every delivered `@` as `＠`, and its
         // own config says so, as the last bullet of the collaboration flow.
-        assert!(prompt.ends_with(&format!("for the remaining commands.\n{}", crate::backends::kiro::AT_TYPED_NOTE)), "{prompt}");
+        assert!(prompt.ends_with(&format!("for the remaining commands.\n{}", crate::backends::Backend::AT_TYPED_NOTE)), "{prompt}");
         // The prompt must NOT carry a date: it is replayed every time the window
         // is restored, so a baked-in "today" becomes a lie. The KICK carries it.
         let year = chrono::Local::now().format("%Y").to_string();

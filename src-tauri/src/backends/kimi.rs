@@ -288,6 +288,13 @@ pub(crate) fn workspace_trust_key(workspace: &str) -> String {
     format!("wd_{base}_{}", &hex::encode(digest)[..12])
 }
 
+/// kimi 2.5.1's composer completes a trailing `@word` that PREFIXES a file
+/// into its path on the Enter that should submit the line, and does not
+/// submit it (board #36, measured 2026-11-05 on a scratch gateway with real managed agents; a workspace holding `README.md` and `src/lib/files/FilePreview.render.ts`): a trailing `@READ` became `@README.md`, unsent
+/// (`@reviewer`, with no prefix match, arrived intact). Typed as `＠`, both
+/// submitted unchanged. So a delivery types every `@` as `＠`, as for kiro.
+pub(crate) const AT_OPENS_FILE_PICKER: bool = true;
+
 #[cfg(not(any(target_os = "android", target_os = "ios")))]
 pub(crate) fn render_kimi(
     def: &RegAgent, _name: &str, home: &Path, workspace: &Path, system_prompt: &str,

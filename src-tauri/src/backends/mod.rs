@@ -410,6 +410,13 @@ impl Backend {
         }
     }
 
+    /// What an agent of a backend with `at_opens_picker` is told about the `＠`
+    /// it reads (board #436 for kiro; board #36 for omp, codex and kimi): the
+    /// one cost of the switch, said where it is paid. `spawn::build_prompt_as`
+    /// appends it as the collaboration flow's last bullet, ONE place for every
+    /// such backend.
+    pub(crate) const AT_TYPED_NOTE: &'static str = "- A `＠` in a message delivered to you stands for `@`: it is typed that way so your CLI's `@` file completion neither changes the line nor keeps it from being sent. Restore `@` when you quote code, and write `@name` yourself when you address someone.";
+
     /// Does a typed `@` open this CLI's file picker, so the Enter after a
     /// delivered line can select a file instead of submitting it (board
     /// #436)? Then the delivery door types every `@` as `＠`
@@ -417,8 +424,15 @@ impl Backend {
     pub fn at_opens_picker(self) -> bool {
         match self {
             Backend::Kiro => kiro::AT_OPENS_FILE_PICKER,
-            // Not measured to open a picker on a typed `@`: typed as is.
-            Backend::Claude | Backend::Codex | Backend::Grok | Backend::Omp | Backend::Kimi | Backend::Dsh => false,
+            Backend::Omp => omp::AT_OPENS_FILE_PICKER,
+            Backend::Codex => codex::AT_OPENS_FILE_PICKER,
+            Backend::Kimi => kimi::AT_OPENS_FILE_PICKER,
+            // Measured NOT to (board #36, claude 2.1.318: a trailing `@reviewer`
+            // and `@READ` both submitted unchanged): typed as is.
+            Backend::Claude => false,
+            // Not measured (not installed on the measuring host, board #36):
+            // typed as is.
+            Backend::Grok | Backend::Dsh => false,
         }
     }
 

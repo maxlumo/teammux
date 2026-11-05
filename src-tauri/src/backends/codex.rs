@@ -564,6 +564,13 @@ pub(crate) fn codex_hooks(notify: &str) -> Value {
     })
 }
 
+/// codex 0.166.0's composer completes a trailing `@word` into a file path,
+/// dropping the `@` too, on the Enter that should submit the line, and does
+/// not submit it (board #36, measured 2026-11-05 on a scratch gateway with real managed agents; a workspace holding `README.md` and `src/lib/files/FilePreview.render.ts`): a trailing `@reviewer` became
+/// `src/lib/files/FilePreview.render.ts`, unsent. Typed as `＠`, the line
+/// submitted unchanged. So a delivery types every `@` as `＠`, as for kiro.
+pub(crate) const AT_OPENS_FILE_PICKER: bool = true;
+
 #[cfg(not(any(target_os = "android", target_os = "ios")))]
 pub(crate) fn render_codex(
     def: &RegAgent, _name: &str, home: &Path, workspace: &Path, system_prompt: &str,

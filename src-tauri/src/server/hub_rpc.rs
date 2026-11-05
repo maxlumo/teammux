@@ -5191,6 +5191,102 @@ while True:
         assert_eq!(count("PICKED-FILE"), 1, "still only the control was picked: {:?}", screen());
     }
 
+    /// Board #36 (validator-2 19:59; earlier 09:03 on #12): a line delivered to
+    /// a managed omp agent reached its model CHANGED. Measured on omp 18.15.0:
+    /// with `@reviewer` as the LAST word, the Enter that should submit the line
+    /// accepts omp's fuzzy file completion instead (`@src/lib/files/…`), and the
+    /// line stays unsent in the composer; codex 0.166.0 and kimi 2.5.1 do the
+    /// same. The fake CLI does what omp was measured to do: an Enter outside a
+    /// paste whose last word starts with `@` completes it (`COMPLETED:`) and
+    /// does not submit; any other Enter submits (`SUBMIT:<text>`). Through the
+    /// real `hub_post` path the line submits with `＠reviewer`, and its receipt
+    /// settles on the echo as typed. Control: the same pane typed by
+    /// `send_command` with `@` is completed.
+    #[test]
+    fn an_omp_delivery_types_no_at_so_its_file_completion_never_takes_the_enter() {
+        crate::projects::tests::use_test_store();
+        let session = format!("tmm-ompat-{}", uuid::Uuid::new_v4());
+        let ws = crate::config::test_scratch("tmm-ompat-ws");
+        let home = ws.join(".tmm/agents").join("dev");
+        std::fs::create_dir_all(&home).unwrap();
+        std::fs::write(home.join("launch.json"), serde_json::json!({ "backend": "omp", "cmd": "omp", "team": "" }).to_string()).unwrap();
+        let fake = ws.join("complete.py");
+        std::fs::write(&fake, "\
+import os, select, sys, tty
+tty.setraw(0)
+def out(s):
+    sys.stdout.write(s + '\\r\\n'); sys.stdout.flush()
+sys.stdout.write('\\x1b[?2004h'); sys.stdout.flush()
+buf, esc, paste = b'', b'', False
+while True:
+    if not select.select([0], [], [], 0.05)[0]:
+        continue
+    c = os.read(0, 1)
+    if esc or c == b'\\x1b':
+        esc += c
+        if esc == b'\\x1b[200~': paste, esc = True, b''
+        elif esc == b'\\x1b[201~': paste, esc = False, b''
+        elif c == b'~' or len(esc) >= 6: buf, esc = buf + esc, b''
+        continue
+    if c == b'\\x15':
+        buf = b''
+        continue
+    if c == b'\\r' and not paste:
+        words = buf.split()
+        if words and words[-1].startswith(b'@') and len(words[-1]) > 1:
+            out('COMPLETED:' + words[-1].decode('utf-8', 'replace'))
+            continue
+        out('SUBMIT:' + buf.decode('utf-8', 'replace').replace('\\r', '|'))
+        buf = b''
+        continue
+    buf += c
+").unwrap();
+        let run = format!("bash -c 'exec -a omp python3 {}'", fake.display());
+        let created = std::process::Command::new("tmux")
+            .args(["new-session", "-d", "-x", "200", "-y", "50", "-s", &session, "-n", "dev", "-c", &ws.to_string_lossy(), &run])
+            .status()
+            .map(|s| s.success())
+            .unwrap_or(false);
+        if !created {
+            eprintln!("no tmux server — skipping");
+            let _ = std::fs::remove_dir_all(&ws);
+            return;
+        }
+        let _cleanup = KillOnDrop(session.clone(), ws.clone());
+        crate::projects::adopt(&session, Some("omp-at-test")).expect("adopt project");
+        let target = format!("{session}:dev");
+        let screen = || crate::tmux::capture_pane_plain(&target, Some(200)).unwrap_or_default();
+        let count = |what: &str| screen().lines().filter(|l| l.starts_with(what)).count();
+        let wait = |what: &str, n: usize| (0..100).any(|_| count(what) >= n || { std::thread::sleep(std::time::Duration::from_millis(30)); false });
+        std::thread::sleep(std::time::Duration::from_millis(500));
+
+        // Control: `@` typed as is loses the Enter to the completion.
+        crate::tmux::send_command(&target, "it moves on to @reviewer").unwrap();
+        assert!(wait("COMPLETED:", 1), "{:?}", screen());
+        assert_eq!(count("SUBMIT:"), 0, "{:?}", screen());
+        crate::tmux::send_keys(&target, "C-u", false).unwrap(); // clear the unsent line, as a person would
+
+        // validator-2's line, through the real hub_post path.
+        let call = |m: &str, params: serde_json::Value| handle_hub_request(&req(m, params), None);
+        let r = call("hub_post", serde_json::json!({ "session": session, "from": "lead", "body": "@dev it moves on to @reviewer" }));
+        assert!(r.error.is_none(), "{:?}", r.error.map(|e| e.message));
+        assert!(wait("SUBMIT:", 1), "submitted, not completed: {:?}", screen());
+        let submitted = screen().lines().filter(|l| l.starts_with("SUBMIT:")).last().unwrap().to_string();
+        assert!(submitted.ends_with("＠dev it moves on to ＠reviewer"), "{submitted:?}");
+        assert!(!submitted.contains('@'), "every @ typed as ＠: {submitted:?}");
+        assert_eq!(count("COMPLETED:"), 1, "only the control was completed: {:?}", screen());
+        // The receipt: the row keeps `@`, the echo carries `＠`; it settles.
+        assert_eq!(crate::projects::telemetry::pending_receipts(&session, "dev").len(), 1, "owed once");
+        let echo = submitted.trim_start_matches("SUBMIT:").replace('|', "\n");
+        assert!(crate::projects::telemetry::record_prompt(&session, "dev", &echo), "the typed echo is our delivery");
+        crate::projects::telemetry::record_notification(&session, "dev", "completed");
+        assert!(crate::projects::telemetry::pending_receipts(&session, "dev").is_empty(), "settled, no 'unconfirmed'");
+        let room: Vec<String> = call("hub_log", serde_json::json!({ "session": session })).result
+            .and_then(|v| v.get("messages").and_then(|m| m.as_array()).cloned()).unwrap_or_default()
+            .iter().filter_map(|m| m.get("body").and_then(|b| b.as_str()).map(str::to_string)).collect();
+        assert!(room.iter().any(|b| b == "@dev it moves on to @reviewer"), "the room keeps @: {room:?}");
+    }
+
     /// Board #437: the sending AGENT is told about its unconfirmed messages,
     /// once per sweep and in one line, in the stamped result shape that asks
     /// nothing; a self-wake (its own pane is the stuck one) and a human

@@ -226,6 +226,15 @@ use crate::projects::store::RegAgent;
 #[cfg(not(any(target_os = "android", target_os = "ios")))]
 use super::shared;
 
+/// omp 18.15.0's composer completes the `@word` at the cursor into a file
+/// path on the Enter that should submit the line, and does not submit it
+/// (board #36, measured 2026-11-05 on a scratch gateway with real managed agents; a workspace holding `README.md` and `src/lib/files/FilePreview.render.ts`): `…it moves on to @reviewer` with `@reviewer` LAST stayed unsent in
+/// the composer as `…moves on to @src/lib/files/FilePreview.render.ts`, a fuzzy
+/// match (validator-2's report, 19:59, and 09:03 on #12). Mid-line it arrived
+/// intact. Typed as `＠`, the same line submitted unchanged. So a delivery
+/// types every `@` as `＠` (`delivery::typed_form`), as for kiro (#436).
+pub(crate) const AT_OPENS_FILE_PICKER: bool = true;
+
 /// omp (oh-my-pi) 18.x. The whole agent state — auth store (`agent.db`),
 /// `config.yml`, `mcp.json`, sessions, extensions — lives in ONE directory
 /// that `PI_CODING_AGENT_DIR` relocates (its settings docs: "the global

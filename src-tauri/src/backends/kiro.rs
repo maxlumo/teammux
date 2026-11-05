@@ -1086,11 +1086,6 @@ pub(crate) fn picker_open(screen: &str) -> bool {
     screen.lines().any(|l| l.contains("esc to cancel") && l.contains("to select"))
 }
 
-/// What a kiro agent is told about the `＠` it reads (board #436): the one
-/// cost of `AT_OPENS_FILE_PICKER`, said where it is paid. Appended to the
-/// collaboration flow's bullets in the agent's own config.
-pub(crate) const AT_TYPED_NOTE: &str = "- A `＠` in a message delivered to you stands for `@`: it is typed that way so kiro-cli's file picker does not open. Restore `@` when you quote code, and write `@name` yourself when you address someone.";
-
 #[cfg(not(any(target_os = "android", target_os = "ios")))]
 pub(crate) fn render_kiro(
     def: &RegAgent, name: &str, home: &Path, workspace: &Path, system_prompt: &str,
@@ -1127,7 +1122,7 @@ pub(crate) fn render_kiro(
     let mut conf = json!({
         "name": name,
         "description": format!("{} (registry agent)", def.name),
-        "prompt": format!("{system_prompt}\n{AT_TYPED_NOTE}"),
+        "prompt": system_prompt,
         "tools": ["*"],
         "allowedTools": ["*"],
         "resources": resources,
