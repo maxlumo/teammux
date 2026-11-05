@@ -80,3 +80,37 @@ test('an IME-composing Escape peels nothing and closes nothing', async context =
 // The phone Back peels the SAME order through the real host — asserted in
 // sessions/Sessions.mount.test.ts, where `goBack` is the registered chain and
 // the mount harness can reach it.
+
+// Board #7 round 3 (reviewer 10:23 P1-R2): a pick made while availability is
+// unknown is dropped when the first check greys it; Create spawns only what
+// this server can run.
+test('a pick made before the first check is dropped when that check greys it, and Create spawns nothing (#7)', async context => {
+  const spawned: unknown[] = [];
+  let release = () => {};
+  let state = 'unknown';
+  const app = await (await compiled).mount(context, {
+    modules: [ws({
+      registryList: async () => ({ agents: [{ name: 'grok', backend: 'grok', availability: state === 'unknown' ? { state } : { state, reason: 'not_found', missing: [] } }] }),
+      backendsCheck: () => new Promise<void>((ok) => { release = () => { state = 'unavailable'; ok(); }; }),
+      projectCreate: async () => ({ project: { id: 1, session: 'p' } }),
+      projectUp: async () => ({}),
+      hubSpawn: async (...args: unknown[]) => { spawned.push(args); return {}; },
+    })],
+  });
+  try {
+    const pick = () => app.document.querySelector<HTMLButtonElement>('.agent-pick')!;
+    for (let i = 0; i < 8 && !app.document.querySelector('.agent-pick'); i++) await app.flush();
+    pick().click(); await app.flush();
+    assert.ok(pick().classList.contains('sel'), 'picked while unknown');
+    release();
+    for (let i = 0; i < 12 && !pick().disabled; i++) await app.flush();
+    assert.ok(pick().disabled, 'the first check greyed grok');
+    assert.equal(pick().classList.contains('sel'), false, 'and its pick is gone');
+    const inputs = app.document.querySelectorAll<HTMLInputElement>('input');
+    for (const [el, v] of [[inputs[0]!, 'p'], [inputs[1]!, '/home/fixture']] as const) { el.value = v; el.dispatchEvent(new app.window.Event('input', { bubbles: true })); }
+    await app.flush();
+    app.document.querySelector<HTMLButtonElement>('.dlg-actions .primary')!.click();
+    for (let i = 0; i < 8; i++) await app.flush();
+    assert.deepEqual(spawned, [], 'no spawn of an agent this server cannot run');
+  } finally { await app.close(); }
+});

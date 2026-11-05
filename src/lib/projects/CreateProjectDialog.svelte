@@ -15,7 +15,7 @@
   import { useServerScope } from '../app/server-context.ts';
   import { backendColor as colorOf } from '../hub/hub.ts';
   import { t } from '../core/i18n.svelte.ts';
-  import { firstReport, settleAvailability, unavailableText } from '../hub/backends-view.ts';
+  import { firstReport, keepAvailable, settleAvailability, unavailableText } from '../hub/backends-view.ts';
 
   let { compact = false, oncreated, oncancel } = $props();
   // This server's RPCs and backend catalog, read once at init (board #335 ②b).
@@ -57,6 +57,7 @@
     const r = await registryList().catch(() => null);
     if (!r || !alive) return;
     registry = r.agents ?? [];
+    agents = keepAvailable(agents, registry);
     if (settle && await settleAvailability(registry, firstReport(scope.runtime.api)) && alive) void loadRegistry(false);
   }
   $effect(() => { void loadRegistry(true); });

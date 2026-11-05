@@ -2696,6 +2696,42 @@ test('Chat picker commands retain choice, disabled start and the original spawn 
   } finally { await app.close(); }
 });
 
+// Board #7 round 3 (reviewer 10:23 P1-R2): a pick made while availability is
+// unknown does not survive the first check that greys it, so Start cannot
+// start an agent this server cannot run.
+test('a pick made before the first check is dropped when that check greys it, and Start starts nothing (#7)', { timeout: 60000 }, async context => {
+  const { rpc } = roomFixture();
+  const spawned: unknown[] = [];
+  let release = () => {};
+  let state = 'unknown';
+  const app = await (await compiledHub()).mount(context, {
+    props: { visible: true },
+    modules: [{
+      ...rpc,
+      registryList: async () => ({ agents: [{ name: 'grok', backend: 'grok', availability: state === 'unknown' ? { state } : { state, reason: 'not_found', missing: [] } }] }),
+      backendsCheck: () => new Promise<void>((ok) => { release = () => { state = 'unavailable'; ok(); }; }),
+      hubSpawn: async (...args: unknown[]) => { spawned.push(args); return {}; },
+    }],
+  });
+  try {
+    for (let i = 0; i < 12 && !app.document.querySelector('.roster-add > button'); i++) await app.flush();
+    app.document.querySelector<HTMLButtonElement>('.roster-add > button')!.click();
+    await app.flush();
+    const pick = () => app.document.querySelector<HTMLButtonElement>('.dlg-agents .agent-pick')!;
+    const start = () => app.document.querySelector<HTMLButtonElement>('.dlg-actions .command-button.primary')!;
+    assert.equal(pick().disabled, false, 'unknown never greys');
+    pick().click(); await app.flush();
+    assert.equal(pick().getAttribute('aria-pressed'), 'true');
+    release();
+    for (let i = 0; i < 12 && !pick().disabled; i++) await app.flush();
+    assert.ok(pick().disabled, 'the first check greyed grok');
+    assert.equal(pick().getAttribute('aria-pressed'), 'false', 'and its pick is gone');
+    assert.ok(start().disabled, 'nothing is left to start');
+    start().click(); await app.flush();
+    assert.deepEqual(spawned, [], 'no spawn of an agent this server cannot run');
+  } finally { await app.close(); }
+});
+
 // Board #382: hiring inside a team. The picker offers Join (Standalone or a
 // team running here); its default follows the team tab the composer points
 // at, and it is a visible choice before confirming.

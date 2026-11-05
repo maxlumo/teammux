@@ -170,7 +170,7 @@ test('the Agents list groups use the shared atoms, and every spawn surface reads
   // validator-2 P1 (round 1): a TEAM start is a spawn too; both team surfaces
   // read the one team reader and offer no start for an unavailable team.
   const hub = spawners['Hub.svelte'];
-  assert.match(hub, /import \{ firstReport, settleAvailability, teamUnavailableText, unavailableText \} from '\.\/backends-view\.ts'/u);
+  assert.match(hub, /import \{ firstReport, keepAvailable, settleAvailability, teamUnavailableText, unavailableText \} from '\.\/backends-view\.ts'/u);
   assert.match(hub, /<button class="start-row team" class:unavailable=\{!!why\} disabled=\{starting \|\| !!why\}/u, 'the roster start list team row');
   assert.match(hub, /<button class="agent-pick team" disabled=\{starting \|\| !!why\}/u, 'the start dialog team row');
   assert.equal(hub.match(/@const why = teamUnavailableText\(tm, t\)/gu)?.length, 2);
@@ -180,6 +180,10 @@ test('the Agents list groups use the shared atoms, and every spawn surface reads
   assert.match(hub, /settleAvailability\(\[\.\.\.registry, \.\.\.teams\], firstReport\(scope\.runtime\.api\)\)/u);
   assert.match(spawners['CreateProjectDialog.svelte'], /settleAvailability\(registry, firstReport\(scope\.runtime\.api\)\)/u);
   for (const [file, text] of Object.entries(spawners)) assert.doesNotMatch(text, /backends_check/u, `${file}: no direct probe`);
+  // Round 3 (reviewer 10:23 P1-R2): each re-list drops a pick the server now
+  // greys, through the ONE helper, so a stale pick cannot be submitted.
+  assert.match(hub, /registry = r\.agents \?\? \[\]; startPick = keepAvailable\(startPick, registry\);/u);
+  assert.match(spawners['CreateProjectDialog.svelte'], /registry = r\.agents \?\? \[\];\n    agents = keepAvailable\(agents, registry\);/u);
   // The waits are one call each, never a timer or a poll.
   for (const [file, name] of [['Hub.svelte', 'loadStartLists'], ['CreateProjectDialog.svelte', 'loadRegistry']] as const) {
     const body = new RegExp(`async function ${name}\\([^)]*\\) \\{[\\s\\S]*?\\n  \\}`, 'u').exec(spawners[file])?.[0] ?? '';

@@ -128,7 +128,7 @@ test('config_invalid says the same format-neutral words in tmm and on the page (
 
 // Board #7: the Agents list's two groups and an agent's availability, as
 // `registry_list` states them (the server's ONE rule, readiness::unavailable).
-import { agentGroups, unavailableOf, unavailableText } from './backends-view.ts';
+import { agentGroups, keepAvailable, unavailableOf, unavailableText } from './backends-view.ts';
 
 const def = (name: string, backend: string, group?: string, availability?: object) => ({ name, backend, group, availability });
 
@@ -187,4 +187,14 @@ test('a list read before the first check waits once for it; a decided list or an
   assert.equal(await settleAvailability([{ availability: { state: 'unknown' } }], undefined), false, 'no backendsCheck');
   assert.equal(await settleAvailability([{ availability: { state: 'unknown' } }], async () => { throw new Error('down'); }), false, 'a failed wait re-lists nothing');
   assert.equal(asks, 1);
+});
+
+test('keepAvailable drops only a pick the server now greys (#7 round 3)', () => {
+  const rows = [
+    { name: 'grok', backend: 'grok', availability: { state: 'unavailable', reason: 'not_found', missing: [] } },
+    { name: 'kiro', backend: 'kiro', availability: { state: 'available' } },
+    { name: 'dsh', backend: 'dsh', availability: { state: 'unknown' } },
+  ];
+  assert.deepEqual(keepAvailable(['grok', 'kiro', 'dsh', 'gone'], rows), ['kiro', 'dsh', 'gone']);
+  assert.deepEqual(keepAvailable([], rows), []);
 });

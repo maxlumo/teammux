@@ -261,6 +261,14 @@ export function unavailableOf(def: Listed): { reason: string | null; missing: st
   return { reason: a.reason ?? null, missing: Array.isArray(a.missing) ? a.missing : [] };
 }
 
+/** The picks still startable after a re-list (board #7 round 3, reviewer
+ * 10:23): a name picked while its availability was unknown is dropped once
+ * the server greys it, so no start surface can submit it. A name the list no
+ * longer holds is kept: availability is the only thing this decides. */
+export function keepAvailable(picks: string[], rows: Listed[]): string[] {
+  return picks.filter((n) => { const row = rows.find((r) => r.name === n); return !row || !unavailableOf(row); });
+}
+
 /** The words for an unavailable agent (colour is never the only signal). */
 export function unavailableText(def: Listed, t: (key: string) => string): string {
   const why = unavailableOf(def);

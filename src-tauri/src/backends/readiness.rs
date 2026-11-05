@@ -1170,7 +1170,7 @@ pub fn availability() -> (bool, impl Fn(&str) -> Option<Value>) {
     if !checked && !KICKED.swap(true, std::sync::atomic::Ordering::SeqCst) {
         #[cfg(not(test))]
         std::thread::spawn(|| {
-            let _ = check(None);
+            let _ = automatic();
         });
     }
     (checked, |backend: &str| LAST.unavailable(backend))
@@ -1196,15 +1196,29 @@ fn refresh_once() -> Value {
 /// started, so the waiting page gets that check's end and no second probe.
 /// Bounded by REFRESH_BUDGET. `tmm registry list` never asks it: tmm never
 /// blocks.
+///
+/// Round 3 (reviewer 10:23): the automatic check is ONE per process (AUTO).
+/// After one that found nothing, a later `first` answers that same outcome
+/// and probes nothing; the Backends section's Refresh is the way to try
+/// again, and a Refresh that finds facts makes `first` answer at once.
 pub fn first() -> Value {
-    first_with(&LAST, refresh_once)
+    first_with(&LAST, &AUTO, refresh_once)
 }
 
-fn first_with(last: &LastReport, run: impl FnOnce() -> Value) -> Value {
+/// The one automatic check's outcome: the background check a first list
+/// starts and every `first` share it; concurrent callers wait for it.
+static AUTO: std::sync::OnceLock<Value> = std::sync::OnceLock::new();
+
+#[cfg(not(test))]
+fn automatic() -> Value {
+    AUTO.get_or_init(refresh_once).clone()
+}
+
+fn first_with(last: &LastReport, auto: &std::sync::OnceLock<Value>, run: impl FnOnce() -> Value) -> Value {
     if last.checked() {
         return json!({ "checked": true });
     }
-    run()
+    auto.get_or_init(run).clone()
 }
 
 /// A Test that did not answer by its deadline.
@@ -1262,10 +1276,29 @@ mod tests {
         let runs = std::cell::Cell::new(0);
         let found = json!({ "backends": [{ "name": "grok", "installed": { "state": "missing", "reason": "not_found" } }] });
         let run = || { runs.set(runs.get() + 1); last.remember(&found); found.clone() };
-        assert_eq!(first_with(&last, run), found, "no report yet: the Refresh's own answer");
+        let auto = std::sync::OnceLock::new();
+        assert_eq!(first_with(&last, &auto, run), found, "no report yet: the Refresh's own answer");
         assert_eq!(runs.get(), 1);
-        assert_eq!(first_with(&last, || { runs.set(runs.get() + 1); json!({}) }), json!({ "checked": true }), "a report exists: answered at once");
+        assert_eq!(first_with(&last, &std::sync::OnceLock::new(), || { runs.set(runs.get() + 1); json!({}) }), json!({ "checked": true }), "a report exists: answered at once");
         assert_eq!(runs.get(), 1, "and nothing probed");
+    }
+
+    /// Board #7 round 3 (reviewer 10:23 P2): the automatic check is ONE per
+    /// process. After one that found nothing, a later page's `first` gets
+    /// that same outcome and probes nothing; only an explicit Refresh (here,
+    /// a remembered report) changes the answer.
+    #[test]
+    fn a_first_check_that_found_nothing_is_not_run_again_by_the_next_page() {
+        let last = LastReport::default();
+        let auto = std::sync::OnceLock::new();
+        let runs = std::cell::Cell::new(0);
+        let run = || { runs.set(runs.get() + 1); refresh_timed_out() };
+        assert_eq!(first_with(&last, &auto, run), refresh_timed_out(), "the first page waits for the one check");
+        assert_eq!(first_with(&last, &auto, run), refresh_timed_out(), "the next page gets that outcome");
+        assert_eq!(runs.get(), 1, "and no second probe");
+        last.remember(&json!({ "backends": [{ "name": "grok", "installed": { "state": "missing", "reason": "not_found" } }] }));
+        assert_eq!(first_with(&last, &auto, run), json!({ "checked": true }), "a Refresh that found facts answers at once");
+        assert_eq!(runs.get(), 1);
     }
 
     /// Board #7: the server keeps its last Refresh that FOUND something; one

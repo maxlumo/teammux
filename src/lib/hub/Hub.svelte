@@ -38,7 +38,7 @@
   import Icon from '../ui/Icon.svelte';
   import { onDestroy, untrack, tick as settled } from 'svelte';
   import { t } from '../core/i18n.svelte.ts';
-  import { firstReport, settleAvailability, teamUnavailableText, unavailableText } from './backends-view.ts';
+  import { firstReport, keepAvailable, settleAvailability, teamUnavailableText, unavailableText } from './backends-view.ts';
   import { sortRows } from '../projects/projects.ts';
   import { alertOf } from './notify-centre.svelte.ts';
   import HubSearch from './HubSearch.svelte';
@@ -1712,7 +1712,7 @@
   async function loadStartLists() {
     const [r, tm] = await Promise.all([registryList().catch(() => null), teamsList().catch(() => null)]);
     if (!alive) return;
-    if (r) registry = r.agents ?? [];
+    if (r) { registry = r.agents ?? []; startPick = keepAvailable(startPick, registry); }
     if (tm) teams = tm.teams ?? [];
     if (settleAsked || (!r && !tm)) return;
     settleAsked = true;
