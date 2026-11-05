@@ -58,7 +58,13 @@ export const repoRoot = resolve(dirname(fileURLToPath(import.meta.url)), '..');
  * string "--test-threads=1" (reviewer P1 on 6e166901, which had put ours
  * last). Ours therefore goes FIRST among the harness args, where libtest
  * reads options, and any `--test-threads` the caller wrote in the option zone
- * is dropped; the caller's own `--` and what follows it stay as filters. */
+ * is dropped; the caller's own `--` and what follows it stay as filters.
+ *
+ * `--no-fail-fast` is always on (board #11): without it cargo stops at the
+ * first failing test BINARY, and on a host whose lib has known failures the
+ * `tmm` bin, main.rs and all integration targets never ran (#8 measured
+ * them at about 45 s together, against about 330 s for the lib). A caller's
+ * own `--no-fail-fast` is not repeated; `--lib` and filters still narrow. */
 export function cargoArgs(extra = []) {
   const at = extra.indexOf('--');
   const forCargo = at === -1 ? extra : extra.slice(0, at);
@@ -74,8 +80,8 @@ export function cargoArgs(extra = []) {
     kept.push(a);
   }
   return [
-    'test', '--manifest-path', 'src-tauri/Cargo.toml', '--no-default-features',
-    ...forCargo,
+    'test', '--manifest-path', 'src-tauri/Cargo.toml', '--no-default-features', '--no-fail-fast',
+    ...forCargo.filter((a) => a !== '--no-fail-fast'),
     '--', '--test-threads=1', ...kept, ...filters,
   ];
 }

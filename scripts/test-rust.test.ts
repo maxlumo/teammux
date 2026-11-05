@@ -11,7 +11,10 @@ test('npm run test:rust is the isolating wrapper', async () => {
 });
 
 test('the cargo run is always sequential, whatever the caller adds, and forwards harness args', () => {
-  const base = ['test', '--manifest-path', 'src-tauri/Cargo.toml', '--no-default-features'];
+  // Board #11: --no-fail-fast by default. Without it cargo stops at the first
+  // failing test BINARY, and on a host whose lib has known failures the tmm
+  // bin, main.rs and every integration target never ran (#8, 2026-11-05).
+  const base = ['test', '--manifest-path', 'src-tauri/Cargo.toml', '--no-default-features', '--no-fail-fast'];
   assert.deepEqual(cargoArgs(), [...base, '--', '--test-threads=1']);
   // Before the caller's `--`: cargo's side. After it: the harness's side,
   // with our flag FIRST (libtest reads options until a bare `--`).
@@ -30,6 +33,8 @@ test('the cargo run is always sequential, whatever the caller adds, and forwards
     [...base, '--', '--test-threads=1', '--', 'tmux::tests']);
   assert.deepEqual(cargoArgs(['--', '--', '--test-threads=4']),
     [...base, '--', '--test-threads=1', '--', '--test-threads=4'], 'after the bare -- it is a filter string, and libtest will treat it as one');
+  // A caller who already wrote --no-fail-fast gets it once; --lib still narrows.
+  assert.deepEqual(cargoArgs(['--no-fail-fast', '--lib']), [...base, '--lib', '--', '--test-threads=1']);
   // Invariant over every shape: exactly one --test-threads before any bare --
   // on the harness side, and it is =1.
   for (const extra of [[], ['x'], ['--', '--nocapture'], ['--', '--test-threads=9'], ['--', '--test-threads', '9', '--', 'f'], ['--', '--', '--test-threads=9']]) {

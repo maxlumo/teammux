@@ -38,6 +38,15 @@ helper must destroy its server before anything restores the global.
 Four mechanical rules replaced the comment, the first in `scripts/test-rust.mjs`
 and the rest in `tmux::test_support`:
 
+- **A full `npm run test:rust` runs EVERY test target** (board #11): the
+  wrapper always passes `--no-fail-fast` (a caller's own is not repeated;
+  `--lib`, `-p` and filters still narrow). Without it cargo stops at the
+  first failing test binary, and on this host the lib always has its known
+  host failures, so the `tmm` bin, `main.rs` and all 21 integration targets
+  never ran: every "full run" cited on #2 to #7 covered the lib only (#8,
+  validator, 2026-11-05). #8 measured the cost of running them: about 45 s
+  for all non-lib targets together, against about 330 s for the lib. The
+  exit status is still non-zero when any test in any target fails.
 - **`npm run test:rust` isolates the test process from every real tmux.** It
   runs cargo with `TMUX`, `TMUX_PANE`, every `TMM_*` and `TOKEN` unset and
   `TMUX_TMPDIR` set to a fresh `mkdtemp` directory, with `--test-threads=1` FIRST in libtest's option region
@@ -64,7 +73,7 @@ and the rest in `tmux::test_support`:
   which takes cargo's own arguments: `npm run test:rust -- <filter|--lib|-p …>
   [-- <harness args>]`. When cargo must be run by hand, the equivalent is
   `env -u TMUX -u TMUX_PANE -u TOKEN $(env | sed -n 's/^\(TMM_[A-Za-z0-9_]*\)=.*/-u \1/p')
-  TMUX_TMPDIR=$(mktemp -d /tmp/tmm-iso-XXXX) cargo test … -- --test-threads=1`
+  TMUX_TMPDIR=$(mktemp -d /tmp/tmm-iso-XXXX) cargo test --no-fail-fast … -- --test-threads=1`
   (every `TMM_*` the shell has, not a list; checked in bash and zsh). The split of guarantees: the wrapper guarantees
   the directory is FRESH; the Rust gate guarantees only that the process is
   NOT looking at the real tmux (`$TMUX`/`$TMUX_PANE` unset, some
