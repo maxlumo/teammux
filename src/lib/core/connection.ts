@@ -287,6 +287,14 @@ function removeListener<CB>(map: Map<string, Set<CB>>, target: string, cb: CB) {
 // What every caller of a connection can do. The members are CLOSURES over
 // one object's state, not prototype methods, so destructuring them is safe
 // and a reference stays bound to the connection it came from.
+/** One rename (board #20): the agent's physical name and its names now. */
+export interface AgentRenamed {
+  session: string;
+  agent: string;
+  label: string;
+  aliases: string[];
+}
+
 export interface Connection {
   /** Dial `url`, authenticate with `token`, replace whatever socket this
    * object had. Resolves with the server's machine id. */
@@ -332,6 +340,9 @@ export interface Connection {
   removePaneClosedListener(target: string, cb: PaneClosedCb): void;
   addTeamMessageListener(cb: (message: TeamMessage) => void): void;
   removeTeamMessageListener(cb: (message: TeamMessage) => void): void;
+  /** `agent_renamed {session, agent, label, aliases}` (board #20/#21). */
+  addAgentRenamedListener(cb: (renamed: AgentRenamed) => void): void;
+  removeAgentRenamedListener(cb: (renamed: AgentRenamed) => void): void;
   subscribe(target: string): void;
   unsubscribe(target: string): void;
   resubscribeActive(): void;
@@ -357,6 +368,8 @@ export function createConnection(): Connection {
   // Team group-chat message push listeners (Team tab). Unkeyed — one stream
   // for the whole room — so a plain Set, not a per-target map.
   const teamMessageListeners = new Set<(message: TeamMessage) => void>();
+  // One rename stream for every project (board #21); the Hub keeps its room's.
+  const agentRenamedListeners = new Set<(renamed: AgentRenamed) => void>();
   let onDisconnect: (() => void) | null = null;
   /** Who watches the current socket's capabilities (`onCaps`). */
   const capsListeners = new Set<(caps: string[] | undefined) => void>();
@@ -405,6 +418,8 @@ export function createConnection(): Connection {
   function removePaneClosedListener(target: string, cb: PaneClosedCb) { removeListener(paneClosedListeners, target, cb); }
   function addTeamMessageListener(cb: (message: TeamMessage) => void) { if (!disposed) teamMessageListeners.add(cb); }
   function removeTeamMessageListener(cb: (message: TeamMessage) => void) { teamMessageListeners.delete(cb); }
+  function addAgentRenamedListener(cb: (renamed: AgentRenamed) => void) { if (!disposed) agentRenamedListeners.add(cb); }
+  function removeAgentRenamedListener(cb: (renamed: AgentRenamed) => void) { agentRenamedListeners.delete(cb); }
   function setOnDisconnect(cb: (() => void) | null) { if (!disposed) onDisconnect = cb; }
 
   function notifyDisconnect(reason: string) {
@@ -783,6 +798,12 @@ export function createConnection(): Connection {
           return;
         }
 
+        if (data.method === 'agent_renamed') {
+          const r = data.params;
+          if (r && typeof r.session === 'string' && typeof r.agent === 'string') for (const cb of agentRenamedListeners) cb(r);
+          return;
+        }
+
         if (data.id != null && pending.has(data.id)) {
           const { resolve: res, reject: rej } = pending.get(data.id)!; // guarded by pending.has above
           pending.delete(data.id);
@@ -1025,6 +1046,7 @@ export function createConnection(): Connection {
     paneOutputListeners.clear();
     paneClosedListeners.clear();
     teamMessageListeners.clear();
+    agentRenamedListeners.clear();
     for (const abort of [...capsWaiters]) abort(new Error('connection disposed'));
     capsListeners.clear();
     subRefcount.clear();
@@ -1036,6 +1058,7 @@ export function createConnection(): Connection {
     addPaneOutputListener, removePaneOutputListener,
     addPaneClosedListener, removePaneClosedListener,
     addTeamMessageListener, removeTeamMessageListener,
+    addAgentRenamedListener, removeAgentRenamedListener,
     subscribe, unsubscribe, resubscribeActive,
   };
 }

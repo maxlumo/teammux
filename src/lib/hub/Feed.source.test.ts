@@ -95,7 +95,7 @@ test('Feed preserves reveal gates and consumes the shared rendering and path mec
   // Board #340: a `#<id>` link takes the same route, so it never also flips
   // the action row, and only the project's own ids are linked.
   assert.match(source, /return handlePathLinkClick\(e, routePathRef\) \|\| openIssueRef\(e\);/u);
-  assert.match(source, /\{@html markIssueRefs\(markMentions\(renderMarkdown\([^)]*\)[^)]*\), managedNames\), issueSet\)\}/u);
+  assert.match(source, /\{@html markIssueRefs\(markMentions\(renderMarkdown\([^)]*\)[^)]*\), managedNames, names\), issueSet\)\}/u);
   assert.match(source, /<ChatImage \{src\} alt=\{m\.from\} onviewstart=\{onimagestart\} onview=\{onimage\} \/>/u, 'the tap\'s claim and reference travel with the image (board #447)');
 });
 
@@ -437,7 +437,7 @@ test('feed-lane identity comparisons match the window NAME, never the pane index
   // never showed. The lane lookups must compare a.name.
   assert.match(
     source,
-    /const windowName = \(w\) => agents\.find\(\(a\) => a\.name === w\)/u,
+    /const windowName = \(w\) => names\.shown\(agents\.find\(\(a\) => a\.name === w\)/u,
     'windowName matches on the name',
   );
   assert.match(
@@ -484,7 +484,7 @@ test('a font change is a layout mutation through the ONE reading transaction (bo
 test('a reply quote renders as the bubble\u2019s own blockquote; Reply sits in the one action row (#290)', () => {
   assert.match(source, /\{@const quote = parseQuote\(note \? note\.text : m\.body\)\}/u, 'the one parser');
   assert.match(source, /\{@const parts = splitImages\(quote \? quote\.text : note \? note\.text : m\.body\)\}/u, 'the token never renders as text');
-  assert.match(source, /\{#if quote && rawOpen !== key\}\s*<blockquote class="m-quote" class:folded><span class="m-quote-who">\{quote\.from\} · \{quote\.time\}<\/span> \{quote\.excerpt\}<\/blockquote>/u,
+  assert.match(source, /\{#if quote && rawOpen !== key\}\s*<blockquote class="m-quote" class:folded><span class="m-quote-who">\{names\.shown\(quote\.from\)\} · \{quote\.time\}<\/span> \{quote\.excerpt\}<\/blockquote>/u,
     'the .md blockquote dialect, no new component; Raw shows the token as sent');
   const acts = source.slice(source.indexOf('<div class="m-acts appear">'), source.indexOf('</div>', source.indexOf('<div class="m-acts appear">')));
   assert.match(acts, /\{#if onreply && m\.id\}\s*<CommandButton iconOnly icon="arc-left" label=\{t\('hubReply'\)\}/u, 'Reply beside Copy and Raw');
@@ -508,10 +508,12 @@ test('an agent bubble is headed from OUTSIDE by name + runtime, in one ink (boar
   assert.match(rule('.m-head .m-who'), /color: var\(--who-ink\)/u);
   assert.match(rule('.sysline .sys-who'), /color: var\(--who-ink\)/u);
   assert.equal((source.match(/--who-ink:/gu) ?? []).length, 1, 'defined once');
-  // Per-agent ink (owner yes, 14:36): agentHue sets --who-ink on every name.
+  // Per-agent ink (owner yes, 14:36): agentHue sets --who-ink on every name,
+  // keyed by the PHYSICAL name so a rename keeps the colour; the words shown
+  // are the current label (board #21).
   assert.match(source, /<div class="m-head" style:--who-ink=\{agentHue\(m\.from\)\}>/u);
-  assert.match(source, /<span class="sys-who" style:--who-ink=\{agentHue\(p\.who\)\}>\{p\.who\}<\/span>/u);
-  assert.match(source, /<span class="m-to" style:--who-ink=\{agentHue\(n\)\}>@\{n\}<\/span>/u, 'a command\u2019s recipients too');
+  assert.match(source, /<span class="sys-who" style:--who-ink=\{agentHue\(p\.who\)\}>\{shownWho\(p\.who\)\}<\/span>/u);
+  assert.match(source, /<span class="m-to" style:--who-ink=\{agentHue\(n\)\}>@\{names\.shown\(n\)\}<\/span>/u, 'a command\u2019s recipients too');
   assert.match(source, /\.m-body :global\(\.m-to\) \{ font-weight: 600; color: color-mix\(in srgb, var\(--who-ink\) 62%, var\(--text\)\); \}/u);
   assert.doesNotMatch(source, /var\(--agent-\d\)/u, 'no component names an agent ink by hand');
   // The bubble hangs from its name: the tight corner is top-left now.

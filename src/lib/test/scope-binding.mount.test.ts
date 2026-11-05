@@ -80,7 +80,7 @@ function scopeServer(win: DOMWindow, calls: string[]) {
     boardCounts: answer('boardCounts', { counts: { 'proj-b': { todo: 1, doing: 0, review: 0, done: 0, total: 1 } } }),
     boardList: answer('boardList', { issues: [{ id: 7, title: 'on B', body: '', status: 'todo', assignee: '', editable: true, created_at: 1, updated_at: 1, notes: [] }] }),
     fsDownloadHttp: answer('fsDownloadHttp', { url: 'https://b.example/dl/x.png', name: 'x.png' }),
-    addTeamMessageListener: () => {}, removeTeamMessageListener: () => {},
+    addTeamMessageListener: () => {}, removeTeamMessageListener: () => {}, addAgentRenamedListener: () => {}, removeAgentRenamedListener: () => {},
     projectRename: answer('projectRename', { session: 'proj-b2' }),
     hubLogAround: answer('hubLogAround', { messages: [], has_more_before: false, has_more_after: false }),
     subscribe: () => {}, unsubscribe: () => {}, capturePane: answer('capturePane', { output: '' }),
@@ -98,7 +98,7 @@ function facade(calls: string[]) {
     'gitCmd', 'fsList', 'fsMkdir', 'fsCwd', 'fsStat', 'fsRead', 'fsWrite', 'fsDelete', 'getBookmarks', 'saveBookmarks',
     'getPrefs', 'setPref', 'getMachineId', 'projectList', 'hubRooms', 'hubUnread', 'hubRead', 'hubAgents', 'hubLog',
     'hubActivity', 'registryList', 'teamsList', 'skillsList', 'mcpList', 'globalPromptGet', 'boardCounts', 'boardList', 'fsDownloadHttp',
-    'addTeamMessageListener', 'removeTeamMessageListener', 'projectRename', 'hubLogAround'];
+    'addTeamMessageListener', 'removeTeamMessageListener', 'addAgentRenamedListener', 'removeAgentRenamedListener', 'projectRename', 'hubLogAround'];
   return Object.fromEntries(names.map((n) => [n, () => { calls.push(n); return Promise.reject(new Error('facade')); }]));
 }
 

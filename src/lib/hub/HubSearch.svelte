@@ -26,12 +26,12 @@
   import { excerptOf, highlight, lineSuffix, pathParts, SEARCH_MAX_TERMS, searchTerms, type FileHit, type SearchHit } from './hub-search.ts';
   import type { HubSearch } from './hub-search.svelte.ts';
 
-  let { search, projectName = (room: string) => room, agentName = (name: string) => name, onjump = (_hit: Pick<SearchHit, 'room' | 'id' | 'seq'>) => {}, onopenfile = (_file: FileHit) => {}, onclearagent = () => {} }: {
+  let { search, projectName = (room: string) => room, agentName = (name: string, _room?: string) => name, onjump = (_hit: Pick<SearchHit, 'room' | 'id' | 'seq'>) => {}, onopenfile = (_file: FileHit) => {}, onclearagent = () => {} }: {
     search: HubSearch;
     /** The project a room belongs to, for a hit found in ALL rooms. */
     projectName?: (room: string) => string;
     /** How a filter's agent is named to the reader ('you' for the human). */
-    agentName?: (name: string) => string;
+    agentName?: (name: string, room?: string) => string;
     /** A message result, or a file row's "show the message" button. */
     onjump?: (hit: Pick<SearchHit, 'room' | 'id' | 'seq'>) => void;
     /** A file row: open the file (the Hub resolves it against the row's OWN project). */
@@ -212,7 +212,7 @@
               </span>
               {#if parts.dir.length}<span class="sr-dir">{#each parts.dir as seg}{#if seg.mark}<mark>{seg.text}</mark>{:else}{seg.text}{/if}{/each}</span>{/if}
               <span class="sr-top">
-                <span class="sr-who" style:--who-ink={agentHue(file.from)}>{agentName(file.from)}</span>
+                <span class="sr-who" style:--who-ink={agentHue(file.from)}>{agentName(file.from, file.room)}</span>
                 {#if search.label?.scope === 'all'}<span class="sr-project">{projectName(file.room)}</span>{/if}
               </span>
             </button>
@@ -236,7 +236,7 @@
           <li>
             <button type="button" class="menu-item sr-row" onclick={() => onjump(hit)}>
               <span class="sr-top">
-                <span class="sr-who" style:--who-ink={agentHue(hit.from)}>{#each highlight(hit.from, terms) as seg}{#if seg.mark}<mark>{seg.text}</mark>{:else}{seg.text}{/if}{/each}</span>
+                <span class="sr-who" style:--who-ink={agentHue(hit.from)}>{#each highlight(agentName(hit.from, hit.room), terms) as seg}{#if seg.mark}<mark>{seg.text}</mark>{:else}{seg.text}{/if}{/each}</span>
                 {#if search.label?.scope === 'all'}<span class="sr-project">{projectName(hit.room)}</span>{/if}
                 <span class="sr-time">{when(hit.ts)}</span>
               </span>

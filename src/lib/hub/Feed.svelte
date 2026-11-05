@@ -19,10 +19,11 @@
   import { heldAnchor, readingDirection, refoldEligible, sameReadingSize } from './hub-reading.ts';
   import { FONT_CHANGE_EVENT } from '../app/fonts.svelte.ts';
   import { askTurns, blockKey } from './hub-turns.ts';
+  import { NO_LABELS } from './names.ts';
   import { parseQuote, TAIL_GAP, bottomGap, tailAfterScroll, markMentions, mentionedAgents, splitImages, toolColor, pickAnchor, toolEventParts, elideTail, foldedCommandArgs, markIssueRefs, foldLines, statusNote, noteStateColor, runtimeLabel, agentHue, sysParts, sysVerbColor, boardLine, boardStatusColor, promptParts, sameDay, continuesRun, perLineOf, STEPS_ROWS, stateIsLive } from './hub.ts';
 
   let {
-    blocks = [], agents = [], managedNames = [], issueIds = [], selected = '', visible = false, compact = false,
+    blocks = [], agents = [], managedNames = [], names = NO_LABELS, issueIds = [], selected = '', visible = false, compact = false,
     roomReady = false, justLoaded = false, openedAt = Infinity,
     loadingOlder = false, histMore = false, actMore = false, stepsRows = STEPS_ROWS,
     following = $bindable(true), newBelow = $bindable(false),
@@ -585,7 +586,10 @@
 
   // A block's `window` IS the agent name since board #120; the lookup
   // survives only as the fallback costume for a window with no live agent.
-  const windowName = (w) => agents.find((a) => a.name === w)?.name ?? `${w}`;
+  // Shown by its current label (board #21): `names` is the server's table.
+  const windowName = (w) => names.shown(agents.find((a) => a.name === w)?.name ?? `${w}`);
+  /** A lifecycle row's subject (one name, or a command's `a, b`) by label. */
+  const shownWho = (who) => who.split(', ').map((n) => names.shown(n)).join(', ');
 
 
   // Disclosure lives outside the row: `undefined` means "nobody chose", and the
@@ -845,7 +849,7 @@
           {@const p = sysParts(item)}
           {@const c = sysVerbColor(p.verb)}
           <div class="sys-item" class:jump-hit={!!hitId && b.ids?.[j] === hitId} data-msg={b.ids?.[j] || undefined}>
-            {#if p.who}<span class="sys-who" style:--who-ink={agentHue(p.who)}>{p.who}</span>{/if}
+            {#if p.who}<span class="sys-who" style:--who-ink={agentHue(p.who)}>{shownWho(p.who)}</span>{/if}
             {#if p.verb}
               <span class="sys-verb" style:color={c}><span class="sv-dot" aria-hidden="true"></span>{p.verb}</span>
             {/if}
@@ -937,7 +941,7 @@
                  existing state-pill dialect (.pg-tag): a dot + the state
                  word in its own status colour, "entered this state". -->
             {@const runtime = runtimeLabel(agents.find((a) => a.managed && a.name === m.from))}
-            <div class="m-head" style:--who-ink={agentHue(m.from)}><span class="m-who">{m.from}</span>{#if runtime}<span class="m-runtime">{runtime}</span>{/if}{#if note}<span class="m-note-state" style:color={noteStateColor(note.state)}><span class="mns-dot" aria-hidden="true"></span>{stateLabel(note.state)}</span>{/if}</div>
+            <div class="m-head" style:--who-ink={agentHue(m.from)}><span class="m-who">{names.shown(m.from)}</span>{#if runtime}<span class="m-runtime">{runtime}</span>{/if}{#if note}<span class="m-note-state" style:color={noteStateColor(note.state)}><span class="mns-dot" aria-hidden="true"></span>{stateLabel(note.state)}</span>{/if}</div>
           {/if}
           <!-- svelte-ignore a11y_no_static_element_interactions, a11y_click_events_have_key_events -->
           <div class="bubble md"
@@ -952,14 +956,14 @@
               <!-- A reply's quote (board #290): the bubble's own markdown
                    blockquote, the sender and time over the quoted line. -->
               {#if quote && rawOpen !== key}
-                <blockquote class="m-quote" class:folded><span class="m-quote-who">{quote.from} · {quote.time}</span> {quote.excerpt}</blockquote>
+                <blockquote class="m-quote" class:folded><span class="m-quote-who">{names.shown(quote.from)} · {quote.time}</span> {quote.excerpt}</blockquote>
               {/if}
               {#if b.command && rawOpen !== key}
                 <!-- The command in the bubble's own atoms, as plain text (no
                      markdown: arguments are data): the recipients in the
                      mention dialect, the name in the rendered inline-
                      code dialect, the arguments wrapping in full. -->
-                <p>{#each b.command.to as n, k (`${k}-${n}`)}<span class="m-to" style:--who-ink={agentHue(n)}>@{n}</span>{k < b.command.to.length - 1 ? ' ' : ''}{/each}{b.command.to.length ? ' ' : ''}<code>{b.command.name}</code>{#if b.command.args}{' '}{folded ? cmdFold : b.command.args}{/if}</p>
+                <p>{#each b.command.to as n, k (`${k}-${n}`)}<span class="m-to" style:--who-ink={agentHue(n)}>@{names.shown(n)}</span>{k < b.command.to.length - 1 ? ' ' : ''}{/each}{b.command.to.length ? ' ' : ''}<code>{b.command.name}</code>{#if b.command.args}{' '}{folded ? cmdFold : b.command.args}{/if}</p>
               {:else if parts.text}
                 {#if rawOpen === key}
                   <pre class="raw">{m.body}</pre>
@@ -967,7 +971,7 @@
                   <!-- Folded: the start of the message, cut where the
                        budget runs out, …… glued to the last kept line.
                        Raw view and agent messages render in full. -->
-                  {@html markIssueRefs(markMentions(renderMarkdown(folded ? foldBody(parts.text, !!quote) : parts.text), managedNames), issueSet)}
+                  {@html markIssueRefs(markMentions(renderMarkdown(folded ? foldBody(parts.text, !!quote) : parts.text), managedNames, names), issueSet)}
                 {/if}
               {/if}
               <!-- One unfold control for a folded command and a folded text. -->
@@ -1013,7 +1017,7 @@
                          it; otherwise just the time. A line steered into a
                          busy turn (#276) reads the same way: typed into the
                          running turn, no check to wait for. -->
-                  {:else if !mentionedAgents(m.body ?? '', managedNames).length}
+                  {:else if !mentionedAgents(m.body ?? '', managedNames, names).length}
                     <span class="m-state note" title={t('hubNoteHint')}><i class="st note-dot"></i></span>
                   {:else}
                     <span class="m-state" title={t('hubPendingHint')}><Icon name="circle" size={11} /></span>

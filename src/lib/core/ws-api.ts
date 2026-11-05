@@ -10,6 +10,7 @@
 // Shapes mirror the Rust structs (src-tauri/src/tmux.rs). If a field changes
 // server-side, change it here — every consumer then fails to type-check
 // instead of silently reading `undefined`.
+import type { AgentLabel } from '../hub/names.ts';
 import type { ProjectRow } from '../projects/projects.ts';
 import type { BackendInfo } from './agents.ts';
 import type { SystemStatus as SystemStatusReading } from '../system/system.ts';
@@ -80,7 +81,13 @@ export interface TmuxPane {
 // a project's room is `proj:<session>`).
 export interface HubAgent {
   window: number;
+  /** The PHYSICAL name (window, home, every key the client holds; board #20). */
   name: string;
+  /** What is shown and typed for it (board #20/#21); the physical name when it
+   * has none. Absent on an older server. */
+  label?: string;
+  /** Its previous labels, which still reach it. */
+  aliases?: string[];
   command: string;
   agent: string | null;
   /** True when the window is a MANAGED agent — spawned from the registry into
@@ -423,8 +430,10 @@ export function createWsApi(connection: Connection) {
    * so the archive view needs no second lookup. */
   const hubArchive = (session: string) =>
     call<{ messages: TeamMessage[] }>('hub_archive', { session });
+  /** `labels` (board #20): every agent of the project with a label, stopped
+   * ones included, `[{agent, label, aliases}]`; absent on an older server. */
   const hubAgents = (session: string) =>
-    call<{ agents: HubAgent[] }>('hub_agents', { session });
+    call<{ agents: HubAgent[]; labels?: AgentLabel[] }>('hub_agents', { session });
   const boardList = (session: string) =>
     call<{ issues: BoardIssue[]; statuses: string[] }>('hub_board_list', { session });
   /** Issue counts for EVERY project's board in one call (board #39) — the Board
@@ -545,6 +554,11 @@ export function createWsApi(connection: Connection) {
    * `as` names it, otherwise the source's name is uniquified. */
   const hubAgentFork = (session: string, agent: string, as?: string) =>
     call<{ window_name: string; pane: string; backend: string; forked_from: string }>('hub_agent_fork', { session, agent, ...(as ? { as } : {}) }, 60000);
+  /** Set an agent's label (board #20/#21): `label` null = back to its
+   * physical name. Only the label changes; the server refuses a name that is
+   * taken or reserved with the reason, and an older one answers -32601. */
+  const hubAgentRename = (session: string, agent: string, label: string | null) =>
+    call<AgentLabel>('hub_agent_rename', { session, agent, label });
   /** Align a team with its CURRENT definition (board #286): restart the
    * members it still has, spawn those it gained, stop those it dropped. */
   const hubTeamRestart = (session: string, team: string, only?: string[]) =>
@@ -657,7 +671,7 @@ export function createWsApi(connection: Connection) {
     hubCommand, hubLog, hubLogAround, hubSearch, hubFiles, hubMsgArchive, hubMsgRestore, hubMsgPurge, hubRooms,
     hubUnread, hubRead, systemStatus, hubArchive, hubAgents, boardList, boardCounts,
     boardGet, boardSave, boardNote, boardDelete, hubActivity, hubSpawn, hubSpawnTeam,
-    hubAgentStop, hubAgentRemove, hubAgentInterrupt, hubAgentInputMode, hubAgentSetTeam, hubAgentRestart, hubAgentFork,
+    hubAgentStop, hubAgentRemove, hubAgentInterrupt, hubAgentInputMode, hubAgentSetTeam, hubAgentRestart, hubAgentFork, hubAgentRename,
     hubTeamRestart, registryList, registrySave, registryDelete, globalPromptGet,
     globalPromptSet, teamsList, teamsSave, teamsDelete, backendsList, backendsCheck, modelsList, skillsList,
     skillsSave, skillsDelete, skillsRefresh, skillsRead, skillsImport, skillsFiles,
@@ -715,7 +729,7 @@ export const RPC_KIND = {
   boardSave: 'write', boardNote: 'write', boardDelete: 'write',
   hubActivity: 'read', hubSpawn: 'write', hubSpawnTeam: 'write',
   hubAgentStop: 'write', hubAgentRemove: 'write', hubAgentInterrupt: 'write', hubAgentInputMode: 'write', hubAgentSetTeam: 'write',
-  hubAgentRestart: 'write', hubAgentFork: 'write', hubTeamRestart: 'write',
+  hubAgentRestart: 'write', hubAgentFork: 'write', hubAgentRename: 'write', hubTeamRestart: 'write',
   registryList: 'read', registrySave: 'write', registryDelete: 'write',
   globalPromptGet: 'read', globalPromptSet: 'write',
   teamsList: 'read', teamsSave: 'write', teamsDelete: 'write',

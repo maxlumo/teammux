@@ -90,7 +90,7 @@ test('a focus change keeps A s guest editor and its draft; B s editor is its own
     registrySave: async (def: { system?: string }) => { sent.push(`${id}:registrySave:${def.system}`); return {}; },
     teamsList: async () => ({ teams: [] }), skillsList: async () => ({ skills: [] }), mcpList: async () => ({ mcp: [] }),
     modelsList: async () => ({ models: [] }), backendsList: async () => ({ backends: [] }), getCaps: () => undefined, onCaps: () => {},
-    addTeamMessageListener: () => {}, removeTeamMessageListener: () => {},
+    addTeamMessageListener: () => {}, removeTeamMessageListener: () => {}, addAgentRenamedListener: () => {}, removeAgentRenamedListener: () => {},
   });
   const app = await (await guests).mount(context, {
     props: { showAgents: true }, modules: [],
@@ -138,7 +138,7 @@ test('the page asks the SHOWN guest: its exit guard and its Back, never the last
     registryList: async () => ({ agents: [{ ...alpha, system: `prompt on ${id}` }] }), registrySave: async () => ({}),
     teamsList: async () => ({ teams: [] }), skillsList: async () => ({ skills: [] }), mcpList: async () => ({ mcp: [] }),
     modelsList: async () => ({ models: [] }), backendsList: async () => ({ backends: [] }), getCaps: () => undefined, onCaps: () => {},
-    addTeamMessageListener: () => {}, removeTeamMessageListener: () => {},
+    addTeamMessageListener: () => {}, removeTeamMessageListener: () => {}, addAgentRenamedListener: () => {}, removeAgentRenamedListener: () => {},
   });
   let back: (() => boolean) | null = null;
   const app = await (await guests).mount(context, {
@@ -173,7 +173,7 @@ test('an edit request opens in the guest of the server it names, and never moves
     registryList: async () => ({ agents: [{ ...alpha, system: `prompt on ${id}` }] }), registrySave: async () => ({}),
     teamsList: async () => ({ teams: [] }), skillsList: async () => ({ skills: [] }), mcpList: async () => ({ mcp: [] }),
     modelsList: async () => ({ models: [] }), backendsList: async () => ({ backends: [] }), getCaps: () => undefined, onCaps: () => {},
-    addTeamMessageListener: () => {}, removeTeamMessageListener: () => {},
+    addTeamMessageListener: () => {}, removeTeamMessageListener: () => {}, addAgentRenamedListener: () => {}, removeAgentRenamedListener: () => {},
   });
   const app = await (await guests).mount(context, {
     props: { showAgents: true }, modules: [],
@@ -208,7 +208,7 @@ test('A s draft survives B leaving the category, and a hidden guest keeps its ow
     registryList: async () => ({ agents: [{ ...alpha, system: `prompt on ${id}` }] }), registrySave: async () => ({}),
     teamsList: async () => ({ teams: [] }), skillsList: async () => ({ skills: [] }), mcpList: async () => ({ mcp: [] }),
     modelsList: async () => ({ models: [] }), backendsList: async () => ({ backends: [] }), getCaps: () => undefined, onCaps: () => {},
-    addTeamMessageListener: () => {}, removeTeamMessageListener: () => {},
+    addTeamMessageListener: () => {}, removeTeamMessageListener: () => {}, addAgentRenamedListener: () => {}, removeAgentRenamedListener: () => {},
   });
   const app = await (await guests).mount(context, {
     props: { showAgents: true }, modules: [],
@@ -245,7 +245,7 @@ async function twoGuests(context: import('node:test').TestContext, props: Record
     registryList: async () => ({ agents: [{ ...alpha, system: `prompt on ${id}` }] }), registrySave: async () => ({}),
     teamsList: async () => ({ teams: [] }), skillsList: async () => ({ skills: [] }), mcpList: async () => ({ mcp: [] }),
     modelsList: async () => ({ models: [] }), backendsList: async () => ({ backends: [] }), getCaps: () => undefined, onCaps: () => {},
-    addTeamMessageListener: () => {}, removeTeamMessageListener: () => {},
+    addTeamMessageListener: () => {}, removeTeamMessageListener: () => {}, addAgentRenamedListener: () => {}, removeAgentRenamedListener: () => {},
   });
   const app = await (await guests).mount(context, {
     props: { showAgents: true, ...props }, modules: [],

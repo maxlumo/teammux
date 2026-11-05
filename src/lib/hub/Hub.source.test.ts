@@ -239,7 +239,9 @@ test('Back keeps the original priority and current live guards in one dispatcher
     assert.ok(region.includes(`backLayers.register('${layer}', () => { ${guard}${suffix} })`),
       `${layer} keeps its current guard/action inside a live callback`);
   }
-  assert.equal([...region.matchAll(/backLayers\.register\(/g)].length, 15, 'the reply chip (#290) peels after the filter; a jump\'s cleared filter (#322) comes back first; the search box (#432) closes before the filter peels; an open turn preview (#461) peels right after a context menu');
+  assert.equal([...region.matchAll(/backLayers\.register\(/g)].length, 16, 'the reply chip (#290) peels after the filter; a jump\'s cleared filter (#322) comes back first; the search box (#432) closes before the filter peels; an open turn preview (#461) peels right after a context menu; the agent Rename dialog (#21) peels right after the header rename');
+  assert.ok(region.includes("backLayers.register('rename', () => { if (renaming) { renaming = false; return true; } return false; }),\n      backLayers.register('agentRename', () => { if (!agentRenaming) return false; closeAgentRename(); return true; }),"),
+    'Back closes the agent Rename dialog (unless it is saving), after the header rename (#21)');
   assert.match(source, /registerBack=\{onGoBack \? backLayers\.register : null\}/u,
     'Composer registers its remaining palette slot with the same registry');
   assert.match(region, /onGoBack\(backLayers\.back\);/u);
@@ -730,7 +732,7 @@ test('composer calculations use the pure helpers without moving send or its gate
     'the same attachment body is addressed to the selected snapshot; team expands to exact members');
   assert.match(send, /Promise\.allSettled\(members\.map\(\(name\) => hubCommand\(room, name, cmd\.command\)\)\)/u,
     'a team slash command is the native per-agent command path, not a new server target');
-  assert.match(send, /if \(team && !members\.length\) \{\s*setRecipient\(''\);\s*if \(!cmd\?\.to && !mentionedAgents\(raw, targetMembers\(ALL_TARGET, agents\)\)\.length\) return;/u,
+  assert.match(send, /if \(team && !members\.length\) \{\s*setRecipient\(''\);\s*if \(!cmd\?\.to && !mentionedAgents\(raw, targetMembers\(ALL_TARGET, agents\), names\)\.length\) return;/u,
     'a vanished team stops implicit delivery but an explicit @name still wins');
   assert.match(pipeline, /const tok = attachToken\(a\);/u, 'removal uses the shared spelling');
   assert.match(pipeline, /const tok = attachToken\(item\);/u, 'staging uses that same spelling');
@@ -909,7 +911,7 @@ test('the reading-filter lock lives in the one target writer and the one send en
   // Showing one agent selects it (or nobody, if it is stopped) through that writer.
   assert.match(source, /search\.setAgent\(next\);[\s\S]{0,400}?if \(shownAgent\(\)\) setRecipient\(shownLive\(\) \? next : ''\);/u);
   // The send reads the payload as sent, not the roster-filtered chip view.
-  assert.match(source, /cmdFirst \? \[cmdFirst\.to\] : mentionTokens\(attachmentBody\(raw, pending\)\)\);/u);
+  assert.match(source, /\(cmdFirst \? \[cmdFirst\.to\] : mentionTokens\(attachmentBody\(raw, pending\)\)\)\.map\(\(n\) => names\.resolve\(n\)\)\);/u);
   assert.doesNotMatch(source, /chipExtras\(raw, shownAgent/u);
   // The send checks what the text reaches BEFORE anything is cleared or sent.
   const send = source.slice(source.indexOf('async function send() {'));
@@ -919,4 +921,22 @@ test('the reading-filter lock lives in the one target writer and the one send en
   // The automatic writes that bypass the writer do not seat anyone else.
   assert.match(source, /if \(!shownAgent\(\)\) recipient = pickLead\(agents, hubPrefs\.lead\(selected\)\);\s*else if \(shownLive\(\)\) recipient = shownAgent\(\);/u);
   assert.match(source, /if \(!auto \|\| managedNames\.includes\(recipient\) \|\| shownAgent\(\)\) return;/u);
+});
+
+// Board #21: the agent Rename entry is the card's ONE ContextMenu item, and
+// its editor is the shared Dialog shell with the shared input and error atoms
+// (non-negotiable 6). It adds no visual species: no style of its own.
+test('Rename an agent is one card-menu item opening the shared Dialog with the shared input and error (#21)', () => {
+  const items = source.slice(source.indexOf('function agentItems(name)'), source.indexOf('function projectItems('));
+  assert.match(items, /const rename = \{ label: t\('hubRename'\), icon: 'edit', onselect: \(\) => openAgentRename\(name\) \};/u);
+  assert.equal((items.match(/\brename,/gu) ?? []).length, 2, 'offered on a running and on a stopped card');
+  const dialog = source.slice(source.indexOf('{#if agentRenaming}'), source.indexOf('{#if createOpen}'));
+  assert.match(dialog, /^\{#if agentRenaming\}[\s\S]*?<Dialog \{compact\} label=/u, 'the one Dialog shell');
+  assert.match(dialog, /<input class="config-input rename-input"/u, 'the config input atom');
+  assert.match(dialog, /<p id="agent-rename-error" class="dlg-error config-error appear" role="alert">/u, 'the one inline error line, named by describedby');
+  assert.match(dialog, /describedby=\{agentRenameError \|\| agentRenameHint \? 'agent-rename-error' : undefined\}/u);
+  assert.match(dialog, /<div class="dlg-actions">[\s\S]*<CommandButton/u, 'the shared actions row and button');
+  assert.doesNotMatch(dialog, /style=|style:|\d+px/u, 'no inline style, no raw px');
+  assert.doesNotMatch(source, /\.rename-input\s*\{/u, 'and no CSS of its own');
+  assert.match(source, /const \{ addTeamMessageListener, removeTeamMessageListener, addAgentRenamedListener, removeAgentRenamedListener \} = scope\.runtime\.connection;/u, 'the push stream from the connection, like the room');
 });

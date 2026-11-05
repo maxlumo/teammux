@@ -21,8 +21,10 @@ async function allButton(app: { document: Document; flush: () => Promise<void> }
 
 function roomFixture() {
   const pushed = new Set<unknown>();
+  const renamed = new Set<unknown>();
   return {
     pushed,
+    renamed,
     rpc: {
       projectList: async () => ({ projects: [{
         project: { id: 'fixture', name: 'Fixture', session: 'fixture', path: '/fixture' },
@@ -42,6 +44,8 @@ function roomFixture() {
       hubActivity: async () => ({ events: [], has_more: false }),
       addTeamMessageListener: (fn: unknown) => { pushed.add(fn); },
       removeTeamMessageListener: (fn: unknown) => { pushed.delete(fn); },
+      addAgentRenamedListener: (fn: unknown) => { renamed.add(fn); },
+      removeAgentRenamedListener: (fn: unknown) => { renamed.delete(fn); },
       // The login answer of a server that can do everything the Hub asks of
       // one (board #384: the Move items read it); a test of an older server
       // overrides it.
@@ -945,7 +949,7 @@ function deferred<T>() {
 // single-row form (#266: the disclosure exists only then).
 async function composerFixture(context: TestContext, extra: Record<string, (...args: any[]) => unknown> = {}, mobile = false, storage: Record<string, string> = {}, overflowing = false) {
   const fixture = await compiledHub();
-  const { rpc } = roomFixture();
+  const { rpc, renamed } = roomFixture();
   const app = await fixture.mount(context, {
     props: { visible: true, mobile },
     setup(window) {
@@ -1025,7 +1029,13 @@ async function composerFixture(context: TestContext, extra: Record<string, (...a
     await app.flush();
     return event.defaultPrevented;
   };
-  return { ...app, input, send, text, key, room, to, wait, paste };
+  /** An `agent_renamed` push, as the server sends it (board #21). */
+  const rename = async (agent: string, label: string, aliases: string[] = []) => {
+    const r = app.window.JSON.parse(JSON.stringify({ session: 'fixture', agent, label, aliases }));
+    for (const listener of renamed) (listener as (x: unknown) => void)(r);
+    for (let i = 0; i < 6; i++) await app.flush();
+  };
+  return { ...app, input, send, text, key, room, to, wait, paste, rename };
 }
 
 test('Composer keeps readline caret, palette, room drafts and all three destinations', { timeout: 60000 }, async (context) => {
@@ -6244,5 +6254,135 @@ test('a card double-tap breaks on another card, a second finger, a strip scroll,
     assert.equal(shown(), '', 'no pair across the switch');
     await cleanPair('bob');
     assert.equal(shown(), 'bob', 'a clean pair in the new room fires');
+  } finally { await app.close(); }
+});
+
+// ── Board #21: an agent's label, from the wire, on every surface, live ──────
+
+const labelled = (overrides: Record<string, unknown> = {}) => {
+  const fixture = roomFixture();
+  const now = Date.now();
+  const message = (seq: number, from: string, body: string) => ({ id: `m${seq}`, seq, room: 'proj:fixture', from, ts: now - 1000 + seq, body, kind: 'msg', to: [] });
+  return {
+    ...fixture,
+    rpc: {
+      ...fixture.rpc,
+      hubLog: async () => ({ messages: [message(1, 'alice', '@bob please look'), message(2, 'bob', '@alice done')], has_more: false }),
+      ...overrides,
+    },
+  };
+};
+
+const settleHub = async (app: { flush: () => Promise<void> }) => { for (let i = 0; i < 16; i++) await app.flush(); };
+const texts = (doc: Document, sel: string) => [...doc.querySelectorAll(sel)].map((e) => e.textContent?.trim());
+
+test('a rename re-labels the open feed, its @mentions and the roster in place (#21)', { timeout: 60000 }, async (context) => {
+  const { rpc, renamed } = labelled();
+  const app = await (await compiledHub()).mount(context, {
+    props: { visible: true },
+    setup(window) { window.Element.prototype.getAnimations = () => []; window.HTMLCanvasElement.prototype.getContext = () => null; },
+    modules: [rpc],
+  });
+  await settleHub(app);
+  assert.deepEqual(texts(app.document, '.m-who'), ['alice', 'bob']);
+  assert.ok(texts(app.document, '.m-to').includes('@alice'));
+  const push = app.window.JSON.parse(JSON.stringify({ session: 'fixture', agent: 'alice', label: 'robin', aliases: [] }));
+  for (const listener of renamed) (listener as (r: unknown) => void)(push);
+  await settleHub(app);
+  assert.deepEqual(texts(app.document, '.m-who'), ['robin', 'bob'], 'the sender head follows at once, no reload');
+  assert.ok(texts(app.document, '.m-to').includes('@robin') && !texts(app.document, '.m-to').includes('@alice'), 'a past @mention shows the label');
+  assert.ok(texts(app.document, '.acard .a-name').includes('robin'), 'and the roster card');
+});
+
+test('a rename while the composer holds @old still sends to the agent (#21)', { timeout: 60000 }, async (context) => {
+  const posts: string[] = [];
+  const app = await composerFixture(context, { hubPost: async (_s: string, body: string) => { posts.push(body); return {}; } });
+  try {
+    await app.to('alice');
+    await app.text('@bob please review');
+    await app.rename('bob', 'robin');
+    app.send.click();
+    for (let i = 0; i < 8; i++) await app.flush();
+    assert.equal(posts.length, 1, 'sent, not refused by a client check');
+    assert.match(posts[0]!, /@bob please review/u, 'the typed old name goes to the server, which resolves it');
+    assert.equal(app.document.querySelector('.command-feedback [role=alert], .op-feedback.error'), null);
+  } finally { await app.close(); }
+});
+
+test('after a rename the @ picker offers the new label and an old name still finds it (#21)', { timeout: 60000 }, async (context) => {
+  const app = await composerFixture(context);
+  const options = () => [...app.document.querySelectorAll('.cmd-menu .cmd-opt .cmd-name')].map((n) => n.textContent);
+  try {
+    await app.rename('bob', 'robin', []);
+    await app.text('ask @');
+    assert.deepEqual(options(), ['@alice', '@robin', '@all'], 'the label is offered, not the physical name');
+    await app.text('ask @bo');
+    assert.deepEqual(options(), ['@robin'], 'typing its physical name still finds it');
+    await app.rename('bob', 'rex', ['robin']);
+    await app.text('ask @rob');
+    assert.deepEqual(options(), ['@rex'], 'and a previous label');
+    assert.equal(await app.key('Enter'), true);
+    assert.equal(app.input.value, 'ask @rex ', 'what is inserted is the current label');
+  } finally { await app.close(); }
+});
+
+test('Rename on the card menu opens one dialog: the label goes to the server, a refusal is said inline, Reset returns the name (#21)', { timeout: 60000 }, async (context) => {
+  const calls: Array<[string, string, string | null]> = [];
+  let refuse = '';
+  const { rpc } = labelled({
+    hubAgentRename: async (session: string, agent: string, label: string | null) => {
+      calls.push([session, agent, label]);
+      if (refuse) throw new Error(refuse);
+      return { agent, label: label ?? agent, aliases: label ? [] : ['robin'] };
+    },
+  });
+  const app = await (await compiledHub()).mount(context, {
+    props: { visible: true },
+    setup(window) { window.Element.prototype.getAnimations = () => []; window.HTMLCanvasElement.prototype.getContext = () => null; },
+    modules: [rpc],
+  });
+  const openRename = async (name: string) => {
+    stripCard(app.document, name).querySelector('.agent-select')!.dispatchEvent(new app.window.MouseEvent('contextmenu', { bubbles: true }));
+    await app.flush();
+    const item = [...app.document.querySelectorAll<HTMLButtonElement>('.ctx button')].find((b) => b.textContent?.trim() === 'Rename');
+    assert.ok(item, 'the card menu offers Rename');
+    item.click();
+    await settleHub(app);
+  };
+  const input = () => app.document.querySelector<HTMLInputElement>('.rename-input')!;
+  const typeLabel = async (value: string) => { input().value = value; input().dispatchEvent(new app.window.Event('input', { bubbles: true })); await app.flush(); };
+  const button = (label: string) => [...app.document.querySelectorAll<HTMLButtonElement>('.dlg-actions button')].find((b) => b.textContent?.trim() === label);
+  try {
+    await settleHub(app);
+    await openRename('alice');
+    assert.ok(app.document.querySelector('.dlg'), 'one dialog, the shared shell');
+    assert.equal(input().value, 'alice', 'it holds the current label');
+    assert.equal(button('Reset to alice'), undefined, 'no reset while it has no label');
+    await typeLabel('has space');
+    assert.match(app.document.querySelector('.dlg [role=alert]')?.textContent ?? '', /letters, digits/u, 'the name rule is said as you type');
+    assert.equal(button('Rename')!.disabled, true);
+    await typeLabel('bob');
+    assert.match(app.document.querySelector('.dlg [role=alert]')?.textContent ?? '', /bob is already a name of bob/u, 'another agent’s name in the table is said before asking');
+    assert.equal(button('Rename')!.disabled, true);
+    refuse = "'tmm' is reserved: it is the system's sender, and an agent shown as it would read as the system";
+    await typeLabel('tmm');
+    button('Rename')!.click();
+    await settleHub(app);
+    assert.deepEqual(calls.at(-1), ['fixture', 'alice', 'tmm']);
+    assert.match(app.document.querySelector('.dlg [role=alert]')?.textContent ?? '', /'tmm' is reserved/u, 'the server decides; its reason is said inline');
+    assert.ok(app.document.querySelector('.dlg'), 'and the dialog stays');
+    refuse = '';
+    await typeLabel('robin');
+    button('Rename')!.click();
+    await settleHub(app);
+    assert.deepEqual(calls.at(-1), ['fixture', 'alice', 'robin']);
+    assert.equal(app.document.querySelector('.dlg'), null, 'done: the dialog closes');
+    assert.deepEqual(texts(app.document, '.m-who'), ['robin', 'bob'], 'and the feed follows from the answer, before any poll');
+    await openRename('alice');
+    assert.equal(input().value, 'robin');
+    button('Reset to alice')!.click();
+    await settleHub(app);
+    assert.deepEqual(calls.at(-1), ['fixture', 'alice', null], 'Reset asks for the physical name');
+    assert.deepEqual(texts(app.document, '.m-who'), ['alice', 'bob']);
   } finally { await app.close(); }
 });

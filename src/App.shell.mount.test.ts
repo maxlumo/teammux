@@ -76,7 +76,7 @@ function transport(calls: string[]) {
     subscribe: () => {}, unsubscribe: () => {}, resubscribeActive: () => {},
     addPaneOutputListener: () => {}, removePaneOutputListener: () => {},
     addPaneClosedListener: () => {}, removePaneClosedListener: () => {},
-    addTeamMessageListener: () => {}, removeTeamMessageListener: () => {},
+    addTeamMessageListener: () => {}, removeTeamMessageListener: () => {}, addAgentRenamedListener: () => {}, removeAgentRenamedListener: () => {},
     findBestAddress: async () => null,
     classifyAddress: () => 0,
     isAddressViable: () => true,
@@ -181,6 +181,7 @@ const LIFECYCLE = new Set([
   'connect', 'disconnect', 'dispose', 'isConnected', 'getMachineId', 'getHostname', 'getBuild', 'setOnDisconnect',
   'subscribe', 'unsubscribe', 'resubscribeActive', 'addPaneOutputListener', 'removePaneOutputListener',
   'addPaneClosedListener', 'removePaneClosedListener', 'addTeamMessageListener', 'removeTeamMessageListener',
+  'addAgentRenamedListener', 'removeAgentRenamedListener',
   'findBestAddress', 'classifyAddress', 'isAddressViable', 'noteAddressUnreachable',
   'createConnection', 'createWsApi', 'createConnectionRegistry',
 ]);
@@ -275,6 +276,7 @@ function withSlot<M extends Record<string, any>>(module: M, candidateAt?: (url: 
       addPaneClosedListener: noop, removePaneClosedListener: noop,
       addTeamMessageListener: (fn: (m: unknown) => void) => { team.add(fn); },
       removeTeamMessageListener: (fn: (m: unknown) => void) => { team.delete(fn); },
+      addAgentRenamedListener: noop, removeAgentRenamedListener: noop,
       url: () => null,
     };
     const api: Record<string, unknown> = {};
@@ -328,7 +330,7 @@ function liveTransport(calls: string[], machine: () => string) {
     subscribe: () => {}, unsubscribe: () => {}, resubscribeActive: () => {},
     addPaneOutputListener: () => {}, removePaneOutputListener: () => {},
     addPaneClosedListener: () => {}, removePaneClosedListener: () => {},
-    addTeamMessageListener: () => {}, removeTeamMessageListener: () => {},
+    addTeamMessageListener: () => {}, removeTeamMessageListener: () => {}, addAgentRenamedListener: () => {}, removeAgentRenamedListener: () => {},
     findBestAddress: async () => null,
     classifyAddress: () => 0,
     isAddressViable: () => true,
@@ -515,7 +517,7 @@ function twoServerTransport(calls: string[], machineAt: MachineAt = byAddress, e
     subscribe: () => {}, unsubscribe: () => {}, resubscribeActive: () => {},
     addPaneOutputListener: () => {}, removePaneOutputListener: () => {},
     addPaneClosedListener: () => {}, removePaneClosedListener: () => {},
-    addTeamMessageListener: () => {}, removeTeamMessageListener: () => {},
+    addTeamMessageListener: () => {}, removeTeamMessageListener: () => {}, addAgentRenamedListener: () => {}, removeAgentRenamedListener: () => {},
     findBestAddress: async () => null,
     classifyAddress: () => 0,
     isAddressViable: () => true,

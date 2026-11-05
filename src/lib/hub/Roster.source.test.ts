@@ -129,7 +129,7 @@ test('Stop consumes parent busy and pending sets through the shared command', ()
 });
 
 test('body mentions use chipExtras, separate from selected state and Stop', () => {
-  assert.match(source, /const extras = \$derived\(chipExtras\(composerText, recipient, managedNames\)\)/u);
+  assert.match(source, /const extras = \$derived\(chipExtras\(composerText, recipient, managedNames, names\)\)/u);
   assert.match(source, /extras\.includes\(ALL_TARGET\)/u);
   assert.match(source, /extras\.includes\(a\.name\)/u);
   assert.match(source, /class="agent-mention"[^>]*>@<\/span>/u);
@@ -259,7 +259,7 @@ test('the stop is a quiet dense action and the dot sits clear of the name, on th
   // 46px card (card 111px wide), name→dot gap 1.3–2px, dot on the line-box centre.
   assert.match(source, /class="agent-stop compact-tools" class:pending use:overDot/u, 'the shared dense slot, not a private size');
   assert.doesNotMatch(source, /variant="warn"/u, 'the amber-mixed ink is gone with its variant');
-  assert.match(source, /<span class="a-name strip-label" style:--who-ink=\{agentHue\(a\.name\)\}>\{a\.name\}<span class="ac-top"><span class="st"/u, 'the dot is in the name\'s line');
+  assert.match(source, /<span class="a-name strip-label" style:--who-ink=\{agentHue\(a\.name\)\}>\{names\.shown\(a\.name\)\}<span class="ac-top"><span class="st"/u, 'the dot is in the name\'s line');
   assert.match(rule('.ac-top'), /vertical-align: middle; margin-inline-start: 5px;/u);
 });
 

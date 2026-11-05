@@ -133,7 +133,7 @@ completion).
   right-click/long-press — no dedicated dots control taking roster space
   (Message / Watch / Only its messages — the one-agent feed filter, also a
   double-click on the card; while it shows one agent that agent is the only
-  target, and a send reaching anyone else is refused, #482 / configure agent / **Fork** (running agents only,
+  target, and a send reaching anyone else is refused, #482 / **Rename** (board #21, below) / configure agent / **Fork** (running agents only,
   board #383: one tap, no dialog — a NEW agent with this one's definition, a
   fresh conversation, named `<name>-2`; zh 复制一个; on a server too old to
   have it, "update the server", not the method name) / Interrupt / Move to team /
@@ -141,6 +141,29 @@ completion).
   aligns to the card's LEFT edge (board #47 — the card reads name-first
   from its left edge; same shared placement flip/clamp as the title menu);
   right-click/long-press keeps the pointer placement.
+- **Rename** (board #21, the UI of #20; zh 重命名), on a running and a stopped
+  card. It opens the shared `ui/Dialog` with the agent's current label in the
+  config input. Only the LABEL changes, the name people and agents see and
+  type: its window, home and `TMM_AGENT` keep the physical name, its old names
+  still reach it, and its own prompt follows at its next start (the note says
+  so). While you type, the name rule (one `@address`) and a name another agent
+  of this project has in the server's table are said inline as a hint; the
+  server decides, and its refusal (a reserved word such as `tmm`, a name taken
+  meanwhile) is said in the same line, the dialog staying open. **Reset to
+  <physical name>** is offered when a label is set. An older server says
+  "update the server". On success the answer re-labels at once, and every
+  other open client re-labels on the `agent_renamed` push.
+- **Every surface shows the label** (board #21): the card (name, avatar
+  letter, hover title, aria), the feed's sender heads, `@mention` chips in
+  history (a physical or previous name renders as the current label, in the
+  agent's own ink, which is keyed by its physical name and so survives a
+  rename), lifecycle rows, reply quotes, the `@` picker (it offers labels and
+  inserts the label; typing a physical or previous name still finds the
+  agent), the drawer switcher, the context-menu heading, confirm titles, the
+  composer's "to" placeholder, search hits, board assignees, openers and note
+  authors, and notifications. The client only APPLIES the server's labels
+  table (`hub_agents.labels`, the `agent_renamed` push; `names.ts`); every key
+  it keeps (recipient, lead, filter, board values) stays the physical name.
 - A **stopped** agent (slot, no window) keeps its card and menu (Start /
   Remove). The card is dimmed and carries no "stopped" word — the dimming
   says it, and the word made the card wide (owner, 2026-09-03); the state

@@ -1,5 +1,6 @@
 <script>
   import CommandButton from '../ui/CommandButton.svelte';
+  import { NO_LABELS } from './names.ts';
   import Icon from '../ui/Icon.svelte';
   import { t } from '../core/i18n.svelte.ts';
   import { untrack } from 'svelte';
@@ -19,7 +20,7 @@
   import { groupDropAt } from '../app/nav-order.ts';
 
   let {
-    selected = '', compact = false, managedAgents = [], stopped = [], stoppedTeams = {}, selectedRow = null,
+    selected = '', compact = false, names = NO_LABELS, managedAgents = [], stopped = [], stoppedTeams = {}, selectedRow = null,
     recipient = '', filterAgent = '', unread = new Set(), acting = false, tick = Date.now(),
     roomReady = false, justLoaded = false, rosterBase = null,
     composerText = '', managedNames = [], busyNames = [], interrupting = [],
@@ -143,7 +144,7 @@
     void selected; void expanded;
     if (cardsEl) { cardsEl.scrollLeft = 0; cardsEl.scrollTop = 0; }
   });
-  const extras = $derived(chipExtras(composerText, recipient, managedNames));
+  const extras = $derived(chipExtras(composerText, recipient, managedNames, names));
   const slotBackend = (name) => (selectedRow?.slots ?? []).find((s) => s.window_name === name)?.command;
 
   function selectTarget(name) {
@@ -301,8 +302,8 @@
     const team = targetTeam(recipient);
     const destination = recipient === ALL_TARGET ? t('hubToAllLong')
       : team ? t('hubToTeamLong').replace('{name}', team)
-      : t('hubToDmLong').replace('{name}', `@${name}`);
-    const also = extras.length ? t('hubToAlsoHint').replace('{names}', extras.map((n) => `@${n}`).join(', ')) : '';
+      : t('hubToDmLong').replace('{name}', `@${names.shown(name)}`);
+    const also = extras.length ? t('hubToAlsoHint').replace('{names}', extras.map((n) => `@${names.shown(n)}`).join(', ')) : '';
     return [destination, also].filter(Boolean).join('\n');
   }
 
@@ -328,7 +329,7 @@
     lines.push({ label: t('hubHoverTarget'), value: `${selected}:${a.window}` });
     if (selectedRow?.project.path) lines.push({ label: t('hubHoverPath'), value: selectedRow.project.path });
     const text = [a.vitals?.effort, a.vitals?.branch].filter(Boolean).join(' · ');
-    return { title: a.name, lines, text, note: [destinationNote(a.name), filterNote(a.name)].filter(Boolean).join('\n') };
+    return { title: names.shown(a.name), lines, text, note: [destinationNote(a.name), filterNote(a.name)].filter(Boolean).join('\n') };
   }
 
   function offCardInfo(name) {
@@ -336,7 +337,7 @@
     const lines = [{ label: t('hubHoverState'), value: t('hubStopped') }];
     if (slot?.command) lines.push({ label: t('hubHoverModel'), value: slot.command });
     if (selectedRow?.project.path) lines.push({ label: t('hubHoverPath'), value: selectedRow.project.path });
-    return { title: name, lines, note: filterNote(name) };
+    return { title: names.shown(name), lines, note: filterNote(name) };
   }
   /** The mode names itself and its way out where the pointer already is. */
   function filterNote(name) {
@@ -435,7 +436,7 @@
           <button type="button" class="agent-select"
             aria-pressed={isAddressed(a.name)}
             aria-disabled={targetable(a.name) ? undefined : 'true'}
-            aria-label={[`${a.name} · ${stateLabel(a.state)}`, a.team, detailLabel(a.detail), vitalsLine(a.vitals), unread.has(a.name) ? t('hubUnread') : '', mentioned ? t('hubToAlsoHint').replace('{names}', `@${a.name}`) : '', filterAgent === a.name ? t('hubFilterItem') : ''].filter(Boolean).join(' · ')}
+            aria-label={[`${names.shown(a.name)} · ${stateLabel(a.state)}`, a.team, detailLabel(a.detail), vitalsLine(a.vitals), unread.has(a.name) ? t('hubUnread') : '', mentioned ? t('hubToAlsoHint').replace('{names}', `@${names.shown(a.name)}`) : '', filterAgent === a.name ? t('hubFilterItem') : ''].filter(Boolean).join(' · ')}
             use:hoverInfo={() => cardInfo(a)}
             onclick={(e) => clickAgent(e, a.name)} ondblclick={(e) => focusAgent(e, a.name)}
             use:doubletap={{ scope: selected, ondoubletap: () => showOnly(a.name) }}
@@ -444,7 +445,7 @@
             oncontextmenu={(e) => { e.preventDefault(); oncontext(pointOf(e), a.name, touchInfo(() => cardInfo(a))); }}
             use:longpress={{ onlongpress: (at) => oncontext(at, a.name, touchInfo(() => cardInfo(a))) }}>
             <span class="avatar-slot">
-              {#if backendIcon(a.agent)}<img class="ava" src={backendIcon(a.agent)} alt={a.agent} />{:else}<span class="ava" style:background={backendColor(a.agent)}>{a.name.slice(0, 1).toUpperCase()}</span>{/if}
+              {#if backendIcon(a.agent)}<img class="ava" src={backendIcon(a.agent)} alt={a.agent} />{:else}<span class="ava" style:background={backendColor(a.agent)}>{names.shown(a.name).slice(0, 1).toUpperCase()}</span>{/if}
               {#if a.vitals?.context_pct != null}
                 {@const pct = Math.max(0, Math.min(100, a.vitals.context_pct))}
                 <span class="ctx-ring" role="meter" aria-label={t('hubCtxUsed')}
@@ -452,7 +453,7 @@
                   style:--ctx-amount={`${pct}%`} style:--ctx-color={ctxColor(a.vitals.context_pct)}></span>
               {/if}
             </span>
-            <span class="a-name strip-label" style:--who-ink={agentHue(a.name)}>{a.name}<span class="ac-top"><span class="st" class:live-dot={stateIsLive(a.state)} style:background={stateDotColor(a.state, a.detail)}></span></span></span>
+            <span class="a-name strip-label" style:--who-ink={agentHue(a.name)}>{names.shown(a.name)}<span class="ac-top"><span class="st" class:live-dot={stateIsLive(a.state)} style:background={stateDotColor(a.state, a.detail)}></span></span></span>
             <span class="agent-marks" class:unmarked={!mentioned && !unread.has(a.name)}>
               {#if mentioned}<span class="agent-mention" aria-hidden="true">@</span>{/if}
               {#if unread.has(a.name)}<span class="unread-dot appear-pop" aria-hidden="true"></span>{/if}
@@ -468,7 +469,7 @@
                  the red glyph is the whole control (owner, 2026-09-20: "停止按钮就
                  不用加背景了，就红色方块我直接点就行"; board #211). -->
             <span class="agent-stop compact-tools" class:pending use:overDot>
-              <CommandButton label={`${t('hubInterrupt')} ${a.name}`} icon="stop" variant="danger" iconOnly bare
+              <CommandButton label={`${t('hubInterrupt')} ${names.shown(a.name)}`} icon="stop" variant="danger" iconOnly bare
                 {pending} disabled={pending}
                 onclick={(e) => { e.stopPropagation(); interrupt(a.name); }} />
             </span>
@@ -528,16 +529,16 @@
       {#snippet offSelect(name)}
         {@const backend = slotBackend(name)}
           <button type="button" class="agent-select" disabled={acting}
-            aria-label={[name, t('hubStopped'), filterAgent === name ? t('hubFilterItem') : ''].filter(Boolean).join(' · ')} aria-haspopup="menu"
+            aria-label={[names.shown(name), t('hubStopped'), filterAgent === name ? t('hubFilterItem') : ''].filter(Boolean).join(' · ')} aria-haspopup="menu"
             use:hoverInfo={() => offCardInfo(name)}
             onclick={(e) => stoppedMenu(e, name)} ondblclick={(e) => focusAgent(e, name, true)}
             use:doubletap={{ scope: selected, ondoubletap: () => showOnly(name, true) }}
             oncontextmenu={(e) => { e.preventDefault(); oncontext(pointOf(e), name, touchInfo(() => offCardInfo(name))); }}
             use:longpress={{ onlongpress: (at) => oncontext(at, name, touchInfo(() => offCardInfo(name))) }}>
             <span class="avatar-slot">
-              {#if backendIcon(backend)}<img class="ava dim" src={backendIcon(backend)} alt={backend} />{:else}<span class="ava dim">{name.slice(0, 1).toUpperCase()}</span>{/if}
+              {#if backendIcon(backend)}<img class="ava dim" src={backendIcon(backend)} alt={backend} />{:else}<span class="ava dim">{names.shown(name).slice(0, 1).toUpperCase()}</span>{/if}
             </span>
-            <span class="a-name strip-label">{name}</span>
+            <span class="a-name strip-label">{names.shown(name)}</span>
           </button>
       {/snippet}
       <!-- Spawning opens a closed project too; keep its entry even in an empty room. -->

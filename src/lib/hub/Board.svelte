@@ -1,5 +1,6 @@
 <script lang="ts">
   import CommandButton from '../ui/CommandButton.svelte';
+  import { agentNames, NO_LABELS, type Names } from './names.ts';
   /* The project task board (owner, 2026-08-29: "引入一个新的看板功能…人类有一个
      看板页面，能写任务issue，agent也可以读任务，修改任务状态，在看板上记录信息
      状态"). This is the HUMAN's half; agents read and update the same issues
@@ -624,9 +625,13 @@
       if (!current()) return;
       agents = a.agents.filter((x) => x.managed);
       backends = rememberBackends(backends, agents);
+      // The project's labels (board #21): assignees, openers and note
+      // authors are stored by physical name and shown by label.
+      if (Array.isArray(a.labels)) names = agentNames(a.labels);
     } catch { /* keep */ }
   }
   let agents = $state<HubAgent[]>([]);
+  let names = $state<Names>(NO_LABELS);
   /** name → backend, as last seen (board #327): a stopped agent keeps its icon. */
   let backends = $state<Record<string, string>>({});
 
@@ -1235,10 +1240,10 @@
           {/each}
         </div>
         <Select value={draft.assignee} dense disabled={submitting || assignBlocked()}
-          options={[{ value: '', label: t('boardUnassigned') }, ...agents.map((a) => ({ value: a.name, label: a.name, icon: backendIcon(a.agent) ?? undefined }))]}
+          options={[{ value: '', label: t('boardUnassigned') }, ...agents.map((a) => ({ value: a.name, label: names.shown(a.name), icon: backendIcon(a.agent) ?? undefined }))]}
           onchange={(v: string) => { if (!submitting) draft.assignee = v; }} />
         {#if assignBlocked()}<span class="meta-bit">{t('boardAssignOldServer')}</span>{/if}
-        {#if sel.created_by}<span class="meta-bit">{t('boardOpenedBy')} <span class="m-name">{sel.created_by}</span></span>{/if}
+        {#if sel.created_by}<span class="meta-bit">{t('boardOpenedBy')} <span class="m-name">{names.shown(sel.created_by)}</span></span>{/if}
       </div>
       {#if sel.editable}
         <textarea class="d-body-edit" bind:this={bodyEl} bind:value={draft.body} use:autoGrow={draft.body} placeholder={t('boardBodyPh')} rows="3"
@@ -1274,7 +1279,7 @@
           {#each sel.notes as n, i (`${i}:${n.at}`)}
             <div class="note" class:appear={i >= notesBase}>
               <div class="n-head">
-                <span class="n-author">{n.author}</span>
+                <span class="n-author">{names.shown(n.author)}</span>
                 <!-- The accessible route to the action row (board #46): the
                      note text stays TEXT to assistive tech — like the Chat
                      bubble — so the time is a real borderless button, Chat's
@@ -1344,7 +1349,7 @@
            is briefed the moment the issue exists (board #11). -->
       <div class="d-meta">
         <Select value={nAssignee} dense disabled={submitting || assignBlocked()}
-          options={[{ value: '', label: t('boardUnassigned') }, ...agents.map((a) => ({ value: a.name, label: a.name, icon: backendIcon(a.agent) ?? undefined }))]}
+          options={[{ value: '', label: t('boardUnassigned') }, ...agents.map((a) => ({ value: a.name, label: names.shown(a.name), icon: backendIcon(a.agent) ?? undefined }))]}
           onchange={(v: string) => { if (!submitting) nAssignee = v; }} />
         {#if assignBlocked()}<span class="meta-bit">{t('boardAssignOldServer')}</span>{/if}
       </div>
@@ -1395,15 +1400,15 @@
               {#if i.body && i.title?.trim()}<span class="c-body">{cardText(i).body}</span>{/if}
               <span class="c-meta">
                 #{i.id}
-                {#if i.created_by}· {t('boardBy')} {i.created_by}{/if}
+                {#if i.created_by}· {t('boardBy')} {names.shown(i.created_by)}{/if}
                 {#if i.assignee}
                   {@const who = assigneeView(i.assignee, agents, s, backends, catalog)}
                   <!-- WHO is on it (board #293): the app's .ava tile in the
                        agent's own ink + the name; a dot on the tile's corner
                        while that agent is running (hub_agents, stateIsLive). -->
                   {#if who?.icon}·
-                    <span class="c-who"><span class="c-tile"><img class="ava" src={who.icon} alt="" />{#if who.live}<span class="c-live live-dot" aria-hidden="true"></span>{/if}</span><span class="c-assignee">{who.name}</span></span>
-                  {:else}· <span class="c-assignee">{who?.name === 'human' ? '@human' : who?.name ?? ''}</span>{/if}
+                    <span class="c-who"><span class="c-tile"><img class="ava" src={who.icon} alt="" />{#if who.live}<span class="c-live live-dot" aria-hidden="true"></span>{/if}</span><span class="c-assignee">{names.shown(who.name)}</span></span>
+                  {:else}· <span class="c-assignee">{who?.name === 'human' ? '@human' : who?.name ? names.shown(who.name) : ''}</span>{/if}
                 {/if}
                 {#if noteCount(i)}· {noteCount(i)} <Icon name="chat" size={10} />{/if}
                 · {ago(i.updated_at)}

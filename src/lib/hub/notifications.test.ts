@@ -292,9 +292,9 @@ test('Hub notifies from the PUSH first and the poll second, both through isAway 
   // push handler is the primary site; the poll is the fallback; sift dedups.
   const calls = hub.match(/notifyNews\(/gu) ?? [];
   assert.equal(calls.length, 2);
-  assert.match(hub, /notifyNews\(messages, newsCtx\(room\(s\), s, first\), undefined, newsEffects\)/u, 'the poll site');
+  assert.match(hub, /notifyNews\(byLabel\(messages, s\), newsCtx\(room\(s\), s, first\), undefined, newsEffects\)/u, 'the poll site');
   const push = hub.slice(hub.indexOf('const onPush = (m) => {'), hub.indexOf('if (!selected || m?.room !== room(selected)) return;'));
-  assert.match(push, /notifyNews\(\[m\], newsCtx\(m\.room, session, false\), undefined, newsEffects\)/u, 'a push is never history');
+  assert.match(push, /notifyNews\(byLabel\(\[m\], session\), newsCtx\(m\.room, session, false\), undefined, newsEffects\)/u, 'a push is never history');
   // ONE context builder (#322): another room is away by definition, the
   // selected one asks the document; the title names the project.
   const ctx = hub.slice(hub.indexOf('function newsCtx('), hub.indexOf('const newsEffects'));

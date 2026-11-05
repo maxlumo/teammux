@@ -1,5 +1,6 @@
 <script>
   import Terminal from '../terminal/Terminal.svelte';
+  import { NO_LABELS } from './names.ts';
   import Files from '../files/Files.svelte';
   import Board from './Board.svelte';
   import SideHandle from '../ui/SideHandle.svelte';
@@ -10,7 +11,7 @@
   import { hoverInfo } from '../ui/hover.ts';
 
   let {
-    compact = false, visible = false, fontSize = 14, selected = '',
+    compact = false, visible = false, fontSize = 14, selected = '', names = NO_LABELS,
     /** The project's declared path — where its Files partition starts (board #181). */
     projectPath = '',
     termTarget = '', drawerView = 'term',
@@ -34,7 +35,7 @@
     const n = panes.filter((p) => p.session === selected && p.window === a.window).length;
     if (n) lines.push({ label: t('hubHoverPanes'), value: String(n) });
     if (a.agent) lines.push({ label: t('hubHoverState'), value: [stateLabel(a.state), detailLabel(a.detail)].filter(Boolean).join(' · '), tone: stateTone(a.state, a.detail) });
-    return { title: `${a.window}:${a.name}`, lines };
+    return { title: `${a.window}:${names.shown(a.name)}`, lines };
   }
 </script>
 
@@ -51,7 +52,7 @@
             aria-pressed={termTarget.startsWith(`${selected}:${a.window}.`)}
             use:hoverInfo={() => pillInfo(a)}>
             <span class="st" class:live-dot={!!a.agent && stateIsLive(a.state)} style:background={a.agent ? stateDotColor(a.state, a.detail) : stateDotColor('shell')}></span>
-            {a.window}:{a.name}{#if a.agent && !a.managed}<span class="direct-tag">{t('hubDirect')}</span>{/if}
+            {a.window}:{names.shown(a.name)}{#if a.agent && !a.managed}<span class="direct-tag">{t('hubDirect')}</span>{/if}
           </button>
         {/each}
         {#if winsFolded > 0 || winsExpanded}

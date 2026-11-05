@@ -43,6 +43,7 @@
   import { alertOf } from './notify-centre.svelte.ts';
   import HubSearch from './HubSearch.svelte';
   import { createHubSearch } from './hub-search.svelte.ts';
+  import { agentNames, patchNames } from './names.ts';
   import { HUMAN, agentHue, quotePreview, stateDotColor, mergeMessages, mergeEvents, backendColor as colorOf, feedBlocks, filterBlocks, mergeStates, pickLead, pickDrawerAgent, addressed, addressedTeam, mentionTokens, mentionedAgents, unreadSenders, stoppedAgents, slashCommand, inputModeSwitch, issueSpans, systemLine } from './hub.ts';
   import { issueRef } from './board.ts';
   import { AGENT_TEAM, lacksCap } from '../core/login-caps.ts';
@@ -77,9 +78,9 @@
   // lives on the connection, the calls on the api — both from the one read.
   const {
     projectList, projectUp, projectDown, projectDelete, projectArchive, projectCreate, projectRename, listSessionsWithPanes,
-    hubPost, hubCommand, modelsList, boardList, hubAgentSetTeam, hubLog, hubLogAround, hubSearch, hubFiles, hubRooms, hubUnread, hubRead, hubAgents, fsCwd, hubSpawn, hubSpawnTeam, teamsList, hubAgentStop, hubAgentRestart, hubAgentFork, hubTeamRestart, hubActivity, hubAgentRemove, hubAgentInterrupt, hubAgentInputMode, registryList,
+    hubPost, hubCommand, hubAgentRename, modelsList, boardList, hubAgentSetTeam, hubLog, hubLogAround, hubSearch, hubFiles, hubRooms, hubUnread, hubRead, hubAgents, fsCwd, hubSpawn, hubSpawnTeam, teamsList, hubAgentStop, hubAgentRestart, hubAgentFork, hubTeamRestart, hubActivity, hubAgentRemove, hubAgentInterrupt, hubAgentInputMode, registryList,
   } = scope.runtime.api;
-  const { addTeamMessageListener, removeTeamMessageListener } = scope.runtime.connection;
+  const { addTeamMessageListener, removeTeamMessageListener, addAgentRenamedListener, removeAgentRenamedListener } = scope.runtime.connection;
   // What this server's login says it can do (board #377 caps). Moving a
   // running agent between teams needs `agent_team` (#384): without it the
   // drag has no targets and the Move items are disabled, saying why.
@@ -153,6 +154,11 @@
   // Stopped managed agent → its team path (hub_agents, board #258), so a
   // team's "Start stopped" knows which stopped identities are its members.
   let stoppedTeams = $state({});
+  // Each project's agent labels, the server's table (board #21): `hub_agents`
+  // answers it, an `agent_renamed` push patches it in place. Keyed by session;
+  // the client only applies it (`names.ts`), never derives a label.
+  let labelsBy = $state({});
+  const names = $derived(agentNames(labelsBy[selected]));
   let feed = $state([]);            // chat messages, oldest first
   let activity = $state([]);        // telemetry events (in-memory ring on the server)
   let lastActivityTs = 0;
@@ -612,7 +618,7 @@
       const messages = res.messages;
       // The batch is news even when the feed is no longer the one it was
       // asked for (a jump landed meanwhile): notify first, then decide.
-      if (messages?.length) notifyNews(messages, newsCtx(room(s), s, first), undefined, newsEffects);
+      if (messages?.length) notifyNews(byLabel(messages, s), newsCtx(room(s), s, first), undefined, newsEffects);
       if (!ours()) return;
       if (first) {
         histSeq = res.oldest_seq ?? 0;
@@ -689,6 +695,7 @@
       if (!alive || request !== rosterReadSequence) return;
       agents = adopt(agents, got);
       stoppedTeams = adopt(stoppedTeams, r.stopped_teams ?? {});
+      if (Array.isArray(r.labels)) labelsBy = { ...labelsBy, [s]: adopt(labelsBy[s] ?? [], r.labels) };
       // The sidebar chips share this truth (board #8): the roster is the
       // freshest reading for THIS project, so its states overwrite the
       // 20s-cadence snapshot's keys instead of disagreeing beside them.
@@ -813,6 +820,11 @@
   // would be mislabelled the moment two are on screen. Constant for this
   // instance; a switch destroys the Hub and its in-flight work with it.
   const serverId = () => scope.runtime.id;
+  /** News is said by the sender's current label (board #21); the room's rows are untouched. */
+  const byLabel = (messages, session) => {
+    const n = agentNames(labelsBy[session]);
+    return messages.map((m) => (m?.from && n.shown(m.from) !== m.from ? { ...m, from: n.shown(m.from) } : m));
+  };
   function newsCtx(roomName, session, first) {
     const here = !!selected && roomName === room(selected);
     const away = !here || isAway(visible);
@@ -1150,14 +1162,16 @@
     // the attachments and the reply stay; the person leaves the filter first.
     // Nothing is stripped and the filter stays.
     const cmdFirst = slashCommand(raw);
+    // Typed names are any an agent has or had (board #21): checked as the
+    // physical agents they reach.
     const lock = lockedSend(shownAgent(), shownLive(), recipient,
-      cmdFirst ? [cmdFirst.to] : mentionTokens(attachmentBody(raw, pending)));
+      (cmdFirst ? [cmdFirst.to] : mentionTokens(attachmentBody(raw, pending))).map((n) => names.resolve(n)));
     if (lock) {
       const token = commandFeedbackLifetime.begin();
       commandFeedbackAnchor = composer?.feedbackAnchor() ?? null;
       commandFeedbackLifetime.update(token, { kind: 'error', message: lock.kind === 'beyond'
-        ? t('hubFilterLockedSend').replace('{name}', shownAgent()).replace('{names}', lock.names.map((n) => `@${n}`).join(', '))
-        : t('hubFilterUnreachable').replace('{name}', shownAgent()) });
+        ? t('hubFilterLockedSend').replace('{name}', names.shown(shownAgent())).replace('{names}', lock.names.map((n) => `@${names.shown(n)}`).join(', '))
+        : t('hubFilterUnreachable').replace('{name}', names.shown(shownAgent())) });
       return;
     }
     const team = targetTeam(recipient);
@@ -1165,7 +1179,7 @@
     const cmd = slashCommand(raw);
     if (team && !members.length) {
       setRecipient('');
-      if (!cmd?.to && !mentionedAgents(raw, targetMembers(ALL_TARGET, agents)).length) return;
+      if (!cmd?.to && !mentionedAgents(raw, targetMembers(ALL_TARGET, agents), names).length) return;
     }
     // A SLASH COMMAND goes to the agent's CLI, not to its model, so it is typed
     // verbatim — no `[tmm chat …] human:` stamp, no @address, nothing the TUI
@@ -1364,7 +1378,9 @@
     setFilter(filterAgent === name ? '' : name, 'user');
   }
   /** How the filter's subject is named to the reader: 'you' for the human. */
-  const filterName = (name) => (name === HUMAN ? t('hubSearchYou') : name);
+  /** A room's names (board #21): the labels of the project that room is. */
+  const roomNames = (roomName) => agentNames(labelsBy[rows.find((r) => roomKey(r) === roomName)?.project.session ?? ''] ?? (roomName === room(selected) ? labelsBy[selected] : undefined));
+  const filterName = (name, roomName = room(selected)) => (name === HUMAN ? t('hubSearchYou') : roomNames(roomName).shown(name));
   /* The mode is shown and exited only on its card (#238), so it lasts only
      while the strip draws one: a live or a stopped identity. An agent removed
      from the room takes the filter with it; otherwise the feed stayed filtered
@@ -2051,7 +2067,7 @@
     // here: a push is by construction newer than any loaded page.
     if (m?.room) {
       const session = rows.find((r) => roomKey(r) === m.room)?.project.session ?? m.room.replace(/^proj:/u, '');
-      notifyNews([m], newsCtx(m.room, session, false), undefined, newsEffects);
+      notifyNews(byLabel([m], session), newsCtx(m.room, session, false), undefined, newsEffects);
     }
     if (m?.room) unreadSoon(m.room);
     // Everything above is the LIST's (the unread badge on the published slice,
@@ -2074,6 +2090,15 @@
     agentsRefresh = setTimeout(() => { agentsRefresh = 0; loadAgents(); }, 300);
   };
   let agentsRefresh = 0;
+  // A rename anywhere re-labels at once (board #21): the open feed, the
+  // roster and the picker read `names`, so nothing reloads.
+  const onRenamed = (r) => {
+    labelsBy = { ...labelsBy, [r.session]: patchNames(labelsBy[r.session] ?? [], r) };
+  };
+  $effect(() => {
+    addAgentRenamedListener(onRenamed);
+    return () => removeAgentRenamedListener(onRenamed);
+  });
   $effect(() => {
     addTeamMessageListener(onPush);
     return () => { removeTeamMessageListener(onPush); clearTimeout(agentsRefresh); agentsRefresh = 0; clearTimeout(unreadPushTimer); };
@@ -2146,7 +2171,7 @@
   function openCtx(at, who, items, info = null) {
     const usable = items.filter(Boolean);
     if (!usable.length) return;
-    ctxWho = who;
+    ctxWho = names.shown(who);
     ctxItems = usable;
     ctxInfo = info;
     ctxAt = at;
@@ -2269,6 +2294,7 @@
       // its Escape does (#317): one order per dismissal, one definition.
       backLayers.register('create', () => { if (!createOpen) return false; if (!createEl?.goBack()) createOpen = false; return true; }),
       backLayers.register('rename', () => { if (renaming) { renaming = false; return true; } return false; }),
+      backLayers.register('agentRename', () => { if (!agentRenaming) return false; closeAgentRename(); return true; }),
       backLayers.register('jumpFilter', () => { if (filterBefore) { restoreFilter(); return true; } return false; }),
       backLayers.register('search', () => { if (search.open) { search.close(); return true; } return false; }),
       backLayers.register('filter', () => { if (filterAgent) { setFilter('', 'user'); return true; } return false; }),
@@ -2309,10 +2335,13 @@
     const config = openAgentConfig
       ? [{ label: t('hubAgentConfig'), icon: 'gear', onselect: () => openAgentConfig(name) }]
       : [];
+    // Its label (board #21): the name people and agents read and type.
+    const rename = { label: t('hubRename'), icon: 'edit', onselect: () => openAgentRename(name) };
     if (stopped.includes(name)) {
       return [
         { label: t('hubStartAgain'), icon: 'refresh', onselect: () => startAgent(name) },
         filterItem(name),
+        rename,
         ...config,
         { label: t('hubRemove'), icon: 'trash', danger: true, onselect: () => askAction('remove', name) },
       ];
@@ -2327,6 +2356,7 @@
         : { label: t('hubTalkTo'), icon: 'chat', disabled: !targetable(name), onselect: () => setRecipient(name) },
       { label: t('hubWatch'), icon: 'terminal', onselect: () => { if (a) watchAgent(a); } },
       filterItem(name),
+      rename,
       ...config,
       // Constructive verbs lead: a running agent can be forked (#383).
       { label: t('hubFork'), icon: 'git-branch', onselect: () => forkAgent(name, session) },
@@ -2344,6 +2374,45 @@
       { label: t('hubStop'), icon: 'stop', danger: true, onselect: () => askAction('stop', name) },
       { label: t('hubRemove'), icon: 'trash', danger: true, onselect: () => askAction('remove', name) },
     ];
+  }
+
+  // ── Rename an agent (board #21) ──
+  // Only its LABEL changes (#20): its window, home and every key keep the
+  // physical name. While you type, the name rule (one @address, the parser
+  // the room reads with) and this project's other names in the server's
+  // table are said as a hint; the server decides, and its refusal is said
+  // inline. On success its answer patches the table at once.
+  let agentRenaming = $state(null); // { name, session }
+  let agentDraft = $state(''), agentRenameError = $state(''), agentRenameBusy = $state(false);
+  function openAgentRename(name) {
+    agentRenaming = { name, session: selected };
+    agentDraft = names.shown(name);
+    agentRenameError = '';
+  }
+  function closeAgentRename() { if (!agentRenameBusy) agentRenaming = null; }
+  const agentRenameHint = $derived.by(() => {
+    const draft = agentDraft.trim();
+    if (!agentRenaming || !draft) return '';
+    if (mentionTokens(`@${draft}`).join(' ') !== draft || !/^[\p{Alphabetic}\p{N}]/u.test(draft)) return t('hubRenameRule');
+    const holder = names.resolve(draft);
+    const others = [...managedNames, ...stopped];
+    if (holder !== agentRenaming.name && (holder !== draft || others.includes(draft))) return t('hubRenameTaken').replace('{name}', draft).replace('{agent}', names.shown(holder));
+    return '';
+  });
+  async function submitAgentRename(label) {
+    if (!agentRenaming || agentRenameBusy) return;
+    const { name, session } = agentRenaming;
+    agentRenameBusy = true;
+    agentRenameError = '';
+    try {
+      const r = await hubAgentRename(session, name, label);
+      onRenamed({ session, agent: r.agent ?? name, label: r.label ?? (label ?? name), aliases: r.aliases ?? [] });
+      agentRenaming = null;
+    } catch (e) {
+      agentRenameError = e?.code === -32601 ? t('hubRenameOldServer') : String(e?.message ?? e);
+    } finally {
+      agentRenameBusy = false;
+    }
   }
 
   /** A project's verbs. Open/Close mirrors the header's single button, so the two
@@ -2740,7 +2809,7 @@
             <div class="empty">{managedAgents.length ? t('hubEmpty') : t('hubEmptyNoAgents')}</div>
           {/if}
       {/snippet}
-      <Feed bind:this={feedView} {blocks} {agents} {managedNames} issueIds={roomIssueIds} {selected} {visible} {compact}
+      <Feed bind:this={feedView} {blocks} {agents} {managedNames} {names} issueIds={roomIssueIds} {selected} {visible} {compact}
         {roomReady} {justLoaded} {openedAt} {loadingOlder} {histMore} {actMore}
         stepsRows={hubPrefs.stepsRows} {stateLabel} {emptyFeed} bind:following bind:newBelow
         onseen={markSeen} onolder={loadOlder} onpath={routePathRef}
@@ -2755,7 +2824,7 @@
         }}
         registerActions={registerFeedActions} />
 
-      <Roster {selected} {compact} {managedAgents} {stopped} {stoppedTeams} {selectedRow}
+      <Roster {selected} {compact} {names} {managedAgents} {stopped} {stoppedTeams} {selectedRow}
         {recipient} filterAgent={filterAgent === HUMAN ? '' : filterAgent} {composerText} {managedNames} {busyNames} {interrupting}
         {unread} {acting} {tick} {roomReady} {justLoaded} {rosterBase}
         expanded={rosterExpanded} onexpand={toggleRoster}
@@ -2773,7 +2842,7 @@
         <div class="jump-note appear"><span>{filterNote}</span>
           <CommandButton variant="secondary" label={t('hubJumpFilterRestore')} onclick={restoreFilter} /></div>
       {/if}
-      <Composer bind:this={composer} bind:composerText {selected} {compact} {recipient}
+      <Composer bind:this={composer} bind:composerText {selected} {compact} {recipient} {names}
         {roomReady} blocked={sendBlocked}
         {agents} {pending} {attaching} {failed} {sendable} {interruptible} {replyTo}
         issues={roomIssues} onissues={(s) => loadIssues(s)}
@@ -2796,7 +2865,7 @@
          grid item the reveal pins; the Drawer inside never changes size
          while the track moves (board #174). ── -->
     <div class="track drawer-track" id={drawerId} bind:this={drawerTrackEl}>
-    <Drawer {compact} {visible} {fontSize} {selected} {projectPath} {termTarget}
+    <Drawer {compact} {visible} {fontSize} {selected} {names} {projectPath} {termTarget}
       {drawerView} {drawerFilesReq} {drawerIssueReq} {drawerBoardNew}
       {agents} {panes} {winsExpanded} {stateLabel} {detailLabel} {stateTone}
       bind:drawerFilesDir bind:drawerFilesPath onpick={pickWindow} onclose={closeDrawer}
@@ -2815,7 +2884,7 @@
        good version of it, so it was lifted out rather than copied. -->
   <ConfirmDialog open={!!pendingAct} busy={acting} compact={compact}
     error={actionError} confirmIcon={pendingAct ? ACT_COPY[pendingAct.kind].icon : 'check'}
-    title={pendingAct ? t(ACT_COPY[pendingAct.kind].title).replace('{name}', pendingAct.server ? `${pendingAct.name} · ${pendingAct.server}` : pendingAct.name).replace('{n}', String(pendingAct.names?.length ?? '')) : ''}
+    title={pendingAct ? t(ACT_COPY[pendingAct.kind].title).replace('{name}', pendingAct.server ? `${pendingAct.name} · ${pendingAct.server}` : (pendingAct.kind === 'stop' || pendingAct.kind === 'remove') ? names.shown(pendingAct.name) : pendingAct.name).replace('{n}', String(pendingAct.names?.length ?? '')) : ''}
     note={pendingAct ? t(ACT_COPY[pendingAct.kind].note) : ''}
     confirmLabel={pendingAct ? t(ACT_COPY[pendingAct.kind].go) : ''}
     onconfirm={runAction} oncancel={() => (pendingAct = null)} />
@@ -2877,6 +2946,31 @@
         <CommandButton label={t('cancel')} onclick={closePicker} />
         <CommandButton variant="primary" icon="zap" label={t('hubStartGo').replace('{n}', String(startPick.length))}
           disabled={!startPick.length} pending={starting} onclick={() => addAgents(startPick, startBrief.trim(), pickerMode, startJoin)} />
+      </div>
+    </Dialog>
+  {/if}
+
+  {#if agentRenaming}
+    <!-- Rename an agent (board #21): the shared Dialog shell, the config input
+         and the one inline error line. -->
+    <Dialog {compact} label={t('hubRenameTitle').replace('{name}', names.shown(agentRenaming.name))} busy={agentRenameBusy}
+      describedby={agentRenameError || agentRenameHint ? 'agent-rename-error' : undefined} oncancel={closeAgentRename}>
+      <h2>{t('hubRenameTitle').replace('{name}', names.shown(agentRenaming.name))}</h2>
+      <p class="dlg-note">{t('hubRenameNote').replace('{name}', agentRenaming.name)}</p>
+      <!-- svelte-ignore a11y_autofocus -->
+      <input class="config-input rename-input" autocomplete="off" autocapitalize="off" spellcheck="false" autofocus
+        aria-label={t('hubRenameLabel')} disabled={agentRenameBusy} bind:value={agentDraft}
+        oninput={() => (agentRenameError = '')}
+        onkeydown={(e) => { if (e.key === 'Enter' && !e.isComposing && !agentRenameHint && agentDraft.trim()) { e.preventDefault(); submitAgentRename(agentDraft.trim()); } }} />
+      {#if agentRenameError || agentRenameHint}<p id="agent-rename-error" class="dlg-error config-error appear" role="alert">{agentRenameError || agentRenameHint}</p>{/if}
+      <div class="dlg-actions">
+        {#if names.shown(agentRenaming.name) !== agentRenaming.name}
+          <CommandButton icon="refresh" label={t('hubRenameReset').replace('{name}', agentRenaming.name)} disabled={agentRenameBusy} onclick={() => submitAgentRename(null)} />
+        {/if}
+        <CommandButton label={t('cancel')} disabled={agentRenameBusy} onclick={closeAgentRename} />
+        <CommandButton variant="primary" icon="check" label={t('hubRenameGo')} pending={agentRenameBusy}
+          disabled={!agentDraft.trim() || !!agentRenameHint || agentDraft.trim() === names.shown(agentRenaming.name)}
+          onclick={() => submitAgentRename(agentDraft.trim())} />
       </div>
     </Dialog>
   {/if}

@@ -1,4 +1,5 @@
 <script>
+  import { NO_LABELS } from './names.ts';
   import { onDestroy, tick as settled, untrack } from 'svelte';
   import Icon from '../ui/Icon.svelte';
   import CommandButton from '../ui/CommandButton.svelte';
@@ -13,7 +14,7 @@
   let {
     selected = '', compact = false, recipient = '', composerText = $bindable(''),
     roomReady = false,
-    agents = [], interruptible = false,
+    agents = [], names = NO_LABELS, interruptible = false,
     pending = [], attaching = false, failed = false, sendable = false,
     /** Why nothing can be sent now, said where the destination is (#482: the
      * one agent the filter shows has stopped). Hub also withholds `sendable`. */
@@ -212,7 +213,7 @@
   });
   const composerLabel = $derived(blocked || (recipient === ALL_TARGET ? t('hubComposerAll')
     : targetTeam(recipient) ? t('hubComposerTeam').replace('{name}', targetTeam(recipient))
-    : recipient ? t('hubComposerDm').replace('{name}', recipient) : t('hubComposerRoom')));
+    : recipient ? t('hubComposerDm').replace('{name}', names.shown(recipient)) : t('hubComposerRoom')));
 
   // Slash completion retains its backend cache and command/argument stages.
   // Only a LIST is kept: an answer with no models (the server could not ask
@@ -228,7 +229,7 @@
   /* `@` completion rides the same palette (#242): the names delivery reaches,
      the managed agents of this room and `all`. */
   const mentionCandidates = $derived([
-    ...agents.filter((a) => a.managed).map((a) => ({ value: a.name, hint: a.agent ?? '' })),
+    ...agents.filter((a) => a.managed).map((a) => ({ value: names.shown(a.name), hint: a.agent ?? '', keys: names.others(a.name) })),
     { value: ALL_TARGET, hint: t('hubEveryone') },
   ]);
   /* `#` completion rides it too (#340): this project's board issues, which

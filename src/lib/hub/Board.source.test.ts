@@ -127,14 +127,14 @@ test('the sidebar orders by conversation, and rows are summaries (reopened #11)'
 test('notes are a timeline: author + time header, content box below (reopened #11)', () => {
   // The time became a real <button> with board #46 (the accessible action
   // trigger) but keeps its place and clothes: right of the author, one line.
-  assert.match(source, /<div class="n-head">\s*<span class="n-author">\{n\.author\}<\/span>[\s\S]*?<button class="n-at"/u,
+  assert.match(source, /<div class="n-head">\s*<span class="n-author">\{names\.shown\(n\.author\)\}<\/span>[\s\S]*?<button class="n-at"/u,
     'author left, time right, one header line');
   assert.match(source, /<div class="n-text"[\s\S]*?onclick=\{\(\) => toggleNoteActs\(i\)\}>\{withImages\(n\.body\.trim\(\)\)\.text\}<\/div>/u,
     'the content is its own box below, trimmed');
   const style = source.slice(source.indexOf('<style>'));
   assert.match(style, /\.n-at \{[^}]*margin-left: auto/u, 'the time right-aligns');
   assert.match(style, /\.n-author \{ color: var\(--accent\)/u, 'the author wears the accent ink');
-  assert.match(source, /\{t\('boardOpenedBy'\)\} <span class="m-name">\{sel\.created_by\}<\/span>/u,
+  assert.match(source, /\{t\('boardOpenedBy'\)\} <span class="m-name">\{names\.shown\(sel\.created_by\)\}<\/span>/u,
     'the opened-by name is highlighted too');
 });
 
@@ -965,7 +965,7 @@ test('a card names its assignee with its backend icon, and the working dot only 
   assert.match(source, /\{#if who\.live\}<span class="c-live live-dot" aria-hidden="true"><\/span>\{\/if\}/u, 'the status language\u2019s own live cue');
   assert.match(source, /\.c-assignee \{ color: var\(--text2\); \}/u, 'the name in --text2, not accent');
   assert.equal((source.match(/hubAgents\(/gu) ?? []).length, 1, 'no second hub_agents loop');
-  assert.equal([...source.matchAll(/agents\.map\(\(a\) => \(\{ value: a\.name, label: a\.name, icon: backendIcon\(a\.agent\) \?\? undefined \}\)\)/gu)].length, 2, 'both pickers wear the same face');
+  assert.equal([...source.matchAll(/agents\.map\(\(a\) => \(\{ value: a\.name, label: names\.shown\(a\.name\), icon: backendIcon\(a\.agent\) \?\? undefined \}\)\)/gu)].length, 2, 'both pickers wear the same face');
 });
 
 test('images: one materialized body per submit, given to the save; refused while uploading or failed (board #329)', () => {

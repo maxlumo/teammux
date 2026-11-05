@@ -2,6 +2,7 @@
 import type { HubAgent, HubActivityEvent } from '../core/ws.ts';
 import type { BackendCatalog } from '../core/agents.ts';
 import { ALL_TARGET, busyTargetsFor, targetMembers, targetTeam, teamRoot } from './hub-composer.ts';
+import { NO_LABELS, type Names } from './names.ts';
 
 /**
  * THE status colour language — one progression, read at a glance (owner,
@@ -1094,6 +1095,9 @@ export interface PaletteItem {
    * review P1-A: a grok `/model` before its models loaded read as "no next
    * level", closed its list, blocked the fetch and was sent bare). */
   opens?: true;
+  /** Other names that find this item when typed (board #21): an agent's
+   * physical name and previous labels, while `value` is its current label. */
+  keys?: string[];
 }
 export interface Palette {
   /** 'command' completes `/mo` → `/model`; 'arg' completes what follows it;
@@ -1269,7 +1273,13 @@ export function mentionPalette(text: string, candidates: readonly PaletteItem[])
   // An address is offered ONCE (board #509): two managed windows sharing a
   // name are one `@name`, and the palette is keyed by the value it inserts.
   const unique = candidates.filter((c, i) => candidates.findIndex((d) => d.value === c.value) === i);
-  const items = fuzzyPick(query, unique, (c) => c.value).map((c) => ({ value: `@${c.value}`, hint: c.hint }));
+  // Matched on the best of its names (board #21): an old name finds the
+  // agent, and what is inserted is its current label.
+  const keyOf = (c: PaletteItem) => [c.value, ...(c.keys ?? [])].reduce((best, k) => {
+    const r = fuzzyRank(query, k), b = fuzzyRank(query, best);
+    return r >= 0 && (b < 0 || r < b || (r === b && k === query)) ? k : best;
+  });
+  const items = fuzzyPick(query, unique, keyOf).map((c) => ({ value: `@${c.value}`, hint: c.hint }));
   if (!items.length) return null;
   // `more`: the accepted mention takes its separating space, like a command.
   return { stage: 'mention', items, from: (text ?? '').length - query.length - 1, more: true };
@@ -1383,15 +1393,18 @@ export type FeedLevel = 'chat' | 'status' | 'tools';
  * is read (a code sample or a link's text is not an address), and each text
  * run is read on its own, since the tag before it stood for markdown
  * punctuation the server read as a word break. */
-export function markMentions(html: string, names: readonly string[]): string {
-  const valid = (n: string) => n === 'all' || n === 'human' || names.includes(n);
+export function markMentions(html: string, names: readonly string[], labels: Names = NO_LABELS): string {
+  // Any name an agent has or had is its address (board #21): resolved to the
+  // physical name to judge it and to pick its ink, SHOWN as the current label.
+  const valid = (n: string) => n === 'all' || n === 'human' || names.includes(labels.resolve(n));
   return mapTextRuns(html, (part) => {
     if (!part.includes('@')) return part;
     let out = '', from = 0;
     for (const { at, name } of mentionSpans(part)) {
       if (!valid(name)) continue;
       const end = at + 1 + name.length;
-      out += `${part.slice(from, at)}<span class="m-to" style="--who-ink: ${agentHue(name)}">${part.slice(at, end)}</span>`;
+      const shown = labels.shown(name);
+      out += `${part.slice(from, at)}<span class="m-to" style="--who-ink: ${agentHue(labels.resolve(name))}">${shown === name ? part.slice(at, end) : `@${shown.replace(/&/gu, '&amp;').replace(/</gu, '&lt;')}`}</span>`;
       from = end;
     }
     return out + part.slice(from);
@@ -1876,8 +1889,8 @@ export function mentionSpans(body: string): { at: number; name: string }[] {
  * the agents' next `tmm log`, typed into no pane — so the feed must not hang
  * a "waiting for its turn to end" ring on it (review, 2026-09-03), and the
  * composer chip can say `+@bob` when the body reaches past the recipient. */
-export function mentionedAgents(body: string, names: readonly string[]): string[] {
-  const tokens = new Set(mentionTokens(body));
+export function mentionedAgents(body: string, names: readonly string[], labels: Names = NO_LABELS): string[] {
+  const tokens = new Set(mentionTokens(body).map((n) => labels.resolve(n)));
   if (tokens.has('all')) return [...names];
   return names.filter((n) => tokens.has(n));
 }
@@ -1889,10 +1902,10 @@ export function mentionedAgents(body: string, names: readonly string[]): string[
  * the one token `all` rather than listing the roster; otherwise the managed
  * agents the body addresses, minus the recipient, in roster order. Rendered
  * as `+@name` after the chip's name. */
-export function chipExtras(body: string, recipient: string, names: readonly string[]): string[] {
+export function chipExtras(body: string, recipient: string, names: readonly string[], labels: Names = NO_LABELS): string[] {
   if (recipient === 'all') return [];
   if (mentionTokens(body).includes('all') && names.length) return ['all'];
-  return mentionedAgents(body, names).filter((n) => n !== recipient);
+  return mentionedAgents(body, names, labels).filter((n) => n !== recipient);
 }
 
 /** A reply's quote token (board #290): the server writes it
