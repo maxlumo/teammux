@@ -17,19 +17,20 @@ test('copy and download feedback share the UI owner and never restore private to
   assert.doesNotMatch(source, /copyToast|copyTimer|downloadToast|downloadedPath|dlProgress|displayedDlProgress|copy-toast|download-toast|dl-ring|toast-fade/u);
 });
 
-test('upload feedback rides the same slot: one batch runner for both transports, honest phases, a size guard (board #214)', () => {
+test('upload feedback rides the same slot: one batch runner for both transports, bytes the server holds (board #214, #23)', () => {
   // Owner 2026-09-20: "文件上传要有个进度或者提示，让我知道传上去了没有". A success used
   // to be a silent listing refresh.
-  assert.match(source, /import \{ uploadProgress, uploadSummary, uploadSizeError \} from '\.\/file-upload\.ts'/u);
+  assert.match(source, /import \{ uploadProgress, uploadSummary \} from '\.\/file-upload\.ts'/u);
+  assert.match(source, /import \{ uploadFile, UploadCancelled, UploadFailed \} from '\.\/http-upload\.ts'/u);
   assert.match(source, /const uploadLifetime = createFeedbackLifetime\(value => \{ uploadFeedback = value; \}\);/u);
   assert.match(source, /\{#if copyFeedback \|\| stackedRows\.length \|\| downloadFeedback \|\| uploadFeedback \|\| earlierFeedback\}/u, 'the slot renders for an upload, a running download (#420) and an earlier one (#301) too');
-  assert.match(source, /<OperationFeedback value=\{uploadFeedback\}\s*ondismiss=\{uploadFeedback\?\.kind === 'error' \? uploadLifetime\.clear : undefined\} \/>/u,
-    'errors are dismissable; progress has no cancel, success expires by itself');
+  assert.match(source, /<OperationFeedback value=\{uploadFeedback\} actions=\{uploadControl && uploadFeedback \? uploadActions : undefined\}/u,
+    'Cancel while sending, Retry after a failure (#23)');
   assert.equal(source.match(/await runUploadBatch\(/gu)?.length, 2, 'picker/drop Files and native paths share ONE runner');
-  assert.doesNotMatch(source, /await fsUpload\(uploadDest\(dir, (?:file\.)?name\)/u, 'no transport uploads on its own');
-  // Uploaded = the server answered: the RPC resolves before the count.
-  assert.match(source, /await fsUpload\(dest, b64\);\s*outcome\.ok\.push\(item\.name\);/u);
-  assert.match(source, /step\.phase = 'sending';\s*show\(step\);/u, 'the send is a discrete beat, not an invented percentage');
+  // One mechanism (#23): Files uploads only through the HTTP channel.
+  assert.doesNotMatch(source, /fsUpload\b/u, 'Files no longer calls fs_upload');
+  // Uploaded = the last chunk committed: the upload resolves before the count.
+  assert.match(source, /await uploadFile\(\{[\s\S]{0,400}?\}\);\s*outcome\.ok\.push\(item\.name\);/u);
   assert.match(source, /uploadLifetime\.clear\(\); \};/u, 'a context exit stops the line, like copy/download');
 });
 
@@ -448,9 +449,9 @@ test('a bookmark opens through the path-link door, behind the unsaved-editor que
   assert.match(source, /pressed=\{isBookmarked\(currentFile\.path\)\} onclick=\{\(\) => toggleBookmark\(currentFile\.path\)\}/u, 'the preview header s star');
 });
 
-test('an upload is checked and sent to ONE destination, the one its cap is priced for (#498)', () => {
-  assert.match(source, /const dest = uploadDest\(dir, item\.name\);\s*const tooLarge = uploadSizeError\(item\.size, dest, t\('uploadTooLarge'\)\);[\s\S]{0,200}?const b64 = await item\.read\(dest, [\s\S]{0,120}?await fsUpload\(dest, b64\);/u);
-  assert.match(source, /read: async \(dest\) => \{\s*const bytes = new Uint8Array\(await tauriFs\.readFile\(filePath\)\);\s*const tooLarge = uploadSizeError\(bytes\.length, dest, t\('uploadTooLarge'\)\);/u,
-    'a native path is checked on the bytes it read, for the same destination');
-  assert.doesNotMatch(source, /UPLOAD_MAX/u);
+test('an upload goes to ONE destination and its file is never read whole (#498, #23)', () => {
+  assert.match(source, /dest: uploadDest\(dir, item\.name\), size, source: item\.source/u);
+  assert.match(source, /source: async \(start, end\) => file\.slice\(start, end\),/u, 'a picked or dropped File is sliced per chunk');
+  assert.match(source, /await handle\.seek\(start, tauriFs\.SeekMode\.Start\);/u, 'a native path is read per chunk from an open handle');
+  assert.doesNotMatch(source, /readAsDataURL|tauriFs\.readFile\(filePath\)|uploadSizeError|UPLOAD_MAX/u, 'no whole-file read, no size cap');
 });

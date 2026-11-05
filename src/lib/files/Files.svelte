@@ -24,7 +24,6 @@
   import { createPreviewRenderers, defaultWrapForMime, highlightCode, isPreviewable, mimeCategory, streamsInline } from './file-preview.ts';
   import { isAndroid, isTauri, isTauriDesktop, tauriReady } from '../core/platform.ts';
   import { invokeNative } from '../core/native.ts';
-  import { bytesToB64 } from './download.ts';
   import { saveServerFile, realmReady } from './save-file.ts';
   import { speed as bytesPerSecond, feedbackOf } from './downloads.svelte.ts';
   import { useServerScope } from '../app/server-context.ts';
@@ -55,7 +54,8 @@
   import { directoryLoadState, leaveDecision, cwdFollowStep } from './file-view-state.ts';
   import { createFileNavigation, directoryBackFloor } from './file-nav.ts';
   import { handlePathLinkClick, resolvePathRef } from '../core/path-links.ts';
-  import { uploadProgress, uploadSummary, uploadSizeError } from './file-upload.ts';
+  import { uploadProgress, uploadSummary } from './file-upload.ts';
+  import { uploadFile, UploadCancelled, UploadFailed } from './http-upload.ts';
 
   // This server's Files record — memory and download rows together — and its
   // RPCs, from the scope this subtree is bound to (board #335 ②b-2-1, ②b-3),
@@ -65,7 +65,7 @@
   const { files } = scope.state;
   const memory = files.memory;
   const store = files.downloads;
-  const { fsCwd, fsList, fsStat, fsRead, fsWrite, fsMkdir, fsDelete, fsRename, fsDownload, fsDownloadHttp, fsPreviewBase, fsUpload, getBookmarks, saveBookmarks, gitCmd, getPrefs, setPref, fsConvert } = scope.runtime.api;
+  const { fsCwd, fsList, fsStat, fsRead, fsWrite, fsMkdir, fsDelete, fsRename, fsDownload, fsDownloadHttp, fsPreviewBase, fsUploadBegin, fsUploadResume, fsUploadAbort, getBookmarks, saveBookmarks, gitCmd, getPrefs, setPref, fsConvert } = scope.runtime.api;
   const { getMachineId } = scope.runtime.connection;
   // What one download attempt needs from this server (`save-file.ts`).
   const saveDeps = { memory, store, fsDownload, fsDownloadHttp, getMachineId };
@@ -1503,80 +1503,98 @@
   const refreshAfterBatch = (dir) => { if (cwd === dir) loadDir(dir); };
 
   // ONE batch runner for both transports (board #214: "文件上传要有个进度或者提示，
-  // 让我知道传上去了没有"). Per file: refuse over the server's message cap up
-  // front, read (the only phase with real byte progress), send — ONE atomic
-  // fs_upload RPC, shown as a discrete "sending" beat — and count it uploaded
-  // only when the server has answered. A per-file try/catch: one unreadable
-  // item (a dropped DIRECTORY reads as a File whose FileReader errors) must
-  // not abandon the rest of the batch; the closing line names every file
-  // that failed. The feedback follows the existing copy/download slot and
-  // its context rule: leave the directory and the line stops updating.
+  // 让我知道传上去了没有"; board #23: over HTTP, in chunks, resumable). Per
+  // file: `uploadFile` sends it to the signed upload channel one chunk at a
+  // time — the file is never read whole — and the line shows the bytes the
+  // server holds of the total; a file counts as uploaded only when its last
+  // chunk has committed. A per-file try/catch: one unreadable item must not
+  // abandon the rest of the batch; the closing line names every file that
+  // failed with its reason and offers Retry, which RESUMES each failed file
+  // from the bytes the server kept. Cancel stops the batch and aborts the
+  // file in flight, so its part file is removed. The feedback follows the
+  // existing copy/download slot and its context rule: leave the directory
+  // and the line stops updating.
   const uploadStrings = () => ({
-    uploading: t('uploading'), uploadReading: t('uploadReading'), uploadSending: t('uploadSending'),
+    uploading: t('uploading'), uploadBytes: t('uploadBytes'),
     uploaded: t('uploaded'), uploadedMany: t('uploadedMany'), uploadFailed: t('uploadFailed'), uploadPartial: t('uploadPartial'),
   });
+  const uploadApi = { begin: fsUploadBegin, resume: fsUploadResume, abort: fsUploadAbort };
+  /** What the upload slot offers: Cancel while sending, Retry after a failure. */
+  let uploadControl = $state(null);
   async function runUploadBatch(items, dir) {
     const token = uploadLifetime.begin();
     const contextCurrent = feedbackContext();
     const current = () => uploadLifetime.current(token) && contextCurrent();
     const s = uploadStrings();
     const outcome = { ok: [], failed: [] };
+    const retry = [];
     const total = items.length;
-    items.forEach((item, i) => {
-      item.step = { name: item.name, index: i + 1, total, phase: 'reading', loaded: 0, size: item.size };
-    });
-    const show = (step) => { if (current()) uploadLifetime.update(token, uploadProgress(step, dir, s)); };
-    for (const item of items) {
-      const step = item.step;
+    const ctl = new AbortController();
+    uploadControl = { cancel: () => ctl.abort() };
+    let cancelled = false;
+    for (const [i, item] of items.entries()) {
+      if (ctl.signal.aborted) { cancelled = true; break; }
+      const step = { name: item.name, index: i + 1, total, sent: 0, size: item.size };
+      const show = () => { if (current()) uploadLifetime.update(token, uploadProgress(step, dir, s, formatSize)); };
       try {
-        // ONE destination for the check and the send (#498): the cap is the
-        // message limit less this path's own JSON.
-        const dest = uploadDest(dir, item.name);
-        const tooLarge = uploadSizeError(item.size, dest, t('uploadTooLarge'));
-        if (tooLarge) throw new Error(`${item.name}: ${tooLarge}`);
-        show(step);
-        const b64 = await item.read(dest, (loaded) => { step.loaded = loaded; show(step); });
-        step.phase = 'sending';
-        show(step);
-        await fsUpload(dest, b64);
+        const size = item.size ?? await item.measure();
+        step.size = size;
+        show();
+        await uploadFile({
+          dest: uploadDest(dir, item.name), size, source: item.source, api: uploadApi, signal: ctl.signal,
+          resumeId: item.resumeId,
+          onProgress: (sent) => { step.sent = sent; show(); },
+        });
         outcome.ok.push(item.name);
       } catch (e) {
+        if (e instanceof UploadCancelled) { cancelled = true; break; }
         outcome.failed.push({ name: item.name, error: e.message });
-        error = e.message;
+        retry.push({ ...item, resumeId: e instanceof UploadFailed && e.id ? e.id : undefined });
+        error = `${item.name}: ${e.message}`;
       }
     }
-    if (current()) uploadLifetime.update(token, uploadSummary(outcome, dir, s));
+    if (uploadLifetime.current(token)) uploadControl = null;
+    if (cancelled) { if (current()) uploadLifetime.clear(); }
+    else if (current()) {
+      uploadLifetime.update(token, uploadSummary(outcome, dir, s));
+      if (retry.length) uploadControl = { retry: () => runUploadBatch(retry, dir) };
+    }
     refreshAfterBatch(dir);
   }
 
-  // Browser File objects (the picker's input, a drop's DataTransfer).
+  // Browser File objects (the picker's input, a drop's DataTransfer; the
+  // Android app's WebView chooser gives these too). A chunk is a Blob slice:
+  // the browser reads it from disk when the PUT sends it.
   async function uploadBlobFiles(files) {
     const dir = cwd; // the batch's target, fixed at the gesture
     await runUploadBatch(files.map((file) => ({
       name: file.name, size: file.size,
-      read: (_dest, onProgress) => new Promise((resolve, reject) => {
-        const reader = new FileReader();
-        reader.onprogress = (e) => { if (e.lengthComputable) onProgress(e.loaded); };
-        reader.onload = () => resolve(String(reader.result).split(',')[1]);
-        reader.onerror = () => reject(new Error(`cannot read: ${file.name}`));
-        reader.readAsDataURL(file);
-      }),
+      source: async (start, end) => file.slice(start, end),
     })), dir);
   }
 
-  // Tauri filesystem paths (the native picker, the webview's drag-drop event).
-  // The plugin reads whole files, so the size is learned with the bytes and
-  // the cap is checked when they are in hand.
+  // Tauri filesystem paths (the desktop picker, the webview's drag-drop
+  // event). The size comes from a stat and each chunk from a positioned read
+  // of an open handle, so a large file is never held whole.
   async function uploadTauriPaths(paths) {
     const dir = cwd; // the batch's target, fixed at the gesture
     await tauriPlugins;
     await runUploadBatch(paths.map((filePath) => ({
-      name: String(filePath).split('/').pop().split('\\').pop(), size: 0,
-      read: async (dest) => {
-        const bytes = new Uint8Array(await tauriFs.readFile(filePath));
-        const tooLarge = uploadSizeError(bytes.length, dest, t('uploadTooLarge'));
-        if (tooLarge) throw new Error(tooLarge);
-        return bytesToB64(bytes);
+      name: String(filePath).split('/').pop().split('\\').pop(), size: undefined,
+      measure: async () => (await tauriFs.stat(filePath)).size,
+      source: async (start, end) => {
+        const handle = await tauriFs.open(filePath, { read: true });
+        try {
+          await handle.seek(start, tauriFs.SeekMode.Start);
+          const buf = new Uint8Array(end - start);
+          let at = 0;
+          while (at < buf.length) {
+            const n = await handle.read(buf.subarray(at));
+            if (!n) throw new Error(`cannot read: ${filePath}`);
+            at += n;
+          }
+          return buf;
+        } finally { await handle.close(); }
       },
     })), dir);
   }
@@ -2216,8 +2234,15 @@
           ? () => dismissDownload(operation) : undefined} />
       <OperationFeedback value={earlierFeedback}
         ondismiss={earlierFeedback?.kind === 'error' ? earlierLifetime.clear : undefined} />
-      <OperationFeedback value={uploadFeedback}
-        ondismiss={uploadFeedback?.kind === 'error' ? uploadLifetime.clear : undefined} />
+      {#snippet uploadActions()}
+        {#if uploadControl?.cancel}
+          <CommandButton variant="icon" icon="x" label={`${t('cancel')}: ${uploadFeedback?.message ?? ''}`} onclick={uploadControl.cancel} />
+        {:else if uploadControl?.retry}
+          <CommandButton icon="refresh" label={t('uploadRetry')} onclick={uploadControl.retry} />
+        {/if}
+      {/snippet}
+      <OperationFeedback value={uploadFeedback} actions={uploadControl && uploadFeedback ? uploadActions : undefined}
+        ondismiss={uploadFeedback?.kind === 'error' ? () => { uploadControl = null; uploadLifetime.clear(); } : undefined} />
     </div>
   {/if}
   <input type="file" multiple hidden bind:this={uploadInput} onchange={onUploadPicked} />

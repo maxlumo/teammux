@@ -3,6 +3,7 @@
 //! line, 5 s), and classified from the parsed request line and headers:
 //!
 //! - a `…/dl?` request PATH (GET or OPTIONS) → the signed download handler;
+//! - a `…/up/` request PATH (PUT or OPTIONS) → the signed upload handler (#23);
 //! - an `Upgrade: websocket` request → the WebSocket handshake;
 //! - any other GET or HEAD → the static web UI (`server::ui`);
 //! - anything else → 400.
@@ -68,6 +69,7 @@ impl<S: AsyncWrite + Unpin> AsyncWrite for Prefixed<S> {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Route {
     Download,
+    Upload,
     WebSocket,
     /// GET/HEAD for the web UI: method and the raw request target.
     Static { head: bool, target: String, accept: String },
@@ -101,8 +103,11 @@ pub fn classify(head: &[u8]) -> Route {
     // `…/dl/s/{exp}/…`, a reverse-proxy prefix allowed the same way.
     let is_dl = (target.contains('?') && (path == "/dl" || path.ends_with("/dl")))
         || path.starts_with("/dl/s/") || path.contains("/dl/s/");
+    // The upload door (board #23): `…/up/{id}?…`, a proxy prefix allowed.
+    let is_up = path.starts_with("/up/") || path.contains("/up/");
     match method {
         "GET" | "OPTIONS" if is_dl => Route::Download,
+        "PUT" | "OPTIONS" if is_up => Route::Upload,
         "GET" if upgrade_ws => Route::WebSocket,
         "GET" | "HEAD" => Route::Static { head: method == "HEAD", target: target.to_string(), accept },
         _ => Route::Bad,
@@ -168,6 +173,17 @@ mod tests {
         assert_eq!(route("POST / HTTP/1.1\r\n\r\n"), Route::Bad);
         assert_eq!(route("GET / HTTP/2\r\n\r\n"), Route::Bad);
         assert_eq!(route("garbage\r\n\r\n"), Route::Bad);
+    }
+
+    #[test]
+    fn an_upload_is_a_put_or_its_preflight_on_the_up_door() {
+        let id = "0123456789abcdef0123456789abcdef";
+        assert_eq!(route(&format!("PUT /up/{id}?exp=1&sig=x HTTP/1.1\r\nContent-Length: 1\r\n\r\n")), Route::Upload);
+        assert_eq!(route(&format!("OPTIONS /up/{id}?exp=1&sig=x HTTP/1.1\r\n\r\n")), Route::Upload);
+        assert_eq!(route(&format!("PUT /tmux/up/{id}?exp=1 HTTP/1.1\r\n\r\n")), Route::Upload, "a proxy prefix");
+        assert!(matches!(route(&format!("GET /up/{id}?exp=1 HTTP/1.1\r\n\r\n")), Route::Static { .. }), "a GET is the web UI's");
+        assert_eq!(route("PUT /dl?path=x HTTP/1.1\r\n\r\n"), Route::Bad, "no other door takes a PUT");
+        assert_eq!(route("PUT /?x=/up/y HTTP/1.1\r\n\r\n"), Route::Bad, "/up/ in the QUERY is not an upload");
     }
 
     #[tokio::test]

@@ -438,8 +438,34 @@ pub fn download_file(path: &str) -> Result<(String, String), String> {
     Ok((name, b64))
 }
 
+/// Where an upload to `path` lands: THE one validator for every upload door
+/// (`fs_upload` and the HTTP channel's `fs_upload_begin`, board #23). It is
+/// `resolve_path`'s rule (`~` expanded, canonical) applied to the PARENT, so
+/// `..` resolves for a file that does not exist yet, and it refuses up front
+/// what a write would only fail on later: an empty, relative or NUL-carrying
+/// path, a name that is `.`/`..`/absent, a missing parent, a directory.
+pub(crate) fn upload_target(path: &str) -> Result<PathBuf, String> {
+    if path.is_empty() { return Err("upload path is empty".into()); }
+    if path.contains('\0') { return Err("upload path contains NUL".into()); }
+    let expanded = expand_path(path);
+    if !expanded.is_absolute() { return Err(format!("upload path must be absolute: {path}")); }
+    let name = match expanded.file_name() {
+        Some(n) if !path.ends_with("/..") && !path.ends_with("/.") => n.to_os_string(),
+        _ => return Err(format!("upload path has no file name: {path}")),
+    };
+    let parent = expanded.parent().ok_or_else(|| format!("upload path has no file name: {path}"))?;
+    let dir = parent.canonicalize().map_err(|_| format!("no such directory: {}", parent.display()))?;
+    if !dir.is_dir() { return Err(format!("not a directory: {}", dir.display())); }
+    // An existing target resolves whole, as `resolve_path` always did: an
+    // upload onto a symlink replaces the file it points to, not the link.
+    let target = dir.join(name);
+    let target = target.canonicalize().unwrap_or(target);
+    if target.is_dir() { return Err(format!("a directory is in the way: {}", target.display())); }
+    Ok(target)
+}
+
 pub fn upload_file(path: &str, data_b64: &str) -> Result<(), String> {
-    let p = resolve_path(path);
+    let p = upload_target(path)?;
     use base64::Engine;
     let bytes = base64::engine::general_purpose::STANDARD
         .decode(data_b64)
@@ -469,5 +495,55 @@ mod tests {
         }
         assert_eq!(mime_hint("notes.md"), "text/markdown");
         assert_eq!(mime_hint("blob.bin"), "application/octet-stream");
+    }
+}
+
+#[cfg(test)]
+mod upload_target_tests {
+    use super::upload_target;
+
+    fn scratch(tag: &str) -> std::path::PathBuf {
+        let d = crate::config::test_scratch(&format!("ut-{tag}"));
+        std::fs::create_dir_all(d.join("sub")).unwrap();
+        d.canonicalize().unwrap()
+    }
+
+    #[test]
+    fn a_new_file_in_an_existing_directory_is_its_canonical_path() {
+        let d = scratch("new");
+        let got = upload_target(&format!("{}/sub/../a.bin", d.display())).unwrap();
+        assert_eq!(got, d.join("a.bin"), "`..` is resolved through the parent, the file need not exist");
+    }
+
+    #[test]
+    fn an_existing_file_is_its_own_target() {
+        let d = scratch("old");
+        std::fs::write(d.join("x"), b"1").unwrap();
+        assert_eq!(upload_target(&format!("{}/x", d.display())).unwrap(), d.join("x"));
+    }
+
+    #[test]
+    fn an_existing_symlink_resolves_to_the_file_it_points_to() {
+        let d = scratch("link");
+        std::fs::write(d.join("real"), b"1").unwrap();
+        std::os::unix::fs::symlink(d.join("real"), d.join("sub/link")).unwrap();
+        assert_eq!(upload_target(&format!("{}/sub/link", d.display())).unwrap(), d.join("real"));
+    }
+
+    #[test]
+    fn what_cannot_be_written_as_a_file_is_refused_by_name() {
+        let d = scratch("bad");
+        for (path, why) in [
+            (String::new(), "empty"),
+            ("relative/a".to_string(), "absolute"),
+            (format!("{}/sub/a\0b", d.display()), "NUL"),
+            (format!("{}/missing/a", d.display()), "directory"),
+            (format!("{}/sub", d.display()), "directory"),
+            (format!("{}/sub/..", d.display()), "name"),
+            ("/".to_string(), "name"),
+        ] {
+            let e = upload_target(&path).expect_err(&path);
+            assert!(e.contains(why), "{path:?}: {e}");
+        }
     }
 }

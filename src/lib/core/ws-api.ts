@@ -633,6 +633,23 @@ export function createWsApi(connection: Connection) {
     });
   }
 
+  /** The HTTP upload channel (board #23): begin fixes the destination and
+   * size on the server and answers an id and a signed `/up/…` URL; resume
+   * re-signs it and says how many bytes the server holds; abort removes the
+   * part file. Each URL is made absolute against THIS connection's origin,
+   * read before the round trip, as `fsDownloadHttp` does. */
+  function fsUploadBegin(path: string, size: number) {
+    const origin = connection.url();
+    return call<{ id: string; url: string; chunk: number; received: number; done?: boolean }>('fs_upload_begin', { path, size })
+      .then((r) => ({ ...r, url: r.url ? httpOriginForWs(origin!) + r.url : '' }));
+  }
+  function fsUploadResume(id: string) {
+    const origin = connection.url();
+    return call<{ url: string; received: number; chunk: number }>('fs_upload_resume', { id })
+      .then((r) => ({ ...r, url: httpOriginForWs(origin!) + r.url }));
+  }
+  const fsUploadAbort = (id: string) => call<{ ok: boolean }>('fs_upload_abort', { id });
+
   /** Review annotations on a project's file (board #434). The server alone
    * resolves the project (by its stable `project_id`, or a `session`), the
    * verified root and the canonical relpath; `path` is absolute. */
@@ -666,7 +683,7 @@ export function createWsApi(connection: Connection) {
     scratchSession, scratchKill, scratchRelease, newSession, killSession, newWindow, killWindow, paneCommand,
     resizePane, setSocket, getBookmarks, saveBookmarks, getPrefs, setPref, fsCwd, fsList,
     fsStat, fsRead, fsWrite, fsMkdir, fsDelete, fsRename, fsDownload, fsDownloadUrl,
-    fsUpload, fsConvert, gitCmd, projectList, projectCreate, projectAdopt, projectUp,
+    fsUpload, fsUploadBegin, fsUploadResume, fsUploadAbort, fsConvert, gitCmd, projectList, projectCreate, projectAdopt, projectUp,
     projectDown, projectRename, projectArchive, projectDelete, projectAutostart, hubPost,
     hubCommand, hubLog, hubLogAround, hubSearch, hubFiles, hubMsgArchive, hubMsgRestore, hubMsgPurge, hubRooms,
     hubUnread, hubRead, systemStatus, hubArchive, hubAgents, boardList, boardCounts,
@@ -717,7 +734,7 @@ export const RPC_KIND = {
   fsCwd: 'read', fsList: 'read', fsStat: 'read', fsRead: 'read',
   fsWrite: 'write', fsMkdir: 'write', fsDelete: 'write', fsRename: 'write',
   fsDownload: 'read', fsDownloadUrl: 'read', fsDownloadHttp: 'read', fsPreviewBase: 'read',
-  fsUpload: 'write', fsConvert: 'read', gitCmd: 'write',
+  fsUpload: 'write', fsUploadBegin: 'write', fsUploadResume: 'write', fsUploadAbort: 'write', fsConvert: 'read', gitCmd: 'write',
   projectList: 'read', projectCreate: 'write', projectAdopt: 'write', projectUp: 'write',
   projectDown: 'write', projectRename: 'write', projectArchive: 'write', projectDelete: 'write',
   projectAutostart: 'write',

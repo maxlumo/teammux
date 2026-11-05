@@ -9,6 +9,7 @@ mod wire;
 pub use wire::{encode_wire_payload, decode_wire_payload, derive_session_keys, SessionKeys, E2E_VERSION, WIRE_PLAIN_JSON, WIRE_DEFLATE_JSON, COMPRESS_MIN_BYTES};
 use wire::HalfCipher;
 mod download;
+mod upload;
 mod hub_rpc;
 mod rpc;
 mod connection;

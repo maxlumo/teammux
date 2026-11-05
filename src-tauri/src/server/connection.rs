@@ -306,6 +306,7 @@ where
         (Peer::Local, _) => return super::ui::bad_request(stream).await,
         // Only a WebSocket head is keyed as Forwarded; the arms say both.
         (Peer::Tcp(addr) | Peer::Forwarded { via: addr, .. }, Route::Download) => return handle_http_download(stream, addr, ctx.token).await,
+        (Peer::Tcp(_) | Peer::Forwarded { .. }, Route::Upload) => return super::upload::handle_http_upload(stream, ctx.token).await,
         (Peer::Tcp(_) | Peer::Forwarded { .. }, Route::Static { head, target, accept }) => return super::ui::serve(stream, head, &target, &accept).await,
         (Peer::Tcp(_) | Peer::Forwarded { .. }, Route::Bad) => return super::ui::bad_request(stream).await,
     }
@@ -1271,5 +1272,16 @@ mod local_peer_tests {
         let mut out = String::new();
         let _ = client.read_to_string(&mut out).await;
         assert!(out.starts_with("HTTP/1.1 400"), "no download over the local socket: {out}");
+    }
+
+    #[tokio::test]
+    async fn the_local_socket_takes_no_upload() {
+        let (mut client, server) = tokio::net::UnixStream::pair().unwrap();
+        tokio::spawn(dispatch(server, Peer::Local, ctx(Arc::new(Mutex::new(HashMap::new()))), false));
+        use tokio::io::{AsyncReadExt, AsyncWriteExt};
+        client.write_all(b"PUT /up/0123456789abcdef0123456789abcdef?exp=1&sig=x HTTP/1.1\r\nContent-Length: 0\r\n\r\n").await.unwrap();
+        let mut out = String::new();
+        let _ = client.read_to_string(&mut out).await;
+        assert!(out.starts_with("HTTP/1.1 400"), "no upload over the local socket: {out}");
     }
 }

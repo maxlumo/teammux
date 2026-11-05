@@ -515,6 +515,18 @@ fn dispatch(req: &Request, token: &str) -> Result<serde_json::Value, RpcError> {
             Ok(serde_json::json!({ "base": base }))
         }
 
+"fs_upload_begin" => {
+            // The HTTP upload channel (board #23): the destination and the
+            // size are fixed HERE, through the one upload validator.
+            let path = param(p, "path")?;
+            let size = p.get("size").and_then(|v| v.as_u64()).ok_or_else(|| RpcError::InvalidParams("size: a byte count".into()))?;
+            super::upload::begin(token, path, size).map_err(RpcError::InvalidParams)
+        }
+
+        "fs_upload_resume" => super::upload::resume(token, param(p, "id")?).map_err(RpcError::InvalidParams),
+
+        "fs_upload_abort" => super::upload::abort(param(p, "id")?).map_err(RpcError::InvalidParams),
+
         "fs_upload" => {
             let path = param(p, "path")?;
             let data = param(p, "data")?;

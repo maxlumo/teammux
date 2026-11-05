@@ -404,6 +404,24 @@ Frontend `fsDownloadHttp` always uses the streaming HTTP path now (both `ws://` 
 
 `fs_download` stays — it's still the right choice for inline preview (the browser wants the bytes as `data:` URL anyway, so the base64 it gets from the server is already the final shape).
 
+### Uploads go over the signed HTTP door, in resumable chunks (board #23, 2026-11-05)
+
+Owner (2026-11-05): an upload over 59 MB failed on the phone with "too large"; "走 HTTP 的通道上传吧 这个更科学一点…并且也可以分块有进度". Before, one `fs_upload` carried the whole file, base64, in ONE WebSocket message, so the server's 80 MiB message limit capped a file at 59.99 MiB, and the only progress was the local read.
+
+**The channel** is `/dl`'s twin on the same port (`server/upload.rs`, routed by `dispatch::classify` for `PUT`/`OPTIONS` on `…/up/`):
+
+1. **Begin over the session.** `fs_upload_begin {path, size}` resolves the destination through `fs::upload_target`, the ONE upload validator (`fs_upload` uses the same function). It refuses a destination with a live upload and a size the filesystem cannot hold (`statvfs` free bytes), then creates the part file `.<name>.<id>.tmm-part` (0600, `create_new`) BESIDE the destination, so the commit is a same-filesystem `rename(2)`. It answers an id and a URL signed for 15 minutes.
+2. **Chunks.** The client sends 4 MiB `PUT`s with `Upload-Offset`. The server accepts only the next expected offset; a repeat, an overlap or a gap gets `409` naming the offset it holds. A body may not pass the declared size (`413`). Bytes count as received only once written, so a body cut short keeps what arrived. A body read that waits 30 s for a byte ends the PUT as a drop: a phone that loses its network sends no FIN, and without the limit the PUT would hold the upload's lock for ever (found by the cut-body test).
+3. **Commit.** On the last byte the part file is fsynced, its length checked against the declared size, and renamed onto the destination: `201`. Nothing is ever written at the destination before that rename. An existing file is replaced, and an existing symlink resolves to its target first, as `fs_upload` always did. The file gets the mode `fs_upload`'s `fs::write` gave it: an existing file keeps its own, a new one is 0666 under the umask (the part file is held at 0600 until then).
+4. **Resume.** `fs_upload_resume {id}` re-signs the URL and says how many bytes the server holds. This one call serves a dropped connection, an expired URL (`403`) and the Retry button. No unauthenticated HTTP door reports status.
+5. **Clean-up.** `fs_upload_abort` removes the part file. An upload with no PUT and no resume for 10 minutes is expired, part file and all, lazily on every begin and resume. The registry is in memory (disposable, tenet 7). After a gateway restart, the next begin in a directory removes that directory's part files older than 10 minutes, and ONLY files with the exact name shape `.<name>.<32 hex>.tmm-part` (orchestrator, #23 design note b). A test pins that other files, look-alikes included, stay.
+
+**Security model.** Like `/dl`, the upload door is protected by TLS (on a `wss://` gateway) and by the signed URL, NOT by the WebSocket's optional E2E layer: the chunk bytes are plain HTTP bodies. The signature is HMAC-SHA256 under `HMAC(token, "tmm-upload-v1")`, the domain separation the #433 scope uses, so an upload tag never verifies as a `/dl` or scope tag and the reverse. It covers `v1\0id\0exp\0size\0destination`, verified in constant time (`verify_slice`). The request carries no path and no size: both come from the server's entry, so one URL can write exactly one destination, at most its declared size, and only at the next offset. A leaked URL is good for at most 15 minutes and only for the rest of that one file. The door is refused on the local socket.
+
+**The client** is `files/http-upload.ts` (`uploadFile`), ONE core for every Files entry point. `source(start, end)` hands over one chunk: `File.slice` for a picked or dropped File (the Android app's WebView chooser gives Files too), and a positioned read of a `plugin-fs` handle for a desktop path, so a file is never read whole. After each chunk the line shows `Uploading name (i/n)` with `sent of total · dir` and the one percentage OperationFeedback draws from `progress`, from the `Upload-Offset` the server answered. On a network error, a `403` or any other failure it waits 1.5 s, calls resume and continues from the server's count. After 4 failures in a row with no byte gained it stops with `UploadFailed`, which carries the id. The closing line names each failed file and its reason and offers Retry, which resumes each failed file from the bytes the server kept (the server keeps them for 10 minutes). Cancel aborts the file in flight (the server removes its part) and stops the batch. Pinned by `http-upload.test.ts` (bytes, drop and resume, 409, give up and retry, cancel, empty), the four `#23` transitions in `Files.mount.test.ts`, `Files.source.test.ts` (one runner, no `fsUpload`, no whole-file read), and `server/upload.rs` tests (every refusal above, commit, sweep, free space, preflight).
+
+**Still on `fs_upload`.** Hub attachments (`hub/attachments.svelte.ts`) still use `fs_upload`; board #25 moves them to this channel and removes `fs_upload` whole.
+
 ### One download core, resumable across sessions (board #305, 2026-10-04)
 
 Owner, 2026-10-04: an 89 MB mp4 failed on the phone with "invalid array length"; then: "应该所有的下载都走一样的逻辑，并且支持下载断点续传之类的，如果服务端的文件没有更新，可以续传，如果更新了就重新下载".
@@ -814,60 +832,32 @@ The zero-request claim for the no-resource state and the loads under the
 scope are measured in a real browser against a real gateway (board #433
 notes), since jsdom enforces no CSP.
 
-### Upload feedback is the third slot of the same stack, and it never invents a percentage (board #214, 2026-09-20)
+### Upload feedback is the third slot of the same stack (board #214, 2026-09-20; #23)
 
 Owner: "文件上传要有个进度或者提示，让我知道传上去了没有". A successful upload was a
 silent listing refresh; only a failure spoke, through the page's error bar.
 Now `uploadLifetime` is a third `createFeedbackLifetime` slot in the same
 `.files-feedback` stack (`{#if copyFeedback || downloadFeedback ||
 uploadFeedback}` — the guard was the bug the mount test caught first), with
-the same rules: errors offer Close, progress has no cancel, success expires
-by itself, and a context exit (directory, session, view) stops the line.
+the same rules: errors offer Close, success expires by itself, and a context
+exit (directory, session, view) stops the line. Since #23 a sending upload
+offers Cancel and a failed batch offers Retry (`uploadControl`).
 
-What can honestly be shown. One file is ONE atomic `fs_upload` RPC — the
-whole base64 body in a single WebSocket message — and nothing observes the
-send, so a moving byte bar there would be fiction (`WebSocket.bufferedAmount`
-polling was considered and rejected: it bypasses ws.ts and, once the
-payload is E2E-encrypted, no longer maps to file bytes). The line therefore
-reads `Uploading name (i/n)` with two phases: **Reading** carries the real
-FileReader percentage (a native-path read is whole, so it shows none);
-**Sending** is a discrete beat with the indeterminate spinner. A file is
-counted *uploaded* only when the RPC resolves — the server has written it —
-never when the send returns. The closing line counts a clean batch
-(`Uploaded name` / `Uploaded n files`) and NAMES every file that failed
-(`k uploaded, m failed: a, b`, detail = the first error); the page's error
-bar keeps its per-file message as before.
+What is shown is what the server holds: the bytes of the current file its
+last answer named, of the total, with the percentage the shared atom draws once from
+`progress` (a second one in the text disagreed with it by rounding in the
+#23 live run). A file is counted *uploaded* only when its last chunk has
+committed. The closing line counts a clean batch (`Uploaded name` /
+`Uploaded n files`) and NAMES every file that failed (`k uploaded, m failed:
+a, b`, detail = the first failure as `name: reason`). Both transports hand
+their batch to ONE `runUploadBatch(items, dir)`; the `dir` stays the
+gesture-time snapshot (#22) and the runner never reads `cwd`. The pure
+pieces, `uploadProgress` and `uploadSummary`, live in `file-upload.ts` and are
+unit-tested.
 
-Both transports (browser Files from the picker or a drop; native paths from
-the Tauri picker or webview drag-drop) hand their batch to ONE
-`runUploadBatch(items, dir)`; the `dir` stays the gesture-time snapshot
-(#22) and the runner never reads `cwd`. The pure pieces — `uploadProgress`,
-`uploadSummary`, `uploadSizeError` — live in `file-upload.ts` and are
-unit-tested; the Files mount tests drive the picker with a deferred
-`fsUpload` and check the phase text, the "counted only after the answer"
-order, and the named failure.
-
-Size guard: the server refuses a WebSocket message over 80 MiB
-(`WS_MAX_MESSAGE_BYTES`, connection.rs; `file-upload.ts` holds the same
-number and a test reads the Rust file to keep them equal), and one
-`fs_upload` carries its whole file, base64, in one message. The cap is
-`maxUploadBytes(path)`: that limit less the message's JSON at the largest
-request id, serialized and priced in UTF-8 bytes for the actual destination
-path, less the 17 bytes the encrypted wire adds when it does not compress (a
-framing byte and the AES-GCM tag), then the base64 that still fits, ×3/4.
-Compression is used only when smaller, so this is the worst case for the
-plain text frame and both encrypted forms. A larger file is refused up front
-with "a single file can be at most 59.99 MiB" (MiB floored to two decimals,
-never rounded up; a path whose request alone is over the limit refuses
-every file, an empty one included); the check and the send use one captured destination, and
-a native path is checked again on the bytes it read. It was a fixed
-`UPLOAD_MAX_BYTES` = 60 MB until board #498: 60 MiB of base64 is exactly 80
-MiB before the JSON around it, so a file at the cap reached the server as
-"Message too long: 83886203 > 83886080" and the person saw "connection lost"
-(measured on #497's rig, plain and uncompressed-E2E). The cap is a property of
-this message format and this server's limit, not a promise about a proxy or
-a phone's memory. Byte-level progress and larger files need a chunked or HTTP
-upload path (#497).
+The 59.99 MiB size guard (#498, `maxUploadBytes`/`uploadSizeError`) is gone
+with the single-message transport it priced. A file is now limited by the
+destination's free space, which begin checks.
 
 ### Base64 Chunking
 `btoa(String.fromCharCode(...spread))` crashes on files >100KB (JS argument limit). Use 8192-byte chunks.

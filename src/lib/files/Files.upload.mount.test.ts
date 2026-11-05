@@ -15,7 +15,35 @@ const compiled = compileMount(new URL('./Files.test.svelte', import.meta.url), [
     .map((s) => [s, standIn])),
 });
 const entries = [{ name: 'AGENTS.md', path: '/fixture/AGENTS.md', type: 'file', size: 1200 }];
-const rpc = (uploads: { path: string; data: string }[]) => ({
+// The HTTP upload channel (board #23), recorded: begin names the destination,
+// each PUT appends at its offset, the last byte commits `{path, data}`.
+type Uploads = { path: string; data: string }[];
+function channel(uploads: Uploads) {
+  const live = new Map<string, { path: string; size: number; bytes: number[] }>();
+  let n = 0;
+  return {
+    rpc: {
+      fsUploadBegin: async (path: string, size: number) => {
+        const id = `u${++n}`;
+        live.set(id, { path, size, bytes: [] });
+        return { id, url: `http://gw/up/${id}`, chunk: 4 * 1024 * 1024, received: 0 };
+      },
+      fsUploadResume: async () => { throw new Error('no resume expected'); },
+      fsUploadAbort: async () => ({ ok: true }),
+    },
+    fetch: async (url: string, init: RequestInit) => {
+      const id = url.split('/').pop()!;
+      const u = live.get(id)!;
+      // A File's slice is the realm's Blob; a native read is a Uint8Array.
+      const raw = init.body as Blob | Uint8Array;
+      const body = typeof (raw as Blob).arrayBuffer === "function" ? new Uint8Array(await (raw as Blob).arrayBuffer()) : Uint8Array.from(raw as Uint8Array);
+      u.bytes.push(...body);
+      if (u.bytes.length === u.size) uploads.push({ path: u.path, data: Buffer.from(u.bytes).toString('base64') });
+      return new Response(null, { status: u.bytes.length === u.size ? 201 : 204, headers: { 'Upload-Offset': String(u.bytes.length) } });
+    },
+  };
+}
+const rpc = (uploads: Uploads, extra: Record<string, unknown>) => ({
   fsCwd: async () => ({ path: '/fixture' }),
   fsList: async () => ({ path: '/fixture', entries }),
   fsStat: async (path: string) => ({ path, is_text: true, writable: true, readable: true, size: 100, mime_hint: 'text/markdown' }),
@@ -24,7 +52,7 @@ const rpc = (uploads: { path: string; data: string }[]) => ({
   getBookmarks: async () => ({ bookmarks: [] }), getPrefs: async () => ({}),
   saveBookmarks: async () => ({}), setPref: async () => ({}),
   gitCmd: async () => ({ code: 0, stdout: '.git' }),
-  fsUpload: async (path: string, data: string) => { uploads.push({ path, data }); return { ok: true }; },
+  ...extra,
 });
 type Realm = { calls: { fn: string; args: unknown[] }[]; pick: unknown; files: Record<string, Uint8Array> };
 const b64 = (text: string) => Buffer.from(text, 'utf8').toString('base64');
@@ -43,12 +71,14 @@ function picker(window: any, picks: () => File[] | null) {
 }
 
 async function mount(context: any, host: 'android' | 'desktop', picks: (w: any) => File[] | null, uploads: { path: string; data: string }[]) {
+  const ch = channel(uploads);
   return (await compiled).mount(context, {
     props: { visible: true, session: 'fixture' },
     // The native bridge (downloads, the file opener) is not this test's: it stays pending.
     pendingImports: ['@tauri-apps/api/core'],
-    modules: [rpc(uploads)],
+    modules: [rpc(uploads, ch.rpc)],
     setup(window: any) {
+      window.fetch = ch.fetch;
       Object.assign(window, { __TAURI_INTERNALS__: {} });
       if (host === 'android') Object.defineProperty(window.navigator, 'userAgent', { value: 'Mozilla/5.0 (Linux; Android 15) fixture' });
       window.localStorage.setItem('tmux_layout_mode', 'desktop');
@@ -77,7 +107,7 @@ test('the Android app (isAndroid and isTauri both true) uploads through the WebV
       'each upload is named by the picked File.name, extension included');
     assert.deepEqual(uploads.map((u) => u.data), [b64('abc'), b64('defg'), b64('h')], 'the content is the file\u2019s, unchanged');
     assert.match(feedback(app), /Uploaded 3 files/, 'the batch\u2019s own success line');
-    assert.deepEqual([...realm.calls.filter((c) => /^(dialog|fs)\./u.test(c.fn))], [], 'no native dialog, no native readFile on Android');
+    assert.deepEqual([...realm.calls.filter((c) => /^(dialog|fs)\./u.test(c.fn))], [], 'no native dialog, no native file read on Android');
     assert.equal(realm.calls.some((c) => c.fn === 'webview.onDragDropEvent'), false, 'no native drop listener on Android');
   } finally { await app.close(); }
 });
@@ -105,7 +135,7 @@ test('the Android app: cancelled choosers upload nothing and leave nothing behin
   } finally { await app.close(); }
 });
 
-test('the desktop app keeps the dialog plugin: a picked PATH uploads under its own file name, read through the fs plugin (#474)', async (context) => {
+test('the desktop app keeps the dialog plugin: a picked PATH uploads under its own file name, read through the fs plugin in chunks (#474, #23)', async (context) => {
   const uploads: { path: string; data: string }[] = [];
   const app = await mount(context, 'desktop', () => { throw new Error('the desktop app must not use the HTML picker'); }, uploads);
   try {
@@ -116,6 +146,7 @@ test('the desktop app keeps the dialog plugin: a picked PATH uploads under its o
     upload(app).click();
     await until(app, () => uploads.length === 1);
     assert.deepEqual(uploads, [{ path: '/fixture/报告 v1.final.pdf', data: b64('pdf') }]);
-    assert.deepEqual([...realm.calls.filter((c) => /^(dialog|fs)\./u.test(c.fn)).map((c) => c.fn)], ['dialog.open', 'fs.readFile']);
+    assert.deepEqual([...realm.calls.filter((c) => /^(dialog|fs)\./u.test(c.fn)).map((c) => c.fn)], ['dialog.open', 'fs.stat', 'fs.open', 'fs.seek', 'fs.close'],
+      'the size from a stat, the bytes from a positioned read of a handle: never a whole-file readFile (#23)');
   } finally { await app.close(); }
 });

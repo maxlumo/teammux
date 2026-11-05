@@ -49,7 +49,7 @@ directory, or the server's home directory when no session is open yet.
 - Recent files panel (last 20 opened files, scrollable, capped to 40vh)
 - File preview: Markdown (rendered through the shared safe renderer, `core/markdown.ts`, + mermaid + KaTeX), CSV (table), code (syntax highlighted; the lined view shows the first 3000 lines with a "Show all N lines" button), HTML (sandboxed iframe), PDF (pdf.js), images (tap → the fullscreen Lightbox with pinch/wheel zoom and a download button for the file shown (#447); a trackpad pinch on the inline image opens it instead of zooming the page), video (the browser's `<video>` streaming ranges from the signed `/dl` URL — mp4/m4v/webm/mov/mkv/ogv, any size — under our own controls (#453): a tap shows or hides the bar, a drag on the position bar commits one seek on release, speed is in More, mute only (no volume range), fullscreen where the host gives it and picture-in-picture where the API exists; until the first frame is on screen the box shows our own placeholder tile, never the WebView's default poster (#470); design-docs/features/file-handling.md), audio (our player on the same stream — mp3 (`audio/mpeg`), m4a (`audio/mp4`), aac (`audio/aac`), ogg/oga/opus (`audio/ogg`), wav, flac, weba (`audio/webm`), any size; no waveform, playlist, background playback or cover art; hiding the page — a tab or server switch — pauses video and audio, and showing it again never plays). pdf.js, mermaid and highlight.js load on first use, not at startup.
 - Text editor with syntax highlighting, undo stack, save button
-- File operations: create file/folder, rename, delete, upload (with per-file progress feedback: reading %, a sending beat, then `Uploaded …` or a line naming every failed file; single file up to about 59.99 MiB, the server's 80 MiB message less the request around it), download
+- File operations: create file/folder, rename, delete, upload (over the signed HTTP upload channel in resumable 4 MiB chunks, board #23: per-file progress as bytes sent of total and a percentage, Cancel while sending, then `Uploaded …` or a line naming every failed file with its reason and a Retry that resumes; no size cap beyond the destination's free space), download
 - File info panel: path (tap to copy), type, size, modified, permissions
 - Git integration: status view, per-file stage/unstage, diff viewer, commit log, add all/commit/push
 
@@ -125,7 +125,7 @@ directory, or the server's home directory when no session is open yet.
 - `fs_delete(path)` — delete file/directory
 - `fs_rename(from, to)` — rename/move
 - `fs_download(path)` — download as base64 (≤50MB)
-- `fs_upload(path, data)` — upload as base64 (one atomic message per file; the client refuses a file whose worst-case message would exceed the server's 80 MiB cap: about 59.99 MiB, exact per destination path, #498)
+- `fs_upload_begin(path, size)` / `fs_upload_resume(id)` / `fs_upload_abort(id)` + `PUT …/up/{id}` chunks — the Files upload (board #23; contract in websocket-rpc.md)
 - `fs_convert(path, format?)` — convert file to HTML for preview (currently pptx only; extracted natively by the server, no external tooling required)
 - `git(subcmd, args, cwd)` — git operations
 - `get_bookmarks()` / `save_bookmarks(bookmarks)` — bookmark persistence
@@ -156,7 +156,6 @@ Both rules are implemented once in `src/lib/files/persisted-list.ts`
 (unit-tested); bookmarks and recents are two configurations of it.
 
 ## Edge Cases
-- Base64 upload uses chunked encoding (8192 bytes/chunk) to avoid stack overflow
 - Files > 5 MB (or not previewable by mime/name) open the info page instead of auto-loading preview; user confirms via preview button to avoid heavy transfers on mobile
 - Markdown preview resolves relative image paths, infers MIME from image extension (not parent file)
 - Markdown preview escapes raw HTML in the file (a README's `<img onerror>` is text, not script); inline HTML badges/logos therefore show as source

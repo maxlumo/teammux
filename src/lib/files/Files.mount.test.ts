@@ -744,72 +744,199 @@ test('crumb and row menus copy the NAME or the full PATH (board #191)', async co
 });
 
 
-test('an upload reports each file, counts it uploaded only when the server answers, and names failures (board #214)', async context => {
-  // Owner 2026-09-20: "文件上传要有个进度或者提示，让我知道传上去了没有". Before, a
-  // successful upload only refreshed the listing; the user could not tell.
-  const uploads: { path: string; done: ReturnType<typeof deferred<object>> }[] = [];
+/** A fake upload gateway with the server's rules (server/upload.rs): begin
+ * fixes the size, a PUT is answered only at the next offset, the last byte
+ * commits. Each PUT waits for the test to `answer` it (or `drop` it, keeping
+ * some of its bytes, as a cut body does). Chunks are 2 bytes so progress moves. */
+function uploadGateway() {
+  type Pending = { offset: number; body: Uint8Array; id: string; answer: () => void; drop: (keep: number) => void };
+  const g = {
+    uploads: new Map<string, { path: string; size: number; received: number; bytes: number[]; committed: boolean }>(),
+    pending: [] as Pending[],
+    begins: [] as string[], resumes: [] as string[], aborts: [] as string[],
+    beginError: null as null | ((path: string) => string | null),
+    rpc: {} as Record<string, (...args: any[]) => unknown>,
+    fetch: null as unknown as (url: string, init: RequestInit) => Promise<Response>,
+  };
+  let n = 0;
+  g.rpc = {
+    fsUploadBegin: async (path: string, size: number) => {
+      g.begins.push(path);
+      const why = g.beginError?.(path);
+      if (why) throw new Error(why);
+      const id = `u${++n}`;
+      g.uploads.set(id, { path, size, received: 0, bytes: [], committed: false });
+      return { id, url: `http://gw/up/${id}?sig=1`, chunk: 2, received: 0 };
+    },
+    fsUploadResume: async (id: string) => {
+      g.resumes.push(id);
+      const u = g.uploads.get(id);
+      if (!u) throw new Error(`no such upload: ${id}`);
+      return { url: `http://gw/up/${id}?sig=2`, received: u.received, chunk: 2 };
+    },
+    fsUploadAbort: async (id: string) => { g.aborts.push(id); g.uploads.delete(id); return { ok: true }; },
+  };
+  g.fetch = async (url: string, init: RequestInit) => {
+    const id = /\/up\/(\w+)\?/.exec(url)![1]!;
+    const offset = Number((init.headers as Record<string, string>)['Upload-Offset']);
+    const body = new Uint8Array(await (init.body as Blob).arrayBuffer());
+    return new Promise<Response>((resolve, reject) => {
+      const signal = init.signal;
+      const entry = {
+        offset, body, id,
+        answer: () => {
+          const u = g.uploads.get(id);
+          if (!u) return resolve(new Response(null, { status: 403 }));
+          if (offset !== u.received) return resolve(new Response(null, { status: 409, headers: { 'Upload-Offset': String(u.received) } }));
+          u.bytes.push(...body); u.received += body.length;
+          if (u.received === u.size) { u.committed = true; g.uploads.delete(id); g.uploads.set(`${id}:done`, u); }
+          resolve(new Response(null, { status: u.committed ? 201 : 204, headers: { 'Upload-Offset': String(u.received) } }));
+        },
+        drop: (keep: number) => {
+          const u = g.uploads.get(id)!;
+          if (offset === u.received) { u.bytes.push(...body.slice(0, keep)); u.received += keep; }
+          reject(new TypeError('Failed to fetch'));
+        },
+      };
+      signal?.addEventListener('abort', () => { g.pending.splice(g.pending.indexOf(entry), 1); reject(new DOMException('aborted', 'AbortError')); });
+      g.pending.push(entry);
+    });
+  };
+  return g;
+}
+
+function pickFiles(window: any, names: [string, string][]) {
+  window.localStorage.setItem('tmux_layout_mode', 'desktop');
+  // A file input cannot be driven in a test; the batch is handed to the
+  // picker's onchange with the files defined on it.
+  const click = window.HTMLInputElement.prototype.click;
+  window.HTMLInputElement.prototype.click = function (this: HTMLInputElement) {
+    if (this.type !== 'file') return click.call(this);
+    const files = names.map(([name, text]) => new window.File([text], name));
+    Object.defineProperty(this, 'files', { value: files, configurable: true });
+    this.dispatchEvent(new window.Event('change', { bubbles: true }));
+  };
+}
+
+async function until(app: App, ok: () => boolean, label: string, rounds = 60) {
+  for (let i = 0; i < rounds && !ok(); i++) { await new Promise<void>((r) => setImmediate(r)); await app.flush(); }
+  assert.ok(ok(), label);
+}
+const feedbackText = (app: App) => app.document.querySelector('.files-feedback')?.textContent ?? '';
+
+test('an upload shows bytes sent of total as the server takes them, counts a file only at its commit, and names a failure (#214, #23)', async context => {
+  const g = uploadGateway();
+  g.beginError = (path) => (path.endsWith('two.txt') ? 'not enough space in /fixture: 0.1 MiB needed, 0.0 MiB free' : null);
   const app = await (await compiled).mount(context, {
     props: { visible: true, session: 'fixture' },
-    modules: [rpc({ fsUpload: (path: string) => { const done = deferred<object>(); uploads.push({ path, done }); return done.promise; } })],
-    setup(window) {
-      window.localStorage.setItem('tmux_layout_mode', 'desktop');
-      // A file input cannot be driven in a test; the batch is handed to the
-      // picker's onchange with the files defined on it.
-      const click = window.HTMLInputElement.prototype.click;
-      window.HTMLInputElement.prototype.click = function (this: HTMLInputElement) {
-        if (this.type !== 'file') return click.call(this);
-        const files = [new window.File(['abc'], 'one.txt'), new window.File(['defg'], 'two.txt')];
-        Object.defineProperty(this, 'files', { value: files, configurable: true });
-        this.dispatchEvent(new window.Event('change', { bubbles: true }));
-      };
-    },
+    modules: [rpc(g.rpc)],
+    setup(window) { pickFiles(window, [['one.txt', 'abc'], ['two.txt', 'defg']]); (window as any).fetch = g.fetch; },
   });
-  const feedback = () => app.document.querySelector('.files-feedback [role=status], .files-feedback [role=alert]')?.textContent ?? '';
   try {
     await settle(app);
     button(app, 'Upload files').click();
-    // jsdom's FileReader completes over setImmediate hops (a macrotask each).
-    const macrotask = () => new Promise<void>((resolve) => setImmediate(resolve));
-    for (let i = 0; i < 20 && uploads.length < 1; i++) { await macrotask(); await app.flush(); }
-    assert.equal(uploads.length, 1, 'files go one at a time');
-    assert.equal(uploads[0]!.path, '/fixture/one.txt');
-    assert.match(feedback(), /Uploading one\.txt \(1\/2\)/);
-    assert.match(feedback(), /Sending/, 'the read is done; the send is a discrete beat');
-    assert.equal(app.document.querySelector('.files-feedback progress'), null, 'no invented percentage while sending');
-    uploads[0]!.done.resolve({});
-    for (let i = 0; i < 20 && uploads.length < 2; i++) { await macrotask(); await app.flush(); }
-    assert.match(feedback(), /Uploading two\.txt \(2\/2\)/, 'the first is counted only after the server answered');
-    uploads[1]!.done.reject(new Error('disk full'));
-    await settle(app);
-    const alert = app.document.querySelector('.files-feedback [role=alert]');
-    assert.ok(alert, 'a failure is an alert, not a silent refresh');
+    await until(app, () => g.pending.length === 1, 'the first chunk is sent');
+    assert.deepEqual(g.begins, ['/fixture/one.txt']);
+    assert.match(feedbackText(app), /Uploading one\.txt \(1\/2\)/);
+    assert.match(feedbackText(app), /0 B of 3 B · \/fixture[\s\S]*0%/, 'bytes of total, before any is taken');
+    g.pending.shift()!.answer();
+    await until(app, () => g.pending.length === 1, 'the second chunk is sent');
+    assert.match(feedbackText(app), /2 B of 3 B · \/fixture[\s\S]*67%/, 'progress moves by the bytes the server holds');
+    assert.equal(g.begins.length, 1, 'the next file waits for this one');
+    g.pending.shift()!.answer();
+    await until(app, () => !!app.document.querySelector('.files-feedback [role=alert]'), 'the batch ends');
+    assert.deepEqual(g.uploads.get('u1:done')?.bytes, [...new TextEncoder().encode('abc')], 'the server holds the whole file');
+    const alert = app.document.querySelector('.files-feedback [role=alert]')!;
     assert.match(alert.textContent ?? '', /1 uploaded, 1 failed: two\.txt/, 'the failed file is named');
-    assert.match(alert.textContent ?? '', /disk full/);
-  } finally { for (const u of uploads) u.done.resolve({}); await app.close(); }
+    assert.match(alert.textContent ?? '', /two\.txt: not enough space/, 'with its reason');
+    assert.ok(button(app, 'Retry'), 'a failure offers Retry');
+  } finally { for (const p of g.pending) p.answer(); await app.close(); }
 });
 
-test('a clean upload batch ends in a success line that names the file (board #214)', async context => {
+test('a dropped connection resumes from the bytes the server kept and completes (#23)', async context => {
+  const g = uploadGateway();
   const app = await (await compiled).mount(context, {
     props: { visible: true, session: 'fixture' },
-    modules: [rpc({ fsUpload: async () => ({ ok: true }) })],
-    setup(window) {
-      window.localStorage.setItem('tmux_layout_mode', 'desktop');
-      window.HTMLInputElement.prototype.click = function (this: HTMLInputElement) {
-        Object.defineProperty(this, 'files', { value: [new window.File(['abc'], 'one.txt')], configurable: true });
-        this.dispatchEvent(new window.Event('change', { bubbles: true }));
-      };
-    },
+    modules: [rpc(g.rpc)],
+    setup(window) { pickFiles(window, [['one.txt', 'abcde']]); (window as any).fetch = g.fetch; },
   });
   try {
     await settle(app);
     button(app, 'Upload files').click();
-    for (let i = 0; i < 20 && !/Uploaded one\.txt/.test(app.document.querySelector('.files-feedback')?.textContent ?? ''); i++) {
-      await new Promise<void>((resolve) => setImmediate(resolve)); await app.flush();
+    await until(app, () => g.pending.length === 1, 'the first chunk is sent');
+    g.pending.shift()!.answer();
+    await until(app, () => g.pending.length === 1, 'the second chunk is sent');
+    assert.match(feedbackText(app), /2 B of 5 B · \/fixture[\s\S]*40%/);
+    g.pending.shift()!.drop(1); // the connection dies after one byte of "cd"
+    await settle(app);
+    assert.equal(g.pending.length, 0, 'it waits before resuming');
+    await app.advance(1500);
+    await until(app, () => g.pending.length === 1, 'the upload resumes after its retry delay');
+    assert.deepEqual(g.resumes, ['u1'], 'it asked the session where the upload stands');
+    assert.equal(g.pending[0]!.offset, 3, 'and continued from the 3rd byte, not from zero');
+    assert.match(feedbackText(app), /3 B of 5 B · \/fixture[\s\S]*60%/);
+    g.pending.shift()!.answer(); // "de", the rest of the file
+    await until(app, () => /Uploaded one\.txt/.test(feedbackText(app)), 'it completes');
+    assert.deepEqual(g.uploads.get('u1:done')?.bytes, [...new TextEncoder().encode('abcde')]);
+    assert.equal(g.begins.length, 1, 'one upload, never restarted');
+  } finally { for (const p of g.pending) p.answer(); await app.close(); }
+});
+
+test('Cancel stops sending and aborts the upload, so the server removes its part file (#23)', async context => {
+  const g = uploadGateway();
+  const app = await (await compiled).mount(context, {
+    props: { visible: true, session: 'fixture' },
+    modules: [rpc(g.rpc)],
+    setup(window) { pickFiles(window, [['one.txt', 'abcdef'], ['two.txt', 'gh']]); (window as any).fetch = g.fetch; },
+  });
+  try {
+    await settle(app);
+    button(app, 'Upload files').click();
+    await until(app, () => g.pending.length === 1, 'the first chunk is sent');
+    g.pending.shift()!.answer();
+    await until(app, () => g.pending.length === 1, 'the second chunk is in flight');
+    const cancel = app.document.querySelector<HTMLButtonElement>('.files-feedback button[aria-label^="Cancel"]');
+    assert.ok(cancel, 'a sending upload offers Cancel');
+    cancel.click();
+    await until(app, () => g.aborts.length === 1, 'the server is told');
+    assert.deepEqual(g.aborts, ['u1']);
+    await settle(app);
+    assert.equal(g.pending.length, 0, 'the chunk in flight was aborted, none sent after it');
+    assert.deepEqual(g.begins, ['/fixture/one.txt'], 'the rest of the batch is not started');
+    assert.doesNotMatch(feedbackText(app), /Uploading|Uploaded/, 'the line goes');
+  } finally { for (const p of g.pending) p.answer(); await app.close(); }
+});
+
+test('Retry after a failed upload resumes the same upload from the bytes the server kept (#23)', async context => {
+  const g = uploadGateway();
+  const app = await (await compiled).mount(context, {
+    props: { visible: true, session: 'fixture' },
+    modules: [rpc(g.rpc)],
+    setup(window) { pickFiles(window, [['one.txt', 'abcd']]); (window as any).fetch = g.fetch; },
+  });
+  try {
+    await settle(app);
+    button(app, 'Upload files').click();
+    await until(app, () => g.pending.length === 1, 'the first chunk is sent');
+    g.pending.shift()!.answer();
+    // Every attempt at the second chunk fails until the upload gives up.
+    for (let i = 0; i < 6 && !app.document.querySelector('.files-feedback [role=alert]'); i++) {
+      await until(app, () => g.pending.length === 1 || !!app.document.querySelector('.files-feedback [role=alert]'), 'an attempt');
+      if (g.pending.length) g.pending.shift()!.drop(0);
+      await settle(app);
+      await app.advance(1500);
     }
-    const status = app.document.querySelector('.files-feedback [role=status]');
-    assert.match(status?.textContent ?? '', /Uploaded one\.txt/);
-    assert.match(status?.textContent ?? '', /\/fixture/, 'and where it landed');
-  } finally { await app.close(); }
+    await until(app, () => !!app.document.querySelector('.files-feedback [role=alert]'), 'the upload gives up');
+    assert.match(feedbackText(app), /Upload failed: one\.txt/);
+    assert.match(feedbackText(app), /Failed to fetch/, 'with the reason');
+    button(app, 'Retry').click();
+    await until(app, () => g.pending.length === 1, 'the retry sends');
+    assert.equal(g.pending[0]!.offset, 2, 'from the bytes the server kept');
+    assert.equal(g.begins.length, 1, 'the same upload, not a new one');
+    g.pending.shift()!.answer();
+    await until(app, () => /Uploaded one\.txt/.test(feedbackText(app)), 'it completes');
+    assert.deepEqual(g.uploads.get('u1:done')?.bytes, [...new TextEncoder().encode('abcd')]);
+  } finally { for (const p of g.pending) p.answer(); await app.close(); }
 });
 
 test('reading mode: the header and the tab bar step away, one floating control or Back returns (board #226)', async context => {
