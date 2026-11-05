@@ -84,10 +84,12 @@ fn agent_remove_now(session: &str, agent: &str) -> Result<Value, String> {
 }
 
 /// Stop every process that holds `home` through a backend's
-/// `home_worker_env` (board #26), and return once each has exited: SIGTERM,
+/// `home_worker_env` (board #26), and return once each has EXITED: SIGTERM,
 /// up to 3 s, then SIGKILL, up to 1 s more. One still alive is an `Err`
-/// naming it. The holders are found by their environment, under `/proc`, so
-/// this is Linux only; elsewhere nothing is stopped.
+/// naming it. The environment only FINDS a worker; from then on it is
+/// tracked by its identity, pid plus start time (review P1-R1: an
+/// environment that stops matching or cannot be read is not an exit, and a
+/// reused pid is not the worker). Linux only; elsewhere nothing is stopped.
 fn stop_home_workers(home: &std::path::Path) -> Result<(), String> {
     #[cfg(target_os = "linux")]
     {
@@ -98,51 +100,71 @@ fn stop_home_workers(home: &std::path::Path) -> Result<(), String> {
                 wanted.push(format!("{k}={}", path.to_string_lossy()));
             }
         }
-        let holders = |wanted: &[String]| -> Vec<libc::pid_t> {
-            let Ok(procs) = std::fs::read_dir("/proc") else { return Vec::new() };
-            procs
-                .flatten()
-                .filter_map(|e| e.file_name().to_str()?.parse::<libc::pid_t>().ok())
-                .filter(|&pid| pid > 1 && pid != std::process::id() as libc::pid_t)
-                .filter(|pid| {
-                    std::fs::read(format!("/proc/{pid}/environ"))
-                        .map(|env| env.split(|b| *b == 0).any(|kv| wanted.iter().any(|w| w.as_bytes() == kv)))
-                        .unwrap_or(false)
-                })
-                .collect()
+        let me = std::process::id() as libc::pid_t;
+        let Ok(procs) = std::fs::read_dir("/proc") else { return Ok(()) };
+        let mut workers: Vec<(libc::pid_t, u64)> = Vec::new();
+        for pid in procs.flatten().filter_map(|e| e.file_name().to_str()?.parse::<libc::pid_t>().ok()) {
+            if pid <= 1 || pid == me {
+                continue;
+            }
+            // Identity before and after the environment read: the match is
+            // this instance's, not a pid reused in between.
+            let Some(before) = process_start(pid) else { continue };
+            let holds = std::fs::read(format!("/proc/{pid}/environ"))
+                .map(|env| env.split(|b| *b == 0).any(|kv| wanted.iter().any(|w| w.as_bytes() == kv)))
+                .unwrap_or(false);
+            if holds && process_start(pid) == Some(before) {
+                workers.push((pid, before));
+            }
+        }
+        if workers.is_empty() {
+            return Ok(());
+        }
+        let alive = |w: &(libc::pid_t, u64)| process_start(w.0) == Some(w.1);
+        let signal = |left: &[(libc::pid_t, u64)], sig: libc::c_int| {
+            for w in left.iter().filter(|w| alive(w)) {
+                // SAFETY: a plain syscall on a positive pid whose start time
+                // was just re-read as the worker's.
+                unsafe { libc::kill(w.0, sig) };
+            }
         };
-        // A zombie has no environment left, so it is never found again.
-        let wait = |pids: &[libc::pid_t], for_ms: u64| {
+        let wait = |left: Vec<(libc::pid_t, u64)>, for_ms: u64| {
             let until = std::time::Instant::now() + std::time::Duration::from_millis(for_ms);
             loop {
-                let alive: Vec<libc::pid_t> = holders(&wanted).into_iter().filter(|p| pids.contains(p)).collect();
-                if alive.is_empty() || std::time::Instant::now() >= until {
-                    return alive;
+                let still: Vec<(libc::pid_t, u64)> = left.iter().copied().filter(|w| alive(w)).collect();
+                if still.is_empty() || std::time::Instant::now() >= until {
+                    return still;
                 }
                 std::thread::sleep(std::time::Duration::from_millis(50));
             }
         };
-        let pids = holders(&wanted);
-        if pids.is_empty() {
-            return Ok(());
-        }
-        // SAFETY: plain syscalls on positive pids just read from /proc as
-        // holding this home; a pid that exited meanwhile fails with ESRCH.
-        for &pid in &pids {
-            unsafe { libc::kill(pid, libc::SIGTERM) };
-        }
-        let left = wait(&pids, 3000);
-        for &pid in &left {
-            unsafe { libc::kill(pid, libc::SIGKILL) };
-        }
-        let left = wait(&left, 1000);
+        signal(&workers, libc::SIGTERM);
+        let left = wait(workers, 3000);
+        signal(&left, libc::SIGKILL);
+        let left = wait(left, 1000);
         if !left.is_empty() {
-            return Err(format!("a process still holding its home did not exit (pid {left:?})"));
+            let pids: Vec<libc::pid_t> = left.iter().map(|w| w.0).collect();
+            return Err(format!("a process still holding its home did not exit (pid {pids:?})"));
         }
     }
     #[cfg(not(target_os = "linux"))]
     let _ = home;
     Ok(())
+}
+
+/// A LIVE process's start time (`/proc/<pid>/stat` field 22, in clock ticks
+/// since boot), or `None` when the pid is gone or a zombie (`Z`/`X`: it can
+/// write nothing more). With the pid it is the process's identity.
+#[cfg(target_os = "linux")]
+fn process_start(pid: libc::pid_t) -> Option<u64> {
+    let stat = std::fs::read_to_string(format!("/proc/{pid}/stat")).ok()?;
+    // The command name may hold spaces and parentheses: fields resume after
+    // the LAST ')'. Field 3 is the state, field 22 the start time.
+    let rest: Vec<&str> = stat.rsplit_once(')')?.1.split_whitespace().collect();
+    if matches!(rest.first(), Some(&"Z") | Some(&"X") | None) {
+        return None;
+    }
+    rest.get(19)?.parse().ok()
 }
 
 /// The team a managed window was spawned as part of, read off its launch
@@ -532,6 +554,53 @@ mod tests {
         std::thread::sleep(std::time::Duration::from_millis(4000));
         assert!(!home.exists(), "the home came back: {:?}", std::fs::read_dir(&home).map(|d| d.flatten().map(|e| e.path()).collect::<Vec<_>>()));
         let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// Board #26 review P1-R1: a worker is waited for until it EXITS, not
+    /// until its environment stops matching. This stand-in, on SIGTERM,
+    /// execs into a process with no environment (the same pid, alive, its
+    /// `/proc/<pid>/environ` no longer naming the home) that writes into the
+    /// home 1.5 s later and then exits. Re-scanning environments took the
+    /// exec for an exit and deleted the home before the write.
+    #[test]
+    #[cfg(target_os = "linux")]
+    fn a_worker_is_waited_for_until_it_exits_not_until_its_environment_changes() {
+        use_test_store();
+        let dir = crate::config::test_scratch("tmm-rm-exec");
+        std::fs::create_dir_all(&dir).unwrap();
+        let made = create(&dir.to_string_lossy(), Some("rmexec"), None, None).unwrap();
+        let session = made["session"].as_str().unwrap().to_string();
+        let home = dir.join(".tmm").join("agents").join("om");
+        std::fs::create_dir_all(&home).unwrap();
+        std::fs::write(home.join("launch.json"), r#"{"backend":"omp"}"#).unwrap();
+        let late = format!("sleep 1.5; mkdir -p '{}/predict'", home.display());
+        let script = format!(r#"(trap 'exec env -i /bin/sh -c "{late}"' TERM; while :; do sleep 0.05; done) >/dev/null 2>&1 &"#);
+        let status = std::process::Command::new("sh").arg("-c").arg(&script).env("OMP_TEXT_PREDICT_AGENT_DIR", &home).status().unwrap();
+        assert!(status.success());
+        std::thread::sleep(std::time::Duration::from_millis(300));
+
+        let r = agent_remove(&session, "om").unwrap();
+        assert_eq!(r["home_removed"].as_bool(), Some(true), "{r}");
+        std::thread::sleep(std::time::Duration::from_millis(2500));
+        assert!(!home.exists(), "the worker wrote after the remove: {:?}", std::fs::read_dir(&home).map(|d| d.flatten().map(|e| e.path()).collect::<Vec<_>>()));
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// Board #26 review P1-R1: a process's identity is its pid plus its start
+    /// time; a zombie has exited (it can write nothing more), and so has a
+    /// reaped pid.
+    #[test]
+    #[cfg(target_os = "linux")]
+    fn a_process_identity_is_live_and_stable_and_a_zombie_has_none() {
+        let me = std::process::id() as libc::pid_t;
+        let start = process_start(me).expect("this process is alive");
+        assert_eq!(process_start(me), Some(start), "the same instance reads the same start");
+        let mut child = std::process::Command::new("true").spawn().unwrap();
+        let pid = child.id() as libc::pid_t;
+        std::thread::sleep(std::time::Duration::from_millis(300));
+        assert_eq!(process_start(pid), None, "exited, not yet reaped: a zombie is not alive");
+        child.wait().unwrap();
+        assert_eq!(process_start(pid), None, "reaped: gone");
     }
 
     /// Board #362 c, the cleanup of accepted person-needed paints (the
