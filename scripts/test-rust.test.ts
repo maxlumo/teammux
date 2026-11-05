@@ -4,11 +4,17 @@ import { readFile } from 'node:fs/promises';
 import { join } from 'node:path';
 import test from 'node:test';
 import { cargoArgs, isolatedEnv, repoRoot, runTestRust, serverSocketsUnder } from './test-rust.mjs';
-import { lockFile, targetDir } from './target-lock.mjs';
+import { lockFile, withTargetDir } from './target-lock.mjs';
 
 // Board #35: cargo runs under the target directory's lock, so the spawn is
 // perl holding it: `-e <script> <target> <lock> test:rust cargo …`.
 const isCargo = (cmd: string, args: string[]) => cmd === 'perl' && args[5] === 'cargo';
+// Round 2: the runner first asks cargo where it writes; a stand-in answers.
+const { mkdtempSync: mkTemp, realpathSync: real } = await import('node:fs');
+const { tmpdir: tmp } = await import('node:os');
+const metaTarget = real(mkTemp(join(tmp(), 'tmm-meta-target-')));
+const metadata = (cmd: string, args: string[]) => cmd === 'cargo' && args[0] === 'metadata'
+  ? { status: 0, stdout: JSON.stringify({ target_directory: metaTarget }) } : null;
 
 test('pnpm run test:rust is the isolating wrapper', async () => {
   const pkg = JSON.parse(await readFile(new URL('../package.json', import.meta.url), 'utf8'));
@@ -100,6 +106,8 @@ test('a run creates the dir, hands it to cargo, kills only servers under it by -
     env: { TMUX: '/tmp/tmux-1000/default,1,0', TMM_SERVER: 'ws://127.0.0.1:9899', TOKEN: 'fake-token', HOME: '/home/x' },
     log: () => {},
     spawn: ((cmd: string, args: string[], opts: { env?: Record<string, string | undefined> }) => {
+      const meta = metadata(cmd, args);
+      if (meta) return meta;
       calls.push({ cmd, args, env: opts.env });
       if (isCargo(cmd, args)) {
         dirSeen = opts.env?.TMUX_TMPDIR ?? '';
@@ -115,9 +123,8 @@ test('a run creates the dir, hands it to cargo, kills only servers under it by -
   });
   assert.equal(code, 3, 'cargo’s exit code is the wrapper’s');
   assert.ok(isCargo(calls[0].cmd, calls[0].args), 'cargo, under the lock');
-  const target = targetDir({}, repoRoot);
-  assert.deepEqual(calls[0].args.slice(2, 5), [target, lockFile(target), 'test:rust'], 'the lock of the target dir, labelled');
-  assert.deepEqual(calls[0].args.slice(6), cargoArgs(['tmux::tests']));
+  assert.deepEqual(calls[0].args.slice(2, 5), [metaTarget, lockFile(metaTarget), 'test:rust'], 'the lock of the dir cargo named, labelled');
+  assert.deepEqual(calls[0].args.slice(6), withTargetDir(cargoArgs(['tmux::tests']), metaTarget), 'and cargo is handed exactly that dir');
   assert.ok(dirSeen.includes('tmm-test-rust-'), dirSeen);
   assert.equal(calls[0].env?.TMUX, undefined);
   assert.equal(calls[0].env?.TMUX_PANE, undefined);
@@ -138,6 +145,8 @@ test('cargo runs under a umask that writes no group/other bits, and the caller\'
       runTestRust({
         extra: [], env: {}, log: () => {},
         spawn: ((cmd: string, args: string[]) => {
+          const meta = metadata(cmd, args);
+          if (meta) return meta;
           if (isCargo(cmd, args)) seen = process.umask();
           return { status: 0 };
         }) as unknown as typeof import('node:child_process').spawnSync,

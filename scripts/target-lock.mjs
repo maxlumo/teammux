@@ -17,16 +17,53 @@
 // holder line the first wrote (pid, label, command, start) and the way out.
 // It does NOT stop a `git commit` in the worktree during a run (build.rs
 // watches HEAD): testing.md § one run per target directory.
-import { isAbsolute, join, resolve } from 'node:path';
+import { spawnSync } from 'node:child_process';
+import { mkdirSync, realpathSync } from 'node:fs';
+import { join, resolve } from 'node:path';
 
 export const LOCK_REFUSED = 75; // EX_TEMPFAIL: try again later
 
-/** Where cargo puts its artifacts for this repo: CARGO_TARGET_DIR (relative
- * to the repo root, where both runners start cargo) or src-tauri/target. */
-export function targetDir(env, repoRoot) {
-  const set = env.CARGO_TARGET_DIR;
-  if (set) return isAbsolute(set) ? set : resolve(repoRoot, set);
-  return join(repoRoot, 'src-tauri', 'target');
+/** The directory cargo will write to, canonical: `{dir}`, or `{why}` when
+ * it cannot be known (round 2, reviewer P1-R1: the lock must guard what cargo
+ * ACTUALLY uses). A `--target-dir` in cargo's own args (before the harness's
+ * `--`) wins, relative to `root`, where both runners start cargo. Otherwise
+ * cargo says: `cargo metadata` reports `target_directory` with every source
+ * it reads applied (CARGO_TARGET_DIR, CARGO_BUILD_TARGET_DIR, build.target-dir
+ * in .cargo/config.toml, the default), offline and without resolving deps.
+ * The dir is created and canonicalized, so two spellings share one lock. */
+export function cargoTargetDir({ args = [], env = process.env, root, manifest = join(root, 'src-tauri', 'Cargo.toml'), run = spawnSync }) {
+  const end = args.indexOf('--');
+  const own = end === -1 ? args : args.slice(0, end);
+  let dir = null;
+  for (let i = 0; i < own.length; i += 1) {
+    if (own[i] === '--target-dir') dir = own[i + 1] ?? null;
+    else if (own[i].startsWith('--target-dir=')) dir = own[i].slice('--target-dir='.length);
+  }
+  if (dir === null) {
+    const r = run('cargo', ['metadata', '--format-version', '1', '--no-deps', '--offline', '--manifest-path', manifest], { cwd: root, env, encoding: 'utf8', stdio: ['ignore', 'pipe', 'pipe'] });
+    if (r.error || r.status !== 0) return { why: `cargo metadata could not name the target directory: ${r.error?.message ?? String(r.stderr ?? '').trim().split('\n').pop() ?? `exit ${r.status}`}` };
+    try { dir = JSON.parse(r.stdout).target_directory; } catch { dir = null; }
+    if (typeof dir !== 'string' || !dir) return { why: 'cargo metadata named no target_directory' };
+  }
+  const abs = resolve(root, dir);
+  mkdirSync(abs, { recursive: true });
+  return { dir: realpathSync(abs) };
+}
+
+/** `args` with exactly `--target-dir <dir>` on cargo's side (any it was
+ * handed dropped), so cargo writes to the directory that is locked, whatever
+ * its config says. Harness args after `--` are left alone. */
+export function withTargetDir(args, dir) {
+  const end = args.indexOf('--');
+  const own = end === -1 ? args : args.slice(0, end);
+  const rest = end === -1 ? [] : args.slice(end);
+  const kept = [];
+  for (let i = 0; i < own.length; i += 1) {
+    if (own[i] === '--target-dir') { i += 1; continue; }
+    if (own[i].startsWith('--target-dir=')) continue;
+    kept.push(own[i]);
+  }
+  return [...kept, '--target-dir', dir, ...rest];
 }
 
 export function lockFile(target) {

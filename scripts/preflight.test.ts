@@ -8,7 +8,7 @@
 import assert from 'node:assert/strict';
 import test, { after } from 'node:test';
 import { spawnSync } from 'node:child_process';
-import { existsSync, mkdtempSync, mkdirSync, readFileSync, rmSync, symlinkSync, writeFileSync } from 'node:fs';
+import { existsSync, mkdtempSync, mkdirSync, readFileSync, realpathSync, rmSync, symlinkSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { fileURLToPath } from 'node:url';
@@ -261,7 +261,8 @@ test('android-apk: a dangling app/build symlink is re-pointed at the cache dir h
 // `cargo` on PATH records what it was asked and with which C toolchain.
 const fakeBin = join(base, 'fake bin');
 mkdirSync(fakeBin);
-writeFileSync(join(fakeBin, 'cargo'), '#!/bin/sh\n{ printf \'%s\\n\' "$@"; echo "CC=$CC_aarch64_linux_android"; echo "AR=$AR_aarch64_linux_android"; } > "$CARGO_RECORD"\nexit "${CARGO_EXIT:-0}"\n', { mode: 0o755 });
+// Round 2 (#35): asked `metadata`, it names CARGO_TARGET_DIR, as cargo would.
+writeFileSync(join(fakeBin, 'cargo'), '#!/bin/sh\nif [ "$1" = metadata ]; then printf \'{"target_directory":"%s"}\' "$CARGO_TARGET_DIR"; exit 0; fi\n{ printf \'%s\\n\' "$@"; echo "CC=$CC_aarch64_linux_android"; echo "AR=$AR_aarch64_linux_android"; } > "$CARGO_RECORD"\nexit "${CARGO_EXIT:-0}"\n', { mode: 0o755 });
 const checkAndroid = (env: Record<string, string>) => {
   const record = join(base, `record-${Math.random().toString(36).slice(2)}`);
   const r = spawnSync(process.execPath, [script, 'android-check'], {
@@ -287,14 +288,15 @@ test('android-check: cargo checks the lib for aarch64-linux-android with the C t
   const bin = join(ndk, 'toolchains', 'llvm', 'prebuilt', prebuilt, 'bin');
   assert.deepEqual(r.lines, [
     'check', '--manifest-path', join(root, 'src-tauri', 'Cargo.toml'), '--lib', '--target', 'aarch64-linux-android',
+    '--target-dir', realpathSync(join(base, 'target')),
     `CC=${join(bin, 'aarch64-linux-android24-clang')}`, `AR=${join(bin, 'llvm-ar')}`,
   ], 'minSdk 24, as gen/android/app/build.gradle.kts');
 });
 
 test('android-check: cargo runs under the target directory\'s lock, and a held lock refuses before cargo runs (#35)', async () => {
-  const { lockFile, lockedCommand, targetDir } = await import('./target-lock.mjs');
-  const root = fileURLToPath(new URL('..', import.meta.url));
+  const { lockFile, lockedCommand } = await import('./target-lock.mjs');
   const target = join(base, `target-${Math.random().toString(36).slice(2)}`);
+  mkdirSync(target);
   const [hcmd, hargs] = lockedCommand(target, 'test:rust', 'sleep', ['30']);
   const { spawn } = await import('node:child_process');
   const holder = spawn(hcmd, hargs, { stdio: 'ignore' });
@@ -305,7 +307,6 @@ test('android-check: cargo runs under the target directory\'s lock, and a held l
     assert.equal(refused.lines, null, 'cargo never ran');
     assert.match(refused.stderr, /check:android.*refused[\s\S]*test:rust/u);
   } finally { holder.kill('SIGKILL'); }
-  assert.equal(targetDir({}, root), join(root, 'src-tauri', 'target'), 'by default the one test:rust uses');
 });
 
 test('android-check: a failing cargo check fails the command with its exit code', () => {

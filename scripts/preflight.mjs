@@ -54,7 +54,7 @@ import { createHash } from 'node:crypto';
 import { fileURLToPath } from 'node:url';
 import { DEV_WEB_PORT, devServerPort } from './dev-ports.mjs';
 import { checkChromeClient } from './wry-chrome-client.mjs';
-import { lockedCommand, targetDir } from './target-lock.mjs';
+import { cargoTargetDir, lockedCommand, withTargetDir } from './target-lock.mjs';
 
 const root = resolve(dirname(fileURLToPath(import.meta.url)), '..');
 const mode = process.argv[2] || 'dev';
@@ -256,8 +256,14 @@ if (mode === 'android-check') {
   const bin = join(picked, 'toolchains', 'llvm', 'prebuilt', host, 'bin');
   // Under the target directory's lock (board #35): beside a running
   // test:rust it refuses instead of rebuilding under its test binaries.
-  const [cmd, args] = lockedCommand(targetDir(process.env, root), 'check:android', 'cargo', ['check', '--manifest-path', join(root, 'src-tauri', 'Cargo.toml'), '--lib', '--target', 'aarch64-linux-android']);
+  // The directory is the one cargo will write to (round 2), and cargo is
+  // handed exactly it; started from the repo root, as test:rust is.
+  const checkArgs = ['check', '--manifest-path', join(root, 'src-tauri', 'Cargo.toml'), '--lib', '--target', 'aarch64-linux-android'];
+  const target = cargoTargetDir({ args: checkArgs, env: process.env, root });
+  if (target.why) { console.error(`check:android: ${target.why}`); process.exit(1); }
+  const [cmd, args] = lockedCommand(target.dir, 'check:android', 'cargo', withTargetDir(checkArgs, target.dir));
   const r = spawnSync(cmd, args, {
+    cwd: root,
     stdio: 'inherit',
     env: { ...process.env, CC_aarch64_linux_android: join(bin, 'aarch64-linux-android24-clang'), AR_aarch64_linux_android: join(bin, 'llvm-ar') },
   });
