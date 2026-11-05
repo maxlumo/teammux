@@ -42,13 +42,85 @@ const BODY_STALL: Duration = Duration::from_secs(30);
 
 /// One upload. What the signature binds is fixed at begin and read without
 /// the lock; the progress is behind it, held by the one PUT writing.
+///
+/// Every filesystem step after begin goes through handles begin opened
+/// (validator-2, round 1): `dir`, the destination's directory, and `file`, the
+/// part it created there with `openat(…, O_CREAT|O_EXCL|O_NOFOLLOW)`. Chunks
+/// are written through `file`, never a reopened path; the commit is
+/// `renameat` in `dir`, abort and expiry `unlinkat`. Before each chunk and the
+/// commit the part's NAME must still be that file (`fstatat` without following
+/// a link, against `ino`); holding `file` keeps its inode from being reused by
+/// a replacement. A symlink or another file swapped in at the part's name is
+/// refused, and a directory swapped in at the parent's path is never looked
+/// at: no step resolves a path again. What can still be swapped is an entry INSIDE that directory, which
+/// whoever can do so could already replace at the destination itself; nothing
+/// is ever written through a link.
 struct Upload {
     dest: PathBuf,
     part: PathBuf,
+    dir: std::fs::File,
+    file: std::fs::File,
+    part_name: std::ffi::CString,
+    dest_name: std::ffi::CString,
+    /// (dev, ino) of the part file begin created.
+    ino: (u64, u64),
     size: u64,
     /// The mode the destination gets at commit.
     mode: u32,
     state: tokio::sync::Mutex<Progress>,
+}
+
+fn cstr(name: &std::ffi::OsStr) -> std::io::Result<std::ffi::CString> {
+    use std::os::unix::ffi::OsStrExt;
+    std::ffi::CString::new(name.as_bytes()).map_err(|_| std::io::Error::from(std::io::ErrorKind::InvalidInput))
+}
+
+fn cvt(r: libc::c_int) -> std::io::Result<libc::c_int> {
+    if r < 0 { Err(std::io::Error::last_os_error()) } else { Ok(r) }
+}
+
+/// The directory `path` names, opened once (`O_DIRECTORY|O_NOFOLLOW`).
+fn open_dir(path: &Path) -> std::io::Result<std::fs::File> {
+    use std::os::fd::FromRawFd;
+    let c = cstr(path.as_os_str())?;
+    // SAFETY: `c` is NUL-terminated; a non-negative result is a new fd we own.
+    let fd = cvt(unsafe { libc::open(c.as_ptr(), libc::O_RDONLY | libc::O_DIRECTORY | libc::O_NOFOLLOW | libc::O_CLOEXEC) })?;
+    Ok(unsafe { std::fs::File::from_raw_fd(fd) })
+}
+
+/// A new `name` in `dir`, created exclusively, never through a symlink.
+fn create_in(dir: &std::fs::File, name: &std::ffi::CStr) -> std::io::Result<std::fs::File> {
+    use std::os::fd::{AsRawFd, FromRawFd};
+    let flags = libc::O_WRONLY | libc::O_NOFOLLOW | libc::O_CLOEXEC | libc::O_CREAT | libc::O_EXCL;
+    // SAFETY: a valid directory fd and a NUL-terminated name; we own the result.
+    let fd = cvt(unsafe { libc::openat(dir.as_raw_fd(), name.as_ptr(), flags, 0o666 as libc::c_uint) })?;
+    Ok(unsafe { std::fs::File::from_raw_fd(fd) })
+}
+
+fn rename_in(dir: &std::fs::File, from: &std::ffi::CStr, to: &std::ffi::CStr) -> std::io::Result<()> {
+    use std::os::fd::AsRawFd;
+    // SAFETY: a valid directory fd and two NUL-terminated names.
+    cvt(unsafe { libc::renameat(dir.as_raw_fd(), from.as_ptr(), dir.as_raw_fd(), to.as_ptr()) }).map(|_| ())
+}
+
+fn unlink_in(dir: &std::fs::File, name: &std::ffi::CStr) {
+    use std::os::fd::AsRawFd;
+    // SAFETY: a valid directory fd and a NUL-terminated name.
+    unsafe { libc::unlinkat(dir.as_raw_fd(), name.as_ptr(), 0) };
+}
+
+/// Whether `name` in `dir` is, without following a link, the file `ino` names.
+fn names(dir: &std::fs::File, name: &std::ffi::CStr, ino: (u64, u64)) -> bool {
+    use std::os::fd::AsRawFd;
+    let mut st: libc::stat = unsafe { std::mem::zeroed() };
+    // SAFETY: a valid directory fd, a NUL-terminated name, a valid out-pointer.
+    if unsafe { libc::fstatat(dir.as_raw_fd(), name.as_ptr(), &mut st, libc::AT_SYMLINK_NOFOLLOW) } != 0 { return false; }
+    (st.st_mode & libc::S_IFMT) == libc::S_IFREG && (st.st_dev as u64, st.st_ino as u64) == ino
+}
+
+fn dev_ino(f: &std::fs::File) -> Option<(u64, u64)> {
+    use std::os::unix::fs::MetadataExt;
+    f.metadata().ok().map(|m| (m.dev(), m.ino()))
 }
 
 struct Progress {
@@ -128,7 +200,7 @@ fn expire_idle(now: Instant) {
     map.retain(|_, up| {
         let Ok(p) = up.state.try_lock() else { return true };
         if now.saturating_duration_since(p.last) <= IDLE { return true; }
-        let _ = std::fs::remove_file(&up.part);
+        unlink_in(&up.dir, &up.part_name);
         false
     });
 }
@@ -152,13 +224,12 @@ fn sweep_stale_parts(dir: &Path) {
     }
 }
 
-/// Free bytes for an unprivileged writer in `dir`.
-fn free_bytes(dir: &Path) -> Option<u64> {
-    use std::os::unix::ffi::OsStrExt;
-    let c = std::ffi::CString::new(dir.as_os_str().as_bytes()).ok()?;
+/// Free bytes for an unprivileged writer in the opened directory.
+fn free_bytes(dir: &std::fs::File) -> Option<u64> {
+    use std::os::fd::AsRawFd;
     let mut st: libc::statvfs = unsafe { std::mem::zeroed() };
-    // SAFETY: `c` is a valid NUL-terminated path, `st` a valid out-pointer.
-    if unsafe { libc::statvfs(c.as_ptr(), &mut st) } != 0 { return None; }
+    // SAFETY: a valid fd and a valid out-pointer.
+    if unsafe { libc::fstatvfs(dir.as_raw_fd(), &mut st) } != 0 { return None; }
     Some((st.f_bavail as u64).saturating_mul(st.f_frsize as u64))
 }
 
@@ -171,37 +242,53 @@ pub(super) fn begin(token: &str, path: &str, size: u64) -> Result<serde_json::Va
     let name = dest.file_name().ok_or("upload path has no file name")?.to_os_string();
     expire_idle(Instant::now());
     sweep_stale_parts(&dir);
-    if let Some(free) = free_bytes(&dir) {
+    let dirf = open_dir(&dir).map_err(|e| format!("cannot open {}: {e}", dir.display()))?;
+    if let Some(free) = free_bytes(&dirf) {
         if free < size {
             return Err(format!("not enough space in {}: {} needed, {} free", dir.display(), mib(size), mib(free)));
         }
     }
     let id = hex::encode(rand::random::<[u8; 16]>());
-    let part = dir.join(part_name(&name, &id));
+    let pname = part_name(&name, &id);
+    let part = dir.join(&pname);
+    let part_c = cstr(&pname).map_err(|e| format!("upload path: {e}"))?;
+    let dest_c = cstr(&name).map_err(|e| format!("upload path: {e}"))?;
     let mut map = registry().lock().unwrap();
-    if map.values().any(|u| u.dest == dest) {
-        return Err(format!("upload in progress: {}", dest.display()));
+    // One upload per destination. One that is not writing a chunk and has
+    // gained nothing for BODY_STALL is abandoned (a page reload, a closed tab;
+    // validator-2, round 1): this begin takes it over, its part removed and its
+    // id forgotten. One whose chunk is being written is never taken over.
+    let mut abandoned = None;
+    for (other, up) in map.iter() {
+        if up.dest != dest { continue; }
+        let idle = up.state.try_lock().is_ok_and(|p| p.last.elapsed() >= BODY_STALL);
+        if !idle { return Err(format!("upload in progress: {}", dest.display())); }
+        abandoned = Some(other.clone());
+    }
+    if let Some(other) = abandoned {
+        if let Some(up) = map.remove(&other) { unlink_in(&up.dir, &up.part_name); }
     }
     // The committed file gets the mode `fs::write` gave an upload: an
     // existing file keeps its own, a new one is 0666 under the umask. The
     // part file is created that way to learn the mode without touching the
     // process umask, then held at 0600 while it is incomplete.
     use std::os::unix::fs::PermissionsExt;
-    let mut f = std::fs::OpenOptions::new();
-    f.write(true).create_new(true);
-    { use std::os::unix::fs::OpenOptionsExt; f.mode(0o666); }
-    let file = f.open(&part).map_err(|e| format!("cannot create {}: {e}", part.display()))?;
+    let file = create_in(&dirf, &part_c).map_err(|e| format!("cannot create {}: {e}", part.display()))?;
     let new_mode = file.metadata().map(|m| m.permissions().mode() & 0o777).unwrap_or(0o644);
     let mode = std::fs::metadata(&dest).map(|m| m.permissions().mode() & 0o7777).unwrap_or(new_mode);
-    let _ = file.set_permissions(std::fs::Permissions::from_mode(0o600));
-    drop(file);
+    let ino = dev_ino(&file).ok_or("cannot stat the part file")?;
     if size == 0 {
         // Nothing to send: the empty file commits now, by the same rename.
-        let _ = std::fs::set_permissions(&part, std::fs::Permissions::from_mode(mode));
-        std::fs::rename(&part, &dest).map_err(|e| format!("upload commit: {e}"))?;
+        let _ = file.set_permissions(std::fs::Permissions::from_mode(mode));
+        drop(file);
+        rename_in(&dirf, &part_c, &dest_c).map_err(|e| { unlink_in(&dirf, &part_c); format!("upload commit: {e}") })?;
         return Ok(serde_json::json!({ "id": id, "url": "", "chunk": CHUNK_BYTES, "received": 0, "done": true }));
     }
-    let up = Arc::new(Upload { dest, part, size, mode, state: tokio::sync::Mutex::new(Progress { received: 0, last: Instant::now() }) });
+    let _ = file.set_permissions(std::fs::Permissions::from_mode(0o600));
+    let up = Arc::new(Upload {
+        dest, part, dir: dirf, file, part_name: part_c, dest_name: dest_c, ino, size, mode,
+        state: tokio::sync::Mutex::new(Progress { received: 0, last: Instant::now() }),
+    });
     let url = url_for(token, &id, &up);
     map.insert(id.clone(), up);
     Ok(serde_json::json!({ "id": id, "url": url, "chunk": CHUNK_BYTES, "received": 0 }))
@@ -219,11 +306,12 @@ pub(super) fn resume(token: &str, id: &str) -> Result<serde_json::Value, String>
 }
 
 /// `fs_upload_abort {id}`: the id is forgotten and the part file removed. A
-/// PUT still writing goes on into the unlinked file, and its commit's rename
-/// finds no part to move, so nothing reaches the destination.
+/// PUT still writing goes on into the unlinked file through its handle, and
+/// its commit finds the part's name no longer that file, so nothing reaches
+/// the destination.
 pub(super) fn abort(id: &str) -> Result<serde_json::Value, String> {
     if let Some(up) = registry().lock().unwrap().remove(id) {
-        let _ = std::fs::remove_file(&up.part);
+        unlink_in(&up.dir, &up.part_name);
     }
     Ok(serde_json::json!({ "ok": true }))
 }
@@ -298,23 +386,43 @@ where
         eprintln!("🚫 HTTP upload rejected (invalid or expired signature)");
         return answer(&mut stream, "403 Forbidden", None).await;
     }
-    // One PUT at a time per upload: a second one is refused, uncounted.
-    let Ok(mut e) = up.state.try_lock() else { return answer(&mut stream, "409 Conflict", None).await };
-    if header(&head, "transfer-encoding").is_some() { return answer(&mut stream, "411 Length Required", Some(e.received)).await; }
+    if header(&head, "transfer-encoding").is_some() { return answer(&mut stream, "411 Length Required", None).await; }
     let Some(len) = header(&head, "content-length").and_then(|v| v.parse::<u64>().ok()) else {
-        return answer(&mut stream, "411 Length Required", Some(e.received)).await;
+        return answer(&mut stream, "411 Length Required", None).await;
     };
-    let Some(offset) = header(&head, "upload-offset").and_then(|v| v.parse::<u64>().ok()) else {
-        return answer(&mut stream, "400 Bad Request", Some(e.received)).await;
+    // From here a refusal reads the body it was sent before answering
+    // (validator-2, round 1): closing with it unread makes the kernel reset
+    // the connection, and the client loses the answer and its offset. Only a
+    // signed request gets this, and only up to MAX_PUT_BYTES.
+    let refuse = |status: &'static str, offset: Option<u64>| (status, offset);
+    let verdict = 'v: {
+        let Some(offset) = header(&head, "upload-offset").and_then(|v| v.parse::<u64>().ok()) else {
+            break 'v Err(refuse("400 Bad Request", None));
+        };
+        // One PUT at a time per upload: a second one is refused, uncounted.
+        let Ok(e) = up.state.try_lock() else { break 'v Err(refuse("409 Conflict", None)) };
+        if offset != e.received { break 'v Err(refuse("409 Conflict", Some(e.received))); }
+        if len > MAX_PUT_BYTES || offset + len > up.size { break 'v Err(refuse("413 Content Too Large", Some(e.received))); }
+        // The part's name must still be the file begin created; the bytes go
+        // through begin's handle, never a reopened path.
+        match up.file.try_clone() {
+            Ok(f) if names(&up.dir, &up.part_name, up.ino) => Ok((e, f)),
+            _ => {
+                eprintln!("🚫 HTTP upload refused: the part file is not the one begin created");
+                Err(refuse("409 Conflict", Some(e.received)))
+            }
+        }
     };
-    if offset != e.received { return answer(&mut stream, "409 Conflict", Some(e.received)).await; }
-    if len > MAX_PUT_BYTES || offset + len > up.size { return answer(&mut stream, "413 Content Too Large", Some(e.received)).await; }
+    let (mut e, file) = match verdict {
+        Ok(v) => v,
+        Err((status, offset)) => {
+            if len <= MAX_PUT_BYTES { drain(&mut stream, len.saturating_sub(body_start.len() as u64), stall).await; }
+            return answer(&mut stream, status, offset).await;
+        }
+    };
     e.last = Instant::now();
 
-    let mut file = match tokio::fs::OpenOptions::new().write(true).open(&up.part).await {
-        Ok(f) => f,
-        Err(_) => return answer(&mut stream, "500 Internal Server Error", Some(e.received)).await,
-    };
+    let mut file = tokio::fs::File::from_std(file);
     if file.seek(std::io::SeekFrom::Start(e.received)).await.is_err() {
         return answer(&mut stream, "500 Internal Server Error", Some(e.received)).await;
     }
@@ -344,20 +452,35 @@ where
     e.last = Instant::now();
     if e.received < up.size { return answer(&mut stream, "204 No Content", Some(e.received)).await; }
 
-    // Commit: the bytes on disk are exactly the declared size, then ONE
-    // rename puts them at the destination. Nothing is written there before.
+    // Commit: the bytes in THIS file are exactly the declared size, then ONE
+    // renameat in begin's directory puts them at the destination. Nothing is
+    // written there before.
     use std::os::unix::fs::PermissionsExt;
     let ok = file.sync_all().await.is_ok()
-        && tokio::fs::metadata(&up.part).await.map(|m| m.len() == up.size).unwrap_or(false)
+        && file.metadata().await.map(|m| m.len() == up.size).unwrap_or(false)
         && file.set_permissions(std::fs::Permissions::from_mode(up.mode)).await.is_ok()
-        && tokio::fs::rename(&up.part, &up.dest).await.is_ok();
+        && names(&up.dir, &up.part_name, up.ino)
+        && rename_in(&up.dir, &up.part_name, &up.dest_name).is_ok();
     drop(file);
     registry().lock().unwrap().remove(id);
     if ok {
         answer(&mut stream, "201 Created", Some(e.received)).await;
     } else {
-        let _ = tokio::fs::remove_file(&up.part).await;
+        unlink_in(&up.dir, &up.part_name);
         answer(&mut stream, "500 Internal Server Error", None).await;
+    }
+}
+
+/// Read and discard `n` more body bytes, each read bounded by `stall`.
+async fn drain<S: tokio::io::AsyncRead + Unpin>(stream: &mut S, mut n: u64, stall: Duration) {
+    use tokio::io::AsyncReadExt;
+    let mut tmp = vec![0u8; 64 * 1024];
+    while n > 0 {
+        let want = (n as usize).min(tmp.len());
+        match tokio::time::timeout(stall, stream.read(&mut tmp[..want])).await {
+            Ok(Ok(k)) if k > 0 => n -= k as u64,
+            _ => return,
+        }
     }
 }
 
@@ -444,6 +567,121 @@ mod tests {
         let (_id, url) = begun(&d.join("new"), 1);
         assert_eq!(put(&url, 0, b"a").await.0, 201);
         assert_eq!(mode(&d.join("new")), mode(&d.join("probe")));
+    }
+
+    /// One exchange over REAL TCP. A server that closes with the body unread
+    /// makes the kernel reset the connection, and the answer is lost; the
+    /// in-memory duplex cannot show that.
+    async fn tcp_put(url: &str, offset: u64, body: Vec<u8>) -> (u16, Option<u64>) {
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        let server = tokio::spawn(async move {
+            let (s, _) = listener.accept().await.unwrap();
+            serve(s, Arc::new(TOK.to_string()), Duration::from_secs(2)).await;
+        });
+        let conn = tokio::net::TcpStream::connect(addr).await.unwrap();
+        let (mut rd, mut wr) = conn.into_split();
+        let head = format!("PUT {url} HTTP/1.1\r\nHost: h\r\nUpload-Offset: {offset}\r\nContent-Length: {}\r\n\r\n", body.len());
+        // The whole body first, then the answer, as validator-2's probe and
+        // an HTTP/1.1 client without early-response handling do.
+        // A body write that fails is a lost answer: a browser reports the
+        // exchange as a network error and never reads the status.
+        let wrote = wr.write_all(head.as_bytes()).await.is_ok() && wr.write_all(&body).await.is_ok();
+        let mut out = Vec::new();
+        let _ = rd.read_to_end(&mut out).await;
+        if !wrote { out.clear(); }
+        let _ = server.await;
+        let text = String::from_utf8_lossy(&out).to_string();
+        let status = text.get(9..12).and_then(|s| s.parse().ok()).unwrap_or(0);
+        let offset = text.lines().find_map(|l| l.strip_prefix("Upload-Offset: ")).and_then(|v| v.trim().parse().ok());
+        (status, offset)
+    }
+
+    #[tokio::test]
+    async fn a_refused_chunk_still_reaches_the_client_with_its_offset() {
+        // validator-2 P2 on 83b6b705: a 409/413 was answered and the socket
+        // closed with the 4 MiB body unread, so the client saw a reset.
+        let d = scratch("drain");
+        let size = 3 * CHUNK_BYTES;
+        let (_id, url) = begun(&d.join("f"), size);
+        // The largest body a PUT may carry: more than loopback's socket
+        // buffers hold, so an unread body cannot all be absorbed.
+        let big = vec![7u8; MAX_PUT_BYTES as usize];
+        assert_eq!(tcp_put(&url, 0, vec![7u8; CHUNK_BYTES as usize]).await, (204, Some(CHUNK_BYTES)));
+        for round in 0..5 {
+            assert_eq!(tcp_put(&url, 0, big.clone()).await, (409, Some(CHUNK_BYTES)), "an overlap, round {round}");
+        }
+        let (_id2, url2) = begun(&d.join("g"), MAX_PUT_BYTES - 1);
+        assert_eq!(tcp_put(&url2, 0, big.clone()).await, (413, Some(0)), "past the size");
+    }
+
+    #[tokio::test]
+    async fn a_part_file_swapped_for_a_symlink_is_never_written_through() {
+        let d = scratch("swap");
+        let dest = d.join("f");
+        let (id, url) = begun(&dest, 4);
+        assert_eq!(put(&url, 0, b"ab").await.0, 204);
+        let part = d.join(part_files(&d)[0].clone());
+        let victim = d.join("victim");
+        std::fs::write(&victim, b"precious").unwrap();
+        std::fs::remove_file(&part).unwrap();
+        std::os::unix::fs::symlink(&victim, &part).unwrap();
+        let (status, _) = put(&url, 2, b"cd").await;
+        assert_eq!(status, 409, "refused");
+        assert_eq!(std::fs::read(&victim).unwrap(), b"precious", "the link's target is untouched");
+        // A regular file of someone else's in the part's place is not ours either.
+        std::fs::remove_file(&part).unwrap();
+        std::fs::write(&part, b"ab").unwrap();
+        assert_eq!(put(&url, 2, b"cd").await.0, 409, "another file at the part's name");
+        assert_eq!(std::fs::read(&part).unwrap(), b"ab", "and it is not written");
+        assert!(!dest.exists());
+        abort(&id).unwrap();
+    }
+
+    #[tokio::test]
+    async fn a_parent_directory_swapped_between_chunks_does_not_move_the_upload() {
+        let d = scratch("parent");
+        std::fs::create_dir(d.join("in")).unwrap();
+        let (_id, url) = begun(&d.join("in/f"), 4);
+        assert_eq!(put(&url, 0, b"ab").await.0, 204);
+        std::fs::rename(d.join("in"), d.join("moved")).unwrap();
+        std::fs::create_dir(d.join("in")).unwrap();
+        assert_eq!(put(&url, 2, b"cd").await.0, 201);
+        assert_eq!(std::fs::read(d.join("moved/f")).unwrap(), b"abcd", "the commit lands in the directory begin opened");
+        assert_eq!(std::fs::read_dir(d.join("in")).unwrap().count(), 0, "nothing appears at the path's new directory");
+    }
+
+    #[tokio::test]
+    async fn a_begin_takes_over_an_abandoned_upload_to_the_same_destination() {
+        // validator-2 P2 on 83b6b705: after a page reload the destination said
+        // "upload in progress" for up to 10 minutes.
+        let d = scratch("takeover");
+        let dest = d.join("f");
+        let (old, old_url) = begun(&dest, 4);
+        assert_eq!(put(&old_url, 0, b"ab").await.0, 204);
+        assert!(begin(TOK, dest.to_str().unwrap(), 4).unwrap_err().contains("upload in progress"), "a live upload is not taken over");
+        let up = registry().lock().unwrap().get(&old).cloned().unwrap();
+        up.state.try_lock().unwrap().last = Instant::now() - BODY_STALL - Duration::from_secs(1);
+        let (new, new_url) = begun(&dest, 4);
+        assert_ne!(new, old);
+        assert!(resume(TOK, &old).unwrap_err().contains("no such upload"), "the abandoned id is gone");
+        assert_eq!(put(&old_url, 2, b"cd").await.0, 403, "and its URL writes nothing");
+        assert_eq!(part_files(&d).len(), 1, "its part file is removed");
+        assert_eq!(put(&new_url, 0, b"wxyz").await.0, 201);
+        assert_eq!(std::fs::read(&dest).unwrap(), b"wxyz");
+    }
+
+    #[tokio::test]
+    async fn a_begin_never_takes_over_an_upload_whose_chunk_is_being_written() {
+        let d = scratch("busy");
+        let dest = d.join("f");
+        let (id, _url) = begun(&dest, 4);
+        let up = registry().lock().unwrap().get(&id).cloned().unwrap();
+        let mut held = up.state.try_lock().unwrap(); // a PUT in progress holds this
+        held.last = Instant::now() - IDLE; // however old its last byte
+        assert!(begin(TOK, dest.to_str().unwrap(), 4).unwrap_err().contains("upload in progress"));
+        drop(held);
+        abort(&id).unwrap();
     }
 
     #[tokio::test]

@@ -1534,7 +1534,8 @@
     let cancelled = false;
     for (const [i, item] of items.entries()) {
       if (ctl.signal.aborted) { cancelled = true; break; }
-      const step = { name: item.name, index: i + 1, total, sent: 0, size: item.size };
+      // A retried file starts its line at the bytes the server kept, not at 0.
+      const step = { name: item.name, index: i + 1, total, sent: item.sent ?? 0, size: item.size };
       const show = () => { if (current()) uploadLifetime.update(token, uploadProgress(step, dir, s, formatSize)); };
       try {
         const size = item.size ?? await item.measure();
@@ -1549,7 +1550,8 @@
       } catch (e) {
         if (e instanceof UploadCancelled) { cancelled = true; break; }
         outcome.failed.push({ name: item.name, error: e.message });
-        retry.push({ ...item, resumeId: e instanceof UploadFailed && e.id ? e.id : undefined });
+        const kept = e instanceof UploadFailed && e.id;
+        retry.push({ ...item, resumeId: kept ? e.id : undefined, sent: kept ? e.received : 0 });
         error = `${item.name}: ${e.message}`;
       }
     }

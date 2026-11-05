@@ -929,8 +929,16 @@ test('Retry after a failed upload resumes the same upload from the bytes the ser
     await until(app, () => !!app.document.querySelector('.files-feedback [role=alert]'), 'the upload gives up');
     assert.match(feedbackText(app), /Upload failed: one\.txt/);
     assert.match(feedbackText(app), /Failed to fetch/, 'with the reason');
+    // Every line the slot shows from the Retry on (validator-2 nit, round 1:
+    // it showed "0 B of …" for a frame before resume answered).
+    const lines: string[] = [];
+    const watch = new (app.window as any).MutationObserver(() => lines.push(feedbackText(app)));
+    watch.observe(app.document.querySelector('.files-feedback')!, { subtree: true, childList: true, characterData: true });
     button(app, 'Retry').click();
     await until(app, () => g.pending.length === 1, 'the retry sends');
+    watch.disconnect();
+    assert.ok(lines.some((l) => /2 B of 4 B/.test(l)), 'the retry starts at the kept bytes');
+    assert.ok(!lines.some((l) => /0 B of 4 B/.test(l)), `never back to zero: ${lines.join(' | ')}`);
     assert.equal(g.pending[0]!.offset, 2, 'from the bytes the server kept');
     assert.equal(g.begins.length, 1, 'the same upload, not a new one');
     g.pending.shift()!.answer();

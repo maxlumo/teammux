@@ -49,10 +49,12 @@ export class UploadCancelled extends Error {
   constructor() { super('cancelled'); }
 }
 
-/** The upload stopped; `id` resumes it (the server keeps its bytes for 10 minutes). */
+/** The upload stopped; `id` resumes it (the server keeps its bytes for 10
+ * minutes) and `received` is how many it held when last heard from. */
 export class UploadFailed extends Error {
   id: string;
-  constructor(id: string, reason: string) { super(reason); this.id = id; }
+  received: number;
+  constructor(id: string, reason: string, received = 0) { super(reason); this.id = id; this.received = received; }
 }
 
 const defaultSleep = (ms: number) => new Promise<void>((r) => setTimeout(r, ms));
@@ -121,7 +123,7 @@ export async function uploadFile(o: UploadOptions): Promise<void> {
     // Lost the connection, the URL expired, or the server refused: ask the
     // session where the upload stands and carry on from there.
     stalls += 1;
-    if (stalls >= maxStalls) throw new UploadFailed(id, reason);
+    if (stalls >= maxStalls) throw new UploadFailed(id, reason, received);
     await sleep(o.retryDelayMs ?? UPLOAD_RETRY_DELAY_MS);
     if (cancelled()) throw await stop();
     try {

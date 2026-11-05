@@ -515,7 +515,7 @@ fn dispatch(req: &Request, token: &str) -> Result<serde_json::Value, RpcError> {
             Ok(serde_json::json!({ "base": base }))
         }
 
-"fs_upload_begin" => {
+        "fs_upload_begin" => {
             // The HTTP upload channel (board #23): the destination and the
             // size are fixed HERE, through the one upload validator.
             let path = param(p, "path")?;
