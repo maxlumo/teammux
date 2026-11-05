@@ -4655,6 +4655,11 @@ mod tests {
         call("hub_agent_interrupt", serde_json::json!({ "session": session, "agent": "robert" })).expect("interrupt by label");
         call("hub_agent_interrupt", serde_json::json!({ "session": session, "agent": "bob" })).expect("interrupt by old label");
 
+        // A typed notice to a label (board reviews, note notices, the offline
+        // notice all go through `deliver_chat_line`) reaches the physical pane.
+        assert_eq!(crate::projects::deliver_chat_line_found(&session, "bob", "[tmm chat 2026-11-05 14:45] tmm: [reply] @dev notice-by-label"), Some(true));
+        assert!(wait_for("dev", "tmm: [reply] @robert notice-by-label"), "and the notice names agents by label: {}", pane("dev"));
+
         // Board: the assignee is stored as the physical name.
         let saved = call("hub_board_save", serde_json::json!({ "session": session, "title": "t", "assignee": "bob", "who": "lead" })).unwrap();
         let issue = call("hub_board_get", serde_json::json!({ "session": session, "id": saved["id"] })).unwrap();
@@ -4690,6 +4695,15 @@ mod tests {
         call("hub_agent_rename", serde_json::json!({ "session": session, "agent": "rob", "label": "roberta" })).unwrap();
         assert_eq!(turn(), busy, "a rename mid-turn changes nothing about the turn");
         assert!(busy.1.contains(&"lead".to_string()), "{busy:?}");
+
+        // The remaining live-agent verbs, by a previous label (round 1 sweep).
+        let left = call("hub_agent_set_team", serde_json::json!({ "session": session, "agent": "bob", "team": "" })).expect("team move by label");
+        assert_eq!(left["agent"], "dev", "{left}");
+        call("hub_agent_stop", serde_json::json!({ "session": session, "agent": "rob" })).expect("stop by label");
+        assert!(window_of_agent(&session, "dev").is_none(), "dev's window is gone");
+        call("hub_agent_remove", serde_json::json!({ "session": session, "agent": "roberta" })).expect("remove by label");
+        assert!(!ws.join(".tmm/agents/dev").exists(), "dev's home is gone");
+        assert_eq!(crate::projects::names::resolve(&session, "roberta"), "roberta", "and its labels are free");
 
     }
 

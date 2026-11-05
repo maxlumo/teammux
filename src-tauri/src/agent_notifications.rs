@@ -180,7 +180,7 @@ impl AgentNotificationHub {
     #[cfg(not(any(target_os = "android", target_os = "ios")))]
     pub(crate) fn open_prompt(&self, session: &str, window: &str, backend: Option<crate::backends::Backend>, prompt: &str) -> crate::projects::telemetry::PromptOutcome {
         let own = backend.and_then(|b| b.cli_own_prompt(prompt));
-        self.start_turn(session, window, if own.is_some() { Vec::new() } else { reply_targets(prompt) });
+        self.start_turn(session, window, if own.is_some() { Vec::new() } else { reply_targets(session, prompt) });
         crate::projects::telemetry::record_prompt_outcome(session, window, prompt, own.as_deref())
     }
 
@@ -207,7 +207,7 @@ impl AgentNotificationHub {
     pub(crate) fn scratch_with_turn(session: &str, window: &str, prompt: &str) -> (Self, PathBuf) {
         let root = crate::config::test_scratch("tmm-scratch-hub");
         let hub = Self::load_at(root.clone());
-        hub.start_turn(session, window, reply_targets(prompt));
+        hub.start_turn(session, window, reply_targets(session, prompt));
         (hub, root)
     }
 
@@ -1387,10 +1387,12 @@ fn join_targets(targets: &mut Vec<String>, more: Vec<String>) {
     }
 }
 
-/// Senders of stamped chat requests in a submitted prompt: the one parser,
-/// `address::requesters`, shared with the activity log's stored column.
-fn reply_targets(prompt: &str) -> Vec<String> {
-    crate::address::requesters(prompt)
+/// Senders of stamped chat requests in a submitted prompt, as PHYSICAL
+/// agents: the one parser and the one resolution (`telemetry::requesters_in`,
+/// board #20), shared with the activity log's stored column. A typed line
+/// shows its sender's label, and the reply is typed to the physical window.
+fn reply_targets(session: &str, prompt: &str) -> Vec<String> {
+    crate::projects::telemetry::requesters_in(session, prompt)
 }
 
 fn truncate(input: &str, max: usize) -> String {
@@ -2105,7 +2107,7 @@ mod tests {
         hub.set_room_poster(spy.clone());
         let (_, win, _) = crate::tmux::resolve_pane_id(&pane_id).expect("pane resolves");
         // Board #289: the human asks in the same turn (one combined prompt).
-        hub.start_turn(&session, &win, reply_targets("[tmm chat 2026-09-08 08:00] lead: @dev fix it\n\n[tmm chat 2026-09-08 08:00] human: @dev and add a test"));
+        hub.start_turn(&session, &win, reply_targets("", "[tmm chat 2026-09-08 08:00] lead: @dev fix it\n\n[tmm chat 2026-09-08 08:00] human: @dev and add a test"));
         std::fs::create_dir_all(root.join("inbox")).unwrap();
         // Exactly the payload measured from kiro-cli 2.16.2.
         std::fs::write(
@@ -2138,6 +2140,100 @@ mod tests {
         let _ = std::process::Command::new("tmux").args(["kill-session", "-t", &session]).status();
         let _ = std::fs::remove_dir_all(&ws);
         let _ = std::fs::remove_dir_all(root);
+    }
+
+    /// Board #20 round 1 (validator P1, orchestrator 14:39): a typed line shows
+    /// its sender's LABEL, so the reply edge must resolve it back to the
+    /// physical agent, or the final reply is typed to nobody. Through the real
+    /// hook path: userPromptSubmit then Stop into the inbox, a RoomPoster spy
+    /// at the end. The current label, a previous label and the physical name
+    /// each give reply_to = the physical requester; an agent asking under its
+    /// own label is still never its own target.
+    #[test]
+    fn a_request_typed_under_a_label_gets_its_final_reply() {
+        crate::projects::tests::use_test_store();
+        let session = format!("tmm-label-reply-{}", uuid::Uuid::new_v4());
+        let ws = crate::config::test_scratch("tmm-label-reply-ws");
+        for a in ["v", "lead"] {
+            std::fs::create_dir_all(ws.join(".tmm/agents").join(a)).unwrap();
+            std::fs::write(ws.join(".tmm/agents").join(a).join("launch.json"), "{}").unwrap();
+        }
+        let created = std::process::Command::new("tmux")
+            .args(["new-session", "-d", "-s", &session, "-n", "v", "-c", &ws.to_string_lossy(), "sleep 60"])
+            .status().map(|s| s.success()).unwrap_or(false);
+        if !created {
+            eprintln!("no tmux server — skipping");
+            return;
+        }
+        struct KillOnDrop(String, std::path::PathBuf);
+        impl Drop for KillOnDrop {
+            fn drop(&mut self) {
+                let _ = std::process::Command::new("tmux").args(["kill-session", "-t", &format!("={}", self.0)]).stderr(std::process::Stdio::null()).status();
+                let _ = std::fs::remove_dir_all(&self.1);
+            }
+        }
+        let _cleanup = KillOnDrop(session.clone(), ws.clone());
+        crate::projects::adopt(&session, Some("label-reply-test")).expect("adopt");
+        crate::projects::names::rename(&session, "lead", Some("bob")).unwrap();
+        crate::projects::names::rename(&session, "lead", Some("robert")).unwrap();
+        crate::projects::names::rename(&session, "v", Some("vera")).unwrap();
+        let pane_id = String::from_utf8(
+            std::process::Command::new("tmux").args(["display-message", "-p", "-t", &session, "#{pane_id}"]).output().unwrap().stdout,
+        ).unwrap().trim().to_string();
+        struct Spy(std::sync::Mutex<Vec<Vec<String>>>);
+        impl RoomPoster for Spy {
+            fn post_final(&self, _s: &str, _a: &str, _b: &str, reply_to: &[String]) -> Result<(), String> {
+                self.0.lock().unwrap().push(reply_to.to_vec());
+                Ok(())
+            }
+        }
+        let spy = std::sync::Arc::new(Spy(std::sync::Mutex::new(Vec::new())));
+        let root = crate::config::test_scratch("tmm-label-reply-hub");
+        let hub = AgentNotificationHub::load_at(root.clone());
+        hub.set_room_poster(spy.clone());
+        std::fs::create_dir_all(root.join("inbox")).unwrap();
+        let mut seq = 0;
+        let mut feed = |payload: Value| {
+            seq += 1;
+            let envelope = json!({ "backend": "kiro", "pane_id": pane_id, "payload": payload });
+            std::fs::write(root.join("inbox").join(format!("{seq:03}.json")), serde_json::to_vec(&envelope).unwrap()).unwrap();
+            hub.consume_inbox();
+        };
+        let prompt = |text: &str| json!({ "hook_event_name": "userPromptSubmit", "cwd": ws.to_string_lossy(), "session_id": "c", "prompt": text });
+        let stop = |text: &str| json!({ "hook_event_name": "stop", "cwd": ws.to_string_lossy(), "session_id": "c", "assistant_response": text });
+        for sender in ["robert", "bob", "lead"] {
+            feed(prompt(&format!("[tmm chat 2026-11-05 14:40] {sender}: @vera please check")));
+            feed(stop("checked"));
+        }
+        feed(prompt("[tmm chat 2026-11-05 14:41] vera: [wake] @vera look again"));
+        feed(stop("looked"));
+        let posts = spy.0.lock().unwrap().clone();
+        assert_eq!(posts, vec![vec!["lead".to_string()], vec!["lead".to_string()], vec!["lead".to_string()], vec![]],
+            "each request's reply goes to the physical requester; never back to itself");
+        let _ = std::fs::remove_dir_all(root);
+    }
+
+    /// Board #20 round 1: the typed `[reply]` line shows the replying agent's
+    /// label, as every other typed line does; the room row keeps the
+    /// physical sender and recipients.
+    #[test]
+    fn a_typed_reply_line_shows_the_senders_label() {
+        crate::projects::tests::use_test_store();
+        let session = format!("tmm-label-replyline-{}", uuid::Uuid::new_v4());
+        let ws = crate::config::test_scratch("tmm-label-replyline-ws");
+        std::fs::create_dir_all(ws.join(".tmm/agents/dev")).unwrap();
+        std::fs::write(ws.join(".tmm/agents/dev/launch.json"), "{}").unwrap();
+        let p = crate::projects::store::Project {
+            id: session.clone(), name: session.clone(), path: ws.to_string_lossy().into_owned(), icon: None, session: session.clone(),
+            adopted: false, autostart: false, created_at: 1, last_up_at: None, last_seen_at: None, archived: false, room: String::new(),
+        };
+        crate::projects::restore_hold::with_store_for_test(|s| s.insert_project(&p)).unwrap();
+        crate::projects::names::rename(&session, "dev", Some("robert")).unwrap();
+        let mut typed = Vec::new();
+        crate::server::post_final_for_test(&session, "dev", "done", &["lead".to_string()], |t, l| typed.push((t.to_string(), l.to_string()))).unwrap();
+        assert_eq!(typed.len(), 1);
+        assert!(typed[0].1.ends_with("robert: [reply] done"), "{typed:?}");
+        let _ = std::fs::remove_dir_all(ws);
     }
 
     /// #256 review (validator 03:11, orchestrator 03:05/03:07): the FULL hook
@@ -2715,7 +2811,7 @@ mod tests {
                 assert_eq!(body, "Fixed it: the test assumed a fast disk.", "read from k1's wire, not k2's");
                 assert_eq!(reply_to, &vec!["lead".to_string()], "the array prompt routed exactly like the string shape");
             }
-            assert_eq!(reply_targets(line), vec!["lead"], "the string shape, for comparison");
+            assert_eq!(reply_targets("", line), vec!["lead"], "the string shape, for comparison");
             let prompt = crate::projects::telemetry::recent_events(&session, 0)
                 .into_iter()
                 .find(|e| e.kind == "prompt")
@@ -4698,16 +4794,16 @@ mod tests {
     #[test]
     fn reply_targets_are_addressed_once_and_replies_do_not_loop() {
         assert_eq!(
-            reply_targets(
+            reply_targets("",
                 "[tmm chat 2026-09-08 08:00] lead: @dev fix it\n\
                  [tmm chat 2026-09-08 08:01] reviewer: @dev check it\n\
                  [tmm chat 2026-09-08 08:02] lead: @dev one more thing"
             ),
             vec!["lead", "reviewer"]
         );
-        assert_eq!(reply_targets("[tmm chat 2026-09-08 08:03] human: @dev ship it"), vec!["human"], "recorded to the human (#289)");
-        assert!(reply_targets("[tmm chat 2026-09-08 08:04] lead: [reply] looks good").is_empty());
-        assert!(reply_targets("[tmm chat 2026-09-08 08:05] worker: [done] old completion").is_empty());
+        assert_eq!(reply_targets("", "[tmm chat 2026-09-08 08:03] human: @dev ship it"), vec!["human"], "recorded to the human (#289)");
+        assert!(reply_targets("", "[tmm chat 2026-09-08 08:04] lead: [reply] looks good").is_empty());
+        assert!(reply_targets("", "[tmm chat 2026-09-08 08:05] worker: [done] old completion").is_empty());
     }
 
     /// Board #257: one combined prompt of held lines replies to each distinct
@@ -4721,7 +4817,7 @@ mod tests {
             "[tmm chat 2026-09-28 03:03] builder: [reply] fyi",
         ]
         .join("\n\n");
-        assert_eq!(reply_targets(&combined), vec!["lead", "validator"]);
+        assert_eq!(reply_targets("", &combined), vec!["lead", "validator"]);
     }
 
     /// #257 review (validator 04:48, orchestrator 04:49 item 4): a combined
@@ -4746,7 +4842,7 @@ mod tests {
         assert!(combined.find("validator:").unwrap() > 1024, "the second requester sits past the text cut");
         let root = crate::config::test_scratch("tmm-combined");
         let hub = AgentNotificationHub::load_at(root.clone());
-        hub.start_turn(&session, "v", reply_targets(&combined));
+        hub.start_turn(&session, "v", reply_targets("", &combined));
         record_prompt(&session, "v", &combined);
         // validator 05:04 / orchestrator 05:05: the row carries its senders
         // the moment record_prompt returns — one INSERT, no second write.
@@ -4929,7 +5025,7 @@ mod tests {
         let hub = AgentNotificationHub::load_at(root.clone());
         // The live order: start_turn, then the prompt is recorded.
         let input = |hub: &AgentNotificationHub, line: &str| {
-            hub.start_turn(&session, "v", reply_targets(line));
+            hub.start_turn(&session, "v", reply_targets("", line));
             record_prompt(&session, "v", line);
         };
 

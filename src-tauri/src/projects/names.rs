@@ -53,6 +53,12 @@ pub fn rename(session: &str, agent: &str, label: Option<&str>) -> Result<Label, 
         if crate::address::is_routing_word(l) {
             return Err(format!("'{l}' is reserved: it addresses everyone or the person, not an agent"));
         }
+        // The system's own sender (`[tmm chat …] tmm: …`, the room's notices;
+        // round 1 P2): a label equal to it would make the agent's lines read
+        // as the system's.
+        if l.eq_ignore_ascii_case("tmm") {
+            return Err(format!("'{l}' is reserved: it is the system's sender, and an agent shown as it would read as the system"));
+        }
         if physical_names(session, &project)?.iter().any(|p| p == l) {
             return Err(format!("'{l}' is the name of agent '{l}' in this project"));
         }
@@ -153,6 +159,9 @@ mod tests {
         assert_eq!(refused("val"), "'val' is already a name of agent 'validator' in this project", "a previous label stays reserved");
         for reserved in ["all", "human", "ALL", "Human"] {
             assert_eq!(refused(reserved), format!("'{reserved}' is reserved: it addresses everyone or the person, not an agent"));
+        }
+        for system in ["tmm", "TMM"] {
+            assert_eq!(refused(system), format!("'{system}' is reserved: it is the system's sender, and an agent shown as it would read as the system"));
         }
         assert!(refused("has space").contains("agent name"), "the agent-name validation: {}", refused("has space"));
         assert!(refused("").contains("must not be empty"));

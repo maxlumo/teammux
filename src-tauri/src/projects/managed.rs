@@ -298,6 +298,13 @@ pub fn deliver_chat_line(session: &str, target_name: &str, line: &str) -> bool {
 /// the pane refuse it (`false`, copy mode). A caller that reports what it
 /// attempted reads the first fact, never the second as a delivery.
 pub fn deliver_chat_line_found(session: &str, target_name: &str, line: &str) -> Option<bool> {
+    // Any of the agent's names reaches it (board #20): the delivery row and
+    // the pane lookup use the PHYSICAL window, which its echo will name.
+    // The line names agents as the project shows them now (the one display):
+    // its addresses, e.g. a team notice's `@dev moved …`, by current label.
+    let names = super::names::names(session);
+    let target_name = names.resolve(target_name);
+    let line = &names.show_body(line);
     let target = crate::projects::delivery::agent_target(session, target_name)?;
     Some(crate::projects::delivery::deliver(session, target_name, &target, line, 0, ""))
 }

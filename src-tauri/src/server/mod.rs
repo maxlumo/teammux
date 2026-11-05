@@ -77,11 +77,21 @@ impl crate::agent_notifications::RoomPoster for HubRoomPoster {
 fn post_final_with(session: &str, agent: &str, body: &str, reply_to: &[String], mut deliver: impl FnMut(&str, &str)) -> Result<(), String> {
     let room = hub_rpc::project_room(session);
     crate::projects::rooms::post_routed(&room, agent, body, reply_to)?;
+    // Typed under the replying agent's label (board #20), like every typed
+    // line; the row above keeps the physical sender and recipients.
+    let names = crate::projects::names::names(session);
+    let (shown, shown_body) = (names.shown(agent), names.show_body(body));
     for target in crate::address::pane_targets(reply_to) {
-        let line = format!("[tmm chat {}] {agent}: [reply] {body}", hub_rpc::stamp_now());
+        let line = format!("[tmm chat {}] {shown}: [reply] {shown_body}", hub_rpc::stamp_now());
         deliver(target, &line);
     }
     Ok(())
+}
+
+/// `post_final_with` for tests outside this module (board #20).
+#[cfg(all(test, not(any(target_os = "android", target_os = "ios"))))]
+pub(crate) fn post_final_for_test(session: &str, agent: &str, body: &str, reply_to: &[String], deliver: impl FnMut(&str, &str)) -> Result<(), String> {
+    post_final_with(session, agent, body, reply_to, deliver)
 }
 
 #[cfg(all(test, not(any(target_os = "android", target_os = "ios"))))]
