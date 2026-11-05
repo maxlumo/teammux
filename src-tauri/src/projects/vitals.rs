@@ -1064,4 +1064,84 @@ mod tests {
         assert_eq!(v.context_pct, None, "the gauge starts at ▶");
         assert!(sniff_omp("").is_empty());
     }
+
+    /// omp 18.15.0 made `composer.shape: band` the default (measured live,
+    /// 2026-11-05): the footer lost its `╭ … ╮` border and its `π` head, the
+    /// thinking level became the glyph in front of the model, and the line
+    /// sits directly above the prompt's `╰─` corner. These are the captured
+    /// lines, idle and mid-turn.
+    #[test]
+    fn omp_band_footer_reads_model_effort_and_context() {
+        // Idle, a model with no thinking levels: `⬢`, so no effort, and that is a verdict.
+        let idle = sniff_omp(" π > ⬢ Opus 5.5 (UST) > 🗑 /tmp ▶─1%──────────────────────────────────╎┃──────1M─\n╰─                                                  ⇧⇥ to change thinking effort\n");
+        assert_eq!(idle.model.as_deref(), Some("Opus 5.5 (UST)"));
+        assert_eq!(idle.effort, None);
+        assert!(idle.effort_definitive);
+        assert_eq!(idle.context_pct, Some(1));
+
+        // Mid-turn, the head is a spinner with the elapsed time.
+        let working = sniff_omp("  ⎋ Running sleep 25\n ⠼ 7s > ⬢ Opus 5.5 (UST) > 🗑 /tmp ▶─2%───┃1M─\n╰─\n");
+        assert_eq!(working.model.as_deref(), Some("Opus 5.5 (UST)"));
+        assert_eq!(working.context_pct, Some(2));
+
+        // A model with thinking levels: the glyph IS the level.
+        let high = sniff_omp("say hi\n Hi! What are you working on?\n π > ◒ Opus 5.5 (UST) > 🗑 /tmp ▶─2%─────╎┃1M─\n╰─               ⇧⇥ to change thinking effort\n");
+        assert_eq!(high.model.as_deref(), Some("Opus 5.5 (UST)"));
+        assert_eq!(high.effort.as_deref(), Some("high"));
+        assert_eq!(high.context_pct, Some(2));
+
+        // `statusLine.compactThinkingLevel: false` spells the level out, as the box shape did.
+        let spelled = sniff_omp(" π > ⬢ Opus 5.5 (UST) · ◒ high > 🗑 /tmp ▶─1%────────╎┃1M─\n╰─\n");
+        assert_eq!(spelled.model.as_deref(), Some("Opus 5.5 (UST)"));
+        assert_eq!(spelled.effort.as_deref(), Some("high"));
+    }
+
+    /// Every level's glyph, measured with `omp --thinking <level>` on 18.15.0.
+    #[test]
+    fn omp_band_footer_glyph_is_the_thinking_level() {
+        for (glyph, level) in [("⦸", "off"), ("○", "minimal"), ("◔", "low"), ("◑", "medium"), ("◒", "high"), ("◕", "xhigh"), ("⟳", "auto")] {
+            let v = sniff_omp(&format!(" π > {glyph} Opus 5.5 (UST) > 🗑 /tmp ▶─1%────╎┃1M─\n╰─\n"));
+            assert_eq!(v.effort.as_deref(), Some(level), "{glyph}");
+            assert_eq!(v.model.as_deref(), Some("Opus 5.5 (UST)"), "{glyph}");
+        }
+    }
+
+    /// A cwd too long for the pane drops the model segment (captured on the
+    /// 45-column phone-width pane); the gauge is still read and `backfill`
+    /// keeps the wide reading's model.
+    #[test]
+    fn omp_band_footer_narrow_form_keeps_only_the_gauge() {
+        let narrow = sniff_omp(" ⠹ 32s > 📁 …mmux ▶────17%────────────╎┃──1M─\n╰─\n");
+        assert_eq!(narrow.model, None);
+        assert!(!narrow.effort_definitive, "no model segment, no verdict");
+        assert_eq!(narrow.context_pct, Some(17));
+    }
+
+    /// The band footer has no border, and this project's room messages quote
+    /// footers verbatim, so only the position authenticates it: a line one
+    /// space in, with the prompt's `╰─` corner in column 0 right under it.
+    #[test]
+    fn omp_band_footer_is_a_position_not_a_pattern() {
+        let footer = " π > ◒ Opus 5.5 (UST) > 🗑 /tmp ▶─1%────╎┃1M─";
+        // The same text, indented as a paste or a quote, with its corner indented too.
+        assert!(sniff_omp(&format!("  {footer}\n  ╰─\n")).is_empty());
+        // Not above a corner at all.
+        assert!(sniff_omp(&format!("{footer}\nplain output\n")).is_empty());
+        assert!(sniff_omp(&format!("{footer}\n")).is_empty());
+        // A chat line quoting it, or a tool card drawing it.
+        assert!(sniff_omp(&format!("[tmm chat 03:00] kiro: {footer}\n╰─\n")).is_empty());
+        assert!(sniff_omp("│ π > ◒ Opus 5.5 ▶─3%─┃1M │\n╰────────────╯\n").is_empty());
+        // Not a footer head.
+        assert!(sniff_omp(" note > ◒ Opus 5.5 (UST) > 🗑 /tmp ▶─1%────╎┃1M─\n╰─\n").is_empty());
+        // No gauge arrow.
+        assert!(sniff_omp(" π > ◒ Opus 5.5 (UST) > 🗑 /tmp\n╰─\n").is_empty());
+        // A % in the cwd is not context.
+        let v = sniff_omp(" π > 📁 /tmp/50%-done ▶──────\n╰─\n");
+        assert_eq!(v.context_pct, None);
+        // The newest footer wins over one that scrolled up.
+        let two = sniff_omp(" π > ◒ Old (UST) > 🗑 /tmp ▶─9%──╎┃1M─\n╰─\nmore output\n π > ◑ New (UST) > 🗑 /tmp ▶─4%──╎┃1M─\n╰─\n");
+        assert_eq!(two.model.as_deref(), Some("New (UST)"));
+        assert_eq!(two.effort.as_deref(), Some("medium"));
+        assert_eq!(two.context_pct, Some(4));
+    }
 }

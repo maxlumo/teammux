@@ -84,50 +84,96 @@ use serde_json::Value;
 #[cfg(not(any(target_os = "android", target_os = "ios")))]
 use crate::projects::vitals::Vitals;
 
-/// omp's persistent footer is the TOP border of its input box — one line
-/// carrying the π mark and, width permitting, the model, thinking level,
-/// cwd, session cost and a context gauge (measured, omp 18.0.6):
+/// omp's persistent footer is one line of `>`-separated segments: a head,
+/// then, width permitting, the model with its thinking level, the cwd, the
+/// session cost and a context gauge. It has had two shapes:
 ///
-/// `╭── π  > ⬢ Fable 5.1 (Bedrock, 1M) · ◒ high > 📁 /path > $0.45 ▶─3%─┃1M───╮`
+/// * the BOX shape (omp 18.0.6 to 18.2.10, and `composer.shape: box` on
+///   later builds), the top border of the input box:
+///   `╭── π  > ⬢ Fable 5.1 (Bedrock, 1M) · ◒ high > 📁 /path > $0.45 ▶─3%─┃1M───╮`
+/// * the BAND shape (omp 18.15.0, the default `composer.shape: band`, measured
+///   2026-11-05): no border, the thinking level is a glyph in front of the
+///   model, and the head is `π` when idle and a spinner with the turn's
+///   elapsed time while a turn runs:
+///   ` π > ◒ Opus 5.5 (UST) > 🗑 /tmp ▶─1%────╎┃──────1M─`
+///   ` ⠼ 7s > ⬢ Opus 5.5 (UST) > 🗑 /tmp ▶─2%────╎┃──────1M─`
+///   `╰─                       ⇧⇥ to change thinking effort`
 ///
-/// The line is RESPONSIVE: a fresh session has no gauge yet
-/// (`… > 📁 /path ▶────────╮`), and a narrow pane drops the model/effort
-/// segments entirely (`╭── π  > 📁 …work ▶────13%───┃────1M───╮` was
-/// measured live) — so every field is independently optional and `backfill`
-/// carries an older wide reading across a narrow capture. The `>`-separated
-/// segments are read by MARK, not position: `⬢` heads the model (with the
-/// thinking level as its `·` sub-segment), `▶ … ┃` frames the used-context
-/// percentage. Cost and the window size have no Vitals field and are not
-/// read.
+/// The line is RESPONSIVE: a fresh session has no gauge yet, and a pane too
+/// narrow for the cwd drops the model segment (`… 32s > 📁 …mmux ▶──17%─╎┃1M─`
+/// was measured live) — so every field is independently optional and
+/// `backfill` carries an older wide reading across a narrow capture. The
+/// segments are read by MARK, not position: a glyph heads the model
+/// (`⬢` = the model has no thinking levels, `⦸ ○ ◔ ◑ ◒ ◕ ⟳` = off, minimal,
+/// low, medium, high, xhigh, auto; the box shape and
+/// `statusLine.compactThinkingLevel: false` spell the level as a `· ◒ high`
+/// sub-segment instead), `▶ … ┃` frames the used-context percentage. Cost and
+/// the window size have no Vitals field and are not read.
+///
+/// The BAND footer has no border to authenticate it, and this project's own
+/// room messages quote footers verbatim, so it is a POSITION: the line
+/// directly above a line that starts with `╰─` in column 0 (the prompt's
+/// own corner), whose head is `π` or a braille spinner and which carries the
+/// `▶` gauge. A quote in a message, a tool card (`│ …`) or an indented
+/// paste has no `╰─` under it at column 0.
 #[cfg(not(any(target_os = "android", target_os = "ios")))]
 pub fn sniff_omp(pane: &str) -> Vitals {
-    let mut v = Vitals::default();
-    for line in pane.lines().rev() {
+    let lines: Vec<&str> = pane.lines().collect();
+    for (i, line) in lines.iter().enumerate().rev() {
         let s = line.trim();
-        // The signature: an input-box top border that carries omp's π mark.
+        // BOX signature: an input-box top border that carries omp's π mark.
         // Tool cards and plain output draw boxes too, but never with π.
-        if !(s.starts_with('╭') && s.ends_with('╮') && s.contains(" π ")) {
+        let boxed = s.starts_with('╭') && s.ends_with('╮') && s.contains(" π ");
+        // BAND signature: see the position rule above.
+        let banded = !boxed
+            && line.starts_with(' ')
+            && !line.starts_with("  ")
+            && lines.get(i + 1).is_some_and(|next| next.starts_with("╰─"))
+            && s.contains('▶')
+            && s.split(" > ").next().is_some_and(is_band_head);
+        if !(boxed || banded) {
             continue;
         }
+        let mut v = Vitals::default();
         for segment in s.split(" > ") {
             let segment = segment.trim();
-            if let Some(model_part) = segment.strip_prefix('⬢') {
-                // `⬢ <model> [· <glyph> <effort>]` — the glyph varies with
-                // the level, so the effort is read as the sub-segment's last
-                // word, gated on omp's own enum.
-                let mut parts = model_part.split(" · ");
-                let model = parts.next().unwrap_or("").trim();
-                if !model.is_empty() {
-                    v.model = Some(model.to_string());
-                    // The model segment is the one that carries the level:
-                    // seeing it without one is a verdict, not a truncation.
-                    v.effort_definitive = true;
+            // `<mark> <model> [· <glyph> <effort>]`: the box shape's mark is
+            // always `⬢` with the level as a sub-segment, the band shape's
+            // is the level glyph itself.
+            let Some((mark, model_part)) = segment.chars().next().map(|c| (c, &segment[c.len_utf8()..])) else {
+                continue;
+            };
+            let glyph_effort = match mark {
+                '⬢' => None,
+                '⦸' => Some("off"),
+                '○' => Some("minimal"),
+                '◔' => Some("low"),
+                '◑' => Some("medium"),
+                '◒' => Some("high"),
+                '◕' => Some("xhigh"),
+                '⟳' => Some("auto"),
+                _ => continue,
+            };
+            if !model_part.starts_with(' ') {
+                continue;
+            }
+            let mut parts = model_part.split(" · ");
+            let model = parts.next().unwrap_or("").trim();
+            if !model.is_empty() {
+                v.model = Some(model.to_string());
+                // The model segment is the one that carries the level:
+                // seeing it without one is a verdict, not a truncation.
+                v.effort_definitive = true;
+                if let Some(level) = glyph_effort {
+                    v.effort = Some(level.to_string());
                 }
-                for extra in parts {
-                    if let Some(word) = extra.split_whitespace().last() {
-                        if matches!(word, "off" | "minimal" | "low" | "medium" | "high" | "xhigh" | "max" | "auto") {
-                            v.effort = Some(word.to_string());
-                        }
+            }
+            // The glyph varies with the level, so the effort is read as the
+            // sub-segment's last word, gated on omp's own enum.
+            for extra in parts {
+                if let Some(word) = extra.split_whitespace().last() {
+                    if matches!(word, "off" | "minimal" | "low" | "medium" | "high" | "xhigh" | "max" | "auto") {
+                        v.effort = Some(word.to_string());
                     }
                 }
             }
@@ -153,9 +199,17 @@ pub fn sniff_omp(pane: &str) -> Vitals {
                 }
             }
         }
-        break; // the last π border is the live footer; older ones scrolled by
+        return v; // the last footer is the live one; older ones scrolled by
     }
-    v
+    Vitals::default()
+}
+
+/// The band footer's head: `π` when idle, a braille spinner (and the turn's
+/// elapsed time, `⠼ 7s`) while a turn runs.
+#[cfg(not(any(target_os = "android", target_os = "ios")))]
+fn is_band_head(head: &str) -> bool {
+    let head = head.trim();
+    head == "π" || head.chars().next().is_some_and(|c| ('\u{2800}'..='\u{28ff}').contains(&c))
 }
 
 
