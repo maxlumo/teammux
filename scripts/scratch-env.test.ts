@@ -114,34 +114,57 @@ test('the gateway routes privately only when it lists exactly the private server
   assert.match(routeVerdict([MARKER], [])!, /private tmux server has no scratch-env-marker/u, 'the marker must really be on the private server');
 });
 
-// Board #30: on macOS there is no /proc. `ps -E -ww -o command=` prints the
-// argv line, one space, then the environment space-joined; `ps -ww -o
-// command=` prints the argv line alone (both captured on clawdbjs, macOS
-// 27.0.1, from `env -i PATH=/usr/bin:/bin TMUX_TMPDIR="/tmp/a b" FOO=1 node -e
-// … x=y "two words"`). A platform binary (/bin/sleep) shows no environment.
-const MAC_ARGV = '/opt/homebrew/bin/node -e setTimeout(()=>{},20000) x=y two words';
-const MAC_WITH_ENV = `${MAC_ARGV} PATH=/usr/bin:/bin TMUX_TMPDIR=/tmp/a b FOO=1`;
+// Board #30: macOS has no /proc. Its NUL-separated source is
+// sysctl(KERN_PROCARGS2), read for our own processes through the host's
+// python3: argc (int32 LE), the exec path, NUL padding, argc argv strings,
+// the environment, an empty string, then the kernel's apple strings. Round 1
+// (reviewer P1-R1): `ps -E` joins with spaces, so a value could forge a
+// variable. Captured on clawdbjs (macOS 27.0.1) from `env -i PATH=/usr/bin:/bin
+// XDG_*_HOME=/s/gw/xdg-* NOTE="diagnostic TMUX_TMPDIR=/s/gw" node -e … 
+// TMUX_TMPDIR=/s/gw "two words"`, cut inside the padding before the apple
+// strings (they name the host's boot and binary hashes).
+const MAC_FORGED = Buffer.from(
+  '050000002f6f70742f686f6d65627265772f62696e2f6e6f646500002f6f70742f686f6d65627265772f62696e2f6e6f6465002d650073657454696d656f7574'
+  + '2828293d3e7b7d2c32303030302900544d55585f544d504449523d2f732f67770074776f20776f72647300504154483d2f7573722f62696e3a2f62696e005844'
+  + '475f434f4e4649475f484f4d453d2f732f67772f7864672d636f6e666967005844475f444154415f484f4d453d2f732f67772f7864672d64617461005844475f'
+  + '53544154455f484f4d453d2f732f67772f7864672d7374617465004e4f54453d646961676e6f7374696320544d55585f544d504449523d2f732f677700000000', 'hex');
+const MAC_ENV = ['PATH=/usr/bin:/bin', 'XDG_CONFIG_HOME=/s/gw/xdg-config', 'XDG_DATA_HOME=/s/gw/xdg-data', 'XDG_STATE_HOME=/s/gw/xdg-state', 'NOTE=diagnostic TMUX_TMPDIR=/s/gw'];
+// /bin/sleep 5, a platform binary: the kernel gives its argv and no environment.
+const MAC_SLEEP = Buffer.from('020000002f62696e2f736c6565700000000000002f62696e2f736c65657000350' + '0', 'hex');
 
-test('the macOS ps -E line yields exactly the environment: the argv copy is cut, a spaced value is kept (#30)', async () => {
-  const { psEnviron } = await import('./scratch-env.mjs');
-  assert.deepEqual(psEnviron(MAC_ARGV, MAC_WITH_ENV), { environ: nul(['PATH=/usr/bin:/bin', 'TMUX_TMPDIR=/tmp/a b', 'FOO=1']) });
+test('the macOS process arguments yield exactly the environment: the argv copy is cut, each value kept whole (#30)', async () => {
+  const { procargsEnviron } = await import('./scratch-env.mjs');
+  assert.deepEqual(procargsEnviron(MAC_FORGED), { environ: nul(MAC_ENV) });
 });
 
-test('an environment ps -E cannot show or cannot tell apart is unreadable, never empty (#30)', async () => {
-  const { psEnviron } = await import('./scratch-env.mjs');
-  assert.match(psEnviron('/bin/sleep 5', '/bin/sleep 5').why, /no environment/, 'a platform binary hides its environment');
-  assert.match(psEnviron(MAC_ARGV, '/usr/bin/other PATH=/bin').why, /argv/, 'the argv changed between the two reads');
-  assert.match(psEnviron(MAC_ARGV, `${MAC_ARGV} TMUX_TMPDIR=/a TMUX_TMPDIR=/b`).why, /TMUX_TMPDIR.*twice/, 'a name seen twice is ambiguous');
+test('a TMUX_TMPDIR forged inside another value, or in argv, does not pass the check on macOS: it is unset, as on Linux (#30 round 1)', async () => {
+  const { procargsEnviron } = await import('./scratch-env.mjs');
+  const found = leaks(procargsEnviron(MAC_FORGED).environ, '/s/gw');
+  assert.deepEqual(found, ["TMUX_TMPDIR is unset (tmux falls back to /tmp, the live server's socket dir), not /s/gw"]);
+  assert.deepEqual(leaks(nul(MAC_ENV), '/s/gw'), found, 'the same verdict Linux gives the same environment');
+});
+
+test('process arguments with no environment, or cut short, are unreadable, never empty (#30)', async () => {
+  const { procargsEnviron } = await import('./scratch-env.mjs');
+  assert.match(procargsEnviron(MAC_SLEEP).why, /no environment/, 'a platform binary hides its environment');
+  assert.match(procargsEnviron(MAC_FORGED.subarray(0, 3)).why, /cut short/);
+  assert.match(procargsEnviron(MAC_FORGED.subarray(0, 0x40)).why, /cut short/, 'inside argv');
+  assert.match(procargsEnviron(MAC_FORGED.subarray(0, 0xe0)).why, /cut short/, 'inside a value: never a shorter value');
 });
 
 test('check reads the environment per platform and fails with the reason when it cannot (#30)', async () => {
   const { environOf } = await import('./scratch-env.mjs');
-  const ps = (argv: string, withEnv: string) => (args: string[]) => ({ status: 0, stdout: `${args.includes('-E') ? withEnv : argv}\n` });
-  assert.deepEqual(environOf('42', { platform: 'darwin', run: ps(MAC_ARGV, MAC_WITH_ENV) }).environ, nul(['PATH=/usr/bin:/bin', 'TMUX_TMPDIR=/tmp/a b', 'FOO=1']));
-  assert.match(environOf('42', { platform: 'darwin', run: () => ({ status: 1, stdout: '' }) }).why, /pid 42/, 'ps finds no such process');
-  assert.match(environOf('42', { platform: 'darwin', run: () => ({ error: new Error('spawn ps ENOENT') }) }).why, /ENOENT/);
+  const ok = () => ({ status: 0, stdout: MAC_FORGED, stderr: Buffer.alloc(0) });
+  assert.deepEqual(environOf('42', { platform: 'darwin', run: ok }).environ, nul(MAC_ENV));
+  assert.match(environOf('42', { platform: 'darwin', run: () => ({ status: 1, stdout: Buffer.alloc(0), stderr: Buffer.from('sysctl: errno 22\n') }) }).why, /pid 42.*errno 22/u, 'gone, or not ours (EINVAL)');
+  assert.match(environOf('42', { platform: 'darwin', run: () => ({ error: new Error('spawn /usr/bin/python3 ENOENT') }) }).why, /python3 ENOENT/u);
   assert.match(environOf('42', { platform: 'freebsd' }).why, /freebsd/, 'an unknown platform is not a pass');
-  // Linux, for real: a pid that does not exist has no /proc/<pid>/environ.
-  assert.match(environOf('999999999', { platform: 'linux' }).why, /\/proc\/999999999\/environ/);
-  assert.equal(environOf(String(process.pid), { platform: 'linux' }).environ, readFileSync(`/proc/${process.pid}/environ`, 'utf8'));
+  const missing = () => { throw new Error("ENOENT: no such file or directory, open '/proc/42/environ'"); };
+  assert.match(environOf('42', { platform: 'linux', readFile: missing }).why, /\/proc\/42\/environ/u);
+});
+
+test('on Linux, check reads the real /proc environment (#30)', { skip: process.platform !== 'linux' }, async () => {
+  const { environOf } = await import('./scratch-env.mjs');
+  assert.equal(environOf(String(process.pid)).environ, readFileSync(`/proc/${process.pid}/environ`, 'utf8'));
+  assert.match(environOf('999999999').why, /\/proc\/999999999\/environ/u);
 });

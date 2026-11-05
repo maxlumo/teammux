@@ -17,7 +17,7 @@
 //       env, writes <dir>/pid (stop it with: kill "$(cat <dir>/pid)").
 //   node scripts/scratch-env.mjs check <dir> [--gateway]
 //       exits 1, naming each route (or why its environment is unreadable:
-//       /proc on Linux, ps -E on macOS, #30), unless the process in <dir>/pid has
+//       /proc on Linux, KERN_PROCARGS2 on macOS, #30), unless the process in <dir>/pid has
 //       TMUX_TMPDIR and the XDG roots exactly under <dir> and kept no
 //       live-pointing name. --gateway also plants a marker session on the
 //       private tmux server and asks the gateway's own list_sessions: it must
@@ -65,53 +65,70 @@ export function leaks(environ, dir) {
   return out;
 }
 
-/** The environment in macOS `ps -E` output (board #30; there is no /proc).
- * `argv` is `ps -ww -o command= -p <pid>`, `withEnv` the same with -E: the
- * argv line, one space, then each NAME=value space-joined (measured on
- * clawdbjs, macOS 27.0.1). The argv copy is cut by that exact prefix, so an
- * argv word like `x=y` is never read as environment; a word that does not
- * start a NAME= continues the previous value (a value with a space). What it
- * cannot tell apart is unreadable, never empty (#26's lesson): no environment
- * at all (a platform binary such as /bin/sleep hides it), an argv that
- * changed between the two reads, or a name seen twice. Returns {environ}
- * (NUL-separated, the /proc form) or {why}. */
-export function psEnviron(argv, withEnv) {
-  const line = argv.trim();
-  const full = withEnv.replace(/\n$/, '');
-  if (!full.startsWith(`${line} `) && full !== line) return { why: `the argv ps -E shows is not the argv ps shows ('${line}')` };
-  const rest = full.slice(line.length + 1);
-  if (!rest) return { why: 'ps -E shows no environment (a platform binary or a process that is not ours hides it)' };
+/** sysctl(KERN_PROCARGS2) for one pid through the macOS host's own python3
+ * (ctypes, no install, no root for our own processes): its raw bytes on
+ * stdout, or the errno on stderr and exit 1. */
+const PROCARGS_PY = `import ctypes, sys
+libc = ctypes.CDLL('/usr/lib/libSystem.B.dylib', use_errno=True)
+mib = (ctypes.c_int * 3)(1, 49, int(sys.argv[1]))
+size = ctypes.c_size_t(0)
+if libc.sysctl(mib, 3, None, ctypes.byref(size), None, 0) != 0: sys.exit('sysctl: errno %d' % ctypes.get_errno())
+buf = ctypes.create_string_buffer(size.value)
+if libc.sysctl(mib, 3, buf, ctypes.byref(size), None, 0) != 0: sys.exit('sysctl: errno %d' % ctypes.get_errno())
+sys.stdout.buffer.write(buf.raw[:size.value])`;
+
+/** The environment in macOS's KERN_PROCARGS2 bytes (board #30 round 1; the
+ * #27 measurement on clawdbjs, macOS 27.0.1): argc (int32 LE), the exec
+ * path, NUL padding, argc argv strings, then the environment, each string
+ * NUL-ended, up to an empty string before the kernel's apple strings. Every
+ * boundary is the kernel's, so neither an argv word nor a value can forge a
+ * variable (reviewer P1-R1 on `ps -E`, which joins them with spaces). What it
+ * cannot read is unreadable, never empty (#26's lesson): no environment (a
+ * platform binary such as /bin/sleep hides it) or bytes cut short. Returns
+ * {environ} (NUL-separated, the /proc form) or {why}. */
+export function procargsEnviron(buf) {
+  const short = { why: 'the process arguments are cut short' };
+  if (buf.length < 4) return short;
+  const argc = buf.readInt32LE(0);
+  let at = 4;
+  const next = () => {
+    const end = buf.indexOf(0, at);
+    if (end === -1) return null;
+    const str = buf.subarray(at, end).toString('utf8');
+    at = end + 1;
+    return str;
+  };
+  if (next() === null) return short; // the exec path
+  while (at < buf.length && buf[at] === 0) at++;
+  for (let i = 0; i < argc; i++) if (next() === null) return short;
   const vars = [];
-  for (const word of rest.split(' ')) {
-    if (/^[A-Za-z_][A-Za-z0-9_]*=/.test(word)) vars.push(word);
-    else if (vars.length) vars[vars.length - 1] += ` ${word}`;
-    else return { why: `ps -E's environment does not start with NAME= ('${word}')` };
+  while (at < buf.length) {
+    const kv = next();
+    if (kv === null) return short;
+    if (kv === '') break;
+    vars.push(kv);
   }
-  const names = vars.map((kv) => kv.slice(0, kv.indexOf('=')));
-  const twice = names.find((n, i) => names.indexOf(n) !== i);
-  if (twice) return { why: `${twice} appears twice in ps -E, which cannot tell a value's spaces from a new variable` };
+  if (!vars.length) return { why: 'the kernel shows no environment (a platform binary or a process that is not ours hides it)' };
   return { environ: vars.map((kv) => `${kv}\0`).join('') };
 }
 
 /** The NUL-separated environment of `pid`, or why it cannot be read: the
  * one platform switch of `check`. Linux reads /proc/<pid>/environ, macOS
- * `ps -E` (psEnviron); anything else, or any failure, is {why}, never a pass. */
-export function environOf(pid, { platform = process.platform, run = (args) => spawnSync('ps', args, { encoding: 'utf8' }) } = {}) {
+ * KERN_PROCARGS2 (procargsEnviron); anything else, or any failure, is {why},
+ * never a pass. */
+export function environOf(pid, {
+  platform = process.platform,
+  readFile = (p) => readFileSync(p, 'utf8'),
+  run = (cmd, args) => spawnSync(cmd, args),
+} = {}) {
   if (platform === 'linux') {
-    try { return { environ: readFileSync(`/proc/${pid}/environ`, 'utf8') }; } catch (e) { return { why: e.message }; }
+    try { return { environ: readFile(`/proc/${pid}/environ`) }; } catch (e) { return { why: e.message }; }
   }
   if (platform === 'darwin') {
-    const read = (args) => {
-      const r = run([...args, '-ww', '-o', 'command=', '-p', pid]);
-      if (r.error) return { why: `ps: ${r.error.message}` };
-      if (r.status !== 0 || !r.stdout.trim()) return { why: `ps finds no process with pid ${pid}` };
-      return { out: r.stdout };
-    };
-    const a = read([]);
-    if (a.why) return a;
-    const e = read(['-E']);
-    if (e.why) return e;
-    return psEnviron(a.out, e.out);
+    const r = run('/usr/bin/python3', ['-I', '-c', PROCARGS_PY, pid]);
+    if (r.error) return { why: `KERN_PROCARGS2 through python3: ${r.error.message}` };
+    if (r.status !== 0) return { why: `KERN_PROCARGS2 for pid ${pid} (gone, or not ours): ${String(r.stderr).trim()}` };
+    return procargsEnviron(Buffer.from(r.stdout));
   }
   return { why: `no way to read a process environment on ${platform}` };
 }
