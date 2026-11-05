@@ -1888,6 +1888,60 @@ mod relaunch_tests {
         std::fs::remove_dir_all(&ws).ok();
     }
 
+    /// Board #29 (measured on codex-cli 0.166.0): `/new` writes nothing a
+    /// hook or the session index reports, but it creates
+    /// `thread-writer-locks/<new id>.lock` at once; the rollout comes only
+    /// with the first prompt. A window kill leaves the locks, and the next
+    /// start removes those of threads it does not run. So when the NEWEST
+    /// lock names a thread with no rollout, the pane was in an empty new
+    /// conversation, and a restart starts fresh rather than reviving the
+    /// cleared one, whatever id was recorded. Only on the measured version,
+    /// and never for a thread the hub saw as a sub-agent child.
+    #[test]
+    fn a_codex_restart_after_new_does_not_revive_the_cleared_conversation() {
+        let ws = crate::config::test_scratch("tmm-relaunch-codex-new");
+        let wss = ws.to_str().unwrap();
+        let home = agent_home(wss, "cx");
+        let codex = home.join("codex");
+        std::fs::create_dir_all(codex.join("thread-writer-locks")).unwrap();
+        std::fs::create_dir_all(codex.join("sessions/2026/11/05")).unwrap();
+        let cmd = "command codex -c a=b --dangerously-bypass-approvals-and-sandbox";
+        LaunchRecipe { backend: "codex", env: &[], cmd, spawned_by: "", team: None, agent_def: "", member: "", from_member: "", input_mode: "" }.write(&home).unwrap();
+        let line = |id: Option<&str>| relaunch_line(wss, "cx", id).unwrap().unwrap();
+        let resume = |id: &str| format!("command codex resume {id} -c a=b --dangerously-bypass-approvals-and-sandbox");
+        let old = "01a1acf2-ff8a-7071-8a17-722f5c7fa5ed";
+        let new = "01a1acf3-7971-7ac0-857c-8fa459c56ba1";
+        let lock = |id: &str, secs: u64| {
+            let f = std::fs::File::create(codex.join("thread-writer-locks").join(format!("{id}.lock"))).unwrap();
+            f.set_modified(std::time::UNIX_EPOCH + std::time::Duration::from_secs(secs)).unwrap();
+        };
+        let rollout = |id: &str| std::fs::write(codex.join("sessions/2026/11/05").join(format!("rollout-2026-11-05T18-22-48-{id}.jsonl")), "{}\n").unwrap();
+        crate::backends::codex::set_test_version(Some("0.166.0"));
+        // A turn: its thread holds a lock and has its rollout.
+        lock(old, 1_793_902_968);
+        rollout(old);
+        assert_eq!(line(Some(old)), resume(old), "the conversation it was in");
+        // `/new`: a newer lock, no rollout yet. Restart before any prompt.
+        lock(new, 1_793_902_999);
+        assert_eq!(line(Some(old)), cmd, "the cleared conversation is not revived");
+        assert_eq!(line(None), cmd, "nor is the newest rollout, which is the cleared one");
+        // Another codex than the one measured: today's line.
+        crate::backends::codex::set_test_version(Some("0.167.0"));
+        assert_eq!(line(Some(old)), resume(old), "an unmeasured version resumes as before");
+        crate::backends::codex::set_test_version(None);
+        assert_eq!(line(Some(old)), resume(old), "an unknown version resumes as before");
+        crate::backends::codex::set_test_version(Some("0.166.0"));
+        // A thread the hub saw as a sub-agent child is never the pane's own.
+        crate::backends::codex::note_child_thread(&home, new).unwrap();
+        assert_eq!(line(Some(old)), resume(old), "a child's lock never starts the parent fresh");
+        std::fs::remove_file(home.join(crate::backends::codex::CHILD_THREADS)).unwrap();
+        // The new conversation's first prompt writes its rollout: resumed as usual.
+        rollout(new);
+        assert_eq!(line(Some(new)), resume(new));
+        crate::backends::codex::set_test_version(None);
+        std::fs::remove_dir_all(&ws).ok();
+    }
+
     /// Board #22 (measured on Claude Code 2.1.318): `--continue` with no
     /// transcript, and `--resume <id>` whose transcript does not exist, both
     /// print "No conversation found…" and exit 1, parking the pane at the
@@ -3185,13 +3239,13 @@ hooks = [ { type = "command", command = "/opt/guard.sh" } ]
         let words: Vec<&str> = cmd.split_whitespace().collect();
         assert!(words.windows(2).any(|w| w == ["--profile", "tmm-agent"]), "the profile door: {cmd}");
         assert!(words.contains(&"--no-daemon"), "no shared background server, started or joined: {cmd}");
-        let resumed = crate::backends::codex::resume_command(&cmd, Some("01a1656d-ae66-7b90-a5b0-6ba62708fd87"));
+        let resumed = crate::backends::codex::resume_command(&cmd, Some("01a1656d-ae66-7b90-a5b0-6ba62708fd87"), None);
         assert!(resumed.starts_with("command codex resume ") && resumed.split_whitespace().any(|w| w == "--no-daemon"), "a resume keeps it: {resumed}");
         // Board #452: no shell snapshot, as a `-c` (beats a user's or a
         // trusted project's `true`), kept by both resume forms.
         let snap = crate::backends::shared::codex_config_override("features.shell_snapshot", serde_json::Value::Bool(false));
         assert!(cmd.contains(&snap), "no shell snapshot: {cmd}");
-        for r in [resumed.clone(), crate::backends::codex::resume_command(&cmd, None)] {
+        for r in [resumed.clone(), crate::backends::codex::resume_command(&cmd, None, None)] {
             assert!(r.contains(&snap), "a resume keeps it: {r}");
         }
         // And a render removes the cache an earlier launch left in the home.
@@ -3235,7 +3289,7 @@ hooks = [ { type = "command", command = "/opt/guard.sh" } ]
         let tokens: Vec<&str> = cmd.split_whitespace().collect();
         let want = r#"'tui.status_line=["model-with-reasoning","context-used","current-dir","thread-title"]'"#;
         assert!(tokens.windows(2).any(|w| w == ["-c", want]), "the status line override: {cmd}");
-        for r in [crate::backends::codex::resume_command(&cmd, None), crate::backends::codex::resume_command(&cmd, Some("01a1656d-ae66-7b90-a5b0-6ba62708fd87"))] {
+        for r in [crate::backends::codex::resume_command(&cmd, None, None), crate::backends::codex::resume_command(&cmd, Some("01a1656d-ae66-7b90-a5b0-6ba62708fd87"), None)] {
             assert!(r.contains(want), "a resume keeps it: {r}");
         }
     }

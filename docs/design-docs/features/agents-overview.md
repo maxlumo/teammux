@@ -746,7 +746,24 @@ A home outside the `<ws>/.tmm/agents/<name>` layout counts any transcript. Witho
 What each CLI sends, measured in scratch homes:
 - **claude 2.1.318:** `/clear` fires SessionStart `source: clear` with the NEW id, and its transcript is written at once.
 - **omp 18.15.0:** `/new` fires `session_before_switch {reason: new}` (old id), then `session_switch {reason: new}` with the NEW id, and the session file is written at once. Our extension reports the switch as `SessionStart {source: <reason>}`.
-- **codex-cli 0.166.0:** `/new` fires nothing and writes no rollout. The new session opens at its first prompt with SessionStart `source: startup` and the new id, which is now registered. Residual: `/new`, then a restart before any prompt, resumes the pre-`/new` conversation. Nothing was said in the new one yet, so no new text is lost.
+- **codex-cli 0.166.0:** `/new` fires nothing and writes no rollout. The new session opens at its first prompt with SessionStart `source: startup` and the new id, which is now registered. For a restart before that prompt see the next paragraph (board #29).
+
+**codex `/new`, then a restart before any prompt** (board #29, measured on codex-cli 0.166.0). No hook, session-index entry or database row changes at `/new`. Codex does create `thread-writer-locks/<new thread id>.lock` at once, and the new thread's rollout only at its first prompt. A window kill leaves the locks, and the next codex start removes those of threads it does not run.
+
+So `codex::resume_command`, given the home, starts fresh when the NEWEST lock (by mtime) names a thread with no rollout under `sessions/**/rollout-*-<id>.jsonl`. It does so whatever id was recorded, and it covers a `/new` typed in the pane by hand, with no delivery marker. Otherwise it resumes as before.
+
+Because the locks are codex's internal concurrency state, not a documented door, two guards apply:
+- **Version gate:** the rule holds only when the installed codex is the measured version (`NEW_THREAD_MEASURED`). On any other version, or an unknown one, the restart resumes as before and the gateway logs that it did.
+- **Sub-agent threads:** a thread the hub saw as a codex sub-agent child (`agent_id`, board #169) is recorded in `<home>/codex-child-threads` and is never taken for the pane's own. A wrong fresh start loses a live conversation, which is worse than reviving a cleared one.
+
+Residuals:
+- `spawn_agent` answered "unsupported call" on this host, so a child's lock was not measured. A child restarted mid-spawn, before its first hook reaches the hub, would still count.
+- The version read is the INSTALLED codex. A pane started before an upgrade wrote its locks with the old binary.
+- The strict restore after a reboot (`resume_exact`, board #422) is unchanged.
+
+Live check (scratch gateway, real managed codex): a turn ("lynx"), `/new`, then a restart before any prompt gave a fresh `command codex …` line, with lynx absent. A turn ("puma"), then a restart, gave `resume <new id>`, with puma present.
+
+Pinned by `spawn::relaunch_tests::a_codex_restart_after_new_does_not_revive_the_cleared_conversation` (measured and unmeasured version, child lock) and `agent_notifications::tests::a_codex_child_thread_is_recorded_in_the_agents_home`.
 - **Not measured:** kimi has SessionStart (already registered), but this host has no model for it. kiro's `/clear` needs a logged-in scratch home. grok is not installed.
 - **dsh:** already safe, because the app runs its `/new` (board #411). The `tmm/new` marker is consumed by the next turn, and it outranks a resume id handed back by a restart (`dsh::new_conversation`).
 

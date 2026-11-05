@@ -498,9 +498,22 @@ impl AgentNotificationHub {
         // start_turn replaced the reply edge with nobody, so codex's real
         // final reply reached no one (owner 2026-09-11 03:46; `tmm log` held
         // not one codex `[reply]` line).
-        if let Some((backend, _child)) = crate::backends::Backend::parse(&envelope.backend)
+        if let Some((backend, child)) = crate::backends::Backend::parse(&envelope.backend)
             .and_then(|b| b.subagent_thread(&envelope.payload).map(|c| (b, c)))
         {
+            // Board #29: a codex child's thread is never the pane's own, so
+            // its lock never makes a restart start fresh. Recorded in the
+            // agent's home, where the restart decision reads it.
+            #[cfg(not(any(target_os = "android", target_os = "ios")))]
+            if backend == crate::backends::Backend::Codex {
+                if let Ok((session, window, _)) = envelope.pane() {
+                    if let Some(home) = crate::projects::managed_home(&session, &window) {
+                        if let Err(e) = crate::backends::codex::note_child_thread(&home, child) {
+                            eprintln!("⚠  {session}:{window}: the codex sub-agent thread {child} was not recorded: {e}");
+                        }
+                    }
+                }
+            }
             // A child's ASK is the exception (board #170, measured on 0.153.4):
             // codex surfaces the child's approval modal in the PARENT's TUI
             // ("Would you like to run the following command? Thread: Agent
@@ -1949,6 +1962,50 @@ mod tests {
         assert!(tool.text.contains("adversarial-review"), "{}", tool.text);
 
         let _ = std::process::Command::new("tmux").args(["kill-session", "-t", &session]).status();
+        let _ = std::fs::remove_dir_all(root);
+    }
+
+    /// Board #29: the thread id of a codex sub-agent child (hook payloads
+    /// carry `agent_id`, board #169) is recorded in the agent's home, where
+    /// the restart decision reads it, so a child's lock never makes the
+    /// parent start fresh.
+    #[test]
+    fn a_codex_child_thread_is_recorded_in_the_agents_home() {
+        crate::projects::tests::use_test_store();
+        let session = format!("tmm-child-{}", std::process::id());
+        let ws = crate::config::test_scratch("tmm-child-ws");
+        std::fs::create_dir_all(ws.join(".tmm/agents/cx")).unwrap();
+        std::fs::write(ws.join(".tmm/agents/cx/launch.json"), r#"{"backend":"codex"}"#).unwrap();
+        let created = std::process::Command::new("tmux")
+            .args(["new-session", "-d", "-s", &session, "-n", "cx", "-c", &ws.to_string_lossy(), "sleep 60"])
+            .status()
+            .map(|s| s.success())
+            .unwrap_or(false);
+        assert!(created, "a tmux server is required (npm run test:rust provides one)");
+        crate::projects::adopt(&session, Some("child-test")).unwrap();
+        let pane_id = String::from_utf8(
+            std::process::Command::new("tmux").args(["display-message", "-p", "-t", &session, "#{pane_id}"]).output().unwrap().stdout,
+        )
+        .unwrap()
+        .trim()
+        .to_string();
+        let root = crate::config::test_scratch("tmm-child-hub");
+        let hub = AgentNotificationHub::load_at(root.clone());
+        std::fs::create_dir_all(root.join("inbox")).unwrap();
+        let child = "01a08e9b-c9b0-7aa0-b09d-74139bb08191";
+        std::fs::write(
+            root.join("inbox").join("1-child.json"),
+            serde_json::to_vec(&json!({"backend": "codex", "pane_id": pane_id, "payload": {
+                "hook_event_name": "SubagentStart", "session_id": "01a08e9b-root", "agent_id": child, "agent_type": "default"
+            }}))
+            .unwrap(),
+        )
+        .unwrap();
+        hub.consume_inbox();
+        let recorded = std::fs::read_to_string(ws.join(".tmm/agents/cx").join(crate::backends::codex::CHILD_THREADS)).unwrap_or_default();
+        assert_eq!(recorded, format!("{child}\n"));
+        let _ = std::process::Command::new("tmux").args(["kill-session", "-t", &session]).status();
+        let _ = std::fs::remove_dir_all(&ws);
         let _ = std::fs::remove_dir_all(root);
     }
 

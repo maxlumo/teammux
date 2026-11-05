@@ -753,9 +753,120 @@ pub(crate) fn line_is_private(cmd: &str) -> bool {
     !cmd.contains("mcp_servers.")
 }
 
-pub(crate) fn resume_command(cmd: &str, id: Option<&str>) -> String {
+pub(crate) fn resume_command(cmd: &str, id: Option<&str>, home: Option<&std::path::Path>) -> String {
+    if home.is_some_and(left_in_an_empty_new_thread) {
+        match codex_version() {
+            Some(v) if v == NEW_THREAD_MEASURED => return cmd.to_string(),
+            v => eprintln!(
+                "codex {}: the pane was in a new, empty conversation, but that reading of codex's thread locks is measured on {NEW_THREAD_MEASURED} only; resuming as before (board #29)",
+                v.as_deref().unwrap_or("of unknown version")
+            ),
+        }
+    }
     let which = id.map(crate::shell::quote).unwrap_or_else(|| "--last".to_string());
     with_resume(cmd, &which).unwrap_or_else(|| cmd.to_string())
+}
+
+/// Board #29, measured on codex-cli 0.166.0 (scratch CODEX_HOME): `/new`
+/// creates `thread-writer-locks/<new thread id>.lock` at once, and the new
+/// thread's rollout (`sessions/YYYY/MM/DD/rollout-…-<id>.jsonl`) only at its
+/// first prompt; no hook, no session index entry, no database row changes
+/// before that. A window kill leaves the locks; the next codex start
+/// removes those of threads it does not run (a fresh start keeps only its
+/// own, `resume <id>` only that id's). So when the NEWEST lock (mtime) names
+/// a thread with no rollout, the pane was in an empty new conversation: a
+/// restart starts fresh instead of reviving the cleared one. The locks are
+/// codex's internal concurrency state, not a documented door, so the rule
+/// holds only on the measured version (`NEW_THREAD_MEASURED`). A thread the
+/// hub saw as a sub-agent child (`CHILD_THREADS`) is never taken for the
+/// pane's own: a wrong fresh start loses a live conversation, which is worse
+/// than reviving a cleared one.
+fn left_in_an_empty_new_thread(home: &std::path::Path) -> bool {
+    let codex = home.join("codex");
+    let children = std::fs::read_to_string(home.join(CHILD_THREADS)).unwrap_or_default();
+    let Ok(locks) = std::fs::read_dir(codex.join("thread-writer-locks")) else { return false };
+    let newest = locks
+        .flatten()
+        .filter_map(|e| {
+            let name = e.file_name().to_str()?.strip_suffix(".lock")?.to_string();
+            let when = e.metadata().ok()?.modified().ok()?;
+            Some((when, name))
+        })
+        .filter(|(_, id)| super::shared::exact_id_ok(id) && !children.lines().any(|c| c == id))
+        .max();
+    let Some((_, id)) = newest else { return false };
+    !has_rollout(&codex.join("sessions"), &id)
+}
+
+/// Whether `sessions/YYYY/MM/DD/` holds the rollout of thread `id`. A tree
+/// that cannot be read counts as holding it: the rule then keeps today's
+/// resume rather than starting fresh on a guess.
+fn has_rollout(sessions: &std::path::Path, id: &str) -> bool {
+    let suffix = format!("-{id}.jsonl");
+    let dirs = |p: &std::path::Path| std::fs::read_dir(p).map(|d| d.flatten().map(|e| e.path()).filter(|p| p.is_dir()).collect::<Vec<_>>());
+    let Ok(years) = dirs(sessions) else { return true };
+    for y in years {
+        let Ok(months) = dirs(&y) else { return true };
+        for m in months {
+            let Ok(days) = dirs(&m) else { return true };
+            for d in days {
+                let Ok(files) = std::fs::read_dir(&d) else { return true };
+                if files.flatten().any(|f| f.file_name().to_str().is_some_and(|n| n.starts_with("rollout-") && n.ends_with(&suffix))) {
+                    return true;
+                }
+            }
+        }
+    }
+    false
+}
+
+/// The codex version the thread-lock reading of `/new` was measured on.
+pub(crate) const NEW_THREAD_MEASURED: &str = "0.166.0";
+
+/// Our record, in the agent's home, of the thread ids the hub saw as codex
+/// sub-agent children (hook payloads carry `agent_id`, board #169).
+pub(crate) const CHILD_THREADS: &str = "codex-child-threads";
+
+/// Record `id` as a sub-agent child thread of this home (once).
+pub(crate) fn note_child_thread(home: &std::path::Path, id: &str) -> Result<(), String> {
+    if !super::shared::exact_id_ok(id) {
+        return Ok(());
+    }
+    let path = home.join(CHILD_THREADS);
+    let mut known = std::fs::read_to_string(&path).unwrap_or_default();
+    if known.lines().any(|l| l == id) {
+        return Ok(());
+    }
+    known.push_str(id);
+    known.push('\n');
+    super::shared::write_atomic(&path, &known)
+}
+
+/// The installed codex version a restart will run, or `None` when unknown.
+#[cfg(all(not(test), not(any(target_os = "android", target_os = "ios"))))]
+fn codex_version() -> Option<String> {
+    crate::projects::recovery::installed_version(super::Backend::Codex)
+}
+
+#[cfg(all(not(test), any(target_os = "android", target_os = "ios")))]
+fn codex_version() -> Option<String> {
+    None
+}
+
+#[cfg(test)]
+thread_local! {
+    static TEST_VERSION: std::cell::RefCell<Option<String>> = const { std::cell::RefCell::new(None) };
+}
+
+#[cfg(test)]
+fn codex_version() -> Option<String> {
+    TEST_VERSION.with(|v| v.borrow().clone())
+}
+
+/// Tests choose the version `codex_version` answers.
+#[cfg(test)]
+pub(crate) fn set_test_version(v: Option<&str>) {
+    TEST_VERSION.with(|t| *t.borrow_mut() = v.map(str::to_string));
 }
 
 /// `resume <which>` inserted into the canonical recipe shape, or `None` when

@@ -718,7 +718,7 @@ impl Backend {
         match self {
             Backend::Kiro => kiro::resume_command(cmd, id, home, agent),
             Backend::Claude => claude::resume_command(cmd, id, home),
-            Backend::Codex => codex::resume_command(cmd, id),
+            Backend::Codex => codex::resume_command(cmd, id, home),
             Backend::Grok => grok::resume_command(cmd, id),
             Backend::Omp => omp::resume_command(cmd, id),
             Backend::Kimi => kimi::resume_command(cmd, id),
