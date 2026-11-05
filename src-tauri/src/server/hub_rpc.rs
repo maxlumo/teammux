@@ -2343,8 +2343,19 @@ fn compact_context_body(body: &str) -> String {
     out
 }
 
+/// `to` as the team context lists it: each agent ONCE by its label (board
+/// #31: a row stored before #31 can name one agent twice, and a row with no
+/// stored `to` reads raw addresses, so it is de-duplicated by physical name
+/// here, on read; stored rows are never rewritten).
 fn context_recipient_label(to: &[String], names: &crate::address::Names) -> String {
+    let mut seen: Vec<&str> = Vec::new();
     to.iter()
+        .filter(|name| {
+            let agent = names.resolve(name);
+            let first = !seen.contains(&agent);
+            seen.push(agent);
+            first
+        })
         .map(|name| if name == "room" { "room".to_string() } else { format!("@{}", names.shown(name)) })
         .collect::<Vec<_>>()
         .join(", ")
@@ -2436,12 +2447,10 @@ fn live_agent(session: &str, p: &serde_json::Value) -> Result<String, RpcError> 
 }
 
 #[cfg(not(any(target_os = "android", target_os = "ios")))]
-/// The PHYSICAL agents a body addresses (board #20): `mention_names`, each
-/// through the one resolution. What is stored as `to` and what delivery
-/// matches against window names.
+/// The PHYSICAL agents a body addresses (board #20), each once (#31):
+/// `Names::addressed`. What is stored as `to`.
 fn addressed(session: &str, body: &str) -> Vec<String> {
-    let names = crate::projects::names::names(session);
-    crate::address::mention_names(body).iter().map(|m| names.resolve(m).to_string()).collect()
+    crate::projects::names::names(session).addressed(body)
 }
 
 #[cfg(not(any(target_os = "android", target_os = "ios")))]
@@ -2486,7 +2495,7 @@ fn deliver_mentions_with(
     use crate::projects::agents;
 
     let names = crate::projects::names::names(session);
-    let mentions: Vec<String> = crate::address::mention_names(body).iter().map(|m| names.resolve(m).to_string()).collect();
+    let mentions = names.addressed(body);
     if mentions.is_empty() {
         return (Vec::new(), Vec::new());
     }
@@ -4592,6 +4601,19 @@ mod tests {
     /// physical name; what is TYPED shows the current label (the sender and
     /// the body's addresses), and a reply edge read from that typed line
     /// resolves back to the physical sender.
+    /// Board #31 AC2: a row stored before #31 can hold one agent twice
+    /// (`to: ["dev","dev"]`), and a row with no stored `to` reads raw
+    /// addresses (`@bob @robert`). Stored rows are never rewritten; the team
+    /// context's `sender -> recipients` lists each agent once, by label.
+    #[test]
+    fn the_team_context_names_each_recipient_once() {
+        let names = crate::address::Names::from_json(&serde_json::json!([{ "agent": "dev", "label": "robert", "aliases": ["bob"] }]));
+        let to = |v: &[&str]| v.iter().map(|s| s.to_string()).collect::<Vec<_>>();
+        assert_eq!(context_recipient_label(&to(&["dev", "dev"]), &names), "@robert");
+        assert_eq!(context_recipient_label(&to(&["bob", "robert", "lead", "dev"]), &names), "@robert, @lead");
+        assert_eq!(context_recipient_label(&to(&["room"]), &names), "room");
+    }
+
     #[test]
     fn every_addressing_door_resolves_old_current_and_physical_names() {
         crate::projects::tests::use_test_store();
@@ -4639,6 +4661,14 @@ mod tests {
             assert_eq!(msg.get("offline"), None, "found, not offline: {msg}");
             assert!(wait_for("dev", &format!("lead: @robert ping-{n}")), "typed with the current label: {}", pane("dev"));
         }
+        // Board #31: two names of ONE agent store it once and type it once.
+        let msg = call("hub_post", serde_json::json!({ "session": session, "from": "lead", "body": "@bob @robert @dev ping-dup" })).unwrap();
+        assert_eq!(msg["to"], serde_json::json!(["dev"]), "one agent, one recipient: {msg}");
+        assert!(wait_for("dev", "ping-dup"), "{}", pane("dev"));
+        std::thread::sleep(std::time::Duration::from_millis(500));
+        // `cat` shows a typed line twice (the tty's echo, then cat's copy), so
+        // once is as often as ping-0, which one name delivered.
+        assert_eq!(pane("dev").matches("ping-dup").count(), pane("dev").matches("ping-0").count(), "typed once: {}", pane("dev"));
         let stored: Vec<String> = rooms::history_page(&project_room(&session), None, 20)["messages"].as_array().unwrap().iter()
             .map(|m| m["body"].as_str().unwrap_or_default().to_string()).collect();
         assert!(stored.contains(&"@bob ping-0".to_string()), "the stored body is never rewritten: {stored:?}");

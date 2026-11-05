@@ -295,6 +295,21 @@ impl Names {
         self.of(name).map_or(name, |l| l.agent.as_str())
     }
 
+    /// The agents `body` addresses (board #31): each `mention_names` address
+    /// through `resolve`, ONCE, in the order first named, so an old label,
+    /// the current label and the physical name of one agent are one
+    /// recipient. What is stored as `to` and what delivery types into.
+    pub fn addressed(&self, body: &str) -> Vec<String> {
+        let mut out: Vec<String> = Vec::new();
+        for m in mention_names(body) {
+            let agent = self.resolve(&m);
+            if !out.iter().any(|a| a == agent) {
+                out.push(agent.to_string());
+            }
+        }
+        out
+    }
+
     /// What is shown for `name`: its agent's current label, else itself.
     pub fn shown<'a>(&'a self, name: &'a str) -> &'a str {
         self.of(name).map_or(name, |l| l.label.as_str())
@@ -400,6 +415,17 @@ mod tests {
         assert_eq!(n.show_body("[tmm] /model x → →"), "[tmm] /model x → →", "nothing that is not a name");
         assert_eq!(n.show_body("@builder → builder"), "@bob → builder", "only a [tmm] line's arrow names targets");
         assert_eq!(Names::default().show_body("@builder hi"), "@builder hi");
+    }
+
+    /// Board #31: the agents a body addresses, each ONCE by its physical name,
+    /// in the order first named: an old label, the current label and the
+    /// physical name of one agent are one recipient.
+    #[test]
+    fn a_body_addresses_each_agent_once() {
+        let n = Names::from_json(&serde_json::json!([{ "agent": "builder", "label": "bob", "aliases": ["bobby"] }]));
+        assert_eq!(n.addressed("@bobby @builder @bob and @builder"), vec!["builder".to_string()]);
+        assert_eq!(n.addressed("@reviewer @all @bob @reviewer"), vec!["reviewer".to_string(), "all".to_string(), "builder".to_string()]);
+        assert_eq!(n.addressed("no address"), Vec::<String>::new());
     }
 
     /// Board #20: the wire shape `[{agent, label, aliases}]` (hub_log, board,
