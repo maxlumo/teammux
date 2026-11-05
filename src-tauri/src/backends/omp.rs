@@ -7,7 +7,8 @@
 /// new `agent_start`, so our telemetry extension reports no prompt for it: the
 /// line was swept `unconfirmed` and the one Stop replied to the first sender
 /// with the second sender's answer. Offering queue would need the extension
-/// to report follow-ups first.
+/// to report follow-ups first. A STEERED line is reported since board #4
+/// (omp 18.15.0, `before_agent_start` at its dequeue); a follow-up is unmeasured.
 pub(crate) const SWITCHES_INPUT_MODE: bool = false;
 
 /// omp 18.0.6 `--thinking` (its own --help): "off, minimal, low, medium,
@@ -444,32 +445,33 @@ function textOf(content: unknown): string {{
 }}
 
 export default function hook(pi: any): void {{
-  // agent_start fires once per user prompt, but the prompt itself is not in
-  // the session branch yet at that moment (measured, omp 18.0.6: the branch
-  // tail is still model/thinking entries). The FIRST context event after it
-  // carries the messages bound for the model — the newest user message there
-  // is the submitted prompt, the delivery receipt tmm acks against.
-  let awaitingPrompt = false;
-  pi.on("agent_start", async (_event: any, _ctx: any) => {{
-    awaitingPrompt = true;
+  // The prompt receipt (board #4, measured on omp 18.15.0): `input` fires
+  // once at submission ingress with exactly the typed text — for an idle
+  // omp AND for a line typed into a busy run — and `before_agent_start`
+  // (reason "prompt") fires when that user work enters a run: at the start
+  // of an idle prompt, and at the DEQUEUE of a steered line, which gets no
+  // new `agent_start`. So the typed lines are held from `input` and reported
+  // at `before_agent_start`, each exactly once. Its own `prompt` is not the
+  // report: for a skill it is the expanded skill body. A builtin command
+  // (`/hotkeys`) fires `input` and starts no run, so a held command line is
+  // reported only when it is the one that started this run (a `/skill:`).
+  // A "revive" is no user work. `context` (every model call, side requests
+  // included) is never read.
+  let typed: string[] = [];
+  pi.on("input", async (event: any, _ctx: any) => {{
+    if (event?.source !== "interactive" && event?.source !== "rpc") return;
+    typed.push(typeof event?.text === "string" ? event.text : "");
   }});
-  pi.on("context", async (event: any, ctx: any) => {{
-    if (!awaitingPrompt) return;
-    awaitingPrompt = false;
-    let prompt = "";
-    try {{
-      const messages = event?.messages ?? [];
-      for (let i = messages.length - 1; i >= 0; i--) {{
-        const m = messages[i] as any;
-        if (m?.role === "user") {{ prompt = textOf(m.content); break; }}
-      }}
-    }} catch {{}}
-    send({{ hook_event_name: "UserPromptSubmit", prompt, session_id: sessionId(ctx) }});
+  pi.on("before_agent_start", async (event: any, ctx: any) => {{
+    if (event?.reason !== "prompt" || typed.length === 0) return;
+    const last = typed.length - 1;
+    const lines = typed.filter((t, i) => i === last || !t.startsWith("/"));
+    typed = [];
+    send({{ hook_event_name: "UserPromptSubmit", prompt: lines.join("\n"), session_id: sessionId(ctx) }});
   }});
   // agent_end with willContinue is an auto-continuation, not a settle.
   pi.on("agent_end", async (event: any, ctx: any) => {{
     if (event?.willContinue) return;
-    awaitingPrompt = false;
     let reply = "";
     try {{
       const messages = event?.messages ?? [];
@@ -597,4 +599,127 @@ pub(crate) fn set_up_need_in(dir: &Path) -> super::readiness::Need {
     use super::readiness::{Need, SetUp};
     let via = if dir.join("agent.db").is_file() { "credential store present" } else { "no credential store" };
     Need::Found(SetUp::unknown("credential_store_unverified").with_via(via))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use serde_json::{json, Value};
+
+    /// Run the generated telemetry extension under node with a stand-in
+    /// `pi` (omp's documented `pi.on(event, handler)`), replaying `events`
+    /// (`[name, payload]` pairs) in order. The notify helper is a shell line
+    /// appending each payload to a file, so what comes back is exactly what
+    /// the hub would receive. `None` without node.
+    fn replay(events: Value) -> Option<Vec<Value>> {
+        let node = crate::backends::dsh::tests::which("node")?;
+        let dir = crate::config::test_scratch("tmm-omp-ext");
+        std::fs::create_dir_all(&dir).unwrap();
+        let sink = dir.join("sink");
+        std::fs::create_dir_all(&sink).unwrap();
+        // One file per payload: the extension's children run concurrently.
+        let notify = format!("cat > {}/$$.json", crate::shell::quote_always(&sink.to_string_lossy()));
+        std::fs::write(dir.join("ext.ts"), omp_telemetry_extension(&notify)).unwrap();
+        std::fs::write(
+            dir.join("driver.ts"),
+            format!(
+                "import hook from './ext.ts';\nconst h: Record<string, any[]> = {{}};\n\
+                 hook({{ on: (e: string, f: any) => {{ (h[e] ??= []).push(f); }} }});\n\
+                 const ctx = {{ sessionManager: {{ getSessionId: () => 'sess-1' }} }};\n\
+                 for (const [e, p] of {events}) for (const f of h[e] ?? []) await f(p, ctx);\n"
+            ),
+        )
+        .unwrap();
+        let out = std::process::Command::new(node).arg("driver.ts").current_dir(&dir).stdin(std::process::Stdio::null()).output().unwrap();
+        assert!(out.status.success(), "driver failed: {}", String::from_utf8_lossy(&out.stderr));
+        // node exits only after its children, so every payload is written.
+        let hooks = std::fs::read_dir(&sink).unwrap().map(|e| serde_json::from_str(&std::fs::read_to_string(e.unwrap().path()).unwrap()).unwrap()).collect();
+        let _ = std::fs::remove_dir_all(&dir);
+        Some(hooks)
+    }
+
+    /// The reported prompts as a sorted multiset: the helper children run
+    /// concurrently, so arrival order is not part of the contract here, but
+    /// the count is (each line exactly once).
+    fn prompts(hooks: &[Value]) -> Vec<String> {
+        let mut p: Vec<String> = hooks
+            .iter()
+            .filter(|h| h["hook_event_name"] == "UserPromptSubmit")
+            .map(|h| h["prompt"].as_str().unwrap_or("").to_string())
+            .collect();
+        p.sort();
+        p
+    }
+
+    fn user(text: &str) -> Value {
+        json!({"role": "user", "content": [{"type": "text", "text": text}]})
+    }
+
+    /// Board #4, the event order measured on omp 18.15.0 (scratch home,
+    /// 2026-11-05): a line typed into a busy run fires `input` at typing and
+    /// `before_agent_start {reason: "prompt"}` when it is dequeued, with NO
+    /// new `agent_start`, while `context` fires on every model call (a
+    /// session-title side request included). Each user line is reported once.
+    #[test]
+    fn a_line_steered_into_a_busy_omp_is_reported_once_as_its_own_prompt() {
+        let first = "FIRST-LINE run sleep 25";
+        let steer = "STEER-LINE say BANANA";
+        let Some(hooks) = replay(json!([
+            ["session_start", {"type": "session_start"}],
+            ["input", {"source": "interactive", "text": first}],
+            ["before_agent_start", {"reason": "prompt", "prompt": first}],
+            ["agent_start", {}],
+            ["context", {"messages": [user(first)]}],
+            ["turn_start", {}],
+            ["context", {"messages": [user(first), {"role": "developer", "content": "<system-reminder>side-channel</system-reminder>"}, user("<title-request>SENTINEL</title-request>")]}],
+            ["tool_call", {"toolName": "bash", "input": {"command": "sleep 25"}}],
+            ["input", {"source": "interactive", "text": steer}],
+            ["tool_result", {"toolName": "bash"}],
+            ["turn_end", {}],
+            ["before_agent_start", {"reason": "prompt", "prompt": steer}],
+            ["context", {"messages": [user(first), user(steer)]}],
+            ["context", {"messages": [user(first), user(steer)]}],
+            ["agent_end", {"messages": [{"role": "assistant", "content": [{"type": "text", "text": "DONE BANANA"}]}]}]
+        ])) else {
+            eprintln!("skipped: no node");
+            return;
+        };
+        assert_eq!(prompts(&hooks), [first, steer], "FIRST < STEER sorted");
+        let stops: Vec<&Value> = hooks.iter().filter(|h| h["hook_event_name"] == "Stop").collect();
+        assert_eq!(stops.len(), 1);
+        assert_eq!(stops[0]["last_assistant_message"], "DONE BANANA");
+        assert!(hooks.iter().all(|h| h["session_id"] == "sess-1"));
+    }
+
+    /// Board #4 AC2, measured shapes: a skill invocation's run carries the
+    /// EXPANDED skill body in `before_agent_start.prompt` (and a `custom`
+    /// skill-prompt message), so the report is the line the user typed; a
+    /// builtin command (`/hotkeys`) fires `input` and no run, and never
+    /// becomes a prompt; a subagent revive is no user work; `context`
+    /// messages (runtime context, reminders, tool results) are never read.
+    #[test]
+    fn only_what_the_user_typed_becomes_a_prompt() {
+        let skill_body = "[IMPORTANT: User invoked the \"probe-skill\" skill; follow its instructions. Full skill below.]\n\nSKILL-BODY-SENTINEL";
+        let Some(hooks) = replay(json!([
+            ["input", {"source": "interactive", "text": "/skill:probe-skill please"}],
+            ["before_agent_start", {"reason": "prompt", "prompt": skill_body}],
+            ["agent_start", {}],
+            ["context", {"messages": [{"role": "custom", "customType": "skill-prompt", "content": skill_body}]}],
+            ["agent_end", {"messages": []}],
+            ["input", {"source": "interactive", "text": "/hotkeys"}],
+            ["input", {"source": "interactive", "text": "a plain line"}],
+            ["before_agent_start", {"reason": "prompt", "prompt": "a plain line"}],
+            ["agent_start", {}],
+            ["context", {"messages": [user("SENTINEL runtime context"), user("a plain line")]}],
+            ["agent_end", {"messages": []}],
+            ["before_agent_start", {"reason": "revive", "prompt": "SENTINEL revive"}],
+            ["agent_start", {}],
+            ["agent_end", {"messages": []}]
+        ])) else {
+            eprintln!("skipped: no node");
+            return;
+        };
+        assert_eq!(prompts(&hooks), ["/skill:probe-skill please", "a plain line"]);
+        assert!(!serde_json::to_string(&hooks).unwrap().contains("SENTINEL"), "{hooks:?}");
+    }
 }
