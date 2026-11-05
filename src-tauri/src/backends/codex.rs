@@ -557,6 +557,9 @@ pub(crate) fn codex_hooks(notify: &str) -> Value {
         // so `failed` cannot be derived for it.
         "UserPromptSubmit": [ { "hooks": [ { "type": "command", "command": notify } ] } ],
         "PermissionRequest": [ { "hooks": [ { "type": "command", "command": notify } ] } ],
+        // Board #28 (0.166.0): fires at a new session's first prompt with its
+        // id, so the hub records the conversation a restart resumes.
+        "SessionStart": [ { "hooks": [ { "type": "command", "command": notify } ] } ],
         "Stop": [ { "hooks": [ { "type": "command", "command": notify } ] } ]
     })
 }
@@ -907,6 +910,17 @@ pub(crate) fn set_up_need_in(home: &std::path::Path) -> super::readiness::Need {
 
 #[cfg(test)]
 mod tests {
+
+    /// Board #28, measured on codex-cli 0.166.0: `/new` fires no hook and
+    /// writes no rollout; the new session opens at its first prompt, which
+    /// fires SessionStart {source: "startup"} with the NEW session_id before
+    /// UserPromptSubmit. Registering it moves the recorded id at that first
+    /// prompt rather than at its Stop.
+    #[cfg(not(any(target_os = "android", target_os = "ios")))]
+    #[test]
+    fn the_new_sessions_start_is_registered() {
+        assert!(codex_hooks("n")["SessionStart"].is_array());
+    }
     /// Board #362 c, the SENTENCE alone (review P1-B: kept apart from the
     /// whole-screen evidence): codex-cli 0.154.0's expired-credential block,
     /// de-wrapped as `person_paint` joins it. Another status, another host,

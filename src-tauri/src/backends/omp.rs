@@ -502,6 +502,11 @@ export default function hook(pi: any): void {{
     }} catch {{}}
     send({{ hook_event_name: "Stop", last_assistant_message: reply, session_id: sessionId(ctx) }});
   }});
+  // Board #28: `/new` (and a fork) switches to a NEW session, written at
+  // once; reported as claude's SessionStart so a restart resumes it.
+  pi.on("session_switch", async (event: any, ctx: any) => {{
+    send({{ hook_event_name: "SessionStart", source: String(event?.reason ?? "switch"), session_id: sessionId(ctx) }});
+  }});
   pi.on("tool_call", async (event: any, ctx: any) => {{
     send({{ hook_event_name: "PreToolUse", tool_name: event?.toolName ?? "tool", tool_input: event?.input ?? {{}}, session_id: sessionId(ctx) }});
   }});
@@ -675,6 +680,24 @@ mod tests {
     /// on it (measured on an idle prompt, a steered line and a skill).
     fn user(text: &str) -> Value {
         json!({"role": "user", "content": [{"type": "text", "text": text}], "attribution": "user"})
+    }
+
+    /// Board #28, measured on omp 18.15.0 (scratch home, a logging
+    /// extension): `/new` fires `session_before_switch {reason: "new"}` with
+    /// the OLD session id, then `session_switch {reason: "new"}` with ctx on
+    /// the NEW one, whose session file is written at once. The extension
+    /// reports the switch as claude's SessionStart, so the hub records the
+    /// conversation a restart must resume. The before-switch reports nothing.
+    #[test]
+    fn a_new_conversation_is_reported_as_a_session_start_with_its_id() {
+        let Some(hooks) = replay(json!([
+            ["session_before_switch", {"type": "session_before_switch", "reason": "new"}],
+            ["session_switch", {"type": "session_switch", "reason": "new", "previousSessionFile": "/x/old.jsonl"}],
+        ])) else {
+            eprintln!("no node: skipped");
+            return;
+        };
+        assert_eq!(hooks, vec![json!({"hook_event_name": "SessionStart", "source": "new", "session_id": "sess-1"})]);
     }
 
     /// Board #4, the event order measured on omp 18.15.0 (scratch home,

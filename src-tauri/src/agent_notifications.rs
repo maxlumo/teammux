@@ -477,6 +477,14 @@ impl AgentNotificationHub {
                 // It writes no fact: a store failure keeps it for a retry.
                 crate::projects::restore_hold::on_session_start(launch, &envelope.pane_id, source).map_err(|e| Consume::Retain(format!("its release could not be recorded ({e})")))?;
             }
+            // Board #28: the conversation this window now runs. After a CLI's
+            // own new-conversation command (claude `/clear`, omp `/new`) this
+            // is the only edge before the next turn's end, and a restart in
+            // between must resume the NEW conversation, never the cleared one.
+            if let Some(id) = envelope.payload.as_object().and_then(|p| string_field(p, &["session_id", "sessionId"])).filter(|id| !id.trim().is_empty()) {
+                let (session, window, _) = envelope.pane()?;
+                self.remember_session(&session, &window, id);
+            }
             return Ok(());
         }
         // A SUB-AGENT thread's event is the agent's own work, like a tool call
@@ -714,9 +722,15 @@ impl AgentNotificationHub {
         }
         let EndTail { session, window, agent_session_id, .. } = tail;
         if let Some(id) = agent_session_id {
-            self.state.lock().unwrap().sessions.insert(window_key(&session, &window), id);
+            self.remember_session(&session, &window, id);
         }
         Ok(())
+    }
+
+    /// The ONE place a window's conversation id is recorded (board #28): a
+    /// turn's end and a conversation's start. A restart resumes it.
+    fn remember_session(&self, session: &str, window: &str, id: String) {
+        self.state.lock().unwrap().sessions.insert(window_key(session, window), id);
     }
 
     /// The body a managed agent's final reply is posted with, if any: only
@@ -2137,6 +2151,51 @@ mod tests {
             eprintln!("could not adopt a project — skipped the assertions");
         }
 
+        let _ = std::process::Command::new("tmux").args(["kill-session", "-t", &session]).status();
+        let _ = std::fs::remove_dir_all(&ws);
+        let _ = std::fs::remove_dir_all(root);
+    }
+
+    /// Board #28 (measured on Claude Code 2.1.318): `/clear` starts a NEW
+    /// conversation and fires SessionStart {source: clear} with its id, and
+    /// the new transcript exists at once. The recorded id used to move only
+    /// at a turn's Stop, so a restart before the next turn's end resumed the
+    /// CLEARED conversation. Through the real inbox: a Stop records the old
+    /// id, then the SessionStart moves it to the new one.
+    #[test]
+    fn a_new_conversation_moves_the_recorded_id_at_once() {
+        crate::projects::tests::use_test_store();
+        let session = format!("tmm-clear-{}", std::process::id());
+        let ws = crate::config::test_scratch("tmm-clear-ws");
+        std::fs::create_dir_all(ws.join(".tmm/agents/dev")).unwrap();
+        std::fs::write(ws.join(".tmm/agents/dev/launch.json"), "{}").unwrap();
+        let created = std::process::Command::new("tmux")
+            .args(["new-session", "-d", "-s", &session, "-n", "dev", "-c", &ws.to_string_lossy(), "sleep 60"])
+            .status()
+            .map(|s| s.success())
+            .unwrap_or(false);
+        assert!(created, "a tmux server is required (npm run test:rust provides one)");
+        let pane_id = String::from_utf8(
+            std::process::Command::new("tmux").args(["display-message", "-p", "-t", &session, "#{pane_id}"]).output().unwrap().stdout,
+        )
+        .unwrap()
+        .trim()
+        .to_string();
+        let root = crate::config::test_scratch("tmm-clear-hub");
+        let hub = AgentNotificationHub::load_at(root.clone());
+        let (_, win, _) = crate::tmux::resolve_pane_id(&pane_id).expect("pane resolves");
+        std::fs::create_dir_all(root.join("inbox")).unwrap();
+        let put = |name: &str, payload: Value| {
+            std::fs::write(root.join("inbox").join(name), serde_json::to_vec(&json!({"backend": "claude", "pane_id": pane_id, "payload": payload})).unwrap()).unwrap();
+        };
+        let old = "77ea58c6-7c66-4132-9348-a8256cac028f";
+        let new = "1cdd34e3-d137-41eb-af10-9fbf2fd9681a";
+        put("1-stop.json", json!({"hook_event_name": "Stop", "session_id": old, "last_assistant_message": "otter"}));
+        hub.consume_inbox();
+        assert_eq!(hub.agent_session_for(&session, &win).as_deref(), Some(old), "a turn's end records its conversation");
+        put("2-start.json", json!({"hook_event_name": "SessionStart", "source": "clear", "session_id": new}));
+        hub.consume_inbox();
+        assert_eq!(hub.agent_session_for(&session, &win).as_deref(), Some(new), "the cleared conversation is no longer the one a restart resumes");
         let _ = std::process::Command::new("tmux").args(["kill-session", "-t", &session]).status();
         let _ = std::fs::remove_dir_all(&ws);
         let _ = std::fs::remove_dir_all(root);

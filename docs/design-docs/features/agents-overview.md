@@ -741,6 +741,17 @@ Why the workspace is canonicalized: claude files a transcript under its REAL cwd
 
 A home outside the `<ws>/.tmm/agents/<name>` layout counts any transcript. Without a home, the unchecked forms are kept. The strict restore form (`resume_exact`, board #422) is unchanged: it never falls back to fresh.
 
+**A restart after a new-conversation command resumes the new conversation** (board #28, 2026-11-05). The recorded id (`agent_notifications::remember_session`, the one insert behind `agent_session_for`) used to move only at a turn's Stop. After `/clear` it still named the cleared conversation, whose transcript exists, so a restart before the next turn's end resumed exactly what was cleared. That undid the orchestrator's clears between tickets. Now a conversation's START records it too: the hub reads the `session_id` of every `SessionStart` envelope, after the restore-hold handling.
+
+What each CLI sends, measured in scratch homes:
+- **claude 2.1.318:** `/clear` fires SessionStart `source: clear` with the NEW id, and its transcript is written at once.
+- **omp 18.15.0:** `/new` fires `session_before_switch {reason: new}` (old id), then `session_switch {reason: new}` with the NEW id, and the session file is written at once. Our extension reports the switch as `SessionStart {source: <reason>}`.
+- **codex-cli 0.166.0:** `/new` fires nothing and writes no rollout. The new session opens at its first prompt with SessionStart `source: startup` and the new id, which is now registered. Residual: `/new`, then a restart before any prompt, resumes the pre-`/new` conversation. Nothing was said in the new one yet, so no new text is lost.
+- **Not measured:** kimi has SessionStart (already registered), but this host has no model for it. kiro's `/clear` needs a logged-in scratch home. grok is not installed.
+- **dsh:** already safe, because the app runs its `/new` (board #411). The `tmm/new` marker is consumed by the next turn, and it outranks a resume id handed back by a restart (`dsh::new_conversation`).
+
+Pinned by `agent_notifications::tests::a_new_conversation_moves_the_recorded_id_at_once` (through the real inbox: a Stop records the old id, then SessionStart moves it), `omp::tests::a_new_conversation_is_reported_as_a_session_start_with_its_id` and `codex::tests::the_new_sessions_start_is_registered`.
+
 **The other backends' recent forms, measured with no prior session**, all start fresh and are left alone: omp 18.15.0 `--continue`, codex 0.166.0 `resume --last`, and kimi 2.4.1 `-c` ("No sessions to continue under <cwd>; starting a fresh session."). grok is not installed on this host and is unmeasured.
 
 **Live check** (scratch gateway through `scripts/scratch-env.mjs`, real claude 2.1.318). These were run on this branch's build:
