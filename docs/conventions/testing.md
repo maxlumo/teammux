@@ -73,7 +73,14 @@ and the rest in `tmux::test_support`:
   endpoint, token and config dir on its child process.
   Any other cargo test invocation on this host goes through the wrapper,
   which takes cargo's own arguments: `pnpm run test:rust -- <filter|--lib|-p …>
-  [-- <harness args>]`. When cargo must be run by hand, the equivalent is
+  [-- <harness args>]`, or the same without the first `--`. pnpm 12.16.1
+  hands the script that first `--` literally (npm swallowed it), so inside a
+  package script `test-rust.mjs` drops ONE leading `--` (`scriptArgs`, board
+  #37: before, `-- --lib x` sent `--lib` to libtest, "Unrecognized option:
+  'lib'" in every target). Run directly, `node scripts/test-rust.mjs -- …`
+  keeps its `--`. The other wrappers were checked: `test:e2e:docker` only
+  looks for `--keep` anywhere in its args, `isolated.mjs` is run with node and
+  splits at its own first `--`, and `preflight.mjs` takes no forwarded args. When cargo must be run by hand, the equivalent is
   `env -u TMUX -u TMUX_PANE -u TOKEN $(env | sed -n 's/^\(TMM_[A-Za-z0-9_]*\)=.*/-u \1/p')
   TMUX_TMPDIR=$(mktemp -d /tmp/tmm-iso-XXXX) cargo test --no-fail-fast … -- --test-threads=1`
   (every `TMM_*` the shell has, not a list; checked in bash and zsh). The split of guarantees: the wrapper guarantees

@@ -105,7 +105,20 @@ export function isolatedEnv(base, dir) {
   return env;
 }
 
-export function runTestRust({ extra = process.argv.slice(2), spawn = spawnSync, env = process.env, log = console.error } = {}) {
+/** The caller's args without the `--` pnpm added (board #37): pnpm
+ * 12.16.1 passes `pnpm run test:rust -- --lib x` to the script as
+ * `["--","--lib","x"]`, where npm swallowed that `--`, so `--lib` landed on
+ * the harness side ("Unrecognized option: 'lib'"). Inside a package script
+ * (pnpm and npm set `npm_lifecycle_event`) a LEADING `--` can only be the
+ * package manager's, so exactly one is dropped and both spellings mean the
+ * same. Run directly (`node scripts/test-rust.mjs -- …`), the caller's own
+ * `--` keeps its meaning. */
+export function scriptArgs(argv, env) {
+  return env.npm_lifecycle_event && argv[0] === '--' ? argv.slice(1) : argv;
+}
+
+export function runTestRust({ extra: given = process.argv.slice(2), spawn = spawnSync, env = process.env, log = console.error } = {}) {
+  const extra = scriptArgs(given, env);
   const dir = mkdtempSync(join(tmpdir(), 'tmm-test-rust-'));
   log(`[test:rust] isolated tmux: TMUX_TMPDIR=${dir}, XDG_{CONFIG,DATA,STATE}_HOME under it (TMUX/TMUX_PANE/TMM_*/TOKEN unset), --test-threads=1`);
   // The suite's directories must not be group/other-writable, whatever the

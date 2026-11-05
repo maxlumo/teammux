@@ -241,3 +241,27 @@ test('no Rust test names a fixed loopback port, and no Rust source binds a liter
   }
   assert.deepEqual(found, [], 'take a free port: std::net::TcpListener::bind("127.0.0.1:0") and read local_addr()');
 });
+
+test('pnpm run test:rust -- --lib x and pnpm run test:rust --lib x give cargo the same argv (#37)', () => {
+  // Board #37 (validator-2, pnpm 12.16.1): pnpm passes the literal `--` to the
+  // script (["--","--lib","x"]); npm swallowed it. Inside a package script
+  // (npm_lifecycle_event set) the one leading `--` is pnpm's, not the caller's.
+  const argvOf = (extra: string[], env: Record<string, string>) => {
+    let seen: string[] = [];
+    runTestRust({ extra, env, log: () => {}, spawn: ((cmd: string, args: string[]) => {
+      const meta = metadata(cmd, args);
+      if (meta) return meta;
+      if (isCargo(cmd, args)) seen = args.slice(6); // cargo's argv under the #35 lock
+      return { status: 0 };
+    }) as unknown as typeof import('node:child_process').spawnSync });
+    return seen;
+  };
+  const cargo = (extra: string[]) => withTargetDir(cargoArgs(extra), metaTarget);
+  const script = { npm_lifecycle_event: 'test:rust' };
+  assert.deepEqual(argvOf(['--', '--lib', 'x'], script), argvOf(['--lib', 'x'], script));
+  assert.deepEqual(argvOf(['--lib', 'x'], script), cargo(['--lib', 'x']));
+  assert.deepEqual(argvOf(['--', '--lib', 'x', '--', '--nocapture'], script), cargo(['--lib', 'x', '--', '--nocapture']), 'only the one leading --');
+  // Run directly (`node scripts/test-rust.mjs -- --nocapture`): no package
+  // script, so no pnpm `--`: the caller's own `--` keeps its meaning.
+  assert.deepEqual(argvOf(['--', '--nocapture'], {}), cargo(['--', '--nocapture']));
+});
