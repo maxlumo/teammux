@@ -275,29 +275,43 @@ directory. Four decisions, each measured rather than guessed:
   tmm-telemetry.ts` (omp auto-loads that directory), emitting CLAUDE-shaped
   payloads to the notify helper so the normalizer needs no third dialect —
   only the `omp` backend arm. **Every line the user typed is reported, the
-  run's first and each one steered into a busy run** (board #4, measured on
-  omp 18.15.0, 2026-11-05): `input` fires once at submission ingress with
-  the typed text, idle or busy, and `before_agent_start {reason: "prompt"}`
-  fires when that user work enters a run, at an idle prompt's start AND at
-  a steered line's dequeue, which gets no new `agent_start`. The extension
-  holds the `input` texts and reports them as one `UserPromptSubmit` at
-  `before_agent_start`, so each line is reported exactly once while `context`
-  fires on every model call (a session-title side request included). The
-  report is the TYPED text, never `before_agent_start.prompt`: for
-  `/skill:<name>` that is the expanded skill body. A builtin command
-  (`/hotkeys`, `/session`) fires `input` and starts no run, so a held line
-  starting with `/` is reported only when it is the one that started this
-  run; a `revive` is no user work; only the documented sources
-  (`interactive`, `rpc`) count. Before #4 the prompt was read from the first
-  `context` after `agent_start`, so a steered line was never reported: its
-  row was swept `unconfirmed` 45 s after the turn and its sender missed the
-  reply. The hub does for it what it does for dsh: the receipt settles
-  (#249) and the sender joins the reply edge (#256). Pinned by
-  `a_line_steered_into_a_busy_omp_is_reported_once_as_its_own_prompt` and
-  `only_what_the_user_typed_becomes_a_prompt` (the generated extension under
-  node, replaying the measured event order and shapes); live on a scratch
-  gateway, a line from a second agent into a busy omp settled, no
-  `unconfirmed`, and the reply went to both senders. `agent_end` with
+  run's first and each one steered into a busy run, when and only when the
+  message carrying it reaches the run** (board #4, measured on omp 18.15.0,
+  2026-11-05). `input` fires once at submission ingress with the typed text,
+  BEFORE omp interprets or queues it, so it alone is no receipt: a builtin
+  command (`/hotkeys`) and a queued line withdrawn with Alt+Up fire `input`
+  and never enter a run. A typed line that does enter a run ends as its own
+  `message_end`: a `user` message whose text is the line (an idle prompt, and
+  a steered line, which gets no new `agent_start`), or for `/skill:<name>
+  args` a `custom` `skill-prompt` message whose `details.prompt` is the
+  typed line (its content and `before_agent_start.prompt` are the expanded
+  skill body). The extension holds the `input` texts (sources `interactive`,
+  `rpc`; the newest 64) and reports one as `UserPromptSubmit` when a
+  carrying message ends, matched by whitespace-blind equality, then forgets
+  it. So each line is reported once, a line that never reaches the model is
+  never attributed to another prompt, and a message nobody typed (a
+  reminder, runtime context, another extension's) matches nothing. If omp
+  ever rewrote a line, nothing would match and the line would be swept
+  `unconfirmed`, never misattributed. `details.prompt` is measured, not
+  documented. `context` (every model call, a session-title side request
+  included) is not read. Round 1 of the review (reviewer P1-R1, validator
+  S2–S4) rejected the first version, which drained every held `input` at the
+  next `before_agent_start`: it reported `/hotkeys` with a steered line,
+  dropped the first of two queued skills, and attached a withdrawn line to
+  the next prompt. Before #4 the prompt was read from the first `context`
+  after `agent_start`, so a steered line was never reported: its row was
+  swept `unconfirmed` 45 s after the turn and its sender missed the reply.
+  The hub does for it what it does for dsh: the receipt settles (#249) and
+  the sender joins the reply edge (#256). Pinned by
+  `a_line_steered_into_a_busy_omp_is_reported_once_as_its_own_prompt` (S1),
+  `only_what_the_user_typed_becomes_a_prompt` and
+  `typed_state_is_reported_only_with_the_message_that_carries_it` (S2–S4),
+  the generated extension under node replaying the measured events. Live on
+  18.15.0 with the generated extension: S1 to S4, a `[tmm chat …]` line and a
+  multi-line paste with an `@file` mention each came back as exactly the
+  typed text, and nothing else was reported; on a scratch gateway, a line
+  from a second agent into a busy omp settled, no `unconfirmed`, and the
+  reply went to both senders. `agent_end` with
   `willContinue` is an auto-continuation, not a completion. `refresh_hooks` rewrites the
   whole file when this build's text differs.
 * **Resume is cwd-scoped by construction** — sessions live per encoded cwd
@@ -333,7 +347,7 @@ Queue is the only mode that keeps "one delivered line → one prompt hook → on
 | kiro (kiro-cli 2.22.1) | `settings/cli.json` `chat.defaultInterruptBehavior` | own turn after A's, hook ack, reply to B | no `userPromptSubmit`; B answered by `tmm send` mid-turn; owed no echo, never swept `unconfirmed` (#276) | yes |
 | codex (codex-cli 0.154.0) | launch-line `-c tui.keymap.composer.queue` / `composer.submit`: queue = `"enter"`/`"tab"`, steer = `"tab"`/`"enter"`, codex's defaults pinned so a remap in the user's `config.toml` (symlinked into the home, so every codex key is a `-c`) cannot override the definition (validator, #245; measured: with the user file set to queue, the steer pin still steered) | own turn after A's, hook ack, reply to B; idle Enter and slash commands still submit at once | CLI default: B's hook fired inside A's turn, the one Stop answered B, **A never got a reply** | yes |
 | claude (2.1.283) | `<home>/keybindings.json` `chat:queueSubmit` (read under `CLAUDE_CONFIG_DIR`) | none exists: with or without the binding B's hook fires at typing time and B is folded into A's turn at the tool boundary; one Stop | CLI default | no |
-| omp (18.2.10; steer 18.15.0) | `<home>/keybindings.yml` `app.message.followUp: enter` | queues in the pane, but a follow-up continues the run with no `agent_start`, so our extension reported no prompt: swept `unconfirmed`, and the one Stop replied to A with B's answer (18.2.10, before board #4; not re-measured since) | CLI default; since board #4 (18.15.0) B is reported at its dequeue (`before_agent_start`), its receipt settles and the Stop answers A and B | no |
+| omp (18.2.10; steer 18.15.0) | `<home>/keybindings.yml` `app.message.followUp: enter` | queues in the pane, but a follow-up continues the run with no `agent_start`, so our extension reported no prompt: swept `unconfirmed`, and the one Stop replied to A with B's answer (18.2.10, before board #4; not re-measured since) | CLI default; since board #4 (18.15.0) B is reported when its message reaches the run (`message_end`), its receipt settles and the Stop answers A and B | no |
 | kimi (2.0.2) | none (`tui.toml` has no key) | always: own turn, hook ack, reply to B | — | no |
 | grok (1.0.13 and 1.0.41) | documented `[ui] follow_up_behavior` (default queue) | unmeasured: no managed grok turn completes here (Bedrock 400, board #252) | unmeasured | no |
 

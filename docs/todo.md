@@ -283,9 +283,9 @@ closed; kept as the record of what the scattering looked like.
   follow-up, so the line is swept `unconfirmed` and the Stop replies to the
   first sender. Neither is offered the input-mode choice. The omp STEER half
   is closed by board #4 (omp 18.15.0): the extension reports each steered
-  line at its dequeue, so it settles and its sender gets the reply. Left:
+  line when its message reaches the run, so it settles and its sender gets the reply. Left:
   omp's queue mode (the follow-up binding) is still not offered; whether a
-  follow-up fires `before_agent_start` at its dequeue is unmeasured. See
+  follow-up reaches the run as a carrying `message_end` is unmeasured. See
   agents-overview.md § The input mode.
 
 - An Escape pressed in a kiro pane (not through the hub) fires no hook

@@ -8,7 +8,7 @@
 /// line was swept `unconfirmed` and the one Stop replied to the first sender
 /// with the second sender's answer. Offering queue would need the extension
 /// to report follow-ups first. A STEERED line is reported since board #4
-/// (omp 18.15.0, `before_agent_start` at its dequeue); a follow-up is unmeasured.
+/// (omp 18.15.0, by the `message_end` that carries it); a follow-up is unmeasured.
 pub(crate) const SWITCHES_INPUT_MODE: bool = false;
 
 /// omp 18.0.6 `--thinking` (its own --help): "off, minimal, low, medium,
@@ -446,28 +446,42 @@ function textOf(content: unknown): string {{
 
 export default function hook(pi: any): void {{
   // The prompt receipt (board #4, measured on omp 18.15.0): `input` fires
-  // once at submission ingress with exactly the typed text — for an idle
-  // omp AND for a line typed into a busy run — and `before_agent_start`
-  // (reason "prompt") fires when that user work enters a run: at the start
-  // of an idle prompt, and at the DEQUEUE of a steered line, which gets no
-  // new `agent_start`. So the typed lines are held from `input` and reported
-  // at `before_agent_start`, each exactly once. Its own `prompt` is not the
-  // report: for a skill it is the expanded skill body. A builtin command
-  // (`/hotkeys`) fires `input` and starts no run, so a held command line is
-  // reported only when it is the one that started this run (a `/skill:`).
-  // A "revive" is no user work. `context` (every model call, side requests
-  // included) is never read.
+  // once at submission ingress with exactly the typed text, idle or busy,
+  // BEFORE command interpretation and queueing. A typed line that reaches
+  // the model arrives as its own `message_end`: a `user` message whose text
+  // is the line (an idle prompt and each line steered into a busy run, which
+  // gets no new `agent_start`), or for `/skill:<name> args` a `custom`
+  // `skill-prompt` message whose `details.prompt` is the typed line (its
+  // content and `before_agent_start.prompt` are the expanded skill body).
+  // So a typed line is reported when, and only when, a message carrying it
+  // ends: once, by content. Typed state that never reaches a message (a
+  // builtin like `/hotkeys`, a line withdrawn from the queue) is never
+  // attributed to another prompt; it waits, bounded to the newest 64, and is
+  // not cleared at `agent_end` (a line typed as a run ends may start the
+  // next one). A message
+  // nobody typed (another extension's, a reminder, runtime context) matches
+  // nothing. `context` (every model call) is not read.
   let typed: string[] = [];
+  const canon = (t: string): string => t.replace(/\s+/g, "");
   pi.on("input", async (event: any, _ctx: any) => {{
     if (event?.source !== "interactive" && event?.source !== "rpc") return;
-    typed.push(typeof event?.text === "string" ? event.text : "");
+    if (typeof event?.text === "string" && event.text.trim() !== "") typed.push(event.text);
+    if (typed.length > 64) typed.shift();
   }});
-  pi.on("before_agent_start", async (event: any, ctx: any) => {{
-    if (event?.reason !== "prompt" || typed.length === 0) return;
-    const last = typed.length - 1;
-    const lines = typed.filter((t, i) => i === last || !t.startsWith("/"));
-    typed = [];
-    send({{ hook_event_name: "UserPromptSubmit", prompt: lines.join("\n"), session_id: sessionId(ctx) }});
+  pi.on("message_end", async (event: any, ctx: any) => {{
+    try {{
+      const m = event?.message;
+      let carried = "";
+      if (m?.role === "user") carried = textOf(m.content);
+      else if (m?.role === "custom" && m?.customType === "skill-prompt" && typeof m?.details?.prompt === "string") carried = m.details.prompt;
+      else return;
+      const key = canon(carried);
+      if (key === "") return;
+      const i = typed.findIndex((t) => canon(t) === key);
+      if (i < 0) return;
+      const [line] = typed.splice(i, 1);
+      send({{ hook_event_name: "UserPromptSubmit", prompt: line, session_id: sessionId(ctx) }});
+    }} catch {{}}
   }});
   // agent_end with willContinue is an auto-continuation, not a settle.
   pi.on("agent_end", async (event: any, ctx: any) => {{
@@ -671,6 +685,7 @@ mod tests {
             ["agent_start", {}],
             ["context", {"messages": [user(first)]}],
             ["turn_start", {}],
+            ["message_end", {"message": user(first)}],
             ["context", {"messages": [user(first), {"role": "developer", "content": "<system-reminder>side-channel</system-reminder>"}, user("<title-request>SENTINEL</title-request>")]}],
             ["tool_call", {"toolName": "bash", "input": {"command": "sleep 25"}}],
             ["input", {"source": "interactive", "text": steer}],
@@ -678,6 +693,8 @@ mod tests {
             ["turn_end", {}],
             ["before_agent_start", {"reason": "prompt", "prompt": steer}],
             ["context", {"messages": [user(first), user(steer)]}],
+            ["turn_start", {}],
+            ["message_end", {"message": {"role": "user", "content": [{"type": "text", "text": steer}], "steering": true}}],
             ["context", {"messages": [user(first), user(steer)]}],
             ["agent_end", {"messages": [{"role": "assistant", "content": [{"type": "text", "text": "DONE BANANA"}]}]}]
         ])) else {
@@ -691,12 +708,17 @@ mod tests {
         assert!(hooks.iter().all(|h| h["session_id"] == "sess-1"));
     }
 
-    /// Board #4 AC2, measured shapes: a skill invocation's run carries the
-    /// EXPANDED skill body in `before_agent_start.prompt` (and a `custom`
-    /// skill-prompt message), so the report is the line the user typed; a
-    /// builtin command (`/hotkeys`) fires `input` and no run, and never
-    /// becomes a prompt; a subagent revive is no user work; `context`
-    /// messages (runtime context, reminders, tool results) are never read.
+    fn skill_message(typed: &str, body: &str) -> Value {
+        json!({"message": {"role": "custom", "customType": "skill-prompt", "content": body, "display": true,
+            "details": {"name": "sk", "args": "x", "prompt": typed, "__queueChipText": typed}}})
+    }
+
+    /// Board #4 AC2, measured shapes (omp 18.15.0): a skill's run carries the
+    /// EXPANDED body in `before_agent_start.prompt` and a `custom`
+    /// `skill-prompt` message whose `details.prompt` is the typed line, so the
+    /// report is the typed line; a builtin command (`/hotkeys`) fires `input`
+    /// and no message, and never becomes a prompt; a subagent revive, runtime
+    /// context and a user-role message nobody typed are never prompts.
     #[test]
     fn only_what_the_user_typed_becomes_a_prompt() {
         let skill_body = "[IMPORTANT: User invoked the \"probe-skill\" skill; follow its instructions. Full skill below.]\n\nSKILL-BODY-SENTINEL";
@@ -705,15 +727,20 @@ mod tests {
             ["before_agent_start", {"reason": "prompt", "prompt": skill_body}],
             ["agent_start", {}],
             ["context", {"messages": [{"role": "custom", "customType": "skill-prompt", "content": skill_body}]}],
+            ["message_end", skill_message("/skill:probe-skill please", skill_body)],
             ["agent_end", {"messages": []}],
             ["input", {"source": "interactive", "text": "/hotkeys"}],
             ["input", {"source": "interactive", "text": "a plain line"}],
             ["before_agent_start", {"reason": "prompt", "prompt": "a plain line"}],
             ["agent_start", {}],
             ["context", {"messages": [user("SENTINEL runtime context"), user("a plain line")]}],
+            ["message_end", {"message": user("a plain line")}],
+            ["message_end", {"message": {"role": "developer", "content": "SENTINEL reminder"}}],
+            ["message_end", {"message": user("SENTINEL a user-role message nobody typed")}],
             ["agent_end", {"messages": []}],
             ["before_agent_start", {"reason": "revive", "prompt": "SENTINEL revive"}],
             ["agent_start", {}],
+            ["message_end", {"message": user("SENTINEL revive")}],
             ["agent_end", {"messages": []}]
         ])) else {
             eprintln!("skipped: no node");
@@ -721,5 +748,49 @@ mod tests {
         };
         assert_eq!(prompts(&hooks), ["/skill:probe-skill please", "a plain line"]);
         assert!(!serde_json::to_string(&hooks).unwrap().contains("SENTINEL"), "{hooks:?}");
+        assert!(!serde_json::to_string(&hooks).unwrap().contains("hotkeys"), "{hooks:?}");
+    }
+
+    /// Board #4 review (reviewer 06:09/06:10): typed state is reported only
+    /// for the message that carries it. Measured on omp 18.15.0, a line, a
+    /// builtin and two skills typed into a busy run: each skill was dequeued
+    /// with its own `before_agent_start`, and the builtin never was. A line
+    /// typed and withdrawn (alt+up) never reaches a message, so it is never
+    /// attributed to the next, unrelated prompt.
+    #[test]
+    fn typed_state_is_reported_only_with_the_message_that_carries_it() {
+        let one = "/skill:sk-one ARGS-ONE";
+        let two = "/skill:sk-two ARGS-TWO";
+        let Some(hooks) = replay(json!([
+            ["input", {"source": "interactive", "text": "RUN sleep 25"}],
+            ["before_agent_start", {"reason": "prompt", "prompt": "RUN sleep 25"}],
+            ["agent_start", {}],
+            ["message_end", {"message": user("RUN sleep 25")}],
+            ["input", {"source": "interactive", "text": "STEER-A say APPLE"}],
+            ["input", {"source": "interactive", "text": "WITHDRAWN-SENTINEL"}],
+            ["before_agent_start", {"reason": "prompt", "prompt": "STEER-A say APPLE"}],
+            ["message_end", {"message": user("STEER-A say APPLE")}],
+            ["input", {"source": "interactive", "text": "/hotkeys"}],
+            ["input", {"source": "interactive", "text": one}],
+            ["input", {"source": "interactive", "text": two}],
+            ["before_agent_start", {"reason": "prompt", "prompt": "[IMPORTANT: … sk-one … ARGS-ONE"}],
+            ["message_end", skill_message(one, "body one")],
+            ["before_agent_start", {"reason": "prompt", "prompt": "[IMPORTANT: … sk-two … ARGS-TWO"}],
+            ["message_end", skill_message(two, "body two")],
+            ["agent_end", {"messages": []}],
+            ["input", {"source": "interactive", "text": "NEXT"}],
+            ["before_agent_start", {"reason": "prompt", "prompt": "NEXT"}],
+            ["agent_start", {}],
+            ["message_end", {"message": user("NEXT")}],
+            ["agent_end", {"messages": []}]
+        ])) else {
+            eprintln!("skipped: no node");
+            return;
+        };
+        let mut want = vec!["NEXT", "RUN sleep 25", "STEER-A say APPLE", one, two];
+        want.sort();
+        assert_eq!(prompts(&hooks), want);
+        let all = serde_json::to_string(&hooks).unwrap();
+        assert!(!all.contains("WITHDRAWN") && !all.contains("hotkeys"), "{all}");
     }
 }
