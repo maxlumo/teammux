@@ -558,7 +558,9 @@ completion).
   draft; a hand-off that fails or reaches nobody after the save is its own line
   with a Reassign button, and the issue stays saved.
 - Status changes are recorded in the room (`[tmm] board #N a → b`), and a
-  move to review NOTIFIES the reporter (line typed into their pane) — the
+  move to review NOTIFIES the reporter (line typed into their pane, naming
+  the issue's last note by number: each party gets the note once and the
+  move once, board #42) — the
   handoff loop: file → assign (delivered) → take → review (delivered) →
   done by the reviewer. Board columns and agent live states are separate
   axes joined at these events.

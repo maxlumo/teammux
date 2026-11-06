@@ -1775,24 +1775,8 @@ fn board_save(session: &str, room: &str, p: &serde_json::Value, hand: &HandOff) 
                 saved,
             );
             let _ = rooms::post(&room, who, &format!("[tmm] board #{saved} {old_status} → {new_status} — {title}"));
-            if new_status == "review" {
-                let reporter = prev["created_by"].as_str().unwrap_or("");
-                if !reporter.is_empty() && reporter != "human" && reporter != who {
-                    // The handoff CARRIES the mover's last note —
-                    // their own account of what was done — so the
-                    // reviewer can usually decide from the message
-                    // (owner, 2026-08-30: concise, no busywork).
-                    let last_note = prev["notes"].as_array()
-                        .and_then(|n| n.last())
-                        .and_then(|n| n["body"].as_str())
-                        .map(|b| format!(" — {}", excerpt(b, NOTICE_EXCERPT)))
-                        .unwrap_or_default();
-                    let line = format!(
-                        "[tmm chat {}] {who}: [board #{saved} review] {title}{last_note}. `tmm board move {saved} done` to accept, or note what to fix + move doing.",
-                        stamp_now()
-                    );
-                    deliver_chat_line(session, reporter, &line);
-                }
+            if let Some((reporter, notice)) = board_review_notice(prev, who, new_status, saved, &title) {
+                deliver_chat_line(session, reporter, &format!("[tmm chat {}] {who}: {notice}", stamp_now()));
             }
         }
     }
@@ -1807,7 +1791,12 @@ fn board_save(session: &str, room: &str, p: &serde_json::Value, hand: &HandOff) 
     // (re)assignment with its own hand-off (the brief above),
     // where a second line would be noise.
     if let Some(prev) = &prev {
-        if let Some(what) = board_change_notice(prev, who, s("title"), s("body"), s("status"), assignee.is_some()) {
+        // One status change is one line per recipient (board #42 AC3): an
+        // assignee who also FILED the issue gets the review handoff above
+        // for this move, so it gets no second line for the same change.
+        let handed = s("status").and_then(|ns| board_review_notice(prev, who, ns, saved, ""));
+        let assignee_got_it = handed.as_ref().is_some_and(|(r, _)| Some(*r) == prev["assignee"].as_str());
+        if let Some(what) = board_change_notice(prev, who, s("title"), s("body"), s("status"), assignee.is_some()).filter(|_| !assignee_got_it) {
             let assignee = prev["assignee"].as_str().unwrap_or("");
             // The head names the issue as it NOW reads (new
             // values win), through the same issue_ref fallback.
@@ -1827,6 +1816,40 @@ fn board_save(session: &str, room: &str, p: &serde_json::Value, hand: &HandOff) 
         }
     }
     Ok(answer)
+}
+
+/// The handoff a move TO REVIEW types into the REPORTER's pane, and who that
+/// is: `None` when the save is not a move to review, or the reporter is
+/// nobody, the human (who reads the board) or the mover itself.
+///
+/// It NAMES the issue's last note (`note n` plus the command that prints it)
+/// and does not quote it again (board #42 AC3). The reporter is a declared
+/// party of every note on its issue (`board_note_notice`: assignee and
+/// reporter, minus the author and the human), so that note's own notice has
+/// already reached it, or the reporter wrote the note itself. Measured on
+/// #41's SHIP (2026-11-06 11:22): the same note reached the orchestrator
+/// 268 ms apart, as `[board #41 reply]` and as this line. The rule is
+/// derived from the issue's parties, never from timing, and both meanings
+/// still arrive: the note once, and the move once.
+#[cfg(not(any(target_os = "android", target_os = "ios")))]
+fn board_review_notice<'a>(prev: &'a serde_json::Value, who: &str, new_status: &str, id: i64, title: &str) -> Option<(&'a str, String)> {
+    if new_status != "review" || prev["status"].as_str() == Some("review") {
+        return None;
+    }
+    let reporter = prev["created_by"].as_str().unwrap_or("");
+    if reporter.is_empty() || reporter == "human" || reporter == who {
+        return None;
+    }
+    let last = prev["notes"]
+        .as_array()
+        .and_then(|n| n.last())
+        .and_then(|n| n["n"].as_i64())
+        .map(|n| format!(" — note {n} (`tmm board show {id} --note {n}`)"))
+        .unwrap_or_default();
+    Some((
+        reporter,
+        format!("[board #{id} review] {title}{last}. `tmm board move {id} done` to accept, or note what to fix + move doing."),
+    ))
 }
 
 #[cfg(not(any(target_os = "android", target_os = "ios")))]
@@ -4270,7 +4293,7 @@ mod tests {
             vec![
                 "read".to_string(),
                 "store".to_string(),
-                "post @dev @human @qa board #7: the fix is in (tmm board show 7)".to_string(),
+                "post @dev @human @qa board #7 note 1: the fix is in (tmm board show 7 --note 1)".to_string(),
                 "notice lead".to_string(),
             ],
             "one read before the write, no `all` read, and the notice only for the party the line does not carry"
@@ -4295,7 +4318,7 @@ mod tests {
         assert_eq!(r["note"], "stored");
         assert_eq!(r["room"], serde_json::json!({ "state": "failed", "error": "database is locked" }));
         assert!(r.get("announce").is_none(), "nothing was attempted for a line that was never written");
-        assert_eq!(r["line"], "@dev board #7: the fix is in (tmm board show 7)");
+        assert_eq!(r["line"], "@dev board #7 note 1: the fix is in (tmm board show 7 --note 1)");
         assert_eq!(r["notice"]["targets"], serde_json::json!(["dev", "lead"]), "dev is NOT suppressed: the room line never existed");
         assert!(s.log().contains(&"notice dev".to_string()), "{:?}", s.log());
     }
@@ -6858,6 +6881,81 @@ while True:
             let note = issue["notes"].as_array().unwrap().iter().find(|x| x["n"] == n).expect("that note exists");
             assert_eq!(note["body"], want, "{line}");
         }
+
+        let _ = std::process::Command::new("tmux").args(["kill-session", "-t", &session]).status();
+        let _ = std::fs::remove_dir_all(&ws);
+    }
+
+    /// Board #42 AC3 (the transition): a SHIP is TWO events, a note and then
+    /// a move to review. Each recipient gets each meaning exactly once: the
+    /// note's text once (in its own notice), and the move once. The review
+    /// handoff names the note by number instead of quoting it again, because
+    /// the reporter is a declared party of that note and already got it. On
+    /// an issue its assignee also filed, one status change is ONE line.
+    #[test]
+    fn a_ship_reaches_each_party_with_each_meaning_exactly_once() {
+        crate::projects::tests::use_test_store();
+        let session = format!("tmm-ship-once-{}", uuid::Uuid::new_v4());
+        let ws = crate::config::test_scratch("tmm-ship-once-ws");
+        for name in ["dev", "lead"] {
+            let home = ws.join(".tmm/agents").join(name);
+            std::fs::create_dir_all(&home).unwrap();
+            std::fs::write(home.join("launch.json"), format!(r#"{{"backend":"kiro","cmd":"kiro-cli chat --agent {name}"}}"#)).unwrap();
+        }
+        let created = std::process::Command::new("tmux")
+            .args(["new-session", "-d", "-s", &session, "-n", "dev", "-c", &ws.to_string_lossy(), "cat"])
+            .status()
+            .map(|s| s.success())
+            .unwrap_or(false);
+        if !created {
+            eprintln!("no tmux server — skipping");
+            let _ = std::fs::remove_dir_all(&ws);
+            return;
+        }
+        std::process::Command::new("tmux")
+            .args(["new-window", "-d", "-t", &session, "-n", "lead", "-c", &ws.to_string_lossy(), "cat"])
+            .status()
+            .unwrap();
+        crate::projects::adopt(&session, Some("ship-once-test")).expect("adopt test project");
+        let call = |method: &str, params: serde_json::Value| {
+            let r = handle_hub_request(&req(method, params), None);
+            assert!(r.error.is_none(), "{method}: {:?}", r.error.map(|e| e.message));
+        };
+        let lines = |window: &str, id: i64| -> Vec<String> {
+            crate::projects::telemetry::owed_rows(&session, window)
+                .into_iter()
+                .map(|r| r.line)
+                .filter(|l| l.contains(&format!("[board #{id}")))
+                .collect()
+        };
+        let ship = |id: i64, text: &str| {
+            call("hub_board_save", serde_json::json!({ "session": session, "id": id, "status": "doing", "who": "dev" }));
+            call("hub_board_note", serde_json::json!({ "session": session, "id": id, "who": "validator", "body": text }));
+            call("hub_board_save", serde_json::json!({ "session": session, "id": id, "status": "review", "who": "validator" }));
+        };
+
+        // 1. lead filed it, dev holds it, validator says SHIP and moves it.
+        let id = crate::projects::board_save(&session, None, Some("Ship"), Some("b"), None, Some("dev"), "lead").unwrap();
+        ship(id, "SHIP at abc123: all green");
+        let lead = lines("lead", id);
+        assert_eq!(lead.iter().filter(|l| l.contains("SHIP at abc123")).count(), 1, "the note's text reaches the reporter once: {lead:?}");
+        let review: Vec<&String> = lead.iter().filter(|l| l.contains(&format!("[board #{id} review]"))).collect();
+        assert_eq!(review.len(), 1, "{lead:?}");
+        assert!(review[0].contains(&format!("note 1 (`tmm board show {id} --note 1`)")), "the handoff names the note: {}", review[0]);
+        assert_eq!(lead.len(), 2, "the note and the handoff, nothing else: {lead:?}");
+        let dev = lines("dev", id);
+        assert_eq!(dev.iter().filter(|l| l.contains("SHIP at abc123")).count(), 1, "{dev:?}");
+        assert_eq!(dev.iter().filter(|l| l.contains("status doing → review")).count(), 1, "{dev:?}");
+        assert_eq!(dev.len(), 2, "{dev:?}");
+
+        // 2. dev filed AND holds it: the move is one line, not a handoff
+        //    plus a change notice for the same status change.
+        let own = crate::projects::board_save(&session, None, Some("Own"), Some("b"), None, Some("dev"), "dev").unwrap();
+        ship(own, "SHIP at def456");
+        let dev = lines("dev", own);
+        assert_eq!(dev.iter().filter(|l| l.contains("SHIP at def456")).count(), 1, "{dev:?}");
+        assert_eq!(dev.iter().filter(|l| l.contains(&format!("[board #{own} review]"))).count(), 1, "{dev:?}");
+        assert_eq!(dev.len(), 2, "one note line and one handoff, no second line for the same move: {dev:?}");
 
         let _ = std::process::Command::new("tmux").args(["kill-session", "-t", &session]).status();
         let _ = std::fs::remove_dir_all(&ws);
