@@ -1492,6 +1492,31 @@ pub fn record_held(session: &str, window: &str, line: &str, ask_at: usize, msg_i
     queue(|s| s.insert_held_delivery(session, window, line, ask_at, now(), msg_id))
 }
 
+/// A `/command` held for the window's next idle edge (board #45): a held
+/// row in the same queue as the lines (`record_held`), marked verbatim. Its
+/// id is returned for `tmm send --cancel`. `Err`: nothing is held, and the
+/// caller says so rather than typing it into a turn that may be running.
+pub fn record_held_command(session: &str, window: &str, command: &str, msg_id: &str) -> Result<i64, String> {
+    recovery_mark(session);
+    with_rec(session, window, |_| {});
+    queue(|s| s.insert_held_command(session, window, command, now(), msg_id))
+}
+
+/// Cancel a held command of `session` (board #45) if `may` allows it for
+/// that row: the row it was. `Err` names why not — no held command `id` there
+/// (typed already, cancelled, a chat line, another project's), `may`'s own
+/// refusal, or the row typed between the check and the delete.
+pub fn cancel_held_command(
+    session: &str,
+    id: i64,
+    may: impl FnOnce(&super::store::DeliveryRow) -> Result<(), String>,
+) -> Result<super::store::DeliveryRow, String> {
+    let gone = || format!("no command #{id} is waiting in this project (typed already, or cancelled)");
+    let row = queue(|s| s.held_command(session, id))?.ok_or_else(gone)?;
+    may(&row)?;
+    queue(|s| s.delete_held_command(session, id))?.ok_or_else(gone)
+}
+
 /// The window's held lines, oldest first.
 pub fn held_rows(session: &str, window: &str) -> Vec<super::store::DeliveryRow> {
     queue(|s| s.held_deliveries(session, window)).unwrap_or_default()
@@ -3068,7 +3093,7 @@ mod tests {
         crate::projects::store::DeliveryRow { ask_at, ..row(id, line, 0) }
     }
     fn row(id: i64, line: &str, ts: u64) -> crate::projects::store::DeliveryRow {
-        crate::projects::store::DeliveryRow { id, window: "w".into(), line: line.into(), ts, msg_id: String::new(), warned: false, command: None, ask_at: 0 }
+        crate::projects::store::DeliveryRow { id, window: "w".into(), line: line.into(), ts, msg_id: String::new(), warned: false, command: None, ask_at: 0, verbatim: false }
     }
     const MARK: (i64, u64) = (0, 0);
 

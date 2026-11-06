@@ -42,6 +42,10 @@ USAGE (agent):
                                       turn or your CLI's own background run (use task --wake)
   tmm send "@name /command [args]"    type a CLI command (e.g. /compact) into a teammate's
                                       pane verbatim, like the composer (@all = everyone else)
+  tmm send "@name /command" --when-idle   type it at the agent's next idle edge, after its
+                                      current turn and before any line sent later; prints
+                                      the waiting id (@all = one per agent)
+  tmm send --cancel <id>              cancel a command still waiting for its idle edge
   tmm send "@name text" --re <seq|id>  reply quoting a room message: the line carries
                                       [re sender HH:MM: 「its first line」] (tmm log --output json
                                       shows each message's seq and id)
@@ -418,6 +422,25 @@ async fn main() {
     match (cmd.as_str(), pos) {
         ("send", rest) => {
             let text = rest.join(" ");
+            // Board #45: cancel a /command still waiting for its agent's idle
+            // edge, by the id `--when-idle` printed. Nothing else rides along.
+            if flags.contains_key("cancel") {
+                let id = flags.get("cancel").cloned().flatten().and_then(|v| v.trim().trim_start_matches('#').parse::<i64>().ok())
+                    .unwrap_or_else(|| fail(EXIT_USAGE, "--cancel needs the id --when-idle printed: tmm send --cancel 12"));
+                if !text.is_empty() || flags.keys().any(|k| SEND_ALONE_CLASH.contains(&k.as_str())) {
+                    fail(EXIT_USAGE, "--cancel takes only the id: tmm send --cancel 12");
+                }
+                let session = need_project(&ctx);
+                let from = ctx.agent.clone().unwrap_or_else(|| "human".into());
+                let r = rpc(&ctx, "hub_command_cancel", json!({ "session": session, "id": id, "from": from })).await;
+                if ctx.json {
+                    println!("{r}");
+                } else {
+                    println!("✓ cancelled {} → {}", r["command"].as_str().unwrap_or("?"), r["agent"].as_str().unwrap_or("?"));
+                }
+                return;
+            }
+            let when_idle = flags.contains_key("when-idle");
             let is_status = flags.contains_key("status");
             // `--image` may repeat. An image is sent as a REFERENCE (an http(s)
             // URL, or a path on the machine the server runs on) appended as
@@ -442,6 +465,9 @@ async fn main() {
                 fail(EXIT_USAGE, "--re needs the quoted message's seq or id (tmm log --output json shows both)");
             }
             if at.is_some() || within.is_some() || flags.contains_key("at") || flags.contains_key("in") {
+                if when_idle {
+                    fail(EXIT_USAGE, "--when-idle waits for the agent's turn to end; it cannot also wait for a time (--in/--at)");
+                }
                 if re.is_some() {
                     fail(EXIT_USAGE, "--re quotes a message now; a scheduled wake cannot carry a quote");
                 }
@@ -467,7 +493,11 @@ async fn main() {
             // rule, read by the same `address::slash_command` (board #274):
             // typed verbatim through hub_command, no chat stamp.
             // A quoted reply is a message, never a /command (board #290).
-            match send_route(&body, &from, !is_status && images.is_empty() && re.is_none()) {
+            let route = send_route(&body, &from, !is_status && images.is_empty() && re.is_none());
+            if when_idle && !matches!(route, SendRoute::Command { .. }) {
+                fail(EXIT_USAGE, WHEN_IDLE_NEEDS_COMMAND);
+            }
+            match route {
                 SendRoute::Post => {}
                 SendRoute::ToSelf => fail(EXIT_USAGE, &format!("{from} cannot send a command to itself")),
                 SendRoute::Command { to, command } => {
@@ -479,14 +509,26 @@ async fn main() {
                             fail(EXIT_NOT_FOUND, &format!("no managed agent named '{to}' — a /command goes to an agent's CLI"));
                         }
                     }
-                    let r = rpc(&ctx, "hub_command", json!({
-                        "session": session, "agent": to, "text": command, "from": from
-                    })).await;
+                    let params = json!({ "session": session, "agent": to, "text": command, "from": from, "when_idle": when_idle });
+                    // An older server ignores `when_idle` and types the command
+                    // at once, into a turn that may be running (board #45).
+                    let r = if when_idle {
+                        rpc_needing(&ctx, COMMAND_WHEN_IDLE, "hub_command", params).await
+                    } else {
+                        rpc(&ctx, "hub_command", params).await
+                    };
                     if ctx.json {
                         println!("{r}");
                     } else {
+                        let name = command.split_whitespace().next().unwrap_or(&command);
                         let sent = r["sent"].as_array().map(|a| a.iter().filter_map(|v| v.as_str()).collect::<Vec<_>>().join(", ")).unwrap_or_default();
-                        println!("✓ {} → {sent}", command.split_whitespace().next().unwrap_or(&command));
+                        if !sent.is_empty() {
+                            println!("✓ {name} → {sent}");
+                        }
+                        for w in r["waiting"].as_array().into_iter().flatten() {
+                            let id = w["id"].as_i64().unwrap_or(0);
+                            println!("✓ {name} → {} waits for its turn to end — cancel: tmm send --cancel {id}", w["agent"].as_str().unwrap_or("?"));
+                        }
                     }
                     return;
                 }
@@ -2706,7 +2748,7 @@ const VALUED: &[&str] = &["project", "agent", "server", "output", "since", "limi
                           "name", "session", "with-agent", "backend", "model", "effort", "input-mode", "system", "skills", "mcp",
                           "ref", "source", "description", "def", "grep", "image", "notify", "body", "assignee", "team", "join", "file",
                           "in", "at", "to", "code", "signal", "re", "as", "from", "before", "lines", "cols", "note", "args-json", "test",
-                          "expect", "message-file", "blocked-by", "only", "seq"];
+                          "expect", "message-file", "blocked-by", "only", "seq", "cancel"];
 
 /// An argument is a flag only if it has a flag's SHAPE: `-x`, `--name`, `--name=value`, a letter
 /// first and then letters, digits, `_` or `-` (board #456). Anything else that begins with `-`
@@ -2814,7 +2856,7 @@ const CTX_FLAGS: &[&str] = &["project", "agent", "server", "output"];
 /// local commands are checked branch by branch. What no test proves is that a flag shared by
 /// every sub-verb of one dispatch arm is read by each of them.
 const VERB_FLAGS: &[VerbFlags] = &[
-    VerbFlags { key: "send", ctx: true, flags: &["status", "image", "at", "in", "re"] },
+    VerbFlags { key: "send", ctx: true, flags: &["status", "image", "at", "in", "re", "when-idle", "cancel"] },
     VerbFlags { key: "scratch", ctx: true, flags: &["kill"] },
     VerbFlags { key: "log", ctx: true, flags: LOG_FLAGS },
     VerbFlags { key: "wake", ctx: true, flags: &["all"] },
@@ -3131,6 +3173,9 @@ fn cap_refusal(need: &str) -> String {
         ),
         "board_agreement" => format!(
             "this server is older than agreement notes (its login answer lacks `{need}`; an older server would store a plain note as if it were the agreement) — update the server. Nothing was saved."
+        ),
+        COMMAND_WHEN_IDLE => format!(
+            "this server cannot hold a command for the agent's turn to end (its login answer lacks `{need}`; an older server would type it at once, into a turn that may be running) — update the server. Nothing was sent."
         ),
         "board_blocks" => format!(
             "this server is older than blocking edges (its login answer lacks `{need}`): it neither keeps blockers nor says which issues are blocked — update the server. Nothing was read or saved."
@@ -3779,6 +3824,18 @@ fn until(secs: i64) -> String {
         s => format!("in {}d {}h", s / 86400, s % 86400 / 3600),
     }
 }
+
+/// `--when-idle` holds a CLI command for the agent's next idle edge (board #45):
+/// a chat message already waits for a busy agent's turn end on its own, so the
+/// flag means something only for a `/command`.
+const WHEN_IDLE_NEEDS_COMMAND: &str = "--when-idle holds a /command for the agent's turn to end: tmm send \"@name /clear\" --when-idle (a message already waits for a busy agent)";
+
+/// The login cap of a server that holds `--when-idle` commands (board #45).
+const COMMAND_WHEN_IDLE: &str = "command_when_idle";
+
+/// The `send` flags that `--cancel` refuses beside it: it names one waiting
+/// command by its id and carries nothing else.
+const SEND_ALONE_CLASH: &[&str] = &["status", "image", "at", "in", "re", "when-idle"];
 
 /// Where `tmm send` takes a body (board #274). `plain` = no `--status` and
 /// no image: only plain text can be a command, as in the composer.

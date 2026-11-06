@@ -68,6 +68,10 @@ pub struct DeliveryRow {
     /// Where the stamped line starts in `line` (board #279, v30): its
     /// producer typed a Team context before it. 0 when nothing leads it.
     pub ask_at: usize,
+    /// A `/command` held for the window's next idle edge (board #45, v36):
+    /// typed alone and verbatim, never combined with lines, never stamped.
+    /// `false` for a chat line.
+    pub verbatim: bool,
 }
 
 /// What one unconfirmed report wrote (`Store::report_unconfirmed`, board
@@ -662,13 +666,49 @@ impl Store {
             .map_err(|e| format!("insert held delivery: {e}"))
     }
 
+    /// A `/command` held for the window's next idle edge (board #45): a held
+    /// row in the same queue as the lines, so its place among them is its id.
+    /// The id comes back: it is what `tmm send --cancel` names.
+    pub fn insert_held_command(&self, session: &str, window: &str, command: &str, ts: u64, msg_id: &str) -> Result<i64, String> {
+        self.conn
+            .execute(
+                "INSERT INTO deliveries (session, win, line, ts, msg_id, held, verbatim) VALUES (?1, ?2, ?3, ?4, ?5, 1, 1)",
+                rusqlite::params![session, window, command, ts as i64, msg_id],
+            )
+            .map(|_| self.conn.last_insert_rowid())
+            .map_err(|e| format!("insert held command: {e}"))
+    }
+
+    /// One held command of `session` (board #45), or `None` (see below).
+    pub fn held_command(&self, session: &str, id: i64) -> Result<Option<DeliveryRow>, String> {
+        Ok(self
+            .delivery_rows(
+                "SELECT id, win, line, ts, msg_id, warned, command, ask_at, verbatim FROM deliveries
+                 WHERE id = ?1 AND session = ?2 AND held = 1 AND verbatim = 1",
+                vec![Box::new(id), Box::new(session.to_string())],
+            )?
+            .pop())
+    }
+
+    /// Cancel one held command of `session` (board #45): the row is deleted
+    /// and returned, or `None` when `id` is no held command of that session
+    /// (already typed, already cancelled, a chat line, another project's).
+    pub fn delete_held_command(&self, session: &str, id: i64) -> Result<Option<DeliveryRow>, String> {
+        let Some(row) = self.held_command(session, id)? else { return Ok(None) };
+        let n = self
+            .conn
+            .execute("DELETE FROM deliveries WHERE id = ?1 AND held = 1 AND verbatim = 1", rusqlite::params![id])
+            .map_err(|e| format!("cancel held command: {e}"))?;
+        Ok((n > 0).then_some(row))
+    }
+
     /// A window's held lines, oldest first. `warned` here means the one
     /// "held (pane in copy mode)" report was already made for the row.
     pub fn held_deliveries(&self, session: &str, window: &str) -> Result<Vec<DeliveryRow>, String> {
         let mut stmt = self
             .conn
             .prepare(
-                "SELECT id, win, line, ts, msg_id, warned, command, ask_at FROM deliveries
+                "SELECT id, win, line, ts, msg_id, warned, command, ask_at, verbatim FROM deliveries
                  WHERE session = ?1 AND win = ?2 AND held = 1 ORDER BY id",
             )
             .map_err(|e| format!("prepare held deliveries: {e}"))?;
@@ -683,6 +723,7 @@ impl Store {
                     warned: r.get::<_, i64>(5)? != 0,
                     command: CommandLife::from_code(r.get::<_, i64>(6)?),
                     ask_at: r.get::<_, i64>(7)?.try_into().unwrap_or(0),
+                    verbatim: r.get::<_, i64>(8)? != 0,
                 })
             })
             .map_err(|e| format!("query held deliveries: {e}"))?;
@@ -787,12 +828,12 @@ impl Store {
     ) -> Result<Vec<DeliveryRow>, String> {
         let (sql, args): (&str, Vec<Box<dyn rusqlite::ToSql>>) = match window {
             Some(w) => (
-                "SELECT id, win, line, ts, msg_id, warned, command, ask_at FROM deliveries
+                "SELECT id, win, line, ts, msg_id, warned, command, ask_at, verbatim FROM deliveries
                  WHERE session = ?1 AND win = ?2 AND held = 0 ORDER BY id",
                 vec![Box::new(session.to_string()), Box::new(w.to_string())],
             ),
             None => (
-                "SELECT id, win, line, ts, msg_id, warned, command, ask_at FROM deliveries WHERE session = ?1 AND held = 0 ORDER BY id",
+                "SELECT id, win, line, ts, msg_id, warned, command, ask_at, verbatim FROM deliveries WHERE session = ?1 AND held = 0 ORDER BY id",
                 vec![Box::new(session.to_string())],
             ),
         };
@@ -805,7 +846,7 @@ impl Store {
     /// warned or command rows again.
     pub fn unreported_deliveries(&self, session: &str) -> Result<Vec<DeliveryRow>, String> {
         self.delivery_rows(
-            "SELECT id, win, line, ts, msg_id, warned, command, ask_at FROM deliveries
+            "SELECT id, win, line, ts, msg_id, warned, command, ask_at, verbatim FROM deliveries
              WHERE session = ?1 AND warned = 0 AND held = 0 AND command = 0 ORDER BY id",
             vec![Box::new(session.to_string())],
         )
@@ -827,6 +868,7 @@ impl Store {
                     warned: r.get::<_, i64>(5)? != 0,
                     command: CommandLife::from_code(r.get::<_, i64>(6)?),
                     ask_at: r.get::<_, i64>(7)?.try_into().unwrap_or(0),
+                    verbatim: r.get::<_, i64>(8)? != 0,
                 })
             })
             .map_err(|e| format!("query deliveries: {e}"))?;
@@ -1218,6 +1260,28 @@ mod tests {
         let tail: Vec<String> = store.activity_since("s", m_ts, 10).unwrap().into_iter().map(|r| r.text).collect();
         assert_eq!(tail, ["after the restart"], "the old process's last cursor sees it");
         let _ = std::fs::remove_dir_all(path.parent().unwrap());
+    }
+
+    /// Board #45: a `--when-idle` command is a held row like any line, in the
+    /// same order, marked verbatim; only a held verbatim row of the named
+    /// session can be cancelled, and cancelling it leaves the lines behind it.
+    #[test]
+    fn a_held_command_queues_in_line_and_only_it_can_be_cancelled() {
+        let store = Store::open_memory().unwrap();
+        store.insert_held_delivery("s", "w", "[tmm chat] before", 0, 100, "m1").unwrap();
+        let id = store.insert_held_command("s", "w", "/clear", 101, "m2").unwrap();
+        store.insert_held_delivery("s", "w", "[tmm chat] after", 0, 102, "m3").unwrap();
+        let held = store.held_deliveries("s", "w").unwrap();
+        let got: Vec<(&str, bool)> = held.iter().map(|r| (r.line.as_str(), r.verbatim)).collect();
+        assert_eq!(got, vec![("[tmm chat] before", false), ("/clear", true), ("[tmm chat] after", false)]);
+        assert_eq!(held[1].msg_id, "m2");
+        assert_eq!(store.delete_held_command("other", id).unwrap(), None, "another session's id cancels nothing");
+        assert_eq!(store.delete_held_command("s", held[0].id).unwrap(), None, "a chat line is not a command");
+        let gone = store.delete_held_command("s", id).unwrap().expect("cancelled");
+        assert_eq!((gone.window.as_str(), gone.line.as_str()), ("w", "/clear"));
+        assert_eq!(store.delete_held_command("s", id).unwrap(), None, "cancelled once");
+        let left: Vec<String> = store.held_deliveries("s", "w").unwrap().into_iter().map(|r| r.line).collect();
+        assert_eq!(left, ["[tmm chat] before", "[tmm chat] after"]);
     }
 
     /// Board #257 review: the 24 h prune drops stale TYPED lines and never a

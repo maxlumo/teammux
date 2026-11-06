@@ -9,7 +9,7 @@ use super::registry::{DEFAULT_DSH_SYSTEM, DEFAULT_KIMI_SYSTEM, DEFAULT_OMP_SYSTE
 
 /// Bumped when the schema changes; `migrate` is the only place that knows the
 /// steps. Stored in SQLite's own `user_version` pragma.
-const SCHEMA_VERSION: i64 = 35;
+const SCHEMA_VERSION: i64 = 36;
 
 impl Store {
     /// Ensure the durable half of Board editability exists, then
@@ -744,6 +744,32 @@ impl Store {
             // stay plain. Inside the ladder, foreign keys off (non-negotiable 9).
             self.ensure_issue_agreement()?;
         }
+        if version < 36 {
+            // v36 (board #45): a held delivery row may be a `/command` waiting
+            // for the window's next idle edge. One column, added only when
+            // absent; every existing row is a chat line: 0. Inside the ladder,
+            // foreign keys off (non-negotiable 9).
+            self.ensure_delivery_verbatim()?;
+        }
+        Ok(())
+    }
+
+    /// The v36 shape (also a heal floor): `deliveries.verbatim`, added only
+    /// when absent.
+    pub(super) fn ensure_delivery_verbatim(&self) -> Result<(), String> {
+        let has: bool = self
+            .conn
+            .query_row(
+                "SELECT EXISTS(SELECT 1 FROM pragma_table_info('deliveries') WHERE name = 'verbatim')",
+                [],
+                |r| r.get(0),
+            )
+            .map_err(|e| format!("inspect deliveries.verbatim: {e}"))?;
+        if !has {
+            self.conn
+                .execute_batch("ALTER TABLE deliveries ADD COLUMN verbatim INTEGER NOT NULL DEFAULT 0;")
+                .map_err(|e| format!("add deliveries.verbatim: {e}"))?;
+        }
         Ok(())
     }
 
@@ -1123,6 +1149,34 @@ mod tests {
         drop(store);
         let store = Store::open(&path).unwrap();
         assert_eq!(store.issue_get("proj", 1).unwrap().unwrap()["agreement"], serde_json::Value::Null, "healed on open, plain");
+    }
+
+    /// v35 -> v36 (board #45): `deliveries.verbatim` appears, every existing
+    /// row (typed or held) stays a chat line, a held command can be written,
+    /// and the heal floor re-adds the column if a stamp ran ahead of it.
+    #[test]
+    fn v35_deliveries_gain_the_verbatim_flag_and_stay_lines() {
+        let scratch = crate::tmux::Scratch::new("store-v36");
+        let path = std::path::Path::new(&scratch.path()).join("state.db");
+        {
+            let store = Store::open(&path).unwrap();
+            store.insert_delivery("s", "w", "typed line", 0, 100, "m1").unwrap();
+            store.insert_held_delivery("s", "w", "held line", 0, 101, "m2").unwrap();
+            store.conn.execute_batch("ALTER TABLE deliveries DROP COLUMN verbatim; PRAGMA user_version = 35;").unwrap();
+        }
+        let store = Store::open(&path).unwrap();
+        let v: i64 = store.conn.query_row("PRAGMA user_version", [], |r| r.get(0)).unwrap();
+        assert_eq!(v, SCHEMA_VERSION);
+        assert_eq!(SCHEMA_VERSION, 36);
+        assert!(!store.pending_deliveries("s", Some("w")).unwrap()[0].verbatim);
+        let held = store.held_deliveries("s", "w").unwrap();
+        assert_eq!((held.len(), held[0].line.as_str(), held[0].verbatim), (1, "held line", false));
+        store.insert_held_command("s", "w", "/compact", 102, "m3").unwrap();
+        assert!(store.held_deliveries("s", "w").unwrap()[1].verbatim);
+        store.conn.execute_batch("ALTER TABLE deliveries DROP COLUMN verbatim;").unwrap();
+        drop(store);
+        let store = Store::open(&path).unwrap();
+        assert!(!store.held_deliveries("s", "w").unwrap()[0].verbatim, "healed on open");
     }
 
     /// The heal step, which is not hypothetical: a dev binary built in the
