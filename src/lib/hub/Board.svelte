@@ -842,6 +842,10 @@
    * draft (an edge has no undo of its own: removing it IS the undo). The
    * request owns a frozen context like every other write here, and the
    * issue is read back after it. */
+  /** Bumped when an edge edit ends, however it ended: the picker is rebuilt
+   * from it, so it shows nothing chosen after a refusal too, not only after
+   * the edges changed (validator-2 F1 on 78f4287a). */
+  let blockPicks = $state(0);
   async function editBlocks(edit: { add?: number[]; remove?: number[] }) {
     if (!sel || busy) return;
     const ctx = freeze();
@@ -854,7 +858,7 @@
     } catch (e) {
       if (!owns(ctx)) return;
       err = (e as { code?: string } | null)?.code === 'server_too_old' ? t('boardBlocksOldServer') : saveError(e);
-    } finally { busy = false; submitting = false; }
+    } finally { busy = false; submitting = false; blockPicks++; }
   }
   /** The issues the open one may be blocked by: the board's others that are
    * not already its blockers, by number. The server still refuses a cycle. */
@@ -1288,7 +1292,7 @@
               title={t('boardRemoveBlocker').replace('{n}', String(n))} disabled={submitting || blocksLocked()}
               onclick={() => editBlocks({ remove: [n] })}>#{n} <Icon name="x" size={10} /></button>
           {/each}
-          {#key blockList(sel)}
+          {#key `${blockList(sel)}|${blockPicks}`}
             <Select value="" dense placeholder={t('boardAddBlocker')} ariaLabel={t('boardAddBlocker')}
               disabled={submitting || blocksLocked()} options={blockerOptions(sel)}
               onchange={(v: string) => { const n = Number(v); if (n > 0) editBlocks({ add: [n] }); }} />

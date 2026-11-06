@@ -605,3 +605,29 @@ test('a server without board_blocks shows the edges but offers no edit (#43)', a
     assert.match(app.document.querySelector('.d-blocks')!.textContent ?? '', /Update the server/);
   } finally { await app.close(); }
 });
+
+test('a refused blocker leaves the picker on its placeholder and says why once (#43 F1)', async context => {
+  const app = await (await compiled).mount(context, {
+    props: { session: 'fixture', visible: true },
+    setup(window) { window.Element.prototype.getAnimations = () => []; },
+    modules: [rpc({
+      getCaps: () => ['board_dispatch', 'board_blocks'],
+      boardCounts: async () => ({ counts: { fixture: blockCounts } }),
+      boardList: async () => ({ issues: blockBoard }),
+      boardGet: async (_s: string, id: number) => blockBoard.find(i => i.id === id),
+      boardBlock: async () => { throw new Error('#3 cannot block #2: that makes a cycle #2 → #3 → #2'); },
+    })],
+  });
+  try {
+    await flush(app);
+    await openCard(app, 'Waits');
+    const trigger = () => app.document.querySelector<HTMLButtonElement>('.d-blocks .sel-trigger')!;
+    trigger().click(); await flush(app);
+    [...app.document.querySelectorAll<HTMLButtonElement>('.sel-opt')].find(o => o.textContent?.trim().startsWith('#3'))!.click();
+    await flush(app);
+    assert.equal(trigger().textContent?.trim(), 'Add a blocker', 'nothing is chosen after a refusal');
+    assert.equal(app.document.querySelectorAll('.err').length, 1);
+    assert.match(app.document.querySelector('.err')!.textContent ?? '', /makes a cycle #2 → #3 → #2/);
+    assert.equal(app.document.querySelector('.d-blocks .chip-btn')?.textContent?.replace(/\s+/g, ''), '#1', 'the edges are as they were');
+  } finally { await app.close(); }
+});
