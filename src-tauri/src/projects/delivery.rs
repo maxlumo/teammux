@@ -197,6 +197,7 @@ pub(crate) fn replace_cli(session: &str, window: &str, backend: Option<crate::ba
         return Err(e);
     }
     taken.announce(session, window);
+    end_held_commands(session, window, Ending::Restart);
     Ok(id)
 }
 
@@ -210,7 +211,39 @@ pub(crate) fn stop_cli(session: &str, window: &str, kill: impl FnOnce() -> Resul
     let taken = take_in_flight(session, window, "stopped")?;
     kill()?;
     taken.announce(session, window);
+    end_held_commands(session, window, Ending::Stop);
     Ok(())
+}
+
+/// What ended a window's CLI, for its held `/command`s (board #45).
+#[derive(Clone, Copy)]
+enum Ending {
+    Stop,
+    Restart,
+}
+
+/// The held `/command`s a stop or a restart ends (board #45), under the
+/// window lock, each said once in the room under its sender. A STOP ends
+/// every one: a reset left waiting must never fire into whatever the agent
+/// is next given (reviewer's retro on #45). A RESTART ends only a typed one
+/// whose effect has not come: the CLI it was typed into is gone, so its effect
+/// never will, and it is not typed again; one still waiting stays and is
+/// typed at the new CLI's idle edge (#38's ready edge comes first). The lines
+/// behind an ended one are no longer held by it.
+fn end_held_commands(session: &str, window: &str, ending: Ending) {
+    use super::store::CommandHold::{Typed, Waiting};
+    for row in telemetry::held_rows(session, window) {
+        let said = match (ending, row.verbatim) {
+            (Ending::Stop, Some(Waiting)) => format!("[tmm] {} → {window} was not typed: {window} was stopped", row.line),
+            (Ending::Stop, Some(Typed)) => format!("[tmm] {} → {window}: {window} was stopped before it took effect", row.line),
+            (Ending::Restart, Some(Typed)) => format!("[tmm] {} → {window}: {window} was restarted before it took effect; it is not typed again", row.line),
+            _ => continue,
+        };
+        if telemetry::cancel_held_command(session, row.id, |_| Ok(())).is_ok() {
+            threads_before().lock().unwrap().remove(&row.id);
+            say_command(session, &row, &said);
+        }
+    }
 }
 
 /// The window's current pane and its screen, the one read a ready check
@@ -3430,5 +3463,48 @@ mod tests {
         std::fs::write(locks.join("01a1b0cc-0000-7000-8000-00000000000b.lock"), "").unwrap();
         check_command_effects();
         assert_eq!(held_lines(&s, "cx"), [(brief.to_string(), None)], "a new thread: the reset took effect");
+    }
+
+    /// Board #45 AC2: what a restart, a stop and an interrupt do to a held
+    /// command. A RESTART keeps a waiting one (typed at the new CLI's idle
+    /// edge) and ends a typed one whose effect has not come (its CLI is gone;
+    /// never typed again); a STOP ends every one, so no reset left waiting can
+    /// erase what the agent is given next; an INTERRUPT drops it with the held
+    /// lines (#257 decision 1). Each end is said once in the room; the lines
+    /// behind are kept.
+    #[test]
+    fn a_restart_keeps_a_waiting_command_and_a_stop_or_interrupt_ends_it() {
+        let mut scratch = crate::tmux::Scratch::new("when-idle-life");
+        let s = scratch.session("s");
+        agent_with_recipe(&scratch, &s, "cl", "claude", "");
+        fake();
+        use crate::projects::store::CommandHold::{Typed, Waiting};
+        let brief = "[tmm chat 2026-11-06 10:00] lead: @cl the brief";
+        let room = crate::projects::rooms::session_room(&s);
+        let said = || -> Vec<String> {
+            crate::projects::rooms::history_page(&room, None, 100)["messages"].as_array().unwrap().iter()
+                .filter_map(|m| m["body"].as_str().map(str::to_string)).filter(|b| b.starts_with("[tmm] /")).collect()
+        };
+        busy(&s, "cl");
+        waiting(command_when_idle(&s, "cl", "t", "/clear", "m1"));
+        assert!(deliver_as(&s, "cl", "t", brief, "m2", false));
+        replace_cli(&s, "cl", None, || Ok(())).unwrap();
+        assert_eq!(held_lines(&s, "cl"), [("/clear".to_string(), Some(Waiting)), (brief.to_string(), None)], "a restart keeps a waiting command");
+        end(&s, "cl");
+        flush_at(&s, "cl", "t");
+        assert_eq!(typed(), ["/clear"]);
+        assert_eq!(held_lines(&s, "cl")[0].1, Some(Typed));
+        replace_cli(&s, "cl", None, || Ok(())).unwrap();
+        assert_eq!(held_lines(&s, "cl"), [(brief.to_string(), None)], "a typed one ends: its CLI is gone");
+        assert_eq!(said(), ["[tmm] /clear → cl (its turn ended)", "[tmm] /clear → cl: cl was restarted before it took effect; it is not typed again"]);
+        busy(&s, "cl");
+        waiting(command_when_idle(&s, "cl", "t", "/compact", "m3"));
+        stop_cli(&s, "cl", || Ok(())).unwrap();
+        assert_eq!(held_lines(&s, "cl"), [(brief.to_string(), None)], "a stop ends a waiting one; the line stays");
+        assert_eq!(said().last().map(String::as_str), Some("[tmm] /compact → cl was not typed: cl was stopped"));
+        waiting(command_when_idle(&s, "cl", "t", "/clear", "m4"));
+        interrupt(&s, "cl", || telemetry::record_interrupt(&s, "cl"));
+        assert!(held_lines(&s, "cl").is_empty(), "an interrupt drops it with the held lines");
+        assert_eq!(typed(), ["/clear"], "none of them was typed");
     }
 }
