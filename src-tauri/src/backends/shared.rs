@@ -561,6 +561,17 @@ pub(crate) fn confirm_startup_prompt(
     confirmation: StartupConfirmation,
     on_ready: Option<Box<dyn FnOnce() + Send + 'static>>,
 ) {
+    confirm_startup_prompt_or(pane, confirmation, on_ready, None);
+}
+
+/// `confirm_startup_prompt`, with `on_timeout` run once when the ready
+/// markers never showed (board #38: a restart says so, and types nothing).
+pub(crate) fn confirm_startup_prompt_or(
+    pane: String,
+    confirmation: StartupConfirmation,
+    on_ready: Option<Box<dyn FnOnce() + Send + 'static>>,
+    on_timeout: Option<Box<dyn FnOnce() + Send + 'static>>,
+) {
     std::thread::spawn(move || {
         let deadline = std::time::Instant::now() + confirmation.timeout;
         let mut accepted = false;
@@ -592,6 +603,9 @@ pub(crate) fn confirm_startup_prompt(
         }
         if on_ready.is_some() {
             eprintln!("projects: pane {pane} never showed its ready markers — the first prompt was not typed");
+            if let Some(f) = on_timeout {
+                f();
+            }
         }
     });
 }
@@ -599,6 +613,18 @@ pub(crate) fn confirm_startup_prompt(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// Board #38 round 1: a pane that never shows its ready furniture runs
+    /// `on_timeout` once, and never `on_ready`.
+    #[test]
+    fn a_waiter_that_times_out_says_so_and_never_runs_on_ready() {
+        let (tx, rx) = std::sync::mpsc::channel::<&'static str>();
+        let (t1, t2) = (tx.clone(), tx);
+        let c = StartupConfirmation { markers: Vec::new(), ready_markers: vec!["never"], accept_keys: Vec::new(), timeout: Duration::from_millis(700) };
+        confirm_startup_prompt_or("no-such-session-38:0".into(), c, Some(Box::new(move || { let _ = t1.send("ready"); })), Some(Box::new(move || { let _ = t2.send("timeout"); })));
+        assert_eq!(rx.recv_timeout(Duration::from_secs(5)).ok(), Some("timeout"));
+        assert!(rx.recv_timeout(Duration::from_millis(300)).is_err(), "once, and on_ready never");
+    }
 
     /// Board #515: under test the user's Claude settings are a per-process
     /// temp file, never the developer's `~/.claude/settings.json` (the path

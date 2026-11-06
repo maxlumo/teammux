@@ -66,6 +66,56 @@ fn recipe_mode(session: &str, window: &str) -> Option<(crate::backends::Backend,
     Some((backend, if recipe["input_mode"].as_str() == Some("steer") { "steer" } else { "queue" }))
 }
 
+/// The windows being restarted (board #38 round 1, orchestrator's rule): set
+/// BEFORE the old CLI is killed, cleared only when the window's screen
+/// proves the new CLI ready (`Backend::startup_confirmation`'s ready
+/// furniture), by whichever trigger looks first: the start's waiter, a
+/// delivery, a flush. Never cleared on a timeout. In memory: a gateway that
+/// dies mid-start loses it (the restart's own waiter dies with it).
+fn starting_set() -> &'static Mutex<std::collections::HashSet<(String, String)>> {
+    static SET: OnceLock<Mutex<std::collections::HashSet<(String, String)>>> = OnceLock::new();
+    SET.get_or_init(|| Mutex::new(std::collections::HashSet::new()))
+}
+
+/// Mark `window` as starting, for a backend with a ready screen to prove it
+/// by (grok and omp have none, and queue nothing).
+pub(crate) fn begin_start(session: &str, window: &str) {
+    if recipe_backend(session, window).and_then(|b| b.startup_confirmation()).is_some() {
+        starting_set().lock().unwrap().insert((session.to_string(), window.to_string()));
+    }
+}
+
+/// Forget the mark: the start did not happen (its launch failed).
+pub(crate) fn abandon_start(session: &str, window: &str) {
+    starting_set().lock().unwrap().remove(&(session.to_string(), window.to_string()));
+}
+
+/// Is `window` still starting? Asked by every trigger before it types: the
+/// screen is read once, and ready furniture on it clears the mark.
+fn starting(session: &str, window: &str) -> bool {
+    let key = (session.to_string(), window.to_string());
+    if !starting_set().lock().unwrap().contains(&key) {
+        return false;
+    }
+    let ready = recipe_backend(session, window)
+        .and_then(|b| b.startup_confirmation())
+        .zip(crate::tmux::capture_pane_plain(&format!("{session}:{window}"), Some(80)).ok())
+        .is_some_and(|(c, screen)| crate::backends::shared::startup_already_ready(&screen, &c));
+    if ready {
+        starting_set().lock().unwrap().remove(&key);
+    }
+    !ready
+}
+
+/// A starting window's ready check, then the flush (board #38): what the
+/// start's waiter runs when the ready furniture shows. It clears the mark
+/// even when nothing is held, so the next delivery types at once.
+pub(crate) fn start_ready(session: &str, window: &str) {
+    if !starting(session, window) {
+        flush(session, window);
+    }
+}
+
 /// The backend `window`'s recipe names (board #38: what a restart's ready
 /// edge reads), from the same recipe read as its input mode.
 pub(crate) fn recipe_backend(session: &str, window: &str) -> Option<crate::backends::Backend> {
@@ -125,6 +175,13 @@ fn strict_occupied(session: &str, window: &str) -> Option<bool> {
     // A window a restore made and has not seen ready (board #422 round 3)
     // is occupied for EVERY backend: its pane may still be a shell.
     if super::restore_hold::held(session, window) {
+        return Some(true);
+    }
+    // A window being restarted (board #38 round 1) is occupied until its
+    // screen PROVES the new CLI ready: its pane may still be the shell the
+    // launch line is typed into (validator: a held line typed there gave
+    // `zsh: bad pattern: [tmm` and codex never started).
+    if starting(session, window) {
         return Some(true);
     }
     let (backend, _) = recipe_mode(session, window)?;

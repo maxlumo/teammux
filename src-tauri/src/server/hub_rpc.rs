@@ -885,6 +885,7 @@ fn dispatch_hub(req: &Request, notifications: Option<&crate::agent_notifications
             // its kill, and finished once at its end (review P1-A residual).
             let permit = crate::projects::start_permit(session, agent).map_err(RpcError::Internal)?;
             if let Some(window) = live {
+                crate::projects::delivery::begin_start(session, agent);
                 kill_agent_cli(session, agent, window).map_err(RpcError::Internal)?;
             }
             let resumed = start_agent(session, agent, permit).map_err(|e| RpcError::Internal(format!("restart failed: {e}")))?;
@@ -945,6 +946,7 @@ fn dispatch_hub(req: &Request, notifications: Option<&crate::agent_notifications
                     }
                 };
                 if let Some(n) = window_of_agent(session, w) {
+                    crate::projects::delivery::begin_start(session, w);
                     if let Err(e) = kill_agent_cli(session, w, n) {
                         errors.push(serde_json::json!({ "name": w, "error": e }));
                         continue;
@@ -1111,29 +1113,51 @@ fn kill_agent_cli(session: &str, agent: &str, window: usize) -> Result<(), Strin
 
 #[cfg(not(any(target_os = "android", target_os = "ios")))]
 fn start_agent(session: &str, agent: &str, permit: crate::projects::StartPermit) -> Result<bool, String> {
-    let resumed = start_agent_with(session, agent, permit, resume_slot, crate::projects::spawn::respawn)?;
+    // Starting until its screen proves ready (round 1): a Start after a Stop
+    // makes a new window too, whose pane begins as a shell.
+    crate::projects::delivery::begin_start(session, agent);
+    let resumed = match start_agent_with(session, agent, permit, resume_slot, crate::projects::spawn::respawn) {
+        Ok(r) => r,
+        Err(e) => {
+            crate::projects::delivery::abandon_start(session, agent);
+            return Err(e);
+        }
+    };
     flush_held_when_ready(session, agent);
     Ok(resumed)
 }
 
-/// The lines held for `agent` (behind a turn its killed CLI never ended, or
-/// queued while it was stopped) are typed to the NEW CLI once it is ready
-/// (board #38): the same waiter a spawn's typed brief uses
-/// (`shared::confirm_startup_prompt` on the backend's own ready furniture),
-/// whose `on_ready` is the one flush door, so each line goes once, in order,
-/// under the window lock. A line typed before the composer was up was
-/// measured to sit unsent (codex 0.166.0 at +0 s). A backend with no
-/// measured ready screen (grok, omp; neither queues lines) keeps the
-/// existing flush triggers. Nothing held: nothing to wait for.
+/// The new CLI's ready edge (board #38): the start's waiter
+/// (`shared::confirm_startup_prompt_or` on the backend's own ready
+/// furniture) is the FIRST of the checks every trigger makes while the
+/// window is starting (`delivery::starting`). On ready it flushes through the
+/// one flush door, which re-reads the screen, clears the mark and types what
+/// is held, once, in order, under the window lock. A line typed before the
+/// composer was up was measured to sit unsent (codex 0.166.0 at +0 s), and
+/// one typed before the launch line strands the agent at its shell (round 1,
+/// validator). On a timeout NOTHING is typed (orchestrator's rule): the mark
+/// stays, the lines stay held, and the senders are told once by the held
+/// warn; a later trigger releases them when the screen proves ready. A
+/// backend with no measured ready screen (grok, omp; neither queues lines)
+/// has no mark and keeps the existing triggers.
 #[cfg(not(any(target_os = "android", target_os = "ios")))]
 fn flush_held_when_ready(session: &str, agent: &str) {
-    if crate::projects::telemetry::held_rows(session, agent).is_empty() {
-        return;
-    }
     let Some(confirmation) = crate::projects::delivery::recipe_backend(session, agent).and_then(|b| b.startup_confirmation()) else { return };
     let Some(window) = window_of_agent(session, agent) else { return };
+    let secs = confirmation.timeout.as_secs();
     let (s, a) = (session.to_string(), agent.to_string());
-    crate::backends::shared::confirm_startup_prompt(format!("{session}:{window}"), confirmation, Some(Box::new(move || crate::projects::delivery::flush(&s, &a))));
+    let (s2, a2) = (s.clone(), a.clone());
+    crate::backends::shared::confirm_startup_prompt_or(
+        format!("{session}:{window}"),
+        confirmation,
+        Some(Box::new(move || crate::projects::delivery::start_ready(&s, &a))),
+        Some(Box::new(move || {
+            let rows = crate::projects::telemetry::held_rows(&s2, &a2);
+            if !rows.is_empty() {
+                crate::projects::telemetry::record_held_blocked(&s2, &a2, &rows, &format!("{a2} has not become ready after {secs} s"));
+            }
+        })),
+    );
 }
 
 /// The resume half of a start: bring the agent's materials up to date with
@@ -6873,7 +6897,9 @@ import os, sys, time, tty
 tty.setraw(0)
 started = time.time()
 time.sleep(1.0)
-sys.stdout.write('OpenAI Codex (fake)\\r\\n'); sys.stdout.flush()
+# A RESUMED codex (round 1, validator P1-a): no banner, only the empty
+# composer's placeholder.
+sys.stdout.write('\\u203a Ask Codex to do anything\\r\\n'); sys.stdout.flush()
 buf = b''
 while True:
     c = os.read(0, 1)
@@ -6913,6 +6939,16 @@ while True:
         assert!(r.error.is_none(), "{:?}", r.error.map(|e| e.message));
         assert_eq!(crate::projects::telemetry::held_rows(&session, "dev").len(), 1, "held behind the open turn");
 
+        // Round 1, validator P1-b: an open Hub reads the feed every 0.5 s, and
+        // each read is a flush trigger. During the respawn none may type.
+        let stop_poll = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
+        let poller = {
+            let (stop, session) = (stop_poll.clone(), session.clone());
+            std::thread::spawn(move || while !stop.load(std::sync::atomic::Ordering::Relaxed) {
+                crate::projects::delivery::flush_idle(&session);
+                std::thread::sleep(std::time::Duration::from_millis(100));
+            })
+        };
         let r = call("hub_agent_restart", serde_json::json!({ "session": session, "agent": "dev" }));
         assert!(r.error.is_none(), "{:?}", r.error.map(|e| e.message));
         assert_ne!(state(), "running", "the killed CLI's turn is over");
@@ -6920,7 +6956,9 @@ while True:
         let typed = submits();
         assert_eq!(typed.iter().filter(|l| l.contains("BETAWORD")).count(), 1, "once: {typed:?}");
         let at: f64 = typed[0].split(':').nth(1).unwrap().parse().unwrap();
-        assert!(at >= 1.0, "after the ready marker, never into the booting CLI: {typed:?}");
+        assert!(at >= 1.0, "after the ready marker, never into the booting CLI, though the feed was read throughout: {typed:?}");
+        stop_poll.store(true, std::sync::atomic::Ordering::Relaxed);
+        poller.join().unwrap();
         assert!(crate::projects::telemetry::held_rows(&session, "dev").is_empty(), "nothing held any more");
         std::thread::sleep(std::time::Duration::from_millis(1500));
         assert_eq!(submits().len(), 1, "nothing typed twice: {:?}", screen());
@@ -6950,6 +6988,80 @@ while True:
         assert!(wait(&|| submits().iter().any(|l| l.contains("GAMMAWORD")), 15000), "the next start types it: {:?}", screen());
         assert_eq!(submits().iter().filter(|l| l.contains("GAMMAWORD")).count(), 1);
         assert!(crate::projects::telemetry::held_rows(&session, "dev").is_empty());
+    }
+
+    /// Board #38 round 1 (orchestrator's rule (2)): a restarted window that
+    /// never shows its ready screen is typed NOTHING. Every trigger keeps its
+    /// lines held; once the screen proves ready, the next trigger types them.
+    #[test]
+    fn a_restarted_window_that_never_shows_ready_is_typed_nothing() {
+        crate::projects::tests::use_test_store();
+        let session = format!("tmm-never-ready-{}", uuid::Uuid::new_v4());
+        let ws = crate::config::test_scratch("tmm-never-ready-ws");
+        let home = ws.join(".tmm/agents/dev");
+        std::fs::create_dir_all(&home).unwrap();
+        let gate = ws.join("ready");
+        let fake = ws.join("cli.py");
+        std::fs::write(&fake, format!("\
+import os, sys, tty
+tty.setraw(0)
+while not os.path.exists({gate:?}):
+    import time; time.sleep(0.1)
+sys.stdout.write('\\u203a Ask Codex to do anything\\r\\n'); sys.stdout.flush()
+buf = b''
+while True:
+    c = os.read(0, 1)
+    if c == b'\\r':
+        sys.stdout.write('SUBMIT:' + buf.decode('utf-8', 'replace') + '\\r\\n'); sys.stdout.flush()
+        buf = b''
+    else:
+        buf += c
+", gate = gate.to_string_lossy())).unwrap();
+        let cmd = format!("exec -a codex python3 {}", fake.display());
+        crate::projects::spawn::LaunchRecipe {
+            backend: "codex", env: &[], cmd: &cmd, spawned_by: "", team: None, agent_def: "", member: "", from_member: "", input_mode: "queue",
+        }.write(&home).unwrap();
+        let created = std::process::Command::new("tmux")
+            .args(["new-session", "-d", "-x", "200", "-y", "50", "-s", &session, "-n", "dev", "-c", &ws.to_string_lossy(), &format!("bash -c '{cmd}'")])
+            .status()
+            .is_ok_and(|s| s.success());
+        if !created {
+            eprintln!("no tmux server — skipping");
+            let _ = std::fs::remove_dir_all(&ws);
+            return;
+        }
+        let _cleanup = KillOnDrop(session.clone(), ws.clone());
+        crate::tmux::new_named_window(&session, "keep", &ws.to_string_lossy()).unwrap();
+        crate::projects::adopt(&session, Some("never-ready-test")).expect("adopt project");
+        let target = format!("{session}:dev");
+        let screen = || crate::tmux::capture_pane_plain(&target, Some(200)).unwrap_or_default();
+        let call = |m: &str, params: serde_json::Value| handle_hub_request(&req(m, params), None);
+        // The first window's fake waits for the gate too; open it so that CLI is up.
+        std::fs::write(&gate, "").unwrap();
+        std::thread::sleep(std::time::Duration::from_millis(500));
+        std::fs::remove_file(&gate).unwrap();
+        crate::projects::telemetry::record_prompt(&session, "dev", "[tmm chat 2026-11-06 03:00] human: @dev a long task");
+        let r = call("hub_post", serde_json::json!({ "session": session, "from": "lead", "body": "@dev reply only ZETAWORD" }));
+        assert!(r.error.is_none(), "{:?}", r.error.map(|e| e.message));
+        let r = call("hub_agent_restart", serde_json::json!({ "session": session, "agent": "dev" }));
+        assert!(r.error.is_none(), "{:?}", r.error.map(|e| e.message));
+        // Not ready: every trigger, many times, types nothing.
+        for _ in 0..20 {
+            crate::projects::delivery::flush_idle(&session);
+            crate::projects::delivery::flush(&session, "dev");
+            std::thread::sleep(std::time::Duration::from_millis(100));
+        }
+        let r = call("hub_post", serde_json::json!({ "session": session, "from": "lead", "body": "@dev reply only ETAWORD" }));
+        assert!(r.error.is_none(), "{:?}", r.error.map(|e| e.message));
+        assert!(!screen().contains("SUBMIT:"), "nothing typed into a window not proven ready: {:?}", screen());
+        assert_eq!(crate::projects::telemetry::held_rows(&session, "dev").len(), 2, "both lines held, the new one too");
+        // Proven ready: the next trigger types both, once, in order.
+        std::fs::write(&gate, "").unwrap();
+        let typed = |w: &str| screen().lines().filter(|l| l.starts_with("SUBMIT:") && l.trim_end().ends_with(&format!("only {w}"))).count();
+        assert!((0..100).any(|_| { crate::projects::delivery::flush_idle(&session); typed("ETAWORD") >= 1 || { std::thread::sleep(std::time::Duration::from_millis(100)); false } }), "{:?}", screen());
+        assert_eq!((typed("ZETAWORD"), typed("ETAWORD")), (1, 1), "{:?}", screen());
+        let order = screen();
+        assert!(order.find("only ZETAWORD").unwrap() < order.find("only ETAWORD").unwrap(), "in order: {order:?}");
     }
 
     /// Board #38, orchestrator's condition (1): every queue-mode backend (kiro,
