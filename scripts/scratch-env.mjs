@@ -479,16 +479,15 @@ function privateDir(p) {
   chmodSync(p, 0o700);
 }
 
-/** Start `argv` with the isolated env under `dir`; returns its pid. */
 /** The marker only the Docker live rig's image carries (docker/live/Dockerfile, board #55). */
 export const LIVE_RIG_MARKER = '/etc/teammux-live-rig';
 /** The command that runs a live check where it is allowed. */
 export const LIVE_RIG_COMMAND = 'pnpm run test:live:docker';
 
 /** Inside the Docker live rig: its image's marker AND a container (Docker's /.dockerenv). The
- * marker alone, a file anyone could write on the host, is not enough. */
-/** A test inside a container (isolated.mjs) may name its own marker file; the container
- * condition (/.dockerenv, which only root can create on a host) still holds. */
+ * marker alone, a file anyone could write on the host, is not enough. A test inside a container
+ * (isolated.mjs) may name its own marker file; the container condition (/.dockerenv, which only
+ * root can create on a host) still holds. */
 export function inLiveRig({ marker = process.env.TMM_LIVE_RIG_MARKER || LIVE_RIG_MARKER, dockerenv = '/.dockerenv' } = {}) {
   return existsSync(marker) && existsSync(dockerenv);
 }
@@ -499,6 +498,7 @@ function refuseOutsideRig(inRig) {
   if (!inRig) throw new Error(`scratch-env runs only inside the Docker live rig (owner, 2026-11-06: no test on this host); use ${LIVE_RIG_COMMAND}`);
 }
 
+/** Start `argv` with the isolated env under `dir`; returns its pid. Refused outside the live rig. */
 export function runScratch({ dir, argv, env = process.env, spawn = nodeSpawn, port = null, home = homedir(), inRig = inLiveRig() }) {
   refuseOutsideRig(inRig);
   if (!dir) throw new Error('give a scratch dir: scratch-env.mjs run <dir> -- <command…>');

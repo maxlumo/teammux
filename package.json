@@ -25,6 +25,7 @@
     "dev:server": "node scripts/preflight.mjs server && cargo run --manifest-path src-tauri/Cargo.toml --no-default-features --release --bin server",
     "test:rust": "node scripts/test-rust.mjs",
     "test:e2e:docker": "node scripts/e2e-docker.mjs",
+    "test:live:docker": "node scripts/live-docker.mjs",
     "build:all": "pnpm run build && pnpm run tauri:build && pnpm exec tauri android build --target aarch64 --apk",
     "build:mac": "tauri build --features embed-ui",
     "build:android": "node scripts/preflight.mjs android-env && pnpm exec tauri android build --target aarch64 --apk && node scripts/preflight.mjs android-apk"

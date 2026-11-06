@@ -696,6 +696,53 @@ before the connect card is in
   separate free-port preview); do not mistake the existing server's UI for the
   worktree's code and do not restart the supervised server.
 
+### Live checks with real agent CLIs run only in Docker (board #55)
+
+Owner, 2026-11-06 15:07: "Why did you change the system's configuration
+during development? These are things that are forever forbidden. If you want
+to test, open a virtual environment in Docker; do not test on this machine."
+That day's live checks on this host relinked `~/.local/bin/claude` four times
+and rewrote `~/.codex/config.toml` twice. So **no test runs on this host**:
+unit suites run inside `scripts/isolated.mjs` (`node scripts/isolated.mjs --
+pnpm test`, `node scripts/isolated.mjs -- bash -c 'pnpm run test:rust'`),
+only `pnpm run check` and `pnpm run check:android` (no run) are allowed bare,
+and every live check with a real agent CLI runs in the live rig:
+
+```bash
+pnpm run test:live:docker            # check `smoke`: one codex turn and one claude turn
+```
+
+- **The image** is `docker/validator/Dockerfile`'s `live` target: this
+  checkout's `server` and `tmm` built inside, and the CLIs pinned to the
+  versions measured on this host: claude 2.1.319, codex-cli 0.166.0, omp
+  18.15.0 (npm). kiro-cli 2.37.1 and kimi 2.5.1 have no public pinned install
+  measured, so they are not in the image and nothing fakes them. Every CLI's
+  no-update switch is set. The image carries `/etc/teammux-live-rig`, the
+  only place `scripts/scratch-env.mjs` agrees to run (with `/.dockerenv`); on
+  the host it refuses and names this command.
+- **Credentials** (owner, 15:26: copy or map them from this system). Only the
+  measured files are bind-mounted, each READ-ONLY, under `/stage`:
+  `~/.codex/config.toml` and its `*.config.toml` layers, `auth.json` and
+  `.env` when present, and `~/.claude/settings.json` (its env block and its
+  `apiKeyHelper`, `printenv <NAME>` here, which the image has).
+  `~/.claude.json` is not needed. The container's entrypoint COPIES them into
+  its own HOME, so a CLI writes only its copy. A link is refused, never
+  followed into a mount. Environment credentials (`UST_API_KEY`, which the
+  codex config names by `env_key`, and the `ANTHROPIC_*` names) pass as
+  `docker run -e NAME`, by name only. No value is ever in an argv, a log, the
+  image or a file in the image. Nothing else of the host is mounted: no HOME,
+  no `~/.config/teammux`, no socket.
+- **The proof** is the host's own: before and after the run, the script
+  snapshots an ALLOW-LIST of the user's config, credential and link paths
+  (the files above, `~/.claude.json`, `~/.config/teammux/config.toml` and
+  every link in `~/.local/bin` by its target) and fails, naming each path, on
+  any change. An unreadable path fails too. An allow-list, because the user's
+  own CLIs write their sessions and history meanwhile.
+- **Measured** 2026-11-06 15:3x: the managed codex and the managed claude each
+  answered `ready` inside the container, and all 24 host paths were unchanged.
+  Without credentials each agent starts and its turn is reported skipped,
+  never passed.
+
 ### A scratch gateway never reaches the live tmux server (board #14)
 
 A scratch gateway or server you start from an agent's pane (or any shell

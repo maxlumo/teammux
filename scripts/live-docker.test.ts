@@ -7,7 +7,7 @@ import { chmodSync, mkdirSync, mkdtempSync, rmSync, symlinkSync, writeFileSync }
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import test from 'node:test';
-import { hostChanges, hostSnapshot } from './live-docker.mjs';
+import { hostChanges, hostSnapshot, liveRunArgs, stagedCredentials } from './live-docker.mjs';
 
 const fakeHome = (root: string) => {
   const home = join(root, 'home');
@@ -71,5 +71,39 @@ test('an unreadable path is a failure that names it, never absent or unchanged (
       chmodSync(join(home, '.codex', 'config.toml'), 0o644);
       chmodSync(join(home, '.local', 'bin'), 0o755);
     }
+  } finally { rmSync(root, { recursive: true, force: true }); }
+});
+
+// AC2: credentials enter only at `docker run`, by NAME: Docker copies each value from the caller's
+// environment, so no value is ever in an argv, a log, the image or a file in the image.
+test('docker run gets each allow-listed credential by NAME only, never its value, and an unset one is named (#55)', () => {
+  const env = { UST_API_KEY: 'sk-SECRET-1', ANTHROPIC_AUTH_TOKEN: 'tok-SECRET-2', ANTHROPIC_BASE_URL: 'https://p.example', HOME: '/home/u', OTHER_SECRET: 'nope', UST_BASE_URL: 'https://not-passed' };
+  const { args, missing } = liveRunArgs({ image: 'tmm-live:test', env, need: ['UST_API_KEY', 'ANTHROPIC_AUTH_TOKEN'], check: 'smoke' });
+  const joined = args.join('\0');
+  for (const v of ['sk-SECRET-1', 'tok-SECRET-2', 'https://p.example', 'nope', '/home/u', 'https://not-passed']) assert.ok(!joined.includes(v), `no value in the argv: ${v}`);
+  assert.deepEqual(args.filter((a, i) => args[i - 1] === '-e').sort(), ['ANTHROPIC_AUTH_TOKEN', 'ANTHROPIC_BASE_URL', 'UST_API_KEY']);
+  assert.ok(!args.some((a) => a.startsWith('-v') || a.startsWith('--mount') || a.startsWith('--volume')), 'nothing of the host is mounted without a stage list');
+  assert.ok(args.includes('--rm') && args.at(-2) === 'tmm-live:test' && args.at(-1) === 'smoke');
+  assert.deepEqual(missing, []);
+  assert.deepEqual(liveRunArgs({ image: 'i', env: { UST_API_KEY: 'x' }, need: ['UST_API_KEY', 'ANTHROPIC_AUTH_TOKEN'], check: 'smoke' }).missing, ['ANTHROPIC_AUTH_TOKEN']);
+  assert.deepEqual(liveRunArgs({ image: 'i', env: { UST_API_KEY: '' }, need: ['UST_API_KEY'], check: 'smoke' }).missing, ['UST_API_KEY'], 'an empty value is unset');
+});
+
+// Owner, 15:26: copy or map the credentials from this system. Only the measured files, each
+// READ-ONLY into a staging dir; the container copies them into its own HOME, so a CLI writes only
+// its copy and nothing can be written back.
+test('only the staged credential files are mounted, each read-only, never a directory, HOME, the gateway config or a socket (#55)', () => {
+  const root = mkdtempSync(join(tmpdir(), 'live-docker-test-'));
+  try {
+    const home = fakeHome(root);
+    const stage = stagedCredentials(home);
+    assert.deepEqual(stage.map((s) => s.dest), ['codex/config.toml', 'codex/personal.config.toml', 'claude/settings.json'], 'present files only; absent ones are not mounted');
+    const { args } = liveRunArgs({ image: 'i', env: {}, check: 'smoke', stage });
+    const mounts = args.filter((_, i) => args[i - 1] === '--mount');
+    assert.deepEqual(mounts, stage.map((s) => `type=bind,src=${s.src},dst=/stage/${s.dest},readonly`));
+    for (const m of mounts) assert.ok(!m.includes('.config/teammux') && !m.includes('.sock') && !m.endsWith(`src=${home},`), m);
+    rmSync(join(home, '.codex', 'config.toml'));
+    symlinkSync('/etc/passwd', join(home, '.codex', 'config.toml'));
+    assert.throws(() => stagedCredentials(home), /config\.toml.*not a regular file/su, 'a link is never followed into a mount');
   } finally { rmSync(root, { recursive: true, force: true }); }
 });

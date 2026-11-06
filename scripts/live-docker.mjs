@@ -83,3 +83,89 @@ export function hostChanges(before, after) {
   }
   return out;
 }
+
+/** The environment names a live check may receive, and nothing else (AC2). The staged codex
+ * config names its key by `env_key` (UST_API_KEY on this host), so that value comes from the
+ * caller's environment; claude's come with its staged settings.json, or these names. Values are
+ * never read by this script. */
+export const CREDENTIAL_NAMES = [
+  'UST_API_KEY',
+  'ANTHROPIC_BASE_URL', 'ANTHROPIC_AUTH_TOKEN', 'ANTHROPIC_API_KEY', 'ANTHROPIC_MODEL',
+  'ANTHROPIC_DEFAULT_OPUS_MODEL', 'ANTHROPIC_DEFAULT_SONNET_MODEL', 'ANTHROPIC_DEFAULT_HAIKU_MODEL', 'ANTHROPIC_DEFAULT_FABLE_MODEL',
+];
+
+/** The credential files the CLIs inside the rig need, measured on this host (owner 15:26: copy or
+ * map them from this system): codex's provider config (config.toml, its profile layers, and
+ * auth.json/.env when present) and claude's settings.json (its env block and apiKeyHelper, which is
+ * `printenv <NAME>` here, a command the image has). ~/.claude.json is NOT needed: a managed claude
+ * has its own CLAUDE_CONFIG_DIR, and the render writes its onboarding state. Present regular files
+ * only; a link is refused, never followed into a mount. */
+export function stagedCredentials(home) {
+  const want = [
+    ['.codex/config.toml', 'codex/config.toml'], ['.codex/auth.json', 'codex/auth.json'], ['.codex/.env', 'codex/.env'],
+    ...listed(join(home, '.codex'), (n) => n.endsWith('.config.toml'), []).map((n) => [`.codex/${n}`, `codex/${n}`]),
+    ['.claude/settings.json', 'claude/settings.json'],
+  ];
+  const out = [];
+  for (const [rel, dest] of want) {
+    const src = join(home, rel);
+    let st;
+    try { st = lstatSync(src); } catch (e) { if (e.code === 'ENOENT') continue; throw new Error(`${src}: ${e.code ?? e.message}`); }
+    if (!st.isFile()) throw new Error(`${src} is not a regular file (a link or a directory); refusing to mount it`);
+    out.push({ src, dest });
+  }
+  return out;
+}
+
+/** `docker run` arguments for one live check: `-e NAME` (name only: Docker copies the value from
+ * this process's environment) for each allow-listed name that is set, nothing of the host mounted,
+ * removed at exit. `missing`: the `need`ed names that are unset or empty. */
+export function liveRunArgs({ image, env, need = [], check, stage = [] }) {
+  const set = (n) => typeof env[n] === 'string' && env[n] !== '';
+  const args = ['run', '--rm', '--init', '--name', `tmm-live-${process.pid}`];
+  for (const n of CREDENTIAL_NAMES) if (set(n)) args.push('-e', n);
+  // Each staged file read-only under /stage; the entrypoint copies it into the container's HOME.
+  for (const { src, dest } of stage) args.push('--mount', `type=bind,src=${src},dst=/stage/${dest},readonly`);
+  args.push(image, check);
+  return { args, missing: need.filter((n) => !set(n)) };
+}
+
+/** What each check needs to run its turns (the in-container script skips a turn without them). */
+const NEED = { smoke: [] };
+
+async function main(args) {
+  const { spawnSync } = await import('node:child_process');
+  const { homedir } = await import('node:os');
+  const { fileURLToPath } = await import('node:url');
+  const check = args.find((a) => !a.startsWith('-')) ?? 'smoke';
+  if (!Object.hasOwn(NEED, check)) { console.error(`[live] unknown check '${check}' (known: ${Object.keys(NEED).join(', ')})`); return 2; }
+  const repo = fileURLToPath(new URL('..', import.meta.url));
+  const home = homedir();
+  const before = hostSnapshot(home);
+  console.log(`[live] host snapshot: ${Object.keys(before).length} config, credential and link paths`);
+  const image = 'tmm-live:local';
+  const built = spawnSync('docker', ['build', '-f', 'docker/validator/Dockerfile', '--target', 'live', '-t', image, '.'], { cwd: repo, stdio: 'inherit' });
+  let code = built.status === 0 ? 0 : 1;
+  if (code === 0) {
+    const stage = stagedCredentials(home);
+    console.log(`[live] staged read-only: ${stage.length ? stage.map((s) => s.src.replace(home, '~')).join(', ') : 'none'}`);
+    const { args: runArgs, missing } = liveRunArgs({ image, env: process.env, need: NEED[check], check, stage });
+    if (missing.length) { console.error(`[live] not set: ${missing.join(', ')}`); code = 2; } else {
+      const passed = CREDENTIAL_NAMES.filter((n) => runArgs.includes(n));
+      console.log(`[live] credentials passed by name: ${passed.length ? passed.join(', ') : 'none'}`);
+      code = spawnSync('docker', runArgs, { stdio: 'inherit' }).status === 0 ? 0 : 1;
+    }
+  } else console.error('[live] the image did not build');
+  const changes = hostChanges(before, hostSnapshot(home));
+  if (changes.length) {
+    console.error(`[live] FAIL: the host's config changed during the run:\n  ${changes.join('\n  ')}`);
+    return 1;
+  }
+  console.log(`[live] host config unchanged (${Object.keys(before).length} paths)`);
+  console.log(code === 0 ? '[live] PASS' : '[live] FAIL');
+  return code;
+}
+
+if (process.argv[1] && (await import('node:url')).fileURLToPath(import.meta.url) === process.argv[1]) {
+  main(process.argv.slice(2)).then((c) => { process.exitCode = c; }, (e) => { console.error(`[live] ${e.message}`); process.exitCode = 2; });
+}

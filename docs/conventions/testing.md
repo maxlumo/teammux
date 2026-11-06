@@ -211,6 +211,16 @@ correctly. Cleanup after the incident (2026-10-16) killed the leftover rig
 servers this way: three by `-S`, and four `tmm-test-own-a-*` servers from
 10-12 by pid, since their socket files were already gone.
 
+## No test runs on this host; live checks run in Docker (board #55)
+
+Owner, 2026-11-06 15:07: no test may change this machine's configuration, and
+live tests do not run here. Unit suites run inside `scripts/isolated.mjs`;
+`pnpm run check` and `pnpm run check:android` (compile only) may run bare.
+A check with a real agent CLI runs only through `pnpm run test:live:docker`
+(development.md § Live checks with real agent CLIs run only in Docker), and
+`scripts/scratch-env.mjs` refuses to run anywhere else. Tickets whose live
+evidence waits on the rig say "live check pending #55".
+
 ## A live check never edits an agent home's config in place (board #54)
 
 A managed codex home's `config.toml` (and `.env`, `auth.json`, `*.config.toml`)
