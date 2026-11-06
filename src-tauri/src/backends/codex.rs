@@ -709,17 +709,6 @@ pub(crate) fn render_codex(
     })
 }
 
-/// codex's first-use trust dialog and its ready furniture: what a spawn's
-/// waiter and a restart's ready edge (board #38) read. The ready mark is the
-/// empty composer's own placeholder, on a FRESH codex and on a RESUMED one
-/// (`codex resume <id>`, #29), measured on 0.166.0. The banner a fresh start
-/// paints (`OpenAI Codex`, `Starting MCP servers`) is NOT on a resumed screen,
-/// so a restart's ready edge never fired on it (round 1, validator P1-a).
-/// Board #47: a resuming codex paints that placeholder while still
-/// `Resuming session…` and drops an Enter typed then (7/7 saved failures).
-/// Not ready while its native loading block shows (`resuming`): typing only
-/// once it is gone submitted 15/15 mid-turn resumes, 6/6 idle resumes and a
-/// fresh start.
 /// A resuming codex's NATIVE loading block (board #47 round 1), read by
 /// structure, measured on 0.166.0 in every frame of two resumes: the last
 /// composer line (`› ` at column 0) has directly above it, blank lines
@@ -730,6 +719,7 @@ pub(crate) fn render_codex(
 /// reply that reproduces the whole block is not read as loading, and the
 /// phrase quoted anywhere else is just transcript (the reviewer's P1-R1,
 /// reproduced live by validator: a substring held a loaded codex forever).
+#[cfg(not(any(target_os = "android", target_os = "ios")))]
 fn resuming(screen: &str) -> bool {
     let lines: Vec<&str> = screen.lines().collect();
     let Some(composer) = lines.iter().rposition(|l| l.starts_with("\u{203a} ")) else { return false };
@@ -743,6 +733,17 @@ fn resuming(screen: &str) -> bool {
     native && below.is_some_and(|l| l.trim_start().starts_with("? for shortcuts"))
 }
 
+/// codex's first-use trust dialog and its ready furniture: what a spawn's
+/// waiter and a restart's ready edge (board #38) read. The ready mark is the
+/// empty composer's own placeholder, on a FRESH codex and on a RESUMED one
+/// (`codex resume <id>`, #29), measured on 0.166.0. The banner a fresh start
+/// paints (`OpenAI Codex`, `Starting MCP servers`) is NOT on a resumed screen,
+/// so a restart's ready edge never fired on it (round 1, validator P1-a).
+/// Board #47: a resuming codex paints that placeholder while still
+/// `Resuming session…` and drops an Enter typed then (7/7 saved failures).
+/// Not ready while its native loading block shows (`resuming`): typing only
+/// once it is gone submitted 15/15 mid-turn resumes, 6/6 idle resumes and a
+/// fresh start.
 #[cfg(not(any(target_os = "android", target_os = "ios")))]
 pub(crate) fn startup_confirmation() -> Option<shared::StartupConfirmation> {
     Some(shared::StartupConfirmation {
