@@ -5,11 +5,12 @@
 // definition of "kept away from the real tmux and gateway") and checks a
 // running process for any name that survived.
 import assert from 'node:assert/strict';
-import { mkdtempSync, rmSync, statSync, readFileSync, chmodSync, realpathSync } from 'node:fs';
+import { createHash } from 'node:crypto';
+import { mkdtempSync, rmSync, statSync, readFileSync, chmodSync, realpathSync, mkdirSync, writeFileSync, lstatSync, existsSync, symlinkSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import test from 'node:test';
-import { leaks, runScratch } from './scratch-env.mjs';
+import { configChanges, leaks, outsideLinks, realConfigHashes, runScratch } from './scratch-env.mjs';
 
 const nul = (pairs: string[]) => pairs.join('\0') + '\0';
 
@@ -383,4 +384,77 @@ test('a target that cannot be resolved is unknown and fails the guard: an unread
     // Confirmed missing keeps the dangling fallback: a link into a deleted dir is still reported.
     assert.deepEqual(resolveOnDisk(join(dir, 'gone', 'claude')), { path: join(realpathSync(dir), 'gone', 'claude') });
   } finally { chmodSync(locked, 0o755); rmSync(root, { recursive: true, force: true }); }
+});
+
+// Board #54 (incident 2026-11-06 14:00:38 and 14:20:04): a managed codex home's config.toml is a
+// symlink into the user's REAL ~/.codex/config.toml (codex.rs, by design, so the user's provider
+// applies). A live check that edited the scratch agent's config.toml rewrote the user's provider
+// URL to a dead fake port, and every codex started in the next 20 minutes read it.
+const fakeUser = (root: string) => {
+  const home = join(root, 'home');
+  mkdirSync(join(home, '.codex'), { recursive: true });
+  writeFileSync(join(home, '.codex', 'config.toml'), 'model = "real"\n[model_providers.ust]\nbase_url = "https://real.example/v1"\n');
+  writeFileSync(join(home, '.codex', 'personal.config.toml'), 'model = "p"\n', { mode: 0o600 });
+  writeFileSync(join(home, '.codex', 'auth.json'), '{"k":"secret"}\n', { mode: 0o600 });
+  writeFileSync(join(home, '.codex', 'history.jsonl'), 'not config\n');
+  return home;
+};
+const sha = (p: string) => createHash('sha256').update(readFileSync(p)).digest('hex');
+
+test('run gives the scratch a COPY of the user codex config the render links, never a link, so a write there leaves the real file alone (#54)', () => {
+  const root = mkdtempSync(join(tmpdir(), 'scratch-env-test-'));
+  try {
+    const home = fakeUser(root);
+    const dir = join(root, 'gw');
+    let env: Record<string, string | undefined> = {};
+    const spawn = (_c: string, _a: string[], opts: { env: Record<string, string | undefined> }) => { env = opts.env; return { pid: 7, unref() {} }; };
+    runScratch({ dir, argv: ['./server'], env: { PATH: '/bin', HOME: home }, spawn, home });
+    const copy = join(dir, 'codex-user');
+    assert.equal(env.CODEX_HOME, copy, 'the gateway renders from the copy');
+    for (const name of ['config.toml', 'personal.config.toml', 'auth.json']) {
+      const st = lstatSync(join(copy, name));
+      assert.ok(st.isFile() && !st.isSymbolicLink(), `${name} is a regular file`);
+      assert.equal(st.mode & 0o777, 0o600, `${name} is private`);
+      assert.equal(readFileSync(join(copy, name), 'utf8'), readFileSync(join(home, '.codex', name), 'utf8'));
+    }
+    assert.ok(!existsSync(join(copy, 'history.jsonl')), 'only what the render links');
+    const before = sha(join(home, '.codex', 'config.toml'));
+    writeFileSync(join(copy, 'config.toml'), 'base_url = "http://127.0.0.1:19954/v1"\n');
+    assert.equal(sha(join(home, '.codex', 'config.toml')), before, "the user's file is untouched");
+  } finally { rmSync(root, { recursive: true, force: true }); }
+});
+
+test('a link in a scratch home that resolves outside the scratch roots is named; one inside is not (#54)', () => {
+  const root = mkdtempSync(join(tmpdir(), 'scratch-env-test-'));
+  try {
+    const home = fakeUser(root);
+    const dir = join(root, 'gw');
+    const ws = join(root, 'ws');
+    const agent = join(ws, '.tmm', 'agents', 'cx', 'codex');
+    mkdirSync(agent, { recursive: true });
+    mkdirSync(join(dir, 'codex-user'), { recursive: true });
+    writeFileSync(join(dir, 'codex-user', 'config.toml'), 'x\n');
+    symlinkSync(join(dir, 'codex-user', 'config.toml'), join(agent, 'config.toml'));
+    mkdirSync(join(ws, '.kiro', 'agents'), { recursive: true });
+    symlinkSync(join(ws, '.tmm', 'agents', 'cx'), join(ws, '.kiro', 'agents', 'cx.json'));
+    assert.deepEqual(outsideLinks([join(ws, '.tmm', 'agents')], [dir, ws]), []);
+    symlinkSync(join(home, '.codex', 'auth.json'), join(agent, 'auth.json'));
+    assert.deepEqual(outsideLinks([join(ws, '.tmm', 'agents')], [dir, ws]), [`${join(agent, 'auth.json')} → ${join(realpathSync(home), '.codex', 'auth.json')}`]);
+  } finally { rmSync(root, { recursive: true, force: true }); }
+});
+
+test("a change to the user's real CLI config during a run is reported by name (#54)", () => {
+  const root = mkdtempSync(join(tmpdir(), 'scratch-env-test-'));
+  try {
+    const home = fakeUser(root);
+    const before = realConfigHashes(home, {});
+    assert.ok(Object.keys(before).includes(join(home, '.codex', 'config.toml')), Object.keys(before).join(', '));
+    assert.deepEqual(configChanges(before, realConfigHashes(home, {})), []);
+    writeFileSync(join(home, '.codex', 'config.toml'), 'base_url = "http://127.0.0.1:19954/v1"\n');
+    rmSync(join(home, '.codex', 'auth.json'));
+    assert.deepEqual(configChanges(before, realConfigHashes(home, {})), [
+      `${join(home, '.codex', 'config.toml')} changed`,
+      `${join(home, '.codex', 'auth.json')} was removed`,
+    ]);
+  } finally { rmSync(root, { recursive: true, force: true }); }
 });

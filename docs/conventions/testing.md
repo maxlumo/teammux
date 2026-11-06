@@ -211,6 +211,16 @@ correctly. Cleanup after the incident (2026-10-16) killed the leftover rig
 servers this way: three by `-S`, and four `tmm-test-own-a-*` servers from
 10-12 by pid, since their socket files were already gone.
 
+## A live check never edits an agent home's config in place (board #54)
+
+A managed codex home's `config.toml` (and `.env`, `auth.json`, `*.config.toml`)
+is a symlink into the user's real `~/.codex`: on 2026-11-06 a live check's edit
+of one changed the user's provider URL twice in 20 minutes. Change a scratch
+CLI's settings with a launch-line override or a copy, `readlink -f` any file in
+an agent home before writing it, and run `scratch-env check` before teardown:
+it fails on a link out of a scratch home and on a changed real config file
+(development.md § A scratch home gets COPIES).
+
 ## A rig owns its whole environment, not just HOME (board #425)
 
 Incident, 2026-10-19 03:17: a validator's browser rig started a release

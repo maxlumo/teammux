@@ -28,9 +28,10 @@
 // docs/conventions/development.md § "A scratch gateway never reaches the live
 // tmux server" holds the rule and its reason.
 import { spawn as nodeSpawn, spawnSync } from 'node:child_process';
-import { randomBytes } from 'node:crypto';
+import { createHash, randomBytes } from 'node:crypto';
 import { chmodSync, existsSync, lstatSync, mkdirSync, readdirSync, readFileSync, readlinkSync, realpathSync, statSync, writeFileSync } from 'node:fs';
 import { basename, dirname, isAbsolute, join, resolve, sep } from 'node:path';
+import { DatabaseSync } from 'node:sqlite';
 import { homedir, tmpdir } from 'node:os';
 import { fileURLToPath } from 'node:url';
 import { isolatedEnv, UPDATE_SWITCHES } from './test-rust.mjs';
@@ -137,6 +138,92 @@ export function resolveOnDisk(p) {
     queue.unshift(...target.split('/'));
   }
   return { path: cur };
+}
+
+/** The user's codex home a managed render links from (codex.rs `codex_user_home`): the caller's
+ * CODEX_HOME, else ~/.codex. */
+const realCodexHome = (home, env) => (env.CODEX_HOME ? env.CODEX_HOME : join(home, '.codex'));
+
+/** The files of a codex home that `inherit_codex_system_files` links into every managed codex
+ * home (shared.rs): config.toml, .env, auth.json and the profile layers `*.config.toml`. */
+function codexLinkedNames(codexHome) {
+  let profiles = [];
+  try { profiles = readdirSync(codexHome).filter((n) => n.endsWith('.config.toml')).sort(); } catch { /* none */ }
+  return ['config.toml', '.env', 'auth.json', ...profiles];
+}
+
+/** Board #54: fill `dest` with COPIES (0600) of the user's codex files a render links, so the
+ * scratch's managed codex homes link into `dest`, inside the scratch dir, and a write in one can
+ * never reach the user's file. Measured on main 05a548c7: codex is the only backend whose render
+ * links outside the agent home (kiro's link points into it; claude and kimi copy). */
+export function copyCodexHome(realHome, dest) {
+  privateDir(dest);
+  for (const name of codexLinkedNames(realHome)) {
+    const from = join(realHome, name);
+    let st;
+    try { st = statSync(from); } catch { continue; }
+    if (!st.isFile()) continue;
+    writeFileSync(join(dest, name), readFileSync(from), { mode: 0o600 });
+    chmodSync(join(dest, name), 0o600);
+  }
+}
+
+/** The user's real CLI config files a managed render links or reads from, each with its sha256
+ * (null when absent), recorded before a run so check can say what changed (board #54). */
+export function realConfigHashes(home, env) {
+  const codex = realCodexHome(home, env);
+  const kimi = env.KIMI_CODE_HOME ? env.KIMI_CODE_HOME : join(home, '.kimi-code');
+  const files = [...codexLinkedNames(codex).map((n) => join(codex, n)), join(home, '.claude', 'settings.json'), join(kimi, 'config.toml')];
+  const out = {};
+  for (const f of files) {
+    try { out[f] = createHash('sha256').update(readFileSync(f)).digest('hex'); } catch { out[f] = null; }
+  }
+  return out;
+}
+
+/** What changed between two `realConfigHashes`, one line per file, in the first's order. */
+export function configChanges(before, after) {
+  const out = [];
+  for (const [f, h] of Object.entries(before)) {
+    const now = Object.hasOwn(after, f) ? after[f] : null;
+    if (h === now) continue;
+    out.push(h === null ? `${f} appeared` : now === null ? `${f} was removed` : `${f} changed`);
+  }
+  for (const f of Object.keys(after)) if (!Object.hasOwn(before, f) && after[f] !== null) out.push(`${f} appeared`);
+  return out;
+}
+
+/** Every symlink under `dirs` (not followed into) that resolves outside all of `roots`, as
+ * `<link> → <target>` (board #54): a write through it would land in a file the scratch does
+ * not own. A link that cannot be resolved is named with why. */
+export function outsideLinks(dirs, roots) {
+  const real = roots.map((r) => resolveOnDisk(r).path ?? r);
+  const inside = (p) => real.some((r) => p === r || p.startsWith(`${r}/`));
+  const out = [];
+  const walk = (d) => {
+    let names;
+    try { names = readdirSync(d); } catch { return; }
+    for (const n of names.sort()) {
+      const p = join(d, n);
+      let st;
+      try { st = lstatSync(p); } catch { continue; }
+      if (st.isSymbolicLink()) {
+        const r = resolveOnDisk(p);
+        if (r.why) out.push(`${p} → cannot be resolved (${r.why})`);
+        else if (!inside(r.path)) out.push(`${p} → ${r.path}`);
+      } else if (st.isDirectory()) walk(p);
+    }
+  };
+  for (const d of dirs) walk(d);
+  return out;
+}
+
+/** The workspaces the scratch gateway's store declares (its projects' paths), read-only. */
+function scratchWorkspaces(dir) {
+  const db = join(dir, 'xdg-config', 'teammux', 'state.db');
+  if (!existsSync(db)) return [];
+  const conn = new DatabaseSync(db, { readOnly: true });
+  try { return conn.prepare('SELECT path FROM projects').all().map((r) => r.path); } finally { conn.close(); }
 }
 
 /** A word a POSIX shell reads back as exactly `s`. */
@@ -344,6 +431,8 @@ export function runScratch({ dir, argv, env = process.env, spawn = nodeSpawn, po
   if (port === LIVE_DEFAULT_PORT) throw new Error(`--port ${LIVE_DEFAULT_PORT} is the live gateway's default; pick a free one`);
   privateDir(dir);
   const scoped = isolatedEnv(env, dir);
+  // Board #54: the scratch's managed codex homes link a COPY of the user's codex config.
+  scoped.CODEX_HOME = join(dir, 'codex-user');
   // The store refuses a state.db under any level others can change, and a
   // `mkdir -m 700 -p` sets only the last one: each level is made ours.
   for (const root of [scoped.XDG_CONFIG_HOME, scoped.XDG_DATA_HOME, scoped.XDG_STATE_HOME]) privateDir(root);
@@ -359,6 +448,10 @@ export function runScratch({ dir, argv, env = process.env, spawn = nodeSpawn, po
   // What the user's CLI links point at before anything runs (board #48), for check.
   const links = join(dir, 'real-links.json');
   if (!existsSync(links)) writeFileSync(links, JSON.stringify(snapshotLinks(home), null, 2), { mode: 0o600 });
+  // And what the user's real CLI config files are before anything runs (board #54), for check.
+  const configs = join(dir, 'real-config.json');
+  if (!existsSync(configs)) writeFileSync(configs, JSON.stringify(realConfigHashes(home, env), null, 2), { mode: 0o600 });
+  copyCodexHome(realCodexHome(home, env), scoped.CODEX_HOME);
   const child = spawn(argv[0], argv.slice(1), { env: scoped, detached: true, stdio: 'ignore' });
   child.unref?.();
   writeFileSync(join(dir, 'pid'), `${child.pid}\n`);
@@ -422,6 +515,31 @@ async function main(args) {
       return 1;
     }
     console.log(`[scratch-env] none of the user's CLI links (${linkDirs(homedir()).join(', ')}) points into ${dir}`);
+    // Board #54: the scratch's codex homes link a copy, no scratch home links out, and the user's
+    // real CLI config is as it was before the run.
+    const codexHome = env.environ.split('\0').find((kv) => kv.startsWith('CODEX_HOME='))?.slice('CODEX_HOME='.length);
+    if (codexHome !== join(dir, 'codex-user')) {
+      console.error(`[scratch-env] pid ${pid} renders codex homes from ${codexHome ? `'${codexHome}'` : "the user's own ~/.codex (CODEX_HOME unset)"}, not the copy ${join(dir, 'codex-user')}`);
+      return 1;
+    }
+    const workspaces = scratchWorkspaces(dir);
+    const out = outsideLinks([dir, ...workspaces.map((w) => join(w, '.tmm', 'agents'))], [dir, ...workspaces]);
+    if (out.length) {
+      console.error(`[scratch-env] a scratch home links outside the scratch (a write through it lands in a file the scratch does not own):\n  ${out.join('\n  ')}`);
+      return 1;
+    }
+    let configsBefore = null;
+    try { configsBefore = JSON.parse(readFileSync(join(dir, 'real-config.json'), 'utf8')); } catch { /* none */ }
+    if (!configsBefore) {
+      console.error(`[scratch-env] ${join(dir, 'real-config.json')} is missing, so the user's real CLI config cannot be compared with its state before the run`);
+      return 1;
+    }
+    const changed = configChanges(configsBefore, realConfigHashes(homedir(), process.env));
+    if (changed.length) {
+      console.error(`[scratch-env] the user's real CLI config changed during this run; restore it from a copy taken before:\n  ${changed.join('\n  ')}`);
+      return 1;
+    }
+    console.log(`[scratch-env] no scratch home links outside ${dir}${workspaces.length ? ` or its workspaces` : ''}, and the user's real CLI config is unchanged (${Object.keys(configsBefore).length} files)`);
     // The effective route (#14 review): what the gateway's tmux really has.
     if (rest.includes('--gateway')) {
       const mine = privateSessions(dir);

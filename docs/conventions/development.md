@@ -823,6 +823,28 @@ env -u TMUX -u TMUX_PANE -u TMUX_SOCKET TMUX_TMPDIR="$D" tmux kill-server
   slash or macOS's `/var` → `/private/var` therefore cannot hide a link. A managed claude OUTSIDE scratch relinks within the
   real install (orchestrator 09:31: builder-3's fork moved it to 2.1.318). That
   is #50's fix at the source (claude's launch env), not this script's.
+- **A scratch home gets COPIES of the user's CLI config, never links**
+  (board #54). Incident 2026-11-06 14:00:38 and 14:20:04: a live check edited a
+  scratch codex home's `config.toml` to point codex at a fake provider. That
+  file is a symlink into the user's real `~/.codex/config.toml` (the managed
+  render links it by design, `inherit_codex_system_files`), so the write
+  changed the user's provider URL, and every codex started in the next
+  20 minutes read a dead port. Measured on main 05a548c7 with one managed agent
+  of each backend under this script: only codex links outside its home
+  (`config.toml` and `*.config.toml`, plus `.env` and `auth.json` when the user
+  has them); kiro's one link points INTO the home, and claude and kimi copy.
+  So `run` sets the gateway's `CODEX_HOME` to `<dir>/codex-user`, which
+  `codex_user_home` reads, and fills it with 0600 copies of exactly those files:
+  the scratch's codex homes link the copy. `run` also writes
+  `<dir>/real-config.json`, the sha256 of each real file a render links or
+  reads (`~/.codex`'s linked set, `~/.claude/settings.json`,
+  `~/.kimi-code/config.toml`). `check` fails when the gateway's `CODEX_HOME` is
+  not the copy, when any link under `<dir>` or under a scratch workspace's
+  `.tmm/agents` (the projects the scratch store declares) resolves outside
+  `<dir>` and those workspaces, naming it, and when a real config's hash moved,
+  naming the file. Still the rule outside a script: **never edit an agent
+  home's config in place**; `readlink -f` it first, and change a scratch CLI's
+  settings with a launch-line override (`-c key=value`) or a copy.
 - **Scope.** This removes INHERITED ROUTING to the live tmux server and
   gateway. `isolatedEnv` keeps `HOME` and the network, so a child that dials
   the live gateway's port on purpose still can; it is not a sandbox
