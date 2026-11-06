@@ -10,7 +10,7 @@ import { mkdtempSync, rmSync, statSync, readFileSync, chmodSync, realpathSync, m
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import test from 'node:test';
-import { configChanges, leaks, outsideLinks, realConfigHashes, runScratch } from './scratch-env.mjs';
+import { cliExecutables, configChanges, leaks, outsideLinks, realConfigHashes, runScratch } from './scratch-env.mjs';
 
 const nul = (pairs: string[]) => pairs.join('\0') + '\0';
 
@@ -456,5 +456,34 @@ test("a change to the user's real CLI config during a run is reported by name (#
       `${join(home, '.codex', 'config.toml')} changed`,
       `${join(home, '.codex', 'auth.json')} was removed`,
     ]);
+  } finally { rmSync(root, { recursive: true, force: true }); }
+});
+
+// Round 1 (validator-2 F1 on 80ce562b, live): codex 0.166.0 links its own arg0 helpers
+// (tmp/arg0-linux/*/apply_patch, applypatch, codex-linux-sandbox) to its executable, so check was
+// red on every codex run. A link whose real target is a NAMED CLI executable passes; a link to
+// any config, credential or data file still fails.
+test("a link to a named CLI's own executable passes, a config link out still fails (#54 round 1)", () => {
+  const root = mkdtempSync(join(tmpdir(), 'scratch-env-test-'));
+  try {
+    const home = fakeUser(root);
+    const bin = join(home, '.local', 'bin');
+    mkdirSync(bin, { recursive: true });
+    writeFileSync(join(bin, 'codex'), '#!/bin/sh\n', { mode: 0o755 });
+    writeFileSync(join(bin, 'notacli'), '#!/bin/sh\n', { mode: 0o755 });
+    const exes = cliExecutables(bin);
+    assert.deepEqual(exes, [realpathSync(join(bin, 'codex'))], 'only the named CLIs found on PATH');
+    const dir = join(root, 'gw');
+    const arg0 = join(root, 'ws', '.tmm', 'agents', 'cx', 'codex', 'tmp', 'arg0-linux', 'x');
+    mkdirSync(arg0, { recursive: true });
+    for (const n of ['apply_patch', 'applypatch', 'codex-linux-sandbox']) symlinkSync(join(bin, 'codex'), join(arg0, n));
+    const agents = [join(root, 'ws', '.tmm', 'agents')];
+    assert.deepEqual(outsideLinks(agents, [dir, join(root, 'ws')], exes), [], "codex's own helpers");
+    symlinkSync(join(bin, 'notacli'), join(arg0, 'other'));
+    symlinkSync(join(home, '.codex', 'config.toml'), join(arg0, 'config.toml'));
+    assert.deepEqual(outsideLinks(agents, [dir, join(root, 'ws')], exes), [
+      `${join(arg0, 'config.toml')} → ${join(realpathSync(home), '.codex', 'config.toml')}`,
+      `${join(arg0, 'other')} → ${realpathSync(join(bin, 'notacli'))}`,
+    ], 'a config link and an unnamed executable still fail');
   } finally { rmSync(root, { recursive: true, force: true }); }
 });

@@ -193,12 +193,13 @@ export function configChanges(before, after) {
   return out;
 }
 
-/** Every symlink under `dirs` (not followed into) that resolves outside all of `roots`, as
+/** Every symlink under `dirs` (not followed into) that resolves outside all of `roots` and is not
+ * one of `executables` (`cliExecutables`, round 1), as
  * `<link> → <target>` (board #54): a write through it would land in a file the scratch does
  * not own. A link that cannot be resolved is named with why. */
-export function outsideLinks(dirs, roots) {
+export function outsideLinks(dirs, roots, executables = []) {
   const real = roots.map((r) => resolveOnDisk(r).path ?? r);
-  const inside = (p) => real.some((r) => p === r || p.startsWith(`${r}/`));
+  const inside = (p) => real.some((r) => p === r || p.startsWith(`${r}/`)) || executables.includes(p);
   const out = [];
   const walk = (d) => {
     let names;
@@ -215,6 +216,28 @@ export function outsideLinks(dirs, roots) {
     }
   };
   for (const d of dirs) walk(d);
+  return out;
+}
+
+/** The agent CLIs a managed pane runs (`Backend::launch_program`): their own executables are
+ * the one kind of outside target a scratch home may link to (board #54 round 1: codex 0.166.0
+ * links its arg0 helpers, `tmp/arg0-linux/<id>/apply_patch` and kin, to its binary). */
+export const CLI_PROGRAMS = ['claude', 'codex', 'dsh', 'grok', 'kimi', 'kiro-cli', 'omp'];
+
+/** The real executables of `CLI_PROGRAMS` found on `path` (a PATH string), first match each. */
+export function cliExecutables(path) {
+  const out = [];
+  for (const program of CLI_PROGRAMS) {
+    for (const d of String(path ?? '').split(':').filter(Boolean)) {
+      const p = join(d, program);
+      let st;
+      try { st = statSync(p); } catch { continue; }
+      if (!st.isFile()) continue;
+      const real = realpathSync(p);
+      if (!out.includes(real)) out.push(real);
+      break;
+    }
+  }
   return out;
 }
 
@@ -523,7 +546,11 @@ async function main(args) {
       return 1;
     }
     const workspaces = scratchWorkspaces(dir);
-    const out = outsideLinks([dir, ...workspaces.map((w) => join(w, '.tmm', 'agents'))], [dir, ...workspaces]);
+    // The CLIs' own binaries as the gateway would find them: its PATH, the one the panes inherit.
+    const gatewayPath = env.environ.split('\0').find((kv) => kv.startsWith('PATH='))?.slice('PATH='.length) ?? process.env.PATH;
+    // A managed pane's PATH also carries the user's CLI bins (shared.rs `agent_launch_path_from`).
+    const paneBins = ['.local/bin', 'bin', '.cargo/bin', '.kimi-code/bin'].map((b) => join(homedir(), b)).join(':');
+    const out = outsideLinks([dir, ...workspaces.map((w) => join(w, '.tmm', 'agents'))], [dir, ...workspaces], cliExecutables(`${paneBins}:${gatewayPath}`));
     if (out.length) {
       console.error(`[scratch-env] a scratch home links outside the scratch (a write through it lands in a file the scratch does not own):\n  ${out.join('\n  ')}`);
       return 1;

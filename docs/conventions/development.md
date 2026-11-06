@@ -842,7 +842,13 @@ env -u TMUX -u TMUX_PANE -u TMUX_SOCKET TMUX_TMPDIR="$D" tmux kill-server
   not the copy, when any link under `<dir>` or under a scratch workspace's
   `.tmm/agents` (the projects the scratch store declares) resolves outside
   `<dir>` and those workspaces, naming it, and when a real config's hash moved,
-  naming the file. Still the rule outside a script: **never edit an agent
+  naming the file. Round 1 (validator-2 F1 on `80ce562b`, live): codex 0.166.0
+  links its own arg0 helpers (`tmp/arg0-linux/<id>/apply_patch`, `applypatch`,
+  `codex-linux-sandbox`) to its executable, so `check` was red on every codex
+  run. A link whose real target is the executable of a NAMED agent CLI
+  (`CLI_PROGRAMS`: claude, codex, dsh, grok, kimi, kiro-cli, omp, found on the
+  gateway's PATH and the user CLI bins a managed pane adds) passes; a link to
+  any config, credential or data file, or to any other executable, still fails. Still the rule outside a script: **never edit an agent
   home's config in place**; `readlink -f` it first, and change a scratch CLI's
   settings with a launch-line override (`-c key=value`) or a copy.
 - **Scope.** This removes INHERITED ROUTING to the live tmux server and
