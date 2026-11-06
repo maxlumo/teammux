@@ -600,10 +600,14 @@ codex.rs). `scripts/doc-adjacency.test.ts` (in `pnpm test`) diffs the working
 tree, untracked files included, against `merge-base(HEAD, main)` and fails on
 what the change introduces:
 
-- **Separation**: a doc block whose item was directly below it, where the
-  item and a doc line both survive and the change put code (anything but doc
-  or attribute lines) between them. This is the only rule that sees #43 S1
-  and #47 S1.
+- **Separation**: a doc block and its item, the first line after it that is
+  not an attribute or decorator (Rust `#[…]`/`#![…]`, one or more, followed
+  over lines by their brackets; TS `@name…`), where the item and a doc line
+  both survive and the change put code (anything but doc or attribute lines)
+  between them, before or after the attributes. This is the only rule that
+  sees #43 S1 and #47 S1. Round 1 (reviewer P2-R1 on `be1647b6`, reproduced
+  by validator): the first cut took the attribute line itself for the item,
+  so a fn inserted between `#[cfg(test)]` and the documented fn was missed.
 - **Stranded, single file** (counted only when the change added or moved the
   block): a line-own `/** … */` directly followed by another `/**` block or by
   a blank line (a file's opening JSDoc is exempt), or a `///` run followed,
@@ -617,8 +621,8 @@ to it (builder-2 on #43), so a file read alone, like main's `cap_refusal`
 doc, which also carries `rpc_needing`'s, looks correct; it is caught only
 when a diff shows the item moving away. An item line the same change also
 edits is not followed, so code inserted together with a signature change is
-missed; a multi-line attribute inserted between a doc and its item reads as
-code (a false red). Main had 33 stranded JSDoc blocks when this landed; they are #51, and
+missed; an attribute's brackets are counted without reading strings, so a
+bracket inside an attribute's string literal can end it early or late. Main had 33 stranded JSDoc blocks when this landed; they are #51, and
 until it lands the single-file rule only counts what a change adds.
 
 ## Three Test Tiers

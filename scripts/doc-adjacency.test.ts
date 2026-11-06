@@ -99,3 +99,22 @@ test('the change since the branch left main introduces no separated doc block', 
   const found = changedSources(ROOT, base).flatMap(({ path, before, after }) => introducedBy(path, before, after).map((f) => `${path}:${f.line} ${f.rule}: ${f.text}`));
   assert.deepEqual(found, []);
 });
+
+// Round 1 (reviewer P2-R1, validator's probes on be1647b6): the item a doc documents is the first line
+// after it that is not an attribute (`#[…]`, `#![…]`, one or more, possibly multi-line) or a decorator
+// (`@…`). An insertion between the attributes and the item moves the doc AND the attributes onto it.
+test('an insertion after the attributes, before the item, separates the doc from its item', () => {
+  const rs = (between: string[]) => ['use x;', '/// F doc.', ...between, 'fn f() {}'].join('\n');
+  for (const attrs of [['#[cfg(test)]'], ['#[cfg(test)]', '#[allow(dead_code)]'], ['#[cfg(any(', '    target_os = "android",', '    target_os = "ios"', '))]']]) {
+    assert.deepEqual(lines(introducedBy('x.rs', rs(attrs), rs([...attrs, 'fn inserted() {}']))), [2], attrs.join(' '));
+  }
+  const ts = (between: string[]) => ["import { d } from './d.ts';", '/** F doc. */', '@decorator()', ...between, 'export class F {}'].join('\n');
+  assert.deepEqual(lines(introducedBy('x.ts', ts([]), ts(['export class Inserted {}']))), [2]);
+});
+
+test('an insertion before the attributes is still caught, and a multi-line attribute added between doc and item is not code', () => {
+  const before = ['use x;', '/// F doc.', '#[cfg(test)]', 'fn f() {}'];
+  assert.deepEqual(lines(introducedBy('x.rs', before.join('\n'), ['use x;', '/// F doc.', 'fn inserted() {}', '#[cfg(test)]', 'fn f() {}'].join('\n'))), [2]);
+  const added = ['use x;', '/// F doc.', '#[cfg(any(', '    target_os = "android",', '))]', '#[cfg(test)]', 'fn f() {}'];
+  assert.deepEqual(introducedBy('x.rs', before.join('\n'), added.join('\n')), []);
+});

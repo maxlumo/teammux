@@ -90,25 +90,54 @@ function unchangedPairs(a, b) {
   return pairs;
 }
 
-const isAttribute = (path, line) => { const t = line.trim(); return isRust(path) ? t.startsWith('#[') : t.startsWith('@'); };
+const opensAttribute = (path, line) => { const t = line.trim(); return isRust(path) ? t.startsWith('#[') || t.startsWith('#![') : /^@[\w$]/u.test(t); };
 
-/** Doc blocks in BEFORE that had their item directly below and that the change moved apart from it:
- * the item line and a doc line both survive, with code (not doc, not attribute) now between them. */
+/** The index past the attribute or decorator that opens at `i` (Rust `#[…]` / `#![…]`, TS `@name(…)`),
+ * following its brackets over as many lines as it takes; `i` itself when none opens there. */
+function pastAttribute(path, lines, i) {
+  if (i >= lines.length || !opensAttribute(path, lines[i])) return i;
+  let depth = 0;
+  for (let j = i; j < lines.length; j++) {
+    for (const ch of lines[j]) {
+      if ('([{'.includes(ch)) depth++;
+      else if (')]}'.includes(ch)) depth--;
+    }
+    if (depth <= 0) return j + 1;
+  }
+  return lines.length;
+}
+
+/** The item a doc block ending at `end` documents: the first line after it that is not an attribute or
+ * decorator. */
+function itemAfter(path, lines, end) {
+  let i = end + 1;
+  for (let next = pastAttribute(path, lines, i); next !== i; next = pastAttribute(path, lines, i)) i = next;
+  return i;
+}
+
+/** Doc blocks in BEFORE whose item (past its attributes) the change moved away: the item line and a doc
+ * line both survive, and walking down from that doc line over doc lines and attributes no longer
+ * lands on the item. */
 function separations(path, a, b, pairs) {
   const toAfter = new Map(pairs);
-  const inBlock = new Set(docBlocks(path, b).flatMap(({ start, end }) => Array.from({ length: end - start + 1 }, (_, i) => start + i)));
+  const inBlock = new Set(docBlocks(path, b).flatMap(({ start, end }) => Array.from({ length: end - start + 1 }, (_, k) => start + k)));
   const found = [];
   for (const { start, end } of docBlocks(path, a)) {
-    const item = a[end + 1];
+    const at = itemAfter(path, a, end);
+    const item = a[at];
     if (item === undefined || item.trim() === '' || item.trim().startsWith('/')) continue;
-    const itemAt = toAfter.get(end + 1);
+    const itemAt = toAfter.get(at);
     const kept = [];
     for (let i = start; i <= end; i++) if (toAfter.has(i)) kept.push(toAfter.get(i));
     if (itemAt === undefined || kept.length === 0) continue;
-    const last = kept.at(-1);
-    let between = false;
-    for (let i = last + 1; i < itemAt; i++) if (!inBlock.has(i) && !isAttribute(path, b[i])) between = true;
-    if (between) found.push({ line: kept[0] + 1, rule: 'the change put code between this doc block and its item' });
+    let i = kept.at(-1) + 1;
+    while (i < itemAt) {
+      const next = pastAttribute(path, b, i);
+      if (next !== i) i = next;
+      else if (inBlock.has(i)) i++;
+      else break;
+    }
+    if (i !== itemAt) found.push({ line: kept[0] + 1, rule: 'the change put code between this doc block and its item' });
   }
   return found;
 }
