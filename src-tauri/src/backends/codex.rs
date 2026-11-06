@@ -822,6 +822,51 @@ pub(crate) fn resume_command(cmd: &str, id: Option<&str>, home: Option<&std::pat
     }
 }
 
+/// How much of a rollout's END is read for its newest turn end (board #39,
+/// orchestrator's condition 1): rollouts grow to tens of MB, and the newest
+/// `task_started` / `task_complete` pair is near the end.
+#[cfg(not(any(target_os = "android", target_os = "ios")))]
+const ROLLOUT_TAIL_BYTES: u64 = 256 * 1024;
+
+/// The open turn's provider failure a person must clear (board #39 slice 2),
+/// from the pane's own rollout: `(turn_id, text)`. codex 0.166.0 sends no end
+/// hook on it (builder-2's AC1); its rollout's `task_complete` carries the
+/// error. `None` when the pane's thread or its rollout cannot be found or
+/// read: nothing is recorded, and the screen reader still applies
+/// (condition 2).
+#[cfg(not(any(target_os = "android", target_os = "ios")))]
+pub(crate) fn provider_end(home: &std::path::Path) -> Option<(String, String)> {
+    let thread = pane_thread(home)?;
+    let path = rollout_path(&home.join("codex").join("sessions"), &thread.id)?;
+    rollout_provider_end(&shared::read_tail(&path, ROLLOUT_TAIL_BYTES)?)
+}
+
+/// The rollout's NEWEST turn, when it ended on a failure only a person can
+/// clear: its `task_complete` has `error` and belongs to the newest
+/// `task_started` (a newer open turn is never ended by an older error), and
+/// the slice-1 predicate keeps it (`shared::provider_failure`, redacted).
+/// Lines that do not parse (a half-written last line, the cut first line of
+/// a tail) are skipped. No `turn_id`: no identity, `None`.
+#[cfg(not(any(target_os = "android", target_os = "ios")))]
+fn rollout_provider_end(rollout: &str) -> Option<(String, String)> {
+    for line in rollout.lines().rev() {
+        let Ok(row) = serde_json::from_str::<Value>(line) else { continue };
+        let payload = &row["payload"];
+        match payload["type"].as_str() {
+            Some("task_started") => return None,
+            Some("task_complete") => {
+                let error = payload.get("error").filter(|e| e.is_object())?;
+                let turn = payload["turn_id"].as_str().filter(|t| !t.is_empty())?;
+                let status = error["codex_error_info"]["http_connection_failed"]["http_status_code"].as_u64().and_then(|s| u16::try_from(s).ok());
+                let text = shared::provider_failure(status, None, error["message"].as_str().unwrap_or_default())?;
+                return Some((turn.to_string(), text));
+            }
+            _ => {}
+        }
+    }
+    None
+}
+
 /// The thread a killed codex pane was in, read from codex's own files.
 struct PaneThread {
     id: String,
@@ -886,6 +931,19 @@ fn is_thread_id(id: &str) -> bool {
 /// not exist yet, as before a fresh agent's first turn, holds none), `None`
 /// when a directory cannot be read: cannot tell.
 fn has_rollout(sessions: &std::path::Path, id: &str) -> Option<bool> {
+    find_rollout(sessions, id).map(|p| p.is_some())
+}
+
+/// The rollout file of thread `id`, `None` when it is absent or cannot be
+/// looked for.
+#[cfg(not(any(target_os = "android", target_os = "ios")))]
+fn rollout_path(sessions: &std::path::Path, id: &str) -> Option<std::path::PathBuf> {
+    find_rollout(sessions, id).flatten()
+}
+
+/// `has_rollout`'s walk, naming the file: `Some(Some(path))` found,
+/// `Some(None)` proven absent, `None` cannot tell.
+fn find_rollout(sessions: &std::path::Path, id: &str) -> Option<Option<std::path::PathBuf>> {
     let suffix = format!("-{id}.jsonl");
     let dirs = |p: &std::path::Path| -> Option<Vec<std::path::PathBuf>> {
         match std::fs::read_dir(p) {
@@ -907,14 +965,15 @@ fn has_rollout(sessions: &std::path::Path, id: &str) -> Option<bool> {
         for m in dirs(&y)? {
             for d in dirs(&m)? {
                 for f in std::fs::read_dir(&d).ok()? {
-                    if f.ok()?.file_name().to_str().is_some_and(|n| n.starts_with("rollout-") && n.ends_with(&suffix)) {
-                        return Some(true);
+                    let f = f.ok()?;
+                    if f.file_name().to_str().is_some_and(|n| n.starts_with("rollout-") && n.ends_with(&suffix)) {
+                        return Some(Some(f.path()));
                     }
                 }
             }
         }
     }
-    Some(false)
+    Some(None)
 }
 
 /// The codex version the thread-lock reading of `/new` was measured on.
@@ -1137,6 +1196,58 @@ pub(crate) fn set_up_need_in(home: &std::path::Path) -> super::readiness::Need {
 
 #[cfg(test)]
 mod tests {
+
+    /// Board #39 slice 2, orchestrator's condition 2: a rollout that exists
+    /// but cannot be read, or a home with no thread, records nothing (the
+    /// turn stays open for the screen reader); the readable one is read.
+    #[cfg(not(any(target_os = "android", target_os = "ios")))]
+    #[test]
+    fn a_rollout_that_cannot_be_read_names_nothing() {
+        use std::os::unix::fs::PermissionsExt;
+        let home = crate::config::test_scratch("codex-provider-end");
+        let thread = "01a1aaeb-dde5-7df0-b10b-52bc2e068818";
+        assert_eq!(super::provider_end(&home), None, "no thread");
+        std::fs::create_dir_all(home.join("codex/thread-writer-locks")).unwrap();
+        std::fs::write(home.join(format!("codex/thread-writer-locks/{thread}.lock")), "").unwrap();
+        std::fs::create_dir_all(home.join("codex/sessions/2026/11/05")).unwrap();
+        let f = home.join(format!("codex/sessions/2026/11/05/rollout-x-{thread}.jsonl"));
+        let end = serde_json::json!({"type":"event_msg","payload":{"type":"task_complete","turn_id":"t1","error":{"message":"unexpected status 402 Payment Required: insufficient credit"}}});
+        std::fs::write(&f, end.to_string()).unwrap();
+        assert_eq!(super::provider_end(&home).map(|(t, _)| t).as_deref(), Some("t1"), "readable: read");
+        std::fs::set_permissions(&f, std::fs::Permissions::from_mode(0o000)).unwrap();
+        if std::fs::read(&f).is_err() {
+            assert_eq!(super::provider_end(&home), None, "unreadable: nothing");
+        }
+        std::fs::set_permissions(&f, std::fs::Permissions::from_mode(0o600)).unwrap();
+        let _ = std::fs::remove_dir_all(&home);
+    }
+
+    /// Board #39 slice 2: codex 0.166.0 sends no end hook on a provider error;
+    /// its rollout's `task_complete` carries it. The 413 line is reviewer's
+    /// real one of 2026-11-05 15:59 (url host shortened); the 401 is
+    /// builder-2's AC1 measurement on an invalid key.
+    #[cfg(not(any(target_os = "android", target_os = "ios")))]
+    #[test]
+    fn a_rollouts_newest_end_names_a_provider_failure_a_person_must_clear() {
+        let end = |turn: &str, error: serde_json::Value| serde_json::json!({"timestamp":"2026-11-05T15:59:21.324Z","type":"event_msg","payload":{"type":"task_complete","turn_id":turn,"last_agent_message":serde_json::Value::Null,"error":error}}).to_string();
+        let ok = serde_json::json!({"type":"event_msg","payload":{"type":"task_complete","turn_id":"t-ok","last_agent_message":"done"}}).to_string();
+        let other = serde_json::json!({"type":"response_item","payload":{"type":"message","role":"assistant"}}).to_string();
+        let e413 = end("01a1ac6d-ebed-78b2-ad24-34c670a9c990", serde_json::json!({"message":"unexpected status 413 Payload Too Large: Failed to buffer the request body: length limit exceeded, url: https://gw.example/v1/responses","codex_error_info":{"http_connection_failed":{"http_status_code":413}}}));
+        let e401 = end("t-401", serde_json::json!({"message":"unexpected status 401 Unauthorized: invalid API key, url: https://gw.example/v1/responses?key=SECRET, request id: req_0a1b","codex_error_info":{"http_connection_failed":{"http_status_code":401}}}));
+        let e429 = end("t-429", serde_json::json!({"message":"unexpected status 429 Too Many Requests","codex_error_info":{"http_connection_failed":{"http_status_code":429}}}));
+        let start = |turn: &str| serde_json::json!({"type":"event_msg","payload":{"type":"task_started","turn_id":turn}}).to_string();
+        let read = |lines: &[&str]| super::rollout_provider_end(&lines.join("\n"));
+        assert!(read(&[&start("01a1ac6d-ebed-78b2-ad24-34c670a9c990"), &e413]).is_some(), "the open turn's own end");
+        assert_eq!(read(&[&start("01a1ac6d-ebed-78b2-ad24-34c670a9c990"), &e413, &start("t-next")]), None, "a newer turn is open: an older error never ends it");
+        assert_eq!(read(&[&ok, &e413, &other]), Some(("01a1ac6d-ebed-78b2-ad24-34c670a9c990".to_string(),
+            "unexpected status 413 Payload Too Large: Failed to buffer the request body: length limit exceeded, url: https://gw.example/v1/responses".to_string())), "the newest end, records after it notwithstanding");
+        assert_eq!(read(&[&e401]).map(|(_, t)| t).as_deref(), Some("unexpected status 401 Unauthorized: invalid API key, url: https://gw.example/v1/responses, request id: req_0a1b"), "redacted");
+        assert_eq!(read(&[&e413, &ok]), None, "a later good end: nothing to say");
+        assert_eq!(read(&[&e429]), None, "an ordinary failure retries by itself");
+        assert_eq!(read(&[&other]), None, "no end yet");
+        assert_eq!(read(&[&format!("{}\n{{\"type\":\"event_msg\",\"payl", e413)]), Some(("01a1ac6d-ebed-78b2-ad24-34c670a9c990".into(), read(&[&e413]).unwrap().1)), "a half-written last line is skipped");
+        assert_eq!(read(&[&end("", serde_json::json!({"message":"401 Unauthorized"}))]), None, "no turn id: no identity, nothing recorded");
+    }
 
     /// Board #47, frames captured on codex-cli 0.166.0 (scratch tmux, 120x40,
     /// 2026-11-06 08:2x, every distinct frame of two resumes). Blank runs are

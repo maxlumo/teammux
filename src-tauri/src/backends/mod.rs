@@ -534,12 +534,25 @@ impl Backend {
         }
     }
 
+    /// The open turn's provider failure a person must clear, from the
+    /// CLI's OWN file, for a backend that sends no end hook on it (board #39
+    /// slice 2): `(identity, text)`, the text redacted. codex reads its
+    /// rollout's newest `task_complete`. kiro's managed v2 engine writes no
+    /// record of a failed turn (measured on 2.37.1), so it has none.
+    #[cfg(not(any(target_os = "android", target_os = "ios")))]
+    pub fn provider_end(self, home: &std::path::Path) -> Option<(String, String)> {
+        match self {
+            Backend::Codex => codex::provider_end(home),
+            _ => None,
+        }
+    }
+
     /// The text of a failed turn end that only a person can clear (board
     /// #39: no credit, a bad key, a request too large), redacted and bounded
     /// (`shared::provider_failure`), read from this backend's own hook
     /// payload. `None` for an ordinary failure and for every other event.
-    /// codex and kiro send no end hook on such a failure (AC1), so theirs is
-    /// not read here.
+    /// codex and kiro send no end hook on such a failure (AC1); codex's is
+    /// read from its own file (`provider_end`).
     pub fn provider_failure(self, payload: &serde_json::Map<String, serde_json::Value>) -> Option<String> {
         match self {
             Backend::Claude => claude::provider_failure(payload),

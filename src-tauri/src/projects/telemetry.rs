@@ -1083,6 +1083,21 @@ pub fn record_notification_with(session: &str, window: &str, kind: &str, quality
     notification(session, window, kind, None, quality, None)
 }
 
+/// The provider's error text on an end the capture tick recorded with
+/// `provider_failed` (board #39 slice 2): put on the window's CURRENT end
+/// only while that end still carries the detail, so a fact landing between
+/// the end and this call is never given it. True when it was put.
+pub fn note_provider_error(session: &str, window: &str, text: &str) -> bool {
+    let mut put = false;
+    with_rec(session, window, |r| {
+        if r.person_end.0 != 0 && r.person_end.0 == r.end_seq && r.person_end.1 == PROVIDER_FAILED_DETAIL {
+            r.person_error = (r.end_seq, text.to_string());
+            put = true;
+        }
+    });
+    put
+}
+
 /// The status detail of an agent whose turn ended on a provider error only a
 /// person can clear (board #39): no credit, a bad key, a request too large.
 pub const PROVIDER_FAILED_DETAIL: &str = "provider_failed";

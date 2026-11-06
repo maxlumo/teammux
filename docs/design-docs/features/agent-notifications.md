@@ -392,8 +392,18 @@ scratch homes with an invalid key (the table is on board #39):
   `stopReason: "error"`, `errorStatus` and `errorMessage`. Our extension now
   reports that as `StopFailure {error_status, error_message}`, not as a `Stop`
   with an empty reply.
-- codex 0.166.0 and kiro-cli 2.37.1 send NO end hook (their rollout and
-  session file hold the error). Their readers are #39's second slice.
+- codex 0.166.0 sends NO end hook. Its rollout's `task_complete` carries
+  `turn_id`, `error.message` and `codex_error_info.http_connection_failed.
+  http_status_code` (the reviewer's 12 ends of 11-05 were 413s). The capture
+  tick reads it (agent-status.md § the provider-refused end the hooks
+  missed).
+- kiro-cli 2.37.1 sends NO end hook either. A managed kiro here runs the v2
+  engine (`kiro-cli chat --agent <name>`, the `kiro_engine` door closed), and
+  re-measured on 2026-11-06 it writes NO record of a failed turn: its
+  `<home>/sessions/cli/<id>.jsonl` stayed empty, and `<id>.json` holds no
+  error. builder-2's `messages.jsonl` with `displayError` + `turn_end
+  stopReason:error` is the v3 engine's layout. So a managed v2 kiro has only
+  its screen (`kiro::person_paint`).
 
 Each backend's file reads its own payload (`provider_failure`, through
 `Backend::provider_failure`). ONE predicate decides whether only a person can
@@ -409,7 +419,12 @@ request id, a line number or a duration); else a measured sentence ("invalid
 API key", "insufficient credit", "request too large", "payload too large",
 "Please run /login"). `rate_limit`, `server_error`, `max_output_tokens` and
 every other failure retry by themselves, so they stay an ordinary failed end
-with no notice (#354). The text is redacted before
+with no notice (#354). A known limit, accepted by validator and the
+orchestrator: with NO explicit status, a status written in another form is
+not read, so `HTTP/1.1 401`, `Request failed with status code 401`, `status
+code: 403` and `[401]` stay ordinary. No CLI read here writes them: claude
+reports a kind, omp and codex give an explicit status, and kimi's text is
+pinned by its own test. The text is redacted before
 anything stores or sends it (orchestrator's ruling, 07:48). A URL's query
 string and its userinfo (`user:pass@`) are dropped. `sk-…`, the token after
 `Bearer` or `Basic`, everything after a SECRET KEY NAME and its separator to the end of that

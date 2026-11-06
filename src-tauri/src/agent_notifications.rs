@@ -181,6 +181,7 @@ impl AgentNotificationHub {
     /// Inject the room poster. Called once by the server after the team bus is
     /// ready. Desktop-only; mobile leaves this as `None`.
     pub fn set_room_poster(&self, poster: Arc<dyn RoomPoster>) {
+        *NOTICE_POSTER.lock().unwrap() = Some(poster.clone());
         self.state.lock().unwrap().poster = Some(poster);
     }
 
@@ -827,7 +828,7 @@ impl AgentNotificationHub {
     fn provider_failure_notice(&self, session: &str, window: &str, normalized: &Normalized) -> Option<String> {
         let text = normalized.provider_error.as_deref()?;
         crate::projects::managed_home(session, window)?;
-        Some(format!("[tmm] stopped on a provider error a person must clear: {text}"))
+        Some(provider_notice_body(text))
     }
 
     pub fn helper_command(&self, backend: &str) -> String {
@@ -1301,6 +1302,45 @@ struct Normalized {
     /// error text, redacted and bounded (`Backend::provider_failure`).
     /// `None` for every other event and for an ordinary failure.
     provider_error: Option<String>,
+}
+
+/// The poster the hub was given, for a turn end recorded OUTSIDE the hook
+/// consumer (board #39 slice 2: the capture tick's missed end of a codex
+/// turn its provider refused). The same poster, never a second one.
+static NOTICE_POSTER: Mutex<Option<Arc<dyn RoomPoster>>> = Mutex::new(None);
+
+/// Who the open turn's notice goes to: its requesters (the reply edge's
+/// members, from the turn log) and the human. Read BEFORE the end closes
+/// the edge.
+#[cfg(not(any(target_os = "android", target_os = "ios")))]
+pub fn provider_notice_targets(session: &str, window: &str) -> Vec<String> {
+    let mut targets = recovered_targets(session, window);
+    targets.retain(|t| t != window);
+    with_human(targets)
+}
+
+/// The ONE provider-failure notice (board #39) for an end the hooks missed,
+/// through the hub's own poster, in the words the hook path posts. Managed
+/// windows only. Returns whether the room row was written.
+#[cfg(not(any(target_os = "android", target_os = "ios")))]
+pub fn post_provider_notice(session: &str, window: &str, text: &str, targets: &[String]) -> bool {
+    if crate::projects::managed_home(session, window).is_none() {
+        return false;
+    }
+    let Some(poster) = NOTICE_POSTER.lock().unwrap().clone() else { return false };
+    match poster.post_final(session, window, &provider_notice_body(text), targets) {
+        Ok(()) => true,
+        Err(e) => {
+            eprintln!("⚠  the provider-failure notice of {session}:{window} was not recorded in the room: {e}");
+            false
+        }
+    }
+}
+
+/// The notice's words, one definition for both producers.
+#[cfg(not(any(target_os = "android", target_os = "ios")))]
+fn provider_notice_body(text: &str) -> String {
+    format!("[tmm] stopped on a provider error a person must clear: {text}")
 }
 
 /// The reply edge plus the human, once (board #39): a provider failure's

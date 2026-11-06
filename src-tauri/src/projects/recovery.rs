@@ -778,6 +778,27 @@ fn commit_person(session: &str, window: &str, sig: &str, detail: &str, seen: u64
     matches!(record_missed_end(session, window, detail, Identity::Paint(sig), seen), Missed::Ended | Missed::Attached)
 }
 
+/// Record the turn end the hooks missed for a provider failure the CLI's own
+/// file names (board #39 slice 2): `(turn, text)`, identified by the CLI's
+/// turn id (`provider|<turn>`), so it is once per failure, never ends a later
+/// turn and survives a restart, exactly as a paint (`Identity::Paint`). On
+/// the END it records, the text goes on the window and ONE notice to the
+/// turn's requesters and the human, whose edge is read before the end
+/// closes it. An attached or stale observation says nothing.
+fn commit_provider(session: &str, window: &str, (turn, text): (String, String), seen: u64) -> bool {
+    use super::telemetry::{record_missed_end, Identity, Missed, PROVIDER_FAILED_DETAIL};
+    let targets = crate::agent_notifications::provider_notice_targets(session, window);
+    match record_missed_end(session, window, PROVIDER_FAILED_DETAIL, Identity::Paint(&format!("provider|{turn}")), seen) {
+        Missed::Ended => {
+            super::telemetry::note_provider_error(session, window, &text);
+            crate::agent_notifications::post_provider_notice(session, window, &text, &targets);
+            true
+        }
+        Missed::Attached => true,
+        _ => false,
+    }
+}
+
 /// Record the turn end the hooks missed for an EXHAUSTED recovery decision
 /// (capped or given up): once per incident (`Identity::Incident`, review
 /// P1-D), the mark committed only when telemetry accepted it. `seen` is the
@@ -894,6 +915,16 @@ pub fn check_once() {
             let seen = super::telemetry::turn_version(&project.session, &p.window_name);
             // The turn identity (board #473): the newest accepted prompt.
             let prompt = super::telemetry::prompt_seq(&project.session, &p.window_name);
+            // A provider failure a person must clear, from the CLI's OWN file
+            // (board #39 slice 2: codex sends no end hook on it), read before
+            // the screen: a documented door over a painted one (tenet 3).
+            // Only while its turn is open (orchestrator's condition 1): an
+            // ended turn has nothing left to end.
+            let open = super::telemetry::derive(&project.session, &p.window_name, 0).state == "running";
+            if let Some(found) = open.then(|| super::managed_home(&project.session, &p.window_name)).flatten().and_then(|home| crate::backends::Backend::parse(backend)?.provider_end(&home)) {
+                commit_provider(&project.session, &p.window_name, found, seen);
+                continue;
+            }
             let Ok(tail) = crate::tmux::capture_pane_plain(&target, Some(0)) else { continue };
             // An error only a person can clear, as the NEWEST paint (board
             // #362 c): its turn end is recorded once, the hooks having missed
@@ -1484,6 +1515,85 @@ mod tests {
             assert_eq!(&now, before, "{name}: nothing typed");
         }
         assert!(super::super::telemetry::recent_events(&session, 0).iter().all(|e| !e.text.starts_with("auto-continue")), "never continued");
+    }
+
+    /// Board #39 slice 2, the reviewer's 413s of 2026-11-05: codex sends no
+    /// end hook on a provider failure, so its turn stayed `running`. The
+    /// capture tick reads the pane's own rollout (the documented door,
+    /// before the screen) and ends the turn ONCE through `record_missed_end`:
+    /// idle + `provider_failed` with the redacted text, and ONE notice to
+    /// the turn's requesters and the human. Nothing is typed. A newer prompt
+    /// over the same rollout is never ended by that old error, and the
+    /// next real end clears it. A real tmux window, a real managed home.
+    #[test]
+    fn a_codex_turn_its_rollout_ended_on_a_provider_failure_is_ended_and_said_once() {
+        use super::super::telemetry as tm;
+        super::super::tests::use_test_store();
+        let mut scratch = crate::tmux::Scratch::new("rec-provider");
+        let session = scratch.session("s");
+        let ws = std::path::PathBuf::from(scratch.path());
+        let home = ws.join(".tmm/agents/cx");
+        let thread = "01a1aaeb-dde5-7df0-b10b-52bc2e068818";
+        let turn = "01a1ac6d-ebed-78b2-ad24-34c670a9c990";
+        std::fs::create_dir_all(home.join("codex/thread-writer-locks")).unwrap();
+        std::fs::write(home.join(format!("codex/thread-writer-locks/{thread}.lock")), "").unwrap();
+        std::fs::create_dir_all(home.join("codex/sessions/2026/11/05")).unwrap();
+        let rollout = [
+            serde_json::json!({"type":"session_meta","payload":{"id":thread}}),
+            serde_json::json!({"type":"event_msg","payload":{"type":"task_started","turn_id":turn}}),
+            serde_json::json!({"type":"event_msg","payload":{"type":"task_complete","turn_id":turn,"last_agent_message":null,
+                "error":{"message":"unexpected status 413 Payload Too Large: Failed to buffer the request body: length limit exceeded, url: https://gw.example/v1/responses?key=SECRET",
+                "codex_error_info":{"http_connection_failed":{"http_status_code":413}}}}}),
+        ].iter().map(|v| v.to_string()).collect::<Vec<_>>().join("\n");
+        std::fs::write(home.join(format!("codex/sessions/2026/11/05/rollout-2026-11-05T08-55-46-{thread}.jsonl")), rollout).unwrap();
+        std::fs::write(home.join("launch.json"), serde_json::json!({ "backend": "codex", "cmd": "codex", "team": "" }).to_string()).unwrap();
+        std::fs::write(ws.join("cx.txt"), "\u{203a} Ask Codex to do anything\n\n  GPT-6.1-Sol high \u{b7} ~/w\n  ? for shortcuts\n").unwrap();
+        let show = format!("cat {}; cat", ws.join("cx.txt").display());
+        let ok = std::process::Command::new("tmux")
+            .args(["new-session", "-d", "-x", "80", "-y", "40", "-s", &session, "-n", "cx", "-c", &ws.to_string_lossy(), &show])
+            .status().map(|s| s.success()).unwrap_or(false);
+        if !ok {
+            eprintln!("no tmux server — skipping");
+            return;
+        }
+        super::super::adopt(&session, Some("rec-provider-test")).expect("adopt");
+        struct Spy(std::sync::Mutex<Vec<(String, String, Vec<String>)>>);
+        impl crate::agent_notifications::RoomPoster for Spy {
+            fn post_final(&self, _s: &str, agent: &str, body: &str, reply_to: &[String]) -> Result<(), String> {
+                self.0.lock().unwrap().push((agent.into(), body.into(), reply_to.to_vec()));
+                Ok(())
+            }
+        }
+        let spy = std::sync::Arc::new(Spy(std::sync::Mutex::new(Vec::new())));
+        let root = crate::config::test_scratch("rec-provider-hub");
+        crate::agent_notifications::AgentNotificationHub::load_at(root.clone()).set_room_poster(spy.clone());
+        tm::record_prompt(&session, "cx", "[tmm chat 2026-11-05 15:57] maker: @cx review G3");
+        std::thread::sleep(std::time::Duration::from_millis(300));
+        let typed_before = crate::tmux::capture_pane_plain(&format!("{session}:cx"), Some(0)).unwrap_or_default();
+        check_once();
+        check_once();
+        std::thread::sleep(std::time::Duration::from_millis(300));
+        let text = "unexpected status 413 Payload Too Large: Failed to buffer the request body: length limit exceeded, url: https://gw.example/v1/responses";
+        let st = tm::derive(&session, "cx", 0);
+        assert_eq!((st.state.as_str(), st.detail.as_str(), st.error.as_str()), ("idle", "provider_failed", text));
+        let ends: Vec<(String, String)> = tm::recent_events(&session, 0).into_iter().filter(|e| e.kind == "notif").map(|e| (e.text, e.tool)).collect();
+        assert_eq!(ends, [("failed".to_string(), "provider_failed".to_string())], "one end over two ticks");
+        {
+            let posts = spy.0.lock().unwrap();
+            assert_eq!(posts.len(), 1, "one notice: {posts:?}");
+            assert_eq!(posts[0], ("cx".to_string(), format!("[tmm] stopped on a provider error a person must clear: {text}"), vec!["maker".to_string(), "human".to_string()]));
+        }
+        assert_eq!(crate::tmux::capture_pane_plain(&format!("{session}:cx"), Some(0)).unwrap_or_default(), typed_before, "nothing typed");
+        // A newer prompt over the same rollout: the old error never ends it.
+        tm::record_prompt(&session, "cx", "[tmm chat 2026-11-05 16:10] human: @cx carry on");
+        check_once();
+        assert_eq!(tm::derive(&session, "cx", 0).state, "running", "the newer turn is open");
+        assert_eq!(spy.0.lock().unwrap().len(), 1, "still one notice");
+        // Its real end clears the detail and the text.
+        tm::record_notification_with(&session, "cx", "completed", crate::backends::EndQuality::Said);
+        let st = tm::derive(&session, "cx", 0);
+        assert_eq!((st.state.as_str(), st.detail.as_str(), st.error.as_str()), ("idle", "", ""));
+        let _ = std::fs::remove_dir_all(root);
     }
 
     /// Board #362, the builder's 02:30 finding (the orchestrator's ruling,

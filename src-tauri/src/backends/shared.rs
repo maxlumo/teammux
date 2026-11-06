@@ -615,6 +615,21 @@ pub(crate) fn confirm_startup_prompt_or(
     });
 }
 
+/// The last `max` bytes of a file a CLI keeps appending to (board #39: a
+/// rollout or session log can be tens of MB), as text; a cut first line or
+/// a cut UTF-8 character is the reader's to skip. `None` when it cannot be
+/// read.
+#[cfg(not(any(target_os = "android", target_os = "ios")))]
+pub(crate) fn read_tail(path: &Path, max: u64) -> Option<String> {
+    use std::io::{Read, Seek, SeekFrom};
+    let mut f = std::fs::File::open(path).ok()?;
+    let len = f.metadata().ok()?.len();
+    f.seek(SeekFrom::Start(len.saturating_sub(max))).ok()?;
+    let mut bytes = Vec::new();
+    f.read_to_end(&mut bytes).ok()?;
+    Some(String::from_utf8_lossy(&bytes).into_owned())
+}
+
 /// The longest provider-error text an agent's status and its notice carry
 /// (board #39): enough for the status, the kind and the provider's sentence.
 pub(crate) const PROVIDER_ERROR_MAX_CHARS: usize = 300;
