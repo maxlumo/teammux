@@ -1058,6 +1058,9 @@ test('a lifecycle line splits into a highlighted verb and its subject', () => {
   assert.deepEqual(sysParts('switched kiro — steer mode (this session)'), { verb: 'switched', who: 'kiro', text: 'steer mode (this session)', cmd: false });
   // A verb with nothing after it (`[tmm] done`) names nobody.
   assert.deepEqual(sysParts('done'), { verb: 'done', who: '', text: '', cmd: false });
+  // Board #43: a blocking-edge change is a sys line, the issue its subject.
+  assert.deepEqual(sysParts('blocked #39 — by #38 — Report provider failures'), { verb: 'blocked', who: '#39', text: 'by #38 — Report provider failures', cmd: false });
+  assert.deepEqual(sysParts('unblocked #39 — no longer by #38, #41 — x'), { verb: 'unblocked', who: '#39', text: 'no longer by #38, #41 — x', cmd: false });
   // A /command record (`[tmm] {text} → {targets}`) splits into the same three
   // atoms: the command is the action, the targets are the who, the arguments are
   // the detail — badge + args read back as exactly the line that was typed.
@@ -1087,6 +1090,8 @@ test('a lifecycle verb speaks the one status colour language', () => {
   // green = ended well, grey = at rest, red = destructive.
   assert.equal(sysVerbColor('spawned'), 'var(--accent)');
   assert.equal(sysVerbColor('restarted'), 'var(--accent)');
+  assert.equal(sysVerbColor('blocked'), 'var(--text3)', 'a blocking edge informs and moves nothing: at rest (#43)');
+  assert.equal(sysVerbColor('unblocked'), 'var(--text3)');
   assert.equal(sysVerbColor('done'), 'var(--status-ok)');
   assert.equal(sysVerbColor('stopped'), 'var(--text3)');
   assert.equal(sysVerbColor('removed'), 'var(--status-danger)');

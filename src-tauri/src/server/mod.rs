@@ -39,11 +39,13 @@ pub type NotificationHub = Arc<AgentNotificationHub>;
 /// would store the marker as a literal, so a client sends none of those six calls without it. `backends_check`
 /// (board #492): the `backends_check` RPC exists, so the Agents page may offer its Backends
 /// section; an older server answers method-not-found, which the page must never read as "not
-/// installed". An older server announces no `caps` at all, and a client that
+/// installed". `board_blocks` (board #43): `hub_board_save` accepts `blocked_by` on a create and
+/// `hub_board_block` exists. An older server ignores the key and files the issue with no edges,
+/// which reads as a success, so a client sends neither without it. An older server announces no `caps` at all, and a client that
 /// needs one refuses the write instead of saving a label nobody acts on. The
 /// phone's server has no Hub, so it announces none.
 #[cfg(not(any(target_os = "android", target_os = "ios")))]
-pub(crate) const LOGIN_CAPS: &[&str] = &["board_dispatch", "board_notify", "spawn_join", "agent_team", "hub_files", "mcp_masked", "backends_check"];
+pub(crate) const LOGIN_CAPS: &[&str] = &["board_dispatch", "board_notify", "spawn_join", "agent_team", "hub_files", "mcp_masked", "backends_check", "board_blocks"];
 #[cfg(any(target_os = "android", target_os = "ios"))]
 pub(crate) const LOGIN_CAPS: &[&str] = &[];
 

@@ -608,6 +608,7 @@ fn dispatch_hub(req: &Request, notifications: Option<&crate::agent_notifications
             }
             Ok(serde_json::json!({ "ok": true }))
         }
+        "hub_board_block" => board_block(session, &room, p),
         "hub_board_delete" => {
             let Some(issue_id) = p.get("id").and_then(|v| v.as_i64()) else {
                 return Err(RpcError::InvalidParams("id required".into()));
@@ -1493,6 +1494,60 @@ struct HandOff<'a> {
     read: &'a dyn Fn(&str, i64) -> Result<serde_json::Value, String>,
 }
 
+/// Board #43: a list of issue numbers from a request (`add`, `remove`,
+/// `blocked_by`). Absent is empty; anything but an array of integers is
+/// refused at the door.
+#[cfg(not(any(target_os = "android", target_os = "ios")))]
+fn issue_numbers(p: &serde_json::Value, key: &str) -> Result<Vec<i64>, RpcError> {
+    match p.get(key) {
+        None | Some(serde_json::Value::Null) => Ok(Vec::new()),
+        Some(serde_json::Value::Array(a)) => a
+            .iter()
+            .map(|v| v.as_i64().ok_or_else(|| RpcError::InvalidParams(format!("{key} must be a list of issue numbers"))))
+            .collect(),
+        Some(_) => Err(RpcError::InvalidParams(format!("{key} must be a list of issue numbers"))),
+    }
+}
+
+/// The room record of a blocking-edge change (board #43), in the sys
+/// grammar `sysParts` reads: verb, the issue as subject, the detail after
+/// the em-dash. None when nothing changed.
+fn board_block_line(verb: &str, id: i64, named: &str, numbers: &[i64]) -> Option<String> {
+    if numbers.is_empty() {
+        return None;
+    }
+    let list = numbers.iter().map(|n| format!("#{n}")).collect::<Vec<_>>().join(", ");
+    let by = if verb == "blocked" { "by" } else { "no longer by" };
+    Some(format!("[tmm] {verb} #{id} — {by} {list} — {named}"))
+}
+
+/// `hub_board_block` (board #43): add and remove the blocking edges of one
+/// issue, all or nothing, then record each real change in the room. No pane
+/// notice and no wake: the frontier informs assignment, it never assigns.
+#[cfg(not(any(target_os = "android", target_os = "ios")))]
+fn board_block(session: &str, room: &str, p: &serde_json::Value) -> Result<serde_json::Value, RpcError> {
+    let Some(issue_id) = p.get("id").and_then(|v| v.as_i64()) else {
+        return Err(RpcError::InvalidParams("id required".into()));
+    };
+    let add = issue_numbers(p, "add")?;
+    let remove = issue_numbers(p, "remove")?;
+    if add.is_empty() && remove.is_empty() {
+        return Err(RpcError::InvalidParams("add or remove at least one issue number".into()));
+    }
+    let who = p.get("who").and_then(|v| v.as_str()).unwrap_or("human");
+    let (added, removed) = crate::projects::board_block(session, issue_id, &add, &remove).map_err(RpcError::InvalidParams)?;
+    // Committed: from here nothing turns the answer into an error.
+    let issue = crate::projects::board_get(session, issue_id).ok();
+    let named = issue
+        .as_ref()
+        .map(|i| crate::projects::issue_ref(i["title"].as_str().unwrap_or(""), i["body"].as_str().unwrap_or(""), issue_id))
+        .unwrap_or_else(|| format!("#{issue_id}"));
+    for line in [board_block_line("blocked", issue_id, &named, &added), board_block_line("unblocked", issue_id, &named, &removed)].into_iter().flatten() {
+        let _ = crate::projects::rooms::post(room, who, &line);
+    }
+    Ok(serde_json::json!({ "ok": true, "added": added, "removed": removed, "issue": issue }))
+}
+
 /// `hub_board_save`: create or patch an issue, record an assignee change in the
 /// room, and — only when the request ASKS (`dispatch: true`, board #377) — hand
 /// the issue to the assignee.
@@ -1523,8 +1578,27 @@ fn board_save(session: &str, room: &str, p: &serde_json::Value, hand: &HandOff) 
     // 2026-08-29: the ideal loop is 人填 issue → lead 派 → 子 agent
     // 完成交 review → 通过标 done). Reporter "human" reads the board
     // itself; the actor is never notified of its own move.
+    // Board #43: `blocked_by` files a NEW issue with its blockers. Every
+    // number is checked on this board BEFORE the create, so a wrong number
+    // files nothing; a patch never carries it (the edit verb is
+    // `hub_board_block`, which records the change in the room).
+    let blocked_by = issue_numbers(p, "blocked_by")?;
+    if issue_id.is_some() && p.get("blocked_by").is_some() {
+        return Err(RpcError::InvalidParams("blocked_by is set when an issue is filed; edit it with hub_board_block".into()));
+    }
+    for &n in &blocked_by {
+        crate::projects::board_get(session, n).map_err(RpcError::InvalidParams)?;
+    }
     let prev = issue_id.and_then(|iid| crate::projects::board_get(session, iid).ok());
     let saved = crate::projects::board_save(session, issue_id, s("title"), s("body"), s("status"), assignee, who).map_err(RpcError::InvalidParams)?;
+    // The edges of a new issue cannot make a cycle (nothing points at it yet)
+    // and every number was found above, so this fails only if a blocker was
+    // deleted in between: the issue is saved, and the answer says so.
+    let blocked_by_error = if blocked_by.is_empty() {
+        None
+    } else {
+        crate::projects::board_block(session, saved, &blocked_by, &[]).err()
+    };
     // EVERYTHING from here on is the "saved" branch (board #377 review, P1-A
     // residual): the write has committed, so no step below may leave through
     // `?` and turn a saved issue into an RPC error — a page that kept its
@@ -1562,6 +1636,9 @@ fn board_save(session: &str, room: &str, p: &serde_json::Value, hand: &HandOff) 
     // the ANSWER, never an error: a failed post must not read as a failed
     // save (a form kept open for a retry would file the issue twice).
     let mut answer = serde_json::json!({ "ok": true, "id": saved });
+    if let Some(error) = blocked_by_error {
+        answer["blocked_by_error"] = serde_json::json!(error);
+    }
     let wants = p.get("dispatch").and_then(|v| v.as_bool()) == Some(true);
     if let (true, Some(name)) = (wants, board_assign_target(assignee, who)) {
         let outcome = board_dispatch(name, (hand.managed)(name), || {
@@ -2979,6 +3056,72 @@ mod tests {
 
     fn issue_count(session: &str) -> usize {
         crate::projects::board_list(session).expect("board")["issues"].as_array().map_or(0, |a| a.len())
+    }
+
+    /// Board #43: `hub_board_block` adds and removes edges and leaves one room
+    /// record per real change; a refusal is an RPC error with nothing written.
+    #[test]
+    fn a_block_edit_is_one_room_record_per_real_change_and_a_refusal_writes_nothing() {
+        let session = project_with(&["builder"]);
+        let a = issue_id(&save_issue(&session, serde_json::json!({ "title": "blocker a" })));
+        let b = issue_id(&save_issue(&session, serde_json::json!({ "title": "blocker b" })));
+        let c = issue_id(&save_issue(&session, serde_json::json!({ "title": "waits" })));
+        let block = |params: serde_json::Value| {
+            let mut params = params;
+            params["session"] = serde_json::json!(session);
+            handle_hub_request(&req("hub_board_block", params), None)
+        };
+        let lines = || -> Vec<String> {
+            room(&session)
+                .iter()
+                .filter_map(|m| m["body"].as_str())
+                .filter(|b| b.starts_with("[tmm] blocked") || b.starts_with("[tmm] unblocked"))
+                .map(str::to_string)
+                .collect()
+        };
+
+        let r = block(serde_json::json!({ "id": c, "add": [a, b], "who": "orchestrator" }));
+        assert!(r.error.is_none(), "{:?}", r.error.map(|e| e.message));
+        let got = r.result.unwrap();
+        assert_eq!(got["added"], serde_json::json!([a, b]));
+        assert_eq!(got["issue"]["blocked_by"], serde_json::json!([a, b]));
+        assert_eq!(got["issue"]["blocked"], true);
+        assert_eq!(lines(), vec![format!("[tmm] blocked #{c} — by #{a}, #{b} — waits")]);
+
+        // A no-op leaves no record; a removal leaves its own.
+        block(serde_json::json!({ "id": c, "add": [a] }));
+        block(serde_json::json!({ "id": c, "remove": [b] }));
+        assert_eq!(lines().len(), 2);
+        assert_eq!(lines()[1], format!("[tmm] unblocked #{c} — no longer by #{b} — waits"));
+
+        // A cycle is an error and writes nothing.
+        let r = block(serde_json::json!({ "id": a, "add": [c] }));
+        assert!(r.error.unwrap().message.contains("makes a cycle"));
+        assert_eq!(stored(&session, a).unwrap()["blocked_by"], serde_json::json!([]));
+        assert_eq!(lines().len(), 2);
+        // Nothing to do is a refusal, not a silent success.
+        assert!(block(serde_json::json!({ "id": c })).error.is_some());
+    }
+
+    /// Board #43: `blocked_by` on CREATE files the issue with its edges; a
+    /// number that is not on this board is refused before anything is saved;
+    /// a PATCH carrying it is refused too (the edit verb is hub_board_block).
+    #[test]
+    fn an_issue_can_be_filed_with_its_blockers_and_a_patch_cannot_carry_them() {
+        let session = project_with(&["builder"]);
+        let a = issue_id(&save_issue(&session, serde_json::json!({ "title": "blocker" })));
+        let made = save_issue(&session, serde_json::json!({ "title": "waits", "blocked_by": [a] }));
+        let id = issue_id(&made);
+        assert_eq!(stored(&session, id).unwrap()["blocked_by"], serde_json::json!([a]));
+
+        let before = issue_count(&session);
+        let r = handle_hub_request(&req("hub_board_save", serde_json::json!({ "session": session, "title": "x", "blocked_by": [999] })), None);
+        assert_eq!(r.error.unwrap().message, "no issue #999 on this board");
+        assert_eq!(issue_count(&session), before, "nothing filed");
+
+        let r = handle_hub_request(&req("hub_board_save", serde_json::json!({ "session": session, "id": id, "status": "doing", "blocked_by": [] })), None);
+        assert!(r.error.unwrap().message.contains("hub_board_block"));
+        assert_eq!(stored(&session, id).unwrap()["status"], "todo", "the refused patch saved nothing");
     }
 
     /// The assignee-notification decision (owner, 2026-08-30): pure, so the

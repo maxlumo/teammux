@@ -118,6 +118,12 @@ pub fn board_note(session: &str, id: i64, author: &str, body: &str) -> Result<()
     with_store(|store| store.issue_note(session, id, author, body, now))
 }
 
+/// Board #43: add and remove blocking edges of issue `id`; answers the
+/// edges that really changed (added, removed).
+pub fn board_block(session: &str, id: i64, add: &[i64], remove: &[i64]) -> Result<(Vec<i64>, Vec<i64>), String> {
+    with_store(|store| store.issue_blocks_set(session, id, add, remove))
+}
+
 pub fn board_delete(session: &str, id: i64) -> Result<bool, String> {
     with_store(|store| store.issue_delete(session, id))
 }
