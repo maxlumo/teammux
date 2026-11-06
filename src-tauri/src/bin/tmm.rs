@@ -575,20 +575,27 @@ async fn main() {
             let global = flags.contains_key("global");
             if flags.contains_key("seq") {
                 // `--seq N` (board #42): exactly room row N, whole — what a cut
-                // `[reply]` points at. `seq` is the room's gapless log
-                // position, so the one row below N+1 is N, unless N is hidden
-                // (archived) or not written: then the row is a NEIGHBOUR and
-                // is refused, never printed in N's place.
-                let Some(n) = flags.get("seq").cloned().flatten().and_then(|s| s.parse::<i64>().ok()).filter(|n| *n >= 1) else {
+                // `[reply]` points at. `seq` is ONE store-wide counter
+                // (`hub_msgs.seq`, AUTOINCREMENT), so a room's numbers have
+                // gaps: the newest row of THIS room below N+1 is N only when
+                // N is this room's. Any other row is a neighbour and is
+                // refused, never printed in N's place (validator 14:57).
+                // The row below N+1 is asked for, so N+1 must exist (validator
+                // 14:53: i64::MAX overflowed).
+                let Some((n, below)) = flags.get("seq").cloned().flatten().and_then(|s| s.parse::<i64>().ok()).filter(|n| *n >= 1).and_then(|n| Some((n, n.checked_add(1)?))) else {
                     fail(EXIT_USAGE, "--seq needs a message number, the one a cut reply names: tmm log --seq 3934");
                 };
-                if !terms.is_empty() || flags.contains_key("files") || flags.contains_key("f") || flags.contains_key("follow") {
-                    fail(EXIT_USAGE, "--seq reads one message; it does not combine with --grep, --files or -f");
+                // ONE row: every other log flag would filter or page a read
+                // this is not, so it is refused by name, never ignored
+                // (validator 14:56: `--from builder` printed reviewer's row).
+                let others: Vec<String> = LOG_FLAGS.iter().filter(|f| **f != "seq" && flags.contains_key(**f)).map(|f| format!("--{f}")).collect();
+                if !others.is_empty() {
+                    fail(EXIT_USAGE, &format!("--seq reads one message; it does not combine with {}", others.join(", ")));
                 }
-                let mut r = rpc(&ctx, "hub_log", json!({ "session": session, "before_seq": n + 1, "limit": 1 })).await;
+                let mut r = rpc(&ctx, "hub_log", json!({ "session": session, "before_seq": below, "limit": 1 })).await;
                 let found = r.get("messages").and_then(|m| m.as_array()).and_then(|m| m.first()).filter(|m| m.get("seq").and_then(|v| v.as_i64()) == Some(n)).cloned();
                 let Some(row) = found else {
-                    fail(EXIT_ERR, &format!("this room has no message {n} to show (not written yet, or archived)"));
+                    fail(EXIT_ERR, &format!("this room has no message {n} (the number may be another room's, or not written yet)"));
                 };
                 r["messages"] = json!([row]);
                 print_log(&ctx, &r);
@@ -2687,6 +2694,9 @@ fn file_line(f: &Value, with_room: bool) -> String {
     format!("{}  {room}{path}  x{}  {}", local_stamp(f["ts"].as_i64().unwrap_or(0)), f["count"].as_u64().unwrap_or(1), f["from"].as_str().unwrap_or("?"))
 }
 
+/// `tmm log`'s own flags: the table's row, and what `--seq` refuses beside it (board #42).
+const LOG_FLAGS: &[&str] = &["since", "limit", "f", "follow", "grep", "all", "from", "global", "files", "before", "seq"];
+
 /// Flags known to take a value consume the next arg; boolean flags don't.
 /// The third return is every valued occurrence in order, so a flag that may be
 /// REPEATED (`--image a.png --image b.png`) does not lose all but the last —
@@ -2806,7 +2816,7 @@ const CTX_FLAGS: &[&str] = &["project", "agent", "server", "output"];
 const VERB_FLAGS: &[VerbFlags] = &[
     VerbFlags { key: "send", ctx: true, flags: &["status", "image", "at", "in", "re"] },
     VerbFlags { key: "scratch", ctx: true, flags: &["kill"] },
-    VerbFlags { key: "log", ctx: true, flags: &["since", "limit", "f", "follow", "grep", "all", "from", "global", "files", "before", "seq"] },
+    VerbFlags { key: "log", ctx: true, flags: LOG_FLAGS },
     VerbFlags { key: "wake", ctx: true, flags: &["all"] },
     VerbFlags { key: "wake list", ctx: true, flags: &["all"] },
     VerbFlags { key: "wake cancel", ctx: true, flags: &[] },

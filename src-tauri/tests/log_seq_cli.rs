@@ -1,8 +1,9 @@
 //! `tmm log --seq N` (board #42) through the REAL CLI against a FAKE gateway.
 //! It prints exactly room row N, whole, which is what a cut `[reply]` points
 //! at. What this watches: the read asks `hub_log` for the one row below N+1,
-//! the row printed is N itself and never its neighbour (an archived row is
-//! hidden, so the page below N+1 can start lower), and a bad number is refused
+//! the row printed is N itself and never its neighbour (`seq` is one
+//! store-wide counter, so a room's numbers have gaps and the row below N+1
+//! can be lower), and a bad number is refused
 //! before any call.
 #![cfg(target_os = "linux")]
 
@@ -16,7 +17,7 @@ struct Fake {
     addr: String,
 }
 
-/// The room the fake serves: rows 7 and 9; row 8 is hidden (archived).
+/// The room the fake serves: rows 7 and 9; 8 is another room's.
 fn rows() -> Vec<serde_json::Value> {
     let tail = format!("{}TAIL-OF-THE-WHOLE-REPLY", "x".repeat(9000));
     vec![
@@ -93,7 +94,7 @@ fn log_seq_prints_exactly_that_row_whole() {
 }
 
 #[test]
-fn log_seq_never_prints_a_neighbour_for_a_hidden_row_and_refuses_a_bad_number() {
+fn log_seq_never_prints_a_neighbour_for_a_number_this_room_lacks_and_refuses_a_bad_number() {
     let f = fake();
     let (ok, out, err) = f.run(&["log", "--seq", "8"]);
     assert!(!ok, "{out:?}");
@@ -106,5 +107,35 @@ fn log_seq_never_prints_a_neighbour_for_a_hidden_row_and_refuses_a_bad_number() 
         assert!(!ok, "{bad}");
         assert!(err.contains("--seq needs a message number"), "{bad}: {err:?}");
         assert!(f.calls.lock().unwrap().is_empty(), "{bad}: refused before the call");
+    }
+}
+
+/// Validator, 14:53 and 14:56 on 68f14dfe: `--seq` must not panic at the top
+/// of i64 (it asks for the row below N+1), and it reads ONE row, so every
+/// other `log` flag is refused by name before any call. An ignored flag
+/// would print a row the reader did not ask for (`--from builder` printed
+/// reviewer's row).
+#[test]
+fn log_seq_refuses_an_out_of_range_number_and_every_other_log_flag_before_the_call() {
+    let f = fake();
+    let (ok, out, err) = f.run(&["log", "--seq", "9223372036854775807"]);
+    assert!(!ok, "{out:?}");
+    assert!(err.contains("--seq needs a message number"), "a usage error, not a panic: {err:?}");
+    assert!(!err.contains("panicked"), "{err:?}");
+    assert!(f.calls.lock().unwrap().is_empty());
+
+    for extra in [
+        vec!["--global"], vec!["--from", "builder"], vec!["--since", "9999999999"], vec!["--limit", "5"],
+        vec!["--before", "3"], vec!["--all"], vec!["--grep", "x"], vec!["--files"], vec!["-f"], vec!["--follow"],
+    ] {
+        let f = fake();
+        let mut args = vec!["log", "--seq", "9"];
+        args.extend(extra.iter().copied());
+        let (ok, out, err) = f.run(&args);
+        assert!(!ok, "{extra:?}: {out:?}");
+        assert!(out.is_empty(), "{extra:?}: {out:?}");
+        let flag = extra[0].trim_start_matches('-');
+        assert!(err.contains("--seq reads one message") && err.contains(&format!("--{flag}")), "{extra:?}: {err:?}");
+        assert!(f.calls.lock().unwrap().is_empty(), "{extra:?}: refused before the call");
     }
 }

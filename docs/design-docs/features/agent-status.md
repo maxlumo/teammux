@@ -262,7 +262,7 @@ target (board #275): a prompt it sent itself, a self-wake, returns nothing,
 because the answer would be typed back into the same pane
 (`an_agent_is_never_its_own_reply_target`).
 
-The managed-home gate excludes hand-started agents, final text is capped at
+The managed-home gate excludes hand-started agents,
 a final reply is stored whole up to 256 KiB, while the typed `[reply]` keeps 6144 chars with a pointer to the row (board #42, hub-feed.md § A final reply is stored whole), and reply targets are removed when used. If the
 server restarts mid-turn, the edge is rebuilt by STREAMING every prompt newer
 than the previous turn end and keeping only the distinct senders: a newest-N
