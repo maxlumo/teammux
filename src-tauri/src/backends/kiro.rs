@@ -1086,6 +1086,23 @@ pub(crate) fn picker_open(screen: &str) -> bool {
     screen.lines().any(|l| l.contains("esc to cancel") && l.contains("to select"))
 }
 
+/// kiro has no first-use dialog on our homes, so the empty marker list is
+/// "accepted" at once with no keys (as dsh's); readiness is its composer's own
+/// placeholder. Measured on kiro-cli 2.37.1 after a restart (board #38): the
+/// pane shows `Initializing · type to queue a message` for ~15 s, then
+/// `ask a question or describe a task`. kiro registers no start hook we
+/// record (its hooks are prompt, tools and stop), so this is the measured
+/// ready edge. A spawn's waiter and a restart's ready edge read it.
+#[cfg(not(any(target_os = "android", target_os = "ios")))]
+pub(crate) fn startup_confirmation() -> Option<super::shared::StartupConfirmation> {
+    Some(super::shared::StartupConfirmation {
+        markers: Vec::new(),
+        ready_markers: vec!["ask a question or describe a task"],
+        accept_keys: Vec::new(),
+        timeout: std::time::Duration::from_secs(120),
+    })
+}
+
 #[cfg(not(any(target_os = "android", target_os = "ios")))]
 pub(crate) fn render_kiro(
     def: &RegAgent, name: &str, home: &Path, workspace: &Path, system_prompt: &str,
@@ -1165,7 +1182,7 @@ pub(crate) fn render_kiro(
             effort_flag(def),
             engine_flag(),
         ),
-        confirmation: None,
+        confirmation: startup_confirmation(),
     })
 }
 

@@ -705,12 +705,21 @@ pub(crate) fn render_codex(
     Ok(Rendered {
         env: vec![("CODEX_HOME".into(), codex_home.to_string_lossy().to_string())],
         cmd: format!("command codex {}", config_args.join(" ")),
-        confirmation: Some(shared::StartupConfirmation {
-            markers: shared::CODEX_FOLDER_TRUST_MARKERS.to_vec(),
-            ready_markers: vec!["Starting MCP servers", "OpenAI Codex"],
-            accept_keys: vec!["Enter"],
-            timeout: std::time::Duration::from_secs(120),
-        }),
+        confirmation: startup_confirmation(),
+    })
+}
+
+/// codex's first-use trust dialog and its ready furniture: what a spawn's
+/// waiter and a restart's ready edge (board #38) read. Measured on 0.166.0
+/// after a restart: `OpenAI Codex` and the composer painted within ~0.5 s,
+/// and a line typed at +1 s submitted (at +0 s it sat unsent).
+#[cfg(not(any(target_os = "android", target_os = "ios")))]
+pub(crate) fn startup_confirmation() -> Option<shared::StartupConfirmation> {
+    Some(shared::StartupConfirmation {
+        markers: shared::CODEX_FOLDER_TRUST_MARKERS.to_vec(),
+        ready_markers: vec!["Starting MCP servers", "OpenAI Codex"],
+        accept_keys: vec!["Enter"],
+        timeout: std::time::Duration::from_secs(120),
     })
 }
 

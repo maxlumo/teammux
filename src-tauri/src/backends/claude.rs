@@ -378,12 +378,19 @@ pub(crate) fn render_claude(
             model_arg,
             effort_flag(def),
         ),
-        confirmation: Some(shared::StartupConfirmation {
-            markers: shared::CLAUDE_FOLDER_TRUST_MARKERS.to_vec(),
-            ready_markers: vec!["bypass permissions on"],
-            accept_keys: vec!["Down", "Enter"],
-            timeout: std::time::Duration::from_secs(120),
-        }),
+        confirmation: startup_confirmation(),
+    })
+}
+
+/// claude's folder-trust dialog and its ready footer: a spawn's waiter and a
+/// restart's ready edge (board #38) read it.
+#[cfg(not(any(target_os = "android", target_os = "ios")))]
+pub(crate) fn startup_confirmation() -> Option<shared::StartupConfirmation> {
+    Some(shared::StartupConfirmation {
+        markers: shared::CLAUDE_FOLDER_TRUST_MARKERS.to_vec(),
+        ready_markers: vec!["bypass permissions on"],
+        accept_keys: vec!["Down", "Enter"],
+        timeout: std::time::Duration::from_secs(120),
     })
 }
 

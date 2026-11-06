@@ -66,6 +66,12 @@ fn recipe_mode(session: &str, window: &str) -> Option<(crate::backends::Backend,
     Some((backend, if recipe["input_mode"].as_str() == Some("steer") { "steer" } else { "queue" }))
 }
 
+/// The backend `window`'s recipe names (board #38: what a restart's ready
+/// edge reads), from the same recipe read as its input mode.
+pub(crate) fn recipe_backend(session: &str, window: &str) -> Option<crate::backends::Backend> {
+    recipe_mode(session, window).map(|(backend, _)| backend)
+}
+
 /// The last mode the SCREEN showed, per window, with the pane it was read
 /// on: kiro paints nothing about the mode while idle, so a Ctrl+S whose
 /// confirmation has scrolled away is remembered — but only for that pane. A

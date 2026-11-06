@@ -403,6 +403,22 @@ impl Backend {
         }
     }
 
+    /// The CLI's first-use dialog and ready furniture, from its own file: a
+    /// spawn's waiter reads it through the render, and a restart's ready edge
+    /// (board #38) reads it here. `None`: no measured ready screen (grok, omp,
+    /// which also do not queue lines behind a turn).
+    #[cfg(not(any(target_os = "android", target_os = "ios")))]
+    pub(crate) fn startup_confirmation(self) -> Option<shared::StartupConfirmation> {
+        match self {
+            Backend::Kiro => kiro::startup_confirmation(),
+            Backend::Codex => codex::startup_confirmation(),
+            Backend::Claude => claude::startup_confirmation(),
+            Backend::Kimi => kimi::startup_confirmation(),
+            Backend::Dsh => dsh::startup_confirmation(),
+            Backend::Grok | Backend::Omp => None,
+        }
+    }
+
     pub fn loses_busy_input(self) -> bool {
         match self {
             Backend::Dsh => dsh::LOSES_BUSY_INPUT,

@@ -885,9 +885,7 @@ fn dispatch_hub(req: &Request, notifications: Option<&crate::agent_notifications
             // its kill, and finished once at its end (review P1-A residual).
             let permit = crate::projects::start_permit(session, agent).map_err(RpcError::Internal)?;
             if let Some(window) = live {
-                if let Err(e) = crate::tmux::kill_window(&format!("{session}:{window}")) {
-                    return Err(RpcError::Internal(e));
-                }
+                kill_agent_cli(session, agent, window).map_err(RpcError::Internal)?;
             }
             let resumed = start_agent(session, agent, permit).map_err(|e| RpcError::Internal(format!("restart failed: {e}")))?;
             let _ = rooms::post(&room, agent, &format!("[tmm] restarted {agent}"));
@@ -947,7 +945,7 @@ fn dispatch_hub(req: &Request, notifications: Option<&crate::agent_notifications
                     }
                 };
                 if let Some(n) = window_of_agent(session, w) {
-                    if let Err(e) = crate::tmux::kill_window(&format!("{session}:{n}")) {
+                    if let Err(e) = kill_agent_cli(session, w, n) {
                         errors.push(serde_json::json!({ "name": w, "error": e }));
                         continue;
                     }
@@ -1085,14 +1083,57 @@ fn agent_backend(session: &str, agent: &str) -> Option<crate::backends::Backend>
 fn stop_agent_window(session: &str, agent: &str) -> Result<(), String> {
     crate::projects::mark_agent_stopped(session, agent).map_err(|e| format!("'{agent}' was not stopped — the stop could not be recorded: {e}"))?;
     match window_of_agent(session, agent) {
-        Some(window) => crate::tmux::kill_window(&format!("{session}:{window}")),
+        Some(window) => kill_agent_cli(session, agent, window),
         None => Ok(()),
     }
 }
 
+/// Kill a managed agent's CLI, and end the turn it had open (board #38): the
+/// ONE kill of an agent CLI, behind Stop, Restart and a team restart. A killed
+/// CLI sends no Stop hook, so its turn stayed `running` forever and a
+/// queue-mode agent (kiro, codex, dsh) held every later line, across restarts
+/// too (validator 01:43, reproduced on main 2ebb04d6 with codex 0.166.0). The
+/// end is the existing interrupt edge (`telemetry::record_interrupt`: end,
+/// interrupt mark, the log's `notif interrupted` row that #394's recovery
+/// reads), written only when a turn was open. It is a rest, counted as
+/// neither progress nor failure (#354); the room says `[tmm] restarted` or
+/// `[tmm] stopped`, never `interrupted`, and the feed draws no row for it.
+/// Held lines are KEPT, unlike a person's Escape (`delivery::interrupt`):
+/// the next start types them on its ready edge (`start_agent`).
+#[cfg(not(any(target_os = "android", target_os = "ios")))]
+fn kill_agent_cli(session: &str, agent: &str, window: usize) -> Result<(), String> {
+    crate::tmux::kill_window(&format!("{session}:{window}"))?;
+    if crate::projects::telemetry::turn_busy(session, agent) {
+        crate::projects::telemetry::record_interrupt(session, agent);
+    }
+    Ok(())
+}
+
 #[cfg(not(any(target_os = "android", target_os = "ios")))]
 fn start_agent(session: &str, agent: &str, permit: crate::projects::StartPermit) -> Result<bool, String> {
-    start_agent_with(session, agent, permit, resume_slot, crate::projects::spawn::respawn)
+    let resumed = start_agent_with(session, agent, permit, resume_slot, crate::projects::spawn::respawn)?;
+    flush_held_when_ready(session, agent);
+    Ok(resumed)
+}
+
+/// The lines held for `agent` (behind a turn its killed CLI never ended, or
+/// queued while it was stopped) are typed to the NEW CLI once it is ready
+/// (board #38): the same waiter a spawn's typed brief uses
+/// (`shared::confirm_startup_prompt` on the backend's own ready furniture),
+/// whose `on_ready` is the one flush door, so each line goes once, in order,
+/// under the window lock. A line typed before the composer was up was
+/// measured to sit unsent (codex 0.166.0 at +0 s). A backend with no
+/// measured ready screen (grok, omp; neither queues lines) keeps the
+/// existing flush triggers. Nothing held: nothing to wait for.
+#[cfg(not(any(target_os = "android", target_os = "ios")))]
+fn flush_held_when_ready(session: &str, agent: &str) {
+    if crate::projects::telemetry::held_rows(session, agent).is_empty() {
+        return;
+    }
+    let Some(confirmation) = crate::projects::delivery::recipe_backend(session, agent).and_then(|b| b.startup_confirmation()) else { return };
+    let Some(window) = window_of_agent(session, agent) else { return };
+    let (s, a) = (session.to_string(), agent.to_string());
+    crate::backends::shared::confirm_startup_prompt(format!("{session}:{window}"), confirmation, Some(Box::new(move || crate::projects::delivery::flush(&s, &a))));
 }
 
 /// The resume half of a start: bring the agent's materials up to date with
@@ -6806,6 +6847,126 @@ while True:
         }
         let _ = std::process::Command::new("tmux").args(["kill-session", "-t", &session]).status();
         let _ = std::fs::remove_dir_all(&ws);
+    }
+
+    /// Board #38 (validator 01:43, on #29; reproduced on main 2ebb04d6 with
+    /// codex 0.166.0): a restart mid-turn never closed the turn. The killed CLI
+    /// sends no Stop, so the window stayed `running` and a queue-mode agent held
+    /// every later line, across further restarts too. Through the REAL restart
+    /// RPC: a turn is open, a line is held behind it, the agent is restarted.
+    /// The fake CLI paints codex's ready marker 1 s after it starts (codex
+    /// measured: a line typed at +0 s sat unsent, at +1 s it submitted) and
+    /// prints `SUBMIT:<line>` for each Enter. After the restart the window is
+    /// idle, not running, and the held line is typed ONCE, after the marker.
+    /// Then the "Stop never arrived" case: a second restart with nothing open
+    /// records no extra end.
+    #[test]
+    fn a_restart_mid_turn_ends_the_turn_and_its_held_line_reaches_the_new_cli_once() {
+        crate::projects::tests::use_test_store();
+        let session = format!("tmm-restart-turn-{}", uuid::Uuid::new_v4());
+        let ws = crate::config::test_scratch("tmm-restart-turn-ws");
+        let home = ws.join(".tmm/agents/dev");
+        std::fs::create_dir_all(&home).unwrap();
+        let fake = ws.join("cli.py");
+        std::fs::write(&fake, "\
+import os, sys, time, tty
+tty.setraw(0)
+started = time.time()
+time.sleep(1.0)
+sys.stdout.write('OpenAI Codex (fake)\\r\\n'); sys.stdout.flush()
+buf = b''
+while True:
+    c = os.read(0, 1)
+    if c == b'\\r':
+        sys.stdout.write('SUBMIT:%.1f:' % (time.time() - started) + buf.decode('utf-8', 'replace') + '\\r\\n'); sys.stdout.flush()
+        buf = b''
+    else:
+        buf += c
+").unwrap();
+        let cmd = format!("exec -a codex python3 {}", fake.display());
+        crate::projects::spawn::LaunchRecipe {
+            backend: "codex", env: &[], cmd: &cmd, spawned_by: "", team: None, agent_def: "", member: "", from_member: "", input_mode: "queue",
+        }.write(&home).unwrap();
+        let created = std::process::Command::new("tmux")
+            .args(["new-session", "-d", "-x", "200", "-y", "50", "-s", &session, "-n", "dev", "-c", &ws.to_string_lossy(), &format!("bash -c '{cmd}'")])
+            .status()
+            .is_ok_and(|s| s.success());
+        if !created {
+            eprintln!("no tmux server — skipping");
+            let _ = std::fs::remove_dir_all(&ws);
+            return;
+        }
+        let _cleanup = KillOnDrop(session.clone(), ws.clone());
+        crate::tmux::new_named_window(&session, "keep", &ws.to_string_lossy()).unwrap();
+        crate::projects::adopt(&session, Some("restart-turn-test")).expect("adopt project");
+        let target = format!("{session}:dev");
+        let screen = || crate::tmux::capture_pane_plain(&target, Some(200)).unwrap_or_default();
+        let submits = || screen().lines().filter(|l| l.starts_with("SUBMIT:")).map(str::to_string).collect::<Vec<_>>();
+        let wait = |ok: &dyn Fn() -> bool, ms: u64| (0..ms / 50).any(|_| ok() || { std::thread::sleep(std::time::Duration::from_millis(50)); false });
+        let state = || crate::projects::telemetry::derive(&session, "dev", 0).state;
+
+        // A turn is open (its prompt, no Stop), and a line is held behind it.
+        crate::projects::telemetry::record_prompt(&session, "dev", "[tmm chat 2026-11-06 01:50] human: @dev a long task");
+        assert_eq!(state(), "running");
+        let call = |m: &str, params: serde_json::Value| handle_hub_request(&req(m, params), None);
+        let r = call("hub_post", serde_json::json!({ "session": session, "from": "lead", "body": "@dev reply only BETAWORD" }));
+        assert!(r.error.is_none(), "{:?}", r.error.map(|e| e.message));
+        assert_eq!(crate::projects::telemetry::held_rows(&session, "dev").len(), 1, "held behind the open turn");
+
+        let r = call("hub_agent_restart", serde_json::json!({ "session": session, "agent": "dev" }));
+        assert!(r.error.is_none(), "{:?}", r.error.map(|e| e.message));
+        assert_ne!(state(), "running", "the killed CLI's turn is over");
+        assert!(wait(&|| submits().iter().any(|l| l.contains("BETAWORD")), 15000), "the held line reaches the new CLI: {:?}", screen());
+        let typed = submits();
+        assert_eq!(typed.iter().filter(|l| l.contains("BETAWORD")).count(), 1, "once: {typed:?}");
+        let at: f64 = typed[0].split(':').nth(1).unwrap().parse().unwrap();
+        assert!(at >= 1.0, "after the ready marker, never into the booting CLI: {typed:?}");
+        assert!(crate::projects::telemetry::held_rows(&session, "dev").is_empty(), "nothing held any more");
+        std::thread::sleep(std::time::Duration::from_millis(1500));
+        assert_eq!(submits().len(), 1, "nothing typed twice: {:?}", screen());
+
+        // "Stop never arrived", then restarted again: nothing is open now, so
+        // the second restart records no end of its own.
+        let ends = || crate::projects::telemetry::recent_events(&session, 0).into_iter().filter(|e| e.kind == "notif" && e.text == "interrupted").count();
+        let before = ends();
+        let r = call("hub_agent_restart", serde_json::json!({ "session": session, "agent": "dev" }));
+        assert!(r.error.is_none(), "{:?}", r.error.map(|e| e.message));
+        assert_eq!(ends(), before, "an idle restart writes no turn end");
+        assert_ne!(state(), "running");
+    
+        // Orchestrator's condition (3): a STOP mid-turn ends the turn too, and
+        // KEEPS what was held; the next Start types it on the same ready edge.
+        std::thread::sleep(std::time::Duration::from_millis(1500));
+        crate::projects::telemetry::record_prompt(&session, "dev", "[tmm chat 2026-11-06 02:00] human: @dev another long task");
+        let r = call("hub_post", serde_json::json!({ "session": session, "from": "lead", "body": "@dev reply only GAMMAWORD" }));
+        assert!(r.error.is_none(), "{:?}", r.error.map(|e| e.message));
+        assert_eq!(crate::projects::telemetry::held_rows(&session, "dev").len(), 1);
+        let r = call("hub_agent_stop", serde_json::json!({ "session": session, "agent": "dev" }));
+        assert!(r.error.is_none(), "{:?}", r.error.map(|e| e.message));
+        assert_ne!(state(), "running", "a stop ends the turn as well");
+        assert_eq!(crate::projects::telemetry::held_rows(&session, "dev").len(), 1, "a stop keeps the held line");
+        let r = call("hub_agent_restart", serde_json::json!({ "session": session, "agent": "dev" }));
+        assert!(r.error.is_none(), "{:?}", r.error.map(|e| e.message));
+        assert!(wait(&|| submits().iter().any(|l| l.contains("GAMMAWORD")), 15000), "the next start types it: {:?}", screen());
+        assert_eq!(submits().iter().filter(|l| l.contains("GAMMAWORD")).count(), 1);
+        assert!(crate::projects::telemetry::held_rows(&session, "dev").is_empty());
+    }
+
+    /// Board #38, orchestrator's condition (1): every queue-mode backend (kiro,
+    /// codex, dsh) has a ready edge a restart can wait on; kiro's is its
+    /// composer placeholder, measured on 2.37.1.
+    #[test]
+    fn every_queue_mode_backend_has_a_ready_edge() {
+        use crate::backends::Backend;
+        for b in [Backend::Kiro, Backend::Codex, Backend::Dsh] {
+            let c = b.startup_confirmation().unwrap_or_else(|| panic!("{b:?} has a ready edge"));
+            assert!(!c.ready_markers.is_empty(), "{b:?}");
+        }
+        let kiro = Backend::Kiro.startup_confirmation().unwrap();
+        let settled = "kiro · claude-opus-5.5 · ◔ 1%    ~/b38-ws · (master)\n›  ask a question or describe a task ↵";
+        let booting = "~/b38-ws · (master)\n›  Initializing · type to queue a message";
+        assert_eq!(crate::backends::shared::startup_step(settled, &kiro, true), crate::backends::shared::StartupStep::Ready);
+        assert_eq!(crate::backends::shared::startup_step(booting, &kiro, true), crate::backends::shared::StartupStep::Wait, "Initializing is not ready");
     }
 
     /// Board #422 P1-A through the REAL start path: Stop records a versioned

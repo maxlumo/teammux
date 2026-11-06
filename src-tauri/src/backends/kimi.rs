@@ -368,12 +368,19 @@ pub(crate) fn render_kimi(
             ("KIMI_CODE_NO_AUTO_UPDATE".into(), "1".into()),
         ],
         cmd,
-        confirmation: Some(shared::StartupConfirmation {
-            markers: KIMI_FOLDER_TRUST_MARKERS.to_vec(),
-            ready_markers: vec!["Welcome to Kimi Code", "No session yet"],
-            accept_keys: vec!["Enter"],
-            timeout: std::time::Duration::from_secs(120),
-        }),
+        confirmation: startup_confirmation(),
+    })
+}
+
+/// kimi's trust dialog and its ready furniture: a spawn's waiter and a
+/// restart's ready edge (board #38) read it.
+#[cfg(not(any(target_os = "android", target_os = "ios")))]
+pub(crate) fn startup_confirmation() -> Option<shared::StartupConfirmation> {
+    Some(shared::StartupConfirmation {
+        markers: KIMI_FOLDER_TRUST_MARKERS.to_vec(),
+        ready_markers: vec!["Welcome to Kimi Code", "No session yet"],
+        accept_keys: vec!["Enter"],
+        timeout: std::time::Duration::from_secs(120),
     })
 }
 

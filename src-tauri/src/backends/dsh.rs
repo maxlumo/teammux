@@ -1234,14 +1234,20 @@ pub(crate) fn render_dsh(
         // `exec`: no outer shell remains for a chat line to fall through to
         // when the managed shell dies (review P1-A2).
         cmd: LAUNCH.into(),
-        // No first-use dialog: the empty marker list is "accepted" at once
-        // with no keys; readiness is the shell's prompt.
-        confirmation: Some(shared::StartupConfirmation {
-            markers: Vec::new(),
-            ready_markers: vec![READY_MARKER],
-            accept_keys: Vec::new(),
-            timeout: std::time::Duration::from_secs(60),
-        }),
+        confirmation: startup_confirmation(),
+    })
+}
+
+/// No first-use dialog: the empty marker list is "accepted" at once with no
+/// keys; readiness is the shell's prompt. A spawn's waiter and a restart's
+/// ready edge (board #38) read it.
+#[cfg(not(any(target_os = "android", target_os = "ios")))]
+pub(crate) fn startup_confirmation() -> Option<shared::StartupConfirmation> {
+    Some(shared::StartupConfirmation {
+        markers: Vec::new(),
+        ready_markers: vec![READY_MARKER],
+        accept_keys: Vec::new(),
+        timeout: std::time::Duration::from_secs(60),
     })
 }
 
