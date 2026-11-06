@@ -750,6 +750,14 @@ fn parse_pane_lines(output: &str) -> Vec<TmuxPane> {
     panes.into_iter().map(|(p, _)| p).collect()
 }
 
+/// The stable pane id (`%N`) `target` resolves to now, or `None` when tmux
+/// cannot answer (board #38 round 3: the final write is bound to it).
+pub fn pane_id_of(target: &str) -> Option<String> {
+    let out = run_tmux(&["display-message", "-p", "-t", target, "#{pane_id}"]).ok()?;
+    let id = out.trim();
+    id.starts_with('%').then(|| id.to_string())
+}
+
 /// The agent CLI running in ONE pane (`TmuxPane::agent`), for the terminal
 /// stream's command-change push (board #260): the same listing and the same
 /// derivation as `list_panes`, just for one target.

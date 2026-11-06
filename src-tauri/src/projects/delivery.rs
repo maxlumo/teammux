@@ -112,30 +112,60 @@ fn read_mark(path: &std::path::Path) -> Option<StartMark> {
 }
 
 /// Mark `window` as starting, for a backend with a ready screen to prove it
-/// by (grok and omp have none, and queue nothing). A fresh start id every
-/// time; the old pane is the window's pane NOW (the CLI about to be killed),
-/// or the one an earlier mark of this same restart already recorded. A mark
-/// that cannot be written is said; the start goes on.
-pub(crate) fn begin_start(session: &str, window: &str) {
+/// by (grok and omp have none, and queue nothing): `Ok(Some(id))`, the start
+/// id THIS start owns, or `Ok(None)` for no mark. A fresh id every time; the
+/// old pane is the window's pane NOW (the CLI about to be killed), or the one
+/// an earlier mark of this same restart already recorded. A mark that cannot
+/// be written is an `Err` (round 3, P1-R5): the caller refuses its start
+/// before any kill, as Stop refuses an unrecordable stop.
+pub(crate) fn begin_start(session: &str, window: &str) -> Result<Option<String>, String> {
     if recipe_backend(session, window).and_then(|b| b.startup_confirmation()).is_none() {
-        return;
+        return Ok(None);
     }
-    let Some(path) = mark_path(session, window) else { return };
+    let path = mark_path(session, window).ok_or_else(|| format!("'{window}' has no home to record its start in"))?;
     let _g = marks_lock().lock().unwrap();
     let pane_now = crate::tmux::find_window_by_name(session, window);
     let old_pane = read_mark(&path).and_then(|m| m.old_pane).or(pane_now);
     let mark = StartMark { id: uuid::Uuid::new_v4().to_string(), old_pane };
-    if let Err(e) = crate::backends::shared::write_atomic(&path, &serde_json::to_string(&mark).unwrap_or_default()) {
-        eprintln!("delivery: {session}:{window}: its starting mark could not be written ({e})");
+    #[cfg(test)]
+    if MARK_WRITE_FAILS.load(std::sync::atomic::Ordering::Relaxed) {
+        return Err(format!("'{window}' was not restarted: its starting hold could not be recorded (test)"));
+    }
+    crate::backends::shared::write_atomic(&path, &serde_json::to_string(&mark).unwrap_or_default())
+        .map_err(|e| format!("'{window}' was not restarted: its starting hold could not be recorded: {e}"))?;
+    Ok(Some(mark.id))
+}
+
+#[cfg(test)]
+pub(crate) static MARK_WRITE_FAILS: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
+
+/// Retire THIS start's mark (round 3, P1-R1 cleanup): compare-and-remove by
+/// its own id, so it never retires a newer start's hold.
+fn retire_own(path: &std::path::Path, id: &str) -> bool {
+    match read_mark(path) {
+        Some(m) if m.id == id && !id.is_empty() => std::fs::remove_file(path).is_ok(),
+        _ => false,
     }
 }
 
-/// Forget the mark: the start made no window, so nothing can be typed into.
-pub(crate) fn abandon_start(session: &str, window: &str) {
-    let _g = marks_lock().lock().unwrap();
-    if let Some(path) = mark_path(session, window) {
-        let _ = std::fs::remove_file(path);
+/// Replace a window's CLI (round 3, P1-R1 late send): the hold is written
+/// and the old CLI killed under the window's delivery lock, the same lock a
+/// delivery holds from its check through its write. So a send that passed
+/// its check finishes (into the OLD CLI) before the hold exists, and every
+/// later one sees it. A hold that cannot be written refuses the kill
+/// (P1-R5). A kill that fails retires this start's hold: the old CLI runs on.
+pub(crate) fn replace_cli(session: &str, window: &str, kill: impl FnOnce() -> Result<(), String>) -> Result<Option<String>, String> {
+    let lock = window_lock(session, window);
+    let _guard = lock.lock().unwrap();
+    let id = begin_start(session, window)?;
+    if let Err(e) = kill() {
+        if let (Some(id), Some(path)) = (&id, mark_path(session, window)) {
+            let _g = marks_lock().lock().unwrap();
+            retire_own(&path, id);
+        }
+        return Err(e);
     }
+    Ok(id)
 }
 
 /// The window's current pane and its screen, the one read a ready check
@@ -213,10 +243,19 @@ pub(crate) fn watch_start(session: &str, window: &str) {
 /// when the window is CONFIRMED absent (nothing can be typed into it). A
 /// window that survived, or a lookup that failed, keeps the mark: its pane
 /// may be the managed shell, and the held lines stay held, said once.
-pub(crate) fn start_failed(session: &str, window: &str, why: &str) {
-    match crate::tmux::list_panes(session) {
-        Ok(panes) if !panes.iter().any(|p| p.window_name == window) => abandon_start(session, window),
-        _ => {
+pub(crate) fn start_failed(session: &str, window: &str, id: Option<&str>, why: &str) {
+    // The absence is observed and the hold retired in ONE step under the
+    // marks' lock, and only THIS start's hold (round 3): a newer start writes
+    // its mark under the same lock, so it is either seen (another id: left
+    // alone) or comes after.
+    let retired = id.zip(mark_path(session, window)).is_some_and(|(id, path)| {
+        let _g = marks_lock().lock().unwrap();
+        let ours = read_mark(&path).is_some_and(|m| m.id == id);
+        ours && matches!(crate::tmux::list_panes(session), Ok(panes) if !panes.iter().any(|p| p.window_name == window)) && retire_own(&path, id)
+    });
+    match retired {
+        true => {}
+        false => {
             let rows = telemetry::held_rows(session, window);
             if !rows.is_empty() {
                 telemetry::record_held_blocked(session, window, &rows, &format!("{window}'s start failed: {why}"));
@@ -900,6 +939,7 @@ fn deliver_gated(
 /// turn. The event records it, so the report of that row can name the lines that followed it.
 fn type_steered(session: &str, window: &str, target: &str, line: &str, ask_at: usize, msg_id: &str, behind: i64) -> bool {
     match type_text(session, window, target, line) {
+        Err(e) if e.starts_with(RESTARTING) => telemetry::record_held(session, window, line, ask_at, msg_id).is_ok(),
         Ok(()) => {
             telemetry::record_steered(session, window, &crate::address::shown(line, ask_at), &[msg_id], behind);
             super::vitals::sniff_window_soon(session, window);
@@ -921,6 +961,7 @@ fn overdue(held: &[super::store::DeliveryRow]) -> bool {
 /// settle; a refusal is said at once and records nothing (#250).
 fn type_now(session: &str, window: &str, target: &str, line: &str, ask_at: usize, msg_id: &str) -> bool {
     match type_text(session, window, target, line) {
+        Err(e) if e.starts_with(RESTARTING) => telemetry::record_held(session, window, line, ask_at, msg_id).is_ok(),
         Ok(()) => {
             telemetry::record_typed(session, window, line, ask_at, msg_id);
             // A line just landed in this pane: sniff its vitals once the TUI
@@ -1128,7 +1169,15 @@ fn typed_form<'a>(session: &str, window: &str, text: &'a str) -> std::borrow::Co
 /// or whose holds cannot be read, gets nothing (`restore_hold::send_gate`,
 /// read here, at the write). Every other window is typed as always.
 pub(crate) fn send_into(session: &str, window: &str, target: &str, text: &str) -> Result<(), String> {
+    // The final write (round 3, P1-R1): re-checked here, under the window lock
+    // a delivery holds and a restart takes. A starting window is not typed
+    // into, and the write goes to the stable pane id (%N) the window has NOW,
+    // never through a reusable session:index.pane address.
+    // The restore barrier answers first: it binds a restored window's write to
+    // its own native pane and says so in its own words.
     let guard = gate(session, window, target, false)?;
+    let pane = final_pane(session, window, target)?;
+    let target = pane.as_str();
     // A verbatim `/command` keeps its `@` (non-negotiable 12), so into a CLI
     // whose `@` opens a picker it gets the one-read picker guard before its
     // Enter (board #436 validator P1; limits at `kiro::picker_open`). A
@@ -1149,6 +1198,31 @@ pub(crate) fn send_into(session: &str, window: &str, target: &str, text: &str) -
         }),
     })
 }
+
+/// What a write refused because the window is restarting says: nothing was
+/// written, and the line is kept held.
+pub(crate) const RESTARTING: &str = "held: the window is restarting: ";
+
+/// The pane the final write may go to: the window's stable pane id, and only
+/// when `target` still resolves to it and no start mark is set.
+fn final_pane(session: &str, window: &str, target: &str) -> Result<String, String> {
+    #[cfg(test)]
+    if let Some(hook) = BEFORE_FINAL.lock().unwrap().as_ref() {
+        hook();
+    }
+    if is_starting(session, window) {
+        return Err(format!("{RESTARTING}its new CLI has not shown it is ready"));
+    }
+    let Some(pane) = crate::tmux::pane_id_of(target) else { return Ok(target.to_string()) };
+    match crate::tmux::find_window_by_name(session, window) {
+        Some(now) if now == pane => Ok(pane),
+        Some(_) => Err(format!("{RESTARTING}its pane changed since the check")),
+        None => Ok(target.to_string()),
+    }
+}
+
+#[cfg(test)]
+pub(crate) static BEFORE_FINAL: Mutex<Option<Box<dyn Fn() + Send>>> = Mutex::new(None);
 
 /// The same door for ONE named key — never text, never an Enter: the CLI's
 /// input-mode toggle (readiness required, like any input) and the one
