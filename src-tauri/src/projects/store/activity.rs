@@ -109,6 +109,10 @@ pub enum CommandLife {
     Queued,
 }
 
+/// Test seam (#41 round 1): the next in-flight commits fail as a whole.
+#[cfg(test)]
+pub static IN_FLIGHT_FAILS: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
+
 impl CommandLife {
     fn code(self) -> i64 {
         match self {
@@ -733,6 +737,28 @@ impl Store {
         tx.commit().map_err(|e| format!("commit delivery batch: {e}"))
     }
 
+    /// A kill's in-flight step (board #41), ONE transaction: the `retire` rows (typed to the old
+    /// CLI, not confirmed) are deleted and `line`, the room's record that they may be lost, is
+    /// inserted once by its id. The record and the retire commit together (validator, round 1):
+    /// a row is never gone without its report. Every id must still be pending, else nothing
+    /// changes. `Some(msg)` when the line is new.
+    pub fn commit_in_flight(&mut self, retire: &[i64], line: &super::OnceLine, ts: i64) -> Result<Option<super::HubMsg>, String> {
+        #[cfg(test)]
+        if IN_FLIGHT_FAILS.load(std::sync::atomic::Ordering::Relaxed) {
+            return Err("the in-flight commit failed (test)".into());
+        }
+        let tx = self.conn.transaction().map_err(|e| format!("in-flight transaction: {e}"))?;
+        for id in retire {
+            let n = tx.execute("DELETE FROM deliveries WHERE id = ?1 AND held = 0", rusqlite::params![id]).map_err(|e| format!("retire in-flight delivery: {e}"))?;
+            if n != 1 {
+                return Err(format!("delivery {id} is not pending"));
+            }
+        }
+        let message = super::rooms::hub_append_once_in(&tx, line, ts)?;
+        tx.commit().map_err(|e| format!("commit in-flight: {e}"))?;
+        Ok(message)
+    }
+
     /// Delete a batch of HELD rows in one transaction (#276: steered into a
     /// running turn, owed no echo). Every id must still be held, else nothing
     /// changes.
@@ -821,6 +847,28 @@ impl Store {
             .query_map(rusqlite::params![session, window], |r| Ok((r.get::<_, i64>(0)?, r.get::<_, String>(1)?)))
             .map_err(|e| format!("query steered events: {e}"))?;
         rows.collect::<Result<_, _>>().map_err(|e| format!("read steered events: {e}"))
+    }
+
+    /// The window's `steered` and `prompt` rows after its newest persisted turn end (board #41):
+    /// what reached the turn a kill is ending, as (id, kind, via, deliveries JSON), oldest
+    /// first. Row ids order them, since they share the one activity table. A row that cannot be
+    /// read is an error.
+    pub fn since_end(&self, session: &str, window: &str) -> Result<Vec<(i64, String, String, String)>, String> {
+        let mut stmt = self
+            .conn
+            .prepare(
+                "SELECT id, kind, via, deliveries FROM activity WHERE session = ?1
+                   AND COALESCE(NULLIF(win, ''), CAST(window AS TEXT)) = ?2 AND kind IN ('steered', 'prompt')
+                   AND id > COALESCE((SELECT MAX(id) FROM activity WHERE session = ?1
+                     AND COALESCE(NULLIF(win, ''), CAST(window AS TEXT)) = ?2
+                     AND kind = 'notif' AND text IN ('completed', 'failed', 'interrupted')), 0)
+                 ORDER BY id",
+            )
+            .map_err(|e| format!("prepare since end: {e}"))?;
+        let rows = stmt
+            .query_map(rusqlite::params![session, window], |r| Ok((r.get::<_, i64>(0)?, r.get::<_, String>(1)?, r.get::<_, String>(2)?, r.get::<_, String>(3)?)))
+            .map_err(|e| format!("query since end: {e}"))?;
+        rows.collect::<Result<_, _>>().map_err(|e| format!("read since end: {e}"))
     }
 
     /// A line is settled — acknowledged by its echo, or reported as

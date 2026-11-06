@@ -155,17 +155,46 @@ fn retire_own(path: &std::path::Path, id: &str) -> bool {
 /// later one sees it. A hold that cannot be written refuses the kill
 /// (P1-R5). A kill that fails retires this start's hold: the old CLI runs on.
 pub(crate) fn replace_cli(session: &str, window: &str, kill: impl FnOnce() -> Result<(), String>) -> Result<Option<String>, String> {
+    // Board #41: echoes the old CLI already wrote settle their rows before the kill, so a line
+    // it did take is not reported.
+    crate::agent_notifications::drain_inbox();
     let lock = window_lock(session, window);
     let _guard = lock.lock().unwrap();
     let id = begin_start(session, window)?;
-    if let Err(e) = kill() {
+    let retire_hold = || {
         if let (Some(id), Some(path)) = (&id, mark_path(session, window)) {
             let _g = marks_lock().lock().unwrap();
             retire_own(&path, id);
         }
+    };
+    // What is in flight is decided and RECORDED before the kill (#41 round 1): a record
+    // that cannot be written refuses the restart, as an unwritable hold does (P1-R5).
+    let taken = match take_in_flight(session, window, "restarted") {
+        Ok(taken) => taken,
+        Err(e) => {
+            retire_hold();
+            return Err(e);
+        }
+    };
+    if let Err(e) = kill() {
+        retire_hold();
         return Err(e);
     }
+    taken.announce(session, window);
     Ok(id)
+}
+
+/// Stop a window's CLI under its delivery lock (board #41), as `replace_cli` does for a
+/// restart: a send that passed its check finishes into the old CLI first, and the kill's
+/// in-flight step (`take_in_flight`) cannot race a flush releasing the same rows.
+pub(crate) fn stop_cli(session: &str, window: &str, kill: impl FnOnce() -> Result<(), String>) -> Result<(), String> {
+    crate::agent_notifications::drain_inbox();
+    let lock = window_lock(session, window);
+    let _guard = lock.lock().unwrap();
+    let taken = take_in_flight(session, window, "stopped")?;
+    kill()?;
+    taken.announce(session, window);
+    Ok(())
 }
 
 /// The window's current pane and its screen, the one read a ready check
@@ -584,6 +613,90 @@ pub fn unconfirmed_notice(items: &[(&str, &str)], stamp: &str) -> String {
     format!(
         "[tmm chat {stamp}] {NOTICE_SENDER}: [reply] unconfirmed — no confirmation was seen for your {msgs} of {}; {they}, or the confirmation is late. Do not resend {it} because of this alone; if it matters, ask @human to look.",
         what.join(", "),
+    )
+}
+
+/// What a kill of `window`'s CLI does with the lines typed to it and not confirmed (board #41,
+/// final). Decided and committed under the window's delivery lock BEFORE the kill, by
+/// `replace_cli` (Restart, team restart) and `stop_cli` (Stop). `why` is the room's verb.
+/// Every such line may have reached the old CLI, so NONE is typed again: one room line names
+/// each sender, committed in the same transaction that retires the rows
+/// (`telemetry::take_in_flight`). If that record cannot be written, nothing changes and the
+/// caller refuses the kill: a line is never gone without its record. `Taken::announce` pushes
+/// the record and tells each AGENT sender once (#437's notice path), after the kill. Held
+/// lines (#38: never typed) stay held and the next CLI's ready edge types them.
+pub(crate) fn take_in_flight(session: &str, window: &str, why: &str) -> Result<Taken, String> {
+    let room = super::rooms::session_room_checked(session);
+    let now = chrono::Local::now();
+    let mut items: Vec<(String, String)> = Vec::new();
+    let found = telemetry::take_in_flight(session, window, |msgs, once_id| {
+        let room = room.as_ref().map_err(|e| format!("the room could not be read: {e}"))?;
+        let mut named = Vec::new();
+        for id in msgs {
+            if let Some(m) = super::with_store(|s| s.hub_message_by_id(room, id))? {
+                named.push((m.sender, short_when(m.ts, now)));
+            }
+        }
+        items = named;
+        Ok(super::store::OnceLine { room: room.clone(), id: once_id.to_string(), sender: NOTICE_SENDER.to_string(), body: may_be_lost_line(window, why, &items) })
+    })
+    .map_err(|e| format!("'{window}' was not {why}: what was typed to it could not be recorded ({e})"))?;
+    Ok(Taken { found, items, why: why.to_string(), stamp: now.format("%Y-%m-%d %H:%M").to_string() })
+}
+
+/// What `take_in_flight` committed, for after the kill.
+pub(crate) struct Taken {
+    found: telemetry::InFlight,
+    items: Vec<(String, String)>,
+    why: String,
+    stamp: String,
+}
+
+impl Taken {
+    /// The record (pushed after its commit) and one notice per agent sender, best effort.
+    fn announce(self, session: &str, window: &str) {
+        let Some(message) = self.found.message else { return };
+        super::rooms::push_stored(&[message]);
+        telemetry::record_may_be_lost(session, window, self.found.lost, &self.why);
+        let mut by_sender: std::collections::BTreeMap<String, Vec<String>> = Default::default();
+        for (sender, when) in &self.items {
+            if sender != window && sender != "human" && !sender.is_empty() {
+                by_sender.entry(sender.clone()).or_default().push(when.clone());
+            }
+        }
+        if by_sender.is_empty() {
+            return;
+        }
+        // On its own thread: the sender's pane takes its own window lock, and the caller
+        // holds this one.
+        let (session, window, why, stamp) = (session.to_string(), window.to_string(), self.why, self.stamp);
+        std::thread::spawn(move || {
+            for (sender, whens) in by_sender {
+                let _ = super::deliver_chat_line(&session, &sender, &may_be_lost_notice(&window, &why, &whens, &stamp));
+            }
+        });
+    }
+}
+
+/// The room's record of lines a kill may have lost (board #41), in the #437 grammar: only
+/// what is known. They were typed to the old CLI, nothing can confirm they reached it, and
+/// they were not typed again, so the sender decides.
+pub fn may_be_lost_line(recipient: &str, why: &str, items: &[(String, String)]) -> String {
+    let what = if items.is_empty() {
+        "lines typed into its running turn".to_string()
+    } else {
+        items.iter().map(|(sender, when)| format!("{sender}'s message of {when}")).collect::<Vec<_>>().join(", ")
+    };
+    format!("[tmm] unconfirmed {recipient} — {why} mid-turn: {what} may be lost. Nothing can confirm it reached the old CLI, so nothing was typed again; resend if it still matters.")
+}
+
+/// The one line an agent sender's pane gets for it (board #41), in the stamped RESULT shape
+/// that asks nothing of the reply edge (#347, #437).
+pub fn may_be_lost_notice(recipient: &str, why: &str, whens: &[String], stamp: &str) -> String {
+    let (msgs, it) = if whens.len() == 1 { ("message", "it") } else { ("messages", "them") };
+    format!(
+        "[tmm chat {stamp}] {NOTICE_SENDER}: [reply] unconfirmed — your {msgs} of {} to @{recipient} may be lost: @{recipient} was {why} mid-turn, and nothing can confirm {it} reached it, so {it} was not typed again. Resend {it} if it still matters.",
+        whens.join(", "),
     )
 }
 

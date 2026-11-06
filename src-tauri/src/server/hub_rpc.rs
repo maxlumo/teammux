@@ -1098,7 +1098,7 @@ fn agent_backend(session: &str, agent: &str) -> Option<crate::backends::Backend>
 fn stop_agent_window(session: &str, agent: &str) -> Result<(), String> {
     crate::projects::mark_agent_stopped(session, agent).map_err(|e| format!("'{agent}' was not stopped — the stop could not be recorded: {e}"))?;
     match window_of_agent(session, agent) {
-        Some(window) => kill_agent_cli(session, agent, window),
+        Some(window) => crate::projects::delivery::stop_cli(session, agent, || kill_agent_cli(session, agent, window)),
         None => Ok(()),
     }
 }
@@ -6987,6 +6987,11 @@ while True:
         assert!(wait(&|| submits().iter().any(|l| l.contains("BETAWORD")), 15000), "the held line reaches the new CLI: {:?}", screen());
         let typed = submits();
         assert_eq!(typed.iter().filter(|l| l.contains("BETAWORD")).count(), 1, "once: {typed:?}");
+        // A real codex echoes what it submitted (its UserPromptSubmit); the fake has no hook,
+        // so the test sends it. Unechoed, the next kill would report it "may be lost" (board #41).
+        let submitted = typed.iter().find(|l| l.contains("BETAWORD")).unwrap().splitn(3, ':').nth(2).unwrap().trim_end().to_string();
+        assert!(crate::projects::telemetry::record_prompt(&session, "dev", &submitted), "the echo settles its row");
+        crate::projects::telemetry::record_notification(&session, "dev", "completed");
         let at: f64 = typed[0].split(':').nth(1).unwrap().parse().unwrap();
         assert!(at >= 1.0, "after the ready marker, never into the booting CLI, though the feed was read throughout: {typed:?}");
         stop_poll.store(true, std::sync::atomic::Ordering::Relaxed);
@@ -7020,6 +7025,380 @@ while True:
         assert!(wait(&|| submits().iter().any(|l| l.contains("GAMMAWORD")), 15000), "the next start types it: {:?}", screen());
         assert_eq!(submits().iter().filter(|l| l.contains("GAMMAWORD")).count(), 1);
         assert!(crate::projects::telemetry::held_rows(&session, "dev").is_empty());
+    }
+
+    /// The running hub a restart's drain consumes for (#41), unregistered with the case.
+    struct RunningHub;
+    impl Drop for RunningHub {
+        fn drop(&mut self) {
+            crate::agent_notifications::unregister_for_test();
+        }
+    }
+
+    /// Board #41's rig (builder, 02:26 on #38: a line typed into a BUSY CLI sits in the old
+    /// CLI's own buffer, and a restart lost it): a fake CLI under the real restart RPC that
+    /// paints `ready` 1 s after it starts and prints `SUBMIT:<line>` for each Enter, a turn
+    /// open, and a line from `lead` typed into it (claude: a row; kiro steer: a steered event).
+    /// A running hub is registered so the restart's drain has an inbox to read.
+    #[allow(clippy::type_complexity)]
+    fn restart_inflight_case(backend: &str, input_mode: &str, ready: &str, word: &str) -> Option<(String, std::path::PathBuf, Box<dyn Fn() -> Vec<String>>, RunningHub)> {
+        crate::projects::tests::use_test_store();
+        crate::projects::telemetry::PERSIST_IN_TEST.with(|p| p.set(true));
+        let session = format!("tmm-inflight-{}", uuid::Uuid::new_v4());
+        let ws = crate::config::test_scratch("tmm-inflight-ws");
+        let home = ws.join(".tmm/agents/dev");
+        std::fs::create_dir_all(&home).unwrap();
+        let fake = ws.join("cli.py");
+        std::fs::write(&fake, format!("\
+import os, sys, time, tty
+tty.setraw(0)
+time.sleep(1.0)
+sys.stdout.write({ready:?} + '\\r\\n'); sys.stdout.flush()
+buf = b''
+while True:
+    c = os.read(0, 1)
+    if c == b'\\r':
+        sys.stdout.write('SUBMIT:' + buf.decode('utf-8', 'replace') + '\\r\\n'); sys.stdout.flush()
+        buf = b''
+    else:
+        buf += c
+")).unwrap();
+        let cmd = format!("exec -a {backend} python3 {}", fake.display());
+        crate::projects::spawn::LaunchRecipe {
+            backend, env: &[], cmd: &cmd, spawned_by: "", team: None, agent_def: "", member: "", from_member: "", input_mode,
+        }.write(&home).unwrap();
+        let created = std::process::Command::new("tmux")
+            .args(["new-session", "-d", "-x", "200", "-y", "50", "-s", &session, "-n", "dev", "-c", &ws.to_string_lossy(), &format!("bash -c '{cmd}'")])
+            .status()
+            .is_ok_and(|s| s.success());
+        if !created {
+            eprintln!("no tmux server — skipping");
+            let _ = std::fs::remove_dir_all(&ws);
+            return None;
+        }
+        crate::tmux::new_named_window(&session, "keep", &ws.to_string_lossy()).unwrap();
+        crate::projects::adopt(&session, Some("inflight-test")).expect("adopt project");
+        let target = format!("{session}:dev");
+        let screen = move || crate::tmux::capture_pane_plain(&target, Some(200)).unwrap_or_default();
+        let wait = |ok: &dyn Fn() -> bool, ms: u64| (0..ms / 50).any(|_| ok() || { std::thread::sleep(std::time::Duration::from_millis(50)); false });
+        assert!(wait(&|| screen().contains(ready), 10000), "the first CLI is up: {:?}", screen());
+        // A turn is open, and a line is typed into it (claude: a row; kiro
+        // steer: a steered event, no row).
+        crate::projects::telemetry::record_prompt(&session, "dev", "[tmm chat 2026-11-06 07:20] human: @dev a long task");
+        assert_eq!(crate::projects::telemetry::derive(&session, "dev", 0).state, "running");
+        // Start of a second, so a case that restarts at once does so within the same second.
+        while std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap().subsec_millis() > 100 {
+            std::thread::sleep(std::time::Duration::from_millis(10));
+        }
+        let r = handle_hub_request(&req("hub_post", serde_json::json!({ "session": session, "from": "lead", "body": format!("@dev reply only {word}") })), None);
+        assert!(r.error.is_none(), "{:?}", r.error.map(|e| e.message));
+        let s2 = screen.clone();
+        assert!(wait(&|| s2().lines().any(|l| l.starts_with("SUBMIT:") && l.contains(word)), 5000), "typed into the OLD CLI: {:?}", s2());
+        assert!(crate::projects::telemetry::held_rows(&session, "dev").is_empty(), "typed, not held");
+        let submits: Box<dyn Fn() -> Vec<String>> = Box::new(move || screen().lines().filter(|l| l.starts_with("SUBMIT:")).map(str::to_string).collect());
+        crate::agent_notifications::AgentNotificationHub::load_at(ws.join("notifications")).register();
+        Some((session, ws, submits, RunningHub))
+    }
+
+    /// Board #41 final (orchestrator's call past the cap, 10:44): a line typed to the old CLI
+    /// and not confirmed is NEVER typed again, by a restart or by the Start after a Stop. It is
+    /// reported once ("may be lost") in the same commit that retires its row, so the
+    /// unconfirmed sweep has nothing left to say twice.
+    #[test]
+    fn a_busy_line_that_never_echoed_is_reported_once_and_never_retyped() {
+        let Some((session, ws, submits, _hub)) = restart_inflight_case("claude", "", "bypass permissions on", "CLAUDEWORD") else { return };
+        let _cleanup = KillOnDrop(session.clone(), ws);
+        let wait = |ok: &dyn Fn() -> bool, ms: u64| (0..ms / 50).any(|_| ok() || { std::thread::sleep(std::time::Duration::from_millis(50)); false });
+        let target = format!("{session}:dev");
+        let ready = || crate::tmux::capture_pane_plain(&target, Some(200)).unwrap_or_default().contains("bypass permissions on");
+        let lost = || rooms::history_page(&project_room(&session), None, 50)["messages"].as_array().unwrap().iter()
+            .filter_map(|m| m["body"].as_str()).filter(|b| b.contains("may be lost")).map(str::to_string).collect::<Vec<_>>();
+        assert_eq!(crate::projects::telemetry::pending_receipts(&session, "dev").len(), 1, "claude owes an echo: a row");
+        let r = handle_hub_request(&req("hub_agent_restart", serde_json::json!({ "session": session, "agent": "dev" })), None);
+        assert!(r.error.is_none(), "{:?}", r.error.map(|e| e.message));
+        assert!(wait(&ready, 15000));
+        std::thread::sleep(std::time::Duration::from_millis(1500));
+        assert!(!submits().iter().any(|l| l.contains("CLAUDEWORD")), "never typed again: {:?}", submits());
+        assert!(crate::projects::telemetry::pending_receipts(&session, "dev").is_empty() && crate::projects::telemetry::held_rows(&session, "dev").is_empty(), "retired, not held");
+        assert_eq!(lost().len(), 1, "{:?}", lost());
+        assert!(lost()[0].contains("lead's message"), "names the sender: {:?}", lost());
+        crate::projects::telemetry::backdate_deliveries_for_test(&session, 600);
+        assert!(crate::projects::delivery::report_unconfirmed(&session).is_empty(), "the sweep has nothing to say twice");
+
+        // A STOP the same way: reported once, and the next Start types nothing of it.
+        crate::projects::telemetry::record_prompt(&session, "dev", "[tmm chat 2026-11-06 10:50] human: @dev another task");
+        let r = handle_hub_request(&req("hub_post", serde_json::json!({ "session": session, "from": "lead", "body": "@dev reply only STOPWORD" })), None);
+        assert!(r.error.is_none(), "{:?}", r.error.map(|e| e.message));
+        assert!(wait(&|| submits().iter().any(|l| l.contains("STOPWORD")), 5000), "typed into the busy CLI: {:?}", submits());
+        let r = handle_hub_request(&req("hub_agent_stop", serde_json::json!({ "session": session, "agent": "dev" })), None);
+        assert!(r.error.is_none(), "{:?}", r.error.map(|e| e.message));
+        assert_eq!(lost().len(), 2, "the stop reports it: {:?}", lost());
+        assert!(crate::projects::telemetry::held_rows(&session, "dev").is_empty(), "nothing held for the next start");
+        let r = handle_hub_request(&req("hub_agent_restart", serde_json::json!({ "session": session, "agent": "dev" })), None);
+        assert!(r.error.is_none(), "{:?}", r.error.map(|e| e.message));
+        assert!(wait(&ready, 15000));
+        std::thread::sleep(std::time::Duration::from_millis(1500));
+        assert_eq!(submits().iter().filter(|l| l.contains("STOPWORD")).count(), 0, "the start types nothing of it: {:?}", submits());
+        assert_eq!(lost().len(), 2, "said once: {:?}", lost());
+    }
+
+    /// Board #41, option A (orchestrator 08:01), measured live on claude 2.1.319: a line typed
+    /// into its running turn is QUEUED, and claude fires UserPromptSubmit then, so the echo
+    /// settles the row at typing time. A restart drops claude's queue. Such an echo, after the
+    /// killed turn's first prompt, proves nothing was submitted or not: it is reported once,
+    /// never typed again. The fake echoes at queue time as 2.1.319 does.
+    #[test]
+    fn a_busy_claude_line_echoed_at_queue_time_is_reported_not_retyped_after_a_restart() {
+        let Some((session, ws, submits, _hub)) = restart_inflight_case("claude", "", "bypass permissions on", "QUEUEWORD") else { return };
+        let _cleanup = KillOnDrop(session.clone(), ws);
+        let typed = submits().into_iter().find(|l| l.contains("QUEUEWORD")).unwrap().trim_start_matches("SUBMIT:").trim_end().to_string();
+        assert!(crate::projects::telemetry::record_prompt(&session, "dev", &typed), "the queue-time echo settles the row");
+        assert!(crate::projects::telemetry::pending_receipts(&session, "dev").is_empty());
+        let r = handle_hub_request(&req("hub_agent_restart", serde_json::json!({ "session": session, "agent": "dev" })), None);
+        assert!(r.error.is_none(), "{:?}", r.error.map(|e| e.message));
+        let target = format!("{session}:dev");
+        let wait = |ok: &dyn Fn() -> bool, ms: u64| (0..ms / 50).any(|_| ok() || { std::thread::sleep(std::time::Duration::from_millis(50)); false });
+        assert!(wait(&|| crate::tmux::capture_pane_plain(&target, Some(200)).unwrap_or_default().contains("bypass permissions on"), 15000));
+        std::thread::sleep(std::time::Duration::from_millis(1500));
+        assert!(!submits().iter().any(|l| l.contains("QUEUEWORD")), "never typed again: {:?}", submits());
+        let lost = || rooms::history_page(&project_room(&session), None, 50)["messages"].as_array().unwrap().iter()
+            .filter_map(|m| m["body"].as_str()).filter(|b| b.contains("may be lost")).map(str::to_string).collect::<Vec<_>>();
+        assert_eq!(lost().len(), 1, "{:?}", lost());
+        assert!(lost()[0].contains("lead's message"), "names the sender, not the turn's own first prompt: {:?}", lost());
+        assert!(!lost()[0].contains("human's"), "{:?}", lost());
+        let r = handle_hub_request(&req("hub_agent_restart", serde_json::json!({ "session": session, "agent": "dev" })), None);
+        assert!(r.error.is_none(), "{:?}", r.error.map(|e| e.message));
+        assert_eq!(lost().len(), 1, "once: {:?}", lost());
+    }
+
+    /// Board #41 round 1 (validator's RETAINWORD probe, reviewer P1-R1): the old CLI submitted
+    /// the line and its UserPromptSubmit is in the inbox, but the restart's drain KEEPS it
+    /// (tmux could not be asked for its pane: one of the kept outcomes). The line is reported,
+    /// never typed again.
+    #[test]
+    fn a_receipt_the_drain_keeps_makes_the_line_unknown_not_retyped() {
+        let Some((session, ws, submits, _hub)) = restart_inflight_case("claude", "", "bypass permissions on", "RETAINWORD") else { return };
+        let _cleanup = KillOnDrop(session.clone(), ws.clone());
+        let root = ws.join("notifications");
+        let hub = crate::agent_notifications::AgentNotificationHub::load_at(root.clone());
+        hub.register();
+        struct Unregister;
+        impl Drop for Unregister {
+            fn drop(&mut self) {
+                crate::agent_notifications::unregister_for_test();
+            }
+        }
+        let _unregister = Unregister;
+        let pane = crate::tmux::find_window_by_name(&session, "dev").expect("the old pane");
+        let pane_id = crate::tmux::pane_format(&pane, "#{pane_id}").expect("its id");
+        let prompt = submits().into_iter().find(|l| l.contains("RETAINWORD")).unwrap().trim_start_matches("SUBMIT:").trim_end().to_string();
+        let envelope = serde_json::json!({
+            "backend": "claude",
+            "pane_id": pane_id,
+            "payload": { "hook_event_name": "UserPromptSubmit", "cwd": ws.to_string_lossy(), "prompt": prompt },
+        });
+        std::fs::write(root.join("inbox").join("1-prompt.json"), serde_json::to_vec(&envelope).unwrap()).unwrap();
+        crate::agent_notifications::keep_next_envelope_for_test();
+        let r = handle_hub_request(&req("hub_agent_restart", serde_json::json!({ "session": session, "agent": "dev" })), None);
+        assert!(r.error.is_none(), "{:?}", r.error.map(|e| e.message));
+        let target = format!("{session}:dev");
+        let wait = |ok: &dyn Fn() -> bool, ms: u64| (0..ms / 50).any(|_| ok() || { std::thread::sleep(std::time::Duration::from_millis(50)); false });
+        assert!(wait(&|| crate::tmux::capture_pane_plain(&target, Some(200)).unwrap_or_default().contains("bypass permissions on"), 15000));
+        std::thread::sleep(std::time::Duration::from_millis(1500));
+        assert!(!submits().iter().any(|l| l.contains("RETAINWORD")), "never typed twice: {:?}", submits());
+        let lost = rooms::history_page(&project_room(&session), None, 50)["messages"].as_array().unwrap().iter()
+            .filter_map(|m| m["body"].as_str()).filter(|b| b.contains("may be lost")).count();
+        assert_eq!(lost, 1, "reported once");
+    }
+
+    /// Board #41 rounds 3 and final: the old CLI's receipt for the line exists but the drain
+    /// cannot use it (validator-2's runs), in every order seen: unreadable at the restart's
+    /// drain (half-written, mode 000), an inbox that cannot be listed, no running hub, the
+    /// half-written receipt already dropped by an ordinary loop pass before the restart
+    /// (loop_first), and a first restart refused by a failed record, then retried
+    /// (refused_then_retry). Nothing is retyped, so in every one the line is typed zero times
+    /// and reported exactly once.
+    #[test]
+    fn a_receipt_the_drain_cannot_use_never_causes_a_retype_in_any_order() {
+        let cases = ["a half-written receipt", "a mode-000 receipt", "an unlistable inbox", "no running hub", "loop_first", "refused_then_retry"];
+        for (i, case) in cases.into_iter().enumerate() {
+            let word = format!("ANYORDER{i}");
+            let Some((session, ws, submits, _hub)) = restart_inflight_case("claude", "", "bypass permissions on", &word) else { return };
+            let _cleanup = KillOnDrop(session.clone(), ws.clone());
+            struct Reset;
+            impl Drop for Reset {
+                fn drop(&mut self) {
+                    crate::projects::store::IN_FLIGHT_FAILS.store(false, std::sync::atomic::Ordering::Relaxed);
+                }
+            }
+            let _reset = Reset;
+            let inbox = ws.join("notifications").join("inbox");
+            let pane = crate::tmux::find_window_by_name(&session, "dev").expect("the old pane");
+            let pane_id = crate::tmux::pane_format(&pane, "#{pane_id}").expect("its id");
+            let prompt = submits().into_iter().find(|l| l.contains(&word)).unwrap().trim_start_matches("SUBMIT:").trim_end().to_string();
+            let receipt = serde_json::to_vec(&serde_json::json!({
+                "backend": "claude", "pane_id": pane_id,
+                "payload": { "hook_event_name": "UserPromptSubmit", "cwd": ws.to_string_lossy(), "prompt": prompt },
+            })).unwrap();
+            let file = inbox.join("1-prompt.json");
+            let restart = || handle_hub_request(&req("hub_agent_restart", serde_json::json!({ "session": session, "agent": "dev" })), None);
+            match case {
+                "a half-written receipt" | "loop_first" | "refused_then_retry" => std::fs::write(&file, &receipt[..receipt.len() / 2]).unwrap(),
+                "a mode-000 receipt" => {
+                    std::fs::write(&file, &receipt).unwrap();
+                    std::fs::set_permissions(&file, std::os::unix::fs::PermissionsExt::from_mode(0o000)).unwrap();
+                }
+                "an unlistable inbox" => std::fs::set_permissions(&inbox, std::os::unix::fs::PermissionsExt::from_mode(0o000)).unwrap(),
+                _ => crate::agent_notifications::unregister_for_test(),
+            }
+            if case == "loop_first" {
+                crate::agent_notifications::drain_inbox(); // one ordinary pass of the 250 ms loop
+            }
+            if case == "refused_then_retry" {
+                crate::projects::store::IN_FLIGHT_FAILS.store(true, std::sync::atomic::Ordering::Relaxed);
+                assert!(restart().error.is_some(), "{case}: the first restart is refused");
+                crate::projects::store::IN_FLIGHT_FAILS.store(false, std::sync::atomic::Ordering::Relaxed);
+            }
+            let r = restart();
+            let _ = std::fs::set_permissions(&inbox, std::os::unix::fs::PermissionsExt::from_mode(0o755));
+            assert!(r.error.is_none(), "{case}: {:?}", r.error.map(|e| e.message));
+            let target = format!("{session}:dev");
+            let wait = |ok: &dyn Fn() -> bool, ms: u64| (0..ms / 50).any(|_| ok() || { std::thread::sleep(std::time::Duration::from_millis(50)); false });
+            assert!(wait(&|| crate::tmux::capture_pane_plain(&target, Some(200)).unwrap_or_default().contains("bypass permissions on"), 15000));
+            std::thread::sleep(std::time::Duration::from_millis(1500));
+            assert!(!submits().iter().any(|l| l.contains(&word)), "{case}: never typed again: {:?}", submits());
+            let lost = rooms::history_page(&project_room(&session), None, 50)["messages"].as_array().unwrap().iter()
+                .filter_map(|m| m["body"].as_str()).filter(|b| b.contains("may be lost")).count();
+            assert_eq!(lost, 1, "{case}: reported once");
+        }
+    }
+
+    /// Board #41 round 1 (validator (2), reviewer P1-R2): the retire and the room's record of it
+    /// are one commit, made BEFORE the kill. When it fails, nothing changes and the restart is
+    /// refused: the old CLI keeps running, the row is still pending. A later restart that can
+    /// record it reports it exactly once. Never typed again, never silently gone. The steered
+    /// (no-row) kiro case is the same: one saved record after the recovery.
+    #[test]
+    fn a_record_that_cannot_be_written_refuses_the_kill_and_the_next_restart_reports_once() {
+        for (backend, mode, ready, word) in [("claude", "", "bypass permissions on", "FAILWORD"), ("kiro", "steer", "ask a question or describe a task", "FAILSTEER")] {
+            let Some((session, ws, submits, _hub)) = restart_inflight_case(backend, mode, ready, word) else { return };
+            let _cleanup = KillOnDrop(session.clone(), ws);
+            struct Reset;
+            impl Drop for Reset {
+                fn drop(&mut self) {
+                    crate::projects::store::IN_FLIGHT_FAILS.store(false, std::sync::atomic::Ordering::Relaxed);
+                }
+            }
+            let _reset = Reset;
+            let rows = crate::projects::telemetry::pending_receipts(&session, "dev").len();
+            let pane = crate::tmux::find_window_by_name(&session, "dev");
+            crate::projects::store::IN_FLIGHT_FAILS.store(true, std::sync::atomic::Ordering::Relaxed);
+            let r = handle_hub_request(&req("hub_agent_restart", serde_json::json!({ "session": session, "agent": "dev" })), None);
+            crate::projects::store::IN_FLIGHT_FAILS.store(false, std::sync::atomic::Ordering::Relaxed);
+            let e = r.error.expect("refused").message;
+            assert!(e.contains("could not be recorded"), "{backend}: {e}");
+            assert_eq!(crate::tmux::find_window_by_name(&session, "dev"), pane, "{backend}: nothing killed");
+            assert_eq!(crate::projects::telemetry::derive(&session, "dev", 0).state, "running", "{backend}: no turn end");
+            assert_eq!(crate::projects::telemetry::pending_receipts(&session, "dev").len(), rows, "{backend}: nothing retired");
+            assert!(!crate::projects::delivery::is_starting(&session, "dev"), "{backend}: no hold left behind");
+            let r = handle_hub_request(&req("hub_agent_restart", serde_json::json!({ "session": session, "agent": "dev" })), None);
+            assert!(r.error.is_none(), "{backend}: {:?}", r.error.map(|e| e.message));
+            let target = format!("{session}:dev");
+            let wait = |ok: &dyn Fn() -> bool, ms: u64| (0..ms / 50).any(|_| ok() || { std::thread::sleep(std::time::Duration::from_millis(50)); false });
+            assert!(wait(&|| crate::tmux::capture_pane_plain(&target, Some(200)).unwrap_or_default().contains(ready), 15000));
+            std::thread::sleep(std::time::Duration::from_millis(1000));
+            assert!(!submits().iter().any(|l| l.contains(word)), "{backend}: {:?}", submits());
+            let lost = rooms::history_page(&project_room(&session), None, 50)["messages"].as_array().unwrap().iter()
+                .filter_map(|m| m["body"].as_str()).filter(|b| b.contains("may be lost")).count();
+            assert_eq!(lost, 1, "{backend}: exactly one saved record");
+            crate::projects::telemetry::backdate_deliveries_for_test(&session, 600);
+            assert!(crate::projects::delivery::report_unconfirmed(&session).is_empty(), "{backend}: and nothing left for the sweep to say twice");
+        }
+    }
+
+    /// Board #41 (orchestrator 07:17): the old CLI DID submit the line and wrote its
+    /// UserPromptSubmit, but the hook inbox had not been read when the restart came. After the
+    /// kill that envelope would be dropped (its pane is gone), so the restart drains the inbox
+    /// first and the echo settles the row. The line is never typed again; since the echo came
+    /// inside the killed turn it proves only "queued" (option A), so it is reported once.
+    #[test]
+    fn an_echo_still_in_the_inbox_at_a_restart_settles_its_row_first() {
+        let Some((session, ws, submits, _hub)) = restart_inflight_case("claude", "", "bypass permissions on", "DRAINWORD") else { return };
+        let _cleanup = KillOnDrop(session.clone(), ws.clone());
+        let root = ws.join("notifications");
+        let hub = crate::agent_notifications::AgentNotificationHub::load_at(root.clone());
+        hub.register();
+        struct Unregister;
+        impl Drop for Unregister {
+            fn drop(&mut self) {
+                crate::agent_notifications::unregister_for_test();
+            }
+        }
+        let _unregister = Unregister;
+        let line = crate::projects::telemetry::pending_receipts(&session, "dev");
+        assert_eq!(line.len(), 1);
+        let pane = crate::tmux::find_window_by_name(&session, "dev").expect("the old pane");
+        let pane_id = crate::tmux::pane_format(&pane, "#{pane_id}").expect("its id");
+        // What the old CLI submitted: exactly the typed line.
+        let prompt = submits().into_iter().find(|l| l.contains("DRAINWORD")).unwrap().trim_start_matches("SUBMIT:").trim_end().to_string();
+        let envelope = serde_json::json!({
+            "backend": "claude",
+            "pane_id": pane_id,
+            "payload": { "hook_event_name": "UserPromptSubmit", "cwd": ws.to_string_lossy(), "prompt": prompt },
+        });
+        std::fs::write(root.join("inbox").join("1-prompt.json"), serde_json::to_vec(&envelope).unwrap()).unwrap();
+        let r = handle_hub_request(&req("hub_agent_restart", serde_json::json!({ "session": session, "agent": "dev" })), None);
+        assert!(r.error.is_none(), "{:?}", r.error.map(|e| e.message));
+        let target = format!("{session}:dev");
+        let wait = |ok: &dyn Fn() -> bool, ms: u64| (0..ms / 50).any(|_| ok() || { std::thread::sleep(std::time::Duration::from_millis(50)); false });
+        assert!(wait(&|| crate::tmux::capture_pane_plain(&target, Some(200)).unwrap_or_default().contains("bypass permissions on"), 15000));
+        std::thread::sleep(std::time::Duration::from_millis(1500));
+        assert!(!submits().iter().any(|l| l.contains("DRAINWORD")), "settled by its echo, never typed twice: {:?}", submits());
+        let lost = rooms::history_page(&project_room(&session), None, 50)["messages"].as_array().unwrap().iter()
+            .filter_map(|m| m["body"].as_str()).filter(|b| b.contains("may be lost")).count();
+        // Its echo came while the killed turn was open, which on claude 2.1.319 means QUEUED
+        // (option A): so it is still reported once, and never typed again.
+        assert_eq!(lost, 1, "an in-turn echo is reported, as option A says");
+        assert!(!root.join("inbox").join("1-prompt.json").exists(), "the restart drained the inbox");
+        assert!(crate::projects::telemetry::held_rows(&session, "dev").is_empty() && crate::projects::telemetry::pending_receipts(&session, "dev").is_empty());
+    }
+
+    #[test]
+    fn a_line_steered_into_a_busy_kiro_is_reported_once_and_never_retyped_after_a_restart() {
+        let Some((session, ws, submits, _hub)) = restart_inflight_case("kiro", "steer", "ask a question or describe a task", "KAPPAWORD") else { return };
+        let _cleanup = KillOnDrop(session.clone(), ws.clone());
+        // The sender is a live managed agent: it gets ONE notice in its own pane.
+        let lead_home = ws.join(".tmm/agents/lead");
+        std::fs::create_dir_all(&lead_home).unwrap();
+        crate::projects::spawn::LaunchRecipe {
+            backend: "grok", env: &[], cmd: "cat", spawned_by: "", team: None, agent_def: "", member: "", from_member: "", input_mode: "",
+        }.write(&lead_home).unwrap();
+        crate::tmux::new_named_window(&session, "lead", &ws.to_string_lossy()).unwrap();
+        crate::tmux::send_command(&format!("{session}:lead"), "stty -echo; exec cat").unwrap();
+        let lead_screen = || crate::tmux::capture_pane_plain(&format!("{session}:lead"), Some(200)).unwrap_or_default();
+        let notices = || lead_screen().matches("may be lost").count();
+        let wait = |ok: &dyn Fn() -> bool, ms: u64| (0..ms / 50).any(|_| ok() || { std::thread::sleep(std::time::Duration::from_millis(50)); false });
+        assert!(crate::projects::telemetry::pending_receipts(&session, "dev").is_empty(), "a steered line has no row (#276)");
+        let lost = || -> Vec<String> {
+            rooms::history_page(&project_room(&session), None, 50)["messages"].as_array().unwrap().iter()
+                .filter_map(|m| m["body"].as_str()).filter(|b| b.contains("may be lost")).map(str::to_string).collect()
+        };
+        let r = handle_hub_request(&req("hub_agent_restart", serde_json::json!({ "session": session, "agent": "dev" })), None);
+        assert!(r.error.is_none(), "{:?}", r.error.map(|e| e.message));
+        let target = format!("{session}:dev");
+        assert!(wait(&|| crate::tmux::capture_pane_plain(&target, Some(200)).unwrap_or_default().contains("ask a question"), 15000));
+        std::thread::sleep(std::time::Duration::from_millis(1500));
+        assert!(!submits().iter().any(|l| l.contains("KAPPAWORD")), "never re-typed: {:?}", submits());
+        let said = lost();
+        assert_eq!(said.len(), 1, "one notice: {said:?}");
+        assert!(said[0].contains("lead") && said[0].starts_with("[tmm] "), "names the sender: {said:?}");
+        assert!(wait(&|| notices() >= 1, 5000), "the agent sender is told: {:?}", lead_screen());
+        // A second restart: the same steered line is not reported again.
+        let r = handle_hub_request(&req("hub_agent_restart", serde_json::json!({ "session": session, "agent": "dev" })), None);
+        assert!(r.error.is_none(), "{:?}", r.error.map(|e| e.message));
+        assert_eq!(lost().len(), 1, "once per restart, not once per kill of the same line: {:?}", lost());
+        std::thread::sleep(std::time::Duration::from_millis(1000));
+        assert_eq!(notices(), 1, "told once: {:?}", lead_screen());
     }
 
     /// Board #38 round 1 (orchestrator's rule (2)): a restarted window that

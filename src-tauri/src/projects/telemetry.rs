@@ -1733,6 +1733,82 @@ pub fn retire_held(ids: &[i64]) -> Result<(), String> {
     queue(|s| s.delete_held_deliveries(ids))
 }
 
+/// What a kill of `window`'s CLI did with what was in flight (board #41).
+#[derive(Debug, Default)]
+pub struct InFlight {
+    /// How many messages may be lost (0: nothing was).
+    pub lost: usize,
+    /// The room's record of them, when written now: pushed by the caller after the commit.
+    pub message: Option<super::store::HubMsg>,
+    /// The messages named in it (id).
+    pub msgs: Vec<String>,
+}
+
+/// What a kill of `window`'s CLI does with what was typed to it and not confirmed (board #41,
+/// final: orchestrator's call past the round cap, 10:44). Every such line MAY have reached the
+/// old CLI, and nothing is ever typed again: three rounds each found a new way for "provably
+/// never submitted" to be wrong, and no backend on this host took a re-type live (claude
+/// 2.1.319 echoes at queue time; codex holds busy lines itself). The lines are:
+/// - every pending chat row of the window (it owes an echo that has not come);
+/// - every `steered` event since the window's last end (#276: no receipt at all);
+/// - every app echo after the killed turn's first prompt (claude 2.1.319 echoes when it
+///   QUEUES a line, and a kill drops its queue).
+/// The rows are retired in the SAME transaction that writes `report`'s room line
+/// (`Store::commit_in_flight`), so a line is never gone without its record, and the
+/// unconfirmed sweep never reports it a second time. Decided and committed BEFORE the kill
+/// (reviewer P1-R2: after it, a failed record would leave lines gone with no trace): any read,
+/// report or commit that fails is an `Err`, nothing has changed, and the caller refuses the
+/// kill. Under the turn-fact lock, so no echo settles a row between the read and the commit.
+/// Held lines (#38: never typed) and command rows are left alone.
+pub fn take_in_flight(
+    session: &str,
+    window: &str,
+    report: impl FnOnce(&[String], &str) -> Result<super::store::OnceLine, String>,
+) -> Result<InFlight, String> {
+    let _order = turn_order();
+    let mut out = InFlight::default();
+    let rows: Vec<super::store::DeliveryRow> = queue(|s| s.pending_deliveries(session, Some(window)))
+        .map_err(|e| format!("its unechoed lines could not be read: {e}"))?
+        .into_iter()
+        .filter(|r| r.command.is_none())
+        .collect();
+    let mut msgs: Vec<String> = rows.iter().map(|r| r.msg_id.clone()).filter(|m| !m.is_empty()).collect();
+    let mut newest_unknown = 0;
+    let events = queue(|s| s.since_end(session, window)).map_err(|e| format!("what reached its turn could not be read: {e}"))?;
+    let mut opened = false;
+    for (id, kind, via, json) in &events {
+        if kind == "prompt" && !opened {
+            opened = true; // the killed turn's own first prompt
+            continue;
+        }
+        if kind == "prompt" && via != "app" {
+            continue;
+        }
+        newest_unknown = *id;
+        let refs: Vec<DeliveryRef> = serde_json::from_str(json).map_err(|e| format!("activity {id} does not decode: {e}"))?;
+        msgs.extend(refs.into_iter().map(|r| r.msg).filter(|m| !m.is_empty()));
+    }
+    let mut seen = std::collections::HashSet::new();
+    msgs.retain(|m| seen.insert(m.clone()));
+    let newest_row = rows.iter().map(|r| r.id).max().unwrap_or(0);
+    if newest_row == 0 && newest_unknown == 0 {
+        return Ok(out);
+    }
+    let line = report(&msgs, &format!("lost:{window}:{newest_unknown}:{newest_row}"))?;
+    let retire: Vec<i64> = rows.iter().map(|r| r.id).collect();
+    // One commit: the retired rows and their record, or nothing.
+    out.message = queue(|s| s.commit_in_flight(&retire, &line, now_ms() as i64))?;
+    out.lost = msgs.len().max(1);
+    out.msgs = msgs;
+    Ok(out)
+}
+
+/// The feed's half of a kill's report (board #41): lines the kill may have lost.
+pub fn record_may_be_lost(session: &str, window: &str, n: usize, why: &str) {
+    let noun = if n == 1 { "line" } else { "lines" };
+    push_event(session, window, "warn", format!("may be lost ({why} mid-turn): {n} {noun} typed to the old CLI, not typed again"));
+}
+
 pub fn record_undelivered(session: &str, window: &str, line: &str, reason: &str) {
     push_event(session, window, "warn", format!("undelivered ({reason}): {}", truncate_chars(line, 160)));
 }

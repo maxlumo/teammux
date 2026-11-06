@@ -270,3 +270,7 @@ mod tests {
         assert!(lines <= 200, "store/mod.rs grew to {lines} lines; it holds the connection only");
     }
 }
+
+/// Test seam (#41 round 1), after the tests: the hub file's own source test reads up to them.
+#[cfg(test)]
+pub use activity::IN_FLIGHT_FAILS;

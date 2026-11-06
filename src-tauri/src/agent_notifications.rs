@@ -123,6 +123,40 @@ struct State {
     poster: Option<Arc<dyn RoomPoster>>,
 }
 
+/// The hub whose inbox the server's loop consumes (`run` registers it), for `drain_inbox`.
+static RUNNING: Mutex<Option<AgentNotificationHub>> = Mutex::new(None);
+/// Serializes every consumption of the inbox (`consume_inbox`).
+static CONSUMING: Mutex<()> = Mutex::new(());
+
+/// Consume the hook inbox NOW, as one pass of the running loop (board #41). A kill of an
+/// agent CLI calls it BEFORE it takes the window's lock and kills: an envelope from the old
+/// pane that is still unread after the kill is dropped (`check_pane`: no such pane), so a
+/// UserPromptSubmit written just before the kill must settle its row first, or the restart
+/// would report a line the old CLI DID take as "may be lost" (a false warning; nothing is ever
+/// typed again, #41 final). Best effort: a receipt this pass keeps, drops or cannot list is
+/// simply not settled, and its line is reported. Not under the window lock: consuming
+/// a Stop runs the end edge's flush, which takes that lock. Serialized with the loop, so each
+/// envelope is consumed once. No running hub (a test, a mobile build): nothing to drain.
+pub fn drain_inbox() {
+    let hub = RUNNING.lock().unwrap_or_else(|e| e.into_inner()).clone();
+    if let Some(hub) = hub {
+        hub.consume_inbox();
+    }
+}
+
+/// Test seam (#41): the next `check_pane` on this thread answers as if tmux could not be
+/// asked, so its envelope is KEPT for a later pass.
+#[cfg(test)]
+pub(crate) fn keep_next_envelope_for_test() {
+    CRASH.with(|c| *c.borrow_mut() = Some("tmux_unknown"));
+}
+
+/// Test seam: no hub is running any more.
+#[cfg(test)]
+pub(crate) fn unregister_for_test() {
+    *RUNNING.lock().unwrap_or_else(|e| e.into_inner()) = None;
+}
+
 #[derive(Clone)]
 pub struct AgentNotificationHub {
     root: PathBuf,
@@ -134,7 +168,7 @@ impl AgentNotificationHub {
         Self::load_at(config::config_dir().join("agent-notifications"))
     }
 
-    fn load_at(root: PathBuf) -> Self {
+    pub(crate) fn load_at(root: PathBuf) -> Self {
         let _ = std::fs::create_dir_all(root.join("inbox"));
         // The unread-inbox UI retired 2026-09-01; nothing reads unread.json
         // any more, so a file left by an older build would sit on disk for
@@ -250,6 +284,7 @@ impl AgentNotificationHub {
     }
 
     pub async fn run(self: Arc<Self>) {
+        self.register();
         loop {
             // consume_inbox is synchronous end to end: directory scan, file
             // reads, tmux subprocesses, bus posts. On the runtime it would
@@ -260,7 +295,15 @@ impl AgentNotificationHub {
         }
     }
 
+    /// Make this hub the one `drain_inbox` consumes for (board #41): the running consumer.
+    pub(crate) fn register(&self) {
+        *RUNNING.lock().unwrap_or_else(|e| e.into_inner()) = Some(self.clone());
+    }
+
     fn consume_inbox(&self) {
+        // ONE consumer at a time (board #41): the 250 ms loop and a restart's drain read the
+        // same directory, and an envelope read by both would be consumed twice.
+        let _one = CONSUMING.lock().unwrap_or_else(|e| e.into_inner());
         // Producers (panes) with an envelope not yet accepted in this pass:
         // their later envelopes wait behind it (review round 5 P1-B).
         let mut blocked = std::collections::HashSet::new();
@@ -2283,6 +2326,43 @@ mod tests {
 
         let _ = std::process::Command::new("tmux").args(["kill-session", "-t", &session]).status();
         let _ = std::fs::remove_dir_all(&ws);
+        let _ = std::fs::remove_dir_all(root);
+    }
+
+    /// Board #41 (orchestrator 07:19): a restart's `drain_inbox` runs while the 250 ms loop
+    /// may be consuming the same directory. Each envelope is consumed exactly once: 30 prompt
+    /// echoes, the loop and the drain racing, and every line is ONE prompt that acked its row.
+    #[test]
+    fn a_drain_during_the_consume_loop_consumes_each_envelope_once() {
+        crate::projects::tests::use_test_store();
+        let session = format!("tmm-drain-{}", uuid::Uuid::new_v4());
+        let created = std::process::Command::new("tmux").args(["new-session", "-d", "-s", &session, "sleep 60"]).status().is_ok_and(|s| s.success());
+        if !created {
+            eprintln!("no tmux server — skipping");
+            return;
+        }
+        let pane = crate::tmux::list_panes(&session).unwrap().first().unwrap().clone();
+        let pane_id = crate::tmux::pane_format(&format!("{session}:{}", pane.window), "#{pane_id}").unwrap();
+        let root = crate::config::test_scratch("tmm-drain-hub");
+        let hub = AgentNotificationHub::load_at(root.clone());
+        hub.register();
+        let lines: Vec<String> = (0..30).map(|i| format!("[tmm chat] human: @dev drain line {i:02}")).collect();
+        for (i, line) in lines.iter().enumerate() {
+            crate::projects::telemetry::record_delivery(&session, &pane.window_name, line, "");
+            let envelope = json!({ "backend": "kiro", "pane_id": pane_id, "payload": { "hook_event_name": "userPromptSubmit", "cwd": "/tmp", "prompt": line } });
+            std::fs::write(root.join("inbox").join(format!("1-{i:02}.json")), serde_json::to_vec(&envelope).unwrap()).unwrap();
+        }
+        let looping = { let hub = hub.clone(); std::thread::spawn(move || for _ in 0..5 { hub.consume_inbox(); }) };
+        drain_inbox();
+        looping.join().unwrap();
+        unregister_for_test();
+        let prompts: Vec<_> = crate::projects::telemetry::recent_events(&session, 0).into_iter().filter(|e| e.kind == "prompt").collect();
+        for line in &lines {
+            let mine: Vec<_> = prompts.iter().filter(|e| e.text.contains(line.as_str())).collect();
+            assert_eq!(mine.len(), 1, "{line}: consumed once: {mine:?}");
+            assert_eq!(mine[0].via, "app", "{line}: its row acked by the one echo");
+        }
+        let _ = std::process::Command::new("tmux").args(["kill-session", "-t", &session]).status();
         let _ = std::fs::remove_dir_all(root);
     }
 
