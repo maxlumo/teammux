@@ -25,6 +25,9 @@ if [ -d /stage ]; then
   done
 fi
 
+# Each CLI answers for itself at its pinned version (round 1: omp needs its Bun runtime).
+for c in claude codex omp bun; do printf 'live-check: %s --version: %s\n' "$c" "$($c --version 2>&1 | head -1)"; done
+
 server >"$HOME/server.log" 2>&1 &
 for _ in $(seq 1 100); do tmm project list >/dev/null 2>&1 && break; sleep 0.2; done
 tmm project create /work/live --name live >/dev/null
