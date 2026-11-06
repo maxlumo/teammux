@@ -168,7 +168,7 @@ pub(super) fn slot_command_in(slot: &Slot, project_path: Option<&str>) -> Result
     let command = match slot.kind {
         SlotKind::Agent => {
             let recipe = match project_path {
-                Some(p) => super::spawn::relaunch_line(p, &slot.window_name, slot.agent_session_id.as_deref())?,
+                Some(p) => super::spawn::relaunch_line(p, &slot.window_name, slot.agent_session_id.as_deref(), slot.command.as_deref())?,
                 None => None,
             };
             match recipe {
@@ -205,7 +205,7 @@ pub(crate) fn slot_command_exact(project_path: &str, slot: &Slot, managed: bool)
             super::managed::ManagedState::Plain => return Err(format!("{}: the managed home is missing", slot.window_name)),
             super::managed::ManagedState::Unknown(e) => return Err(format!("{}: the managed home cannot be read: {e}", slot.window_name)),
         }
-        return super::spawn::relaunch_line_exact(project_path, &slot.window_name, id).map(Some);
+        return super::spawn::relaunch_line_exact(project_path, &slot.window_name, id, slot.command.as_deref()).map(Some);
     }
     let backend = slot.command.as_deref().unwrap_or("");
     agents::launch_line_exact(backend, id).map(Some).ok_or_else(|| format!("{}: {backend} cannot resume an exact conversation", slot.window_name))
@@ -401,6 +401,30 @@ mod tests {
             slot_command(&agent).as_deref(),
             Some("kiro-cli chat --resume-id aa816dcf-6615-4e41-86bb-1c9ec1c2c6a1")
         );
+    }
+
+    /// Board #46: the slot's id is the conversation of the backend it last
+    /// observed. A managed agent re-defined as codex while its slot still
+    /// holds omp's id starts codex fresh, not `codex resume <omp's id>`.
+    #[test]
+    fn a_switched_agent_starts_its_new_backend_fresh() {
+        let ws = crate::config::test_scratch("tmm-recon-switch");
+        let wss = ws.to_str().unwrap();
+        let home = super::super::spawn::agent_home(wss, "val");
+        std::fs::create_dir_all(&home).unwrap();
+        let cmd = "command codex -c a=b --dangerously-bypass-approvals-and-sandbox";
+        super::super::spawn::LaunchRecipe { backend: "codex", env: &[], cmd, spawned_by: "", team: None, agent_def: "", member: "", from_member: "", input_mode: "" }.write(&home).unwrap();
+        let mut agent = slot("val", "", true);
+        agent.kind = SlotKind::Agent;
+        agent.auto_run = true;
+        agent.command = Some("omp".into());
+        agent.agent_session_id = Some("01a1b041-96d7-73f0-8ef6-840fadf8f1ef".into());
+        assert_eq!(slot_command_in(&agent, Some(wss)).unwrap().as_deref(), Some(cmd), "omp's id is not resumed by codex");
+        agent.command = Some("codex".into());
+        agent.agent_session_id = Some("01a0-abc".into());
+        let own = slot_command_in(&agent, Some(wss)).unwrap().unwrap();
+        assert!(own.contains("command codex resume 01a0-abc"), "codex's own id resumes: {own}");
+        std::fs::remove_dir_all(&ws).ok();
     }
 
     #[test]

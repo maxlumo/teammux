@@ -4141,6 +4141,11 @@ mod tests {
         for (i, s) in slots.iter_mut().enumerate() {
             s.ord = i as i64;
         }
+        // Each slot observed the backend its recipe runs: an id is only its
+        // own CLI's to resume (board #46), so a claude slot under a kimi recipe
+        // would be refused before any launch.
+        slots[1].command = Some("kimi".into());
+        slots[2].command = Some("grok".into());
         let p = declare("r3ss", slots);
         for (name, backend) in [("k1", "kimi"), ("x1", "grok")] {
             let home = p.ws.join(".tmm/agents").join(name);

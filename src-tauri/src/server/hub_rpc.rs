@@ -3030,7 +3030,7 @@ mod tests {
         assert_eq!(std::fs::read_to_string(&outside).unwrap(), "the user's", "the link's target is untouched");
         // And without a definition at all, the legacy line is refused by the replay door itself.
         crate::projects::registry_delete(&def).ok();
-        let err = crate::projects::spawn::relaunch_line(&ws.to_string_lossy(), "lg", None).unwrap_err();
+        let err = crate::projects::spawn::relaunch_line(&ws.to_string_lossy(), "lg", None, None).unwrap_err();
         assert!(err.contains("not replayed"), "{err}");
         // The definition-gone fallback (refresh_hooks) with a refresh target
         // the private writer refuses: a kiro profile that is a link. The start

@@ -787,6 +787,20 @@ Pinned by `agent_notifications::tests::a_new_conversation_moves_the_recorded_id_
 
 Pinned by `spawn::relaunch_tests::a_claude_restart_resumes_only_a_conversation_that_exists`, `restart_spawn_resumes_but_a_new_hire_starts_fresh` `claude::tests::continue_needs_a_transcript_in_claudes_own_directory_for_the_workspace` and `claude::tests::the_transcript_directory_is_the_canonical_workspace_not_its_link_or_git_root`.
 
+### A conversation is resumed only by the backend that recorded it (board #46, codex-cli 0.166.0, omp 18.15.0, 2026-11-06)
+
+**Measured on main f7ec95ae**, in a scratch project: a team member on omp, one turn, so its slot recorded omp's id. Then the team was re-saved with the member on codex, and `tmm agent restart val` was run once. The re-rendered recipe was codex's, but the slot's id was still omp's, so the line was `codex resume <omp's id> …`. codex printed "No saved session found with ID …" and the pane was left at the shell. `tmm` exited 0, the room said `[tmm] restarted val`, and `tmm agent list` showed `val [codex] idle`. Nothing else in the room reported it, including #38's ready timeout (120 s), because no line was held.
+
+**Rule.** A slot's `agent_session_id` is the conversation of the backend in its `command`, the one capture last observed in the pane. Two places keep that pair true:
+- `relaunch_line` and `relaunch_line_exact` take the observed backend. When it is not the recipe's backend, `relaunch_line` starts FRESH, using the recipe's plain line. It does not use the backend's recent form either (`--last`, `--continue`), because after a codex→omp→codex switch that form would reach the thread from before. The strict reboot restore refuses with the reason, since #422 never starts blank. An unobserved backend (`command` empty) reads the id as before.
+- The capture merge keeps a sticky id only while the observed backend is unchanged. Otherwise, once codex runs, the slot would read `codex` with omp's id, and the NEXT restart would make the same mistake.
+
+**One member at a time.** `tmm agent restart --team <team> --only <name>[,…]` passes `hub_team_restart`'s existing `only` (#286), so a re-defined member takes effect and nobody else is restarted. A name the team does not have fails.
+
+**A switched home keeps the old backend's files.** omp's `agent.db`, `sessions/`, `history.db` and `models.yml` stay next to the new `codex/` directory. Nothing reads them after the switch, and nothing deletes them: a switch back finds them, and removing a home stays `tmm agent remove`.
+
+Pinned by `spawn::a_conversation_is_resumed_only_by_the_backend_that_recorded_it`, `reconcile::a_switched_agent_starts_its_new_backend_fresh`, `capture::a_conversation_id_does_not_outlive_its_backend` and `tests/team_restart_only_cli.rs`.
+
 ### The kimi backend: Kimi Code CLI 2.0.2 on Bedrock (board #224, 2026-09-20)
 
 The owner runs Kimi K3 through Bedrock's OpenAI-compatible endpoint ("kimi code也帮我支持上吧 我应该配置了可以用bedrock"): `~/.kimi-code/config.toml` declares `[providers.bedrock] type="openai"`, `base_url=https://bedrock-runtime.us-west-2.amazonaws.com/openai/v1`, `api_key_env="KIMI_API_KEY"` (the env var is the same long-term Bedrock API key as `AWS_BEARER_TOKEN_BEDROCK`, exported by the interactive zsh, so it reaches every pane; kimi's `openai` provider sends a fixed bearer token and does not SigV4-sign) and one alias `[models.bedrock-kimi-k3]` → `global.moonshotai.kimi-k3`, 1M context. Everything below was measured on 2.0.2 with a scratch `KIMI_CODE_HOME` and hooks that dumped their stdin.

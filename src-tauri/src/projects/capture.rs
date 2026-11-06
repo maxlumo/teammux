@@ -157,10 +157,12 @@ pub fn merge_preserving(
             Some(prev) => {
                 // Sticky: a hook only reports the conversation id now and then,
                 // so an observation without one must not erase what we know.
+                // But only while the same backend runs (board #46): an id is
+                // its CLI's, and a pane now running another one has none yet.
                 let agent_session_id = obs
                     .agent_session_id
                     .clone()
-                    .or_else(|| prev.agent_session_id.clone())
+                    .or_else(|| prev.agent_session_id.clone().filter(|_| prev.command.is_none() || prev.command == obs.command))
                     .filter(|_| obs.kind == SlotKind::Agent);
                 let changed = prev.ord != ord
                     || prev.cwd != obs.cwd
@@ -656,6 +658,28 @@ mod tests {
         assert_eq!(stopped.slots[0].agent_session_id.as_deref(), Some("conv-1"));
         assert_eq!(stopped.slots[0].ord, 0, "kept slots follow live windows");
         assert!(stopped.dirty, "the normalized order must be persisted");
+    }
+
+    /// Board #46: the id is the conversation of the backend the slot saw.
+    /// Once the pane runs another CLI (an omp member restarted as codex), the
+    /// old id is not codex's, so an observation that reports none must not
+    /// keep it; the same backend still keeps a sticky id.
+    #[test]
+    fn a_conversation_id_does_not_outlive_its_backend() {
+        let mut agent = slot("val", 0, 1_000, Some(1_120));
+        agent.kind = SlotKind::Agent;
+        agent.command = Some("omp".into());
+        agent.auto_run = true;
+        agent.agent_session_id = Some("01a1b041-96d7-73f0-8ef6-840fadf8f1ef".into());
+        let seen = |backend: &str| Observed { kind: SlotKind::Agent, command: Some(backend.into()), ..obs("val", "") };
+
+        let same = merge(std::slice::from_ref(&agent), &[seen("omp")], 1_400, 120);
+        assert_eq!(same.slots[0].agent_session_id.as_deref(), Some("01a1b041-96d7-73f0-8ef6-840fadf8f1ef"), "sticky while omp runs");
+
+        let switched = merge(&[agent], &[seen("codex")], 1_400, 120);
+        assert_eq!(switched.slots[0].command.as_deref(), Some("codex"));
+        assert_eq!(switched.slots[0].agent_session_id, None, "omp's id is not codex's");
+        assert!(switched.dirty);
     }
 
     #[test]

@@ -1554,8 +1554,16 @@ fn resume_command(cmd: &str, backend: &str, session_id: Option<&str>, home: Opti
 
 /// Replay the persisted identity (env + backend command), preferring an exact
 /// conversation id and otherwise the isolated home's newest cwd conversation.
-pub fn relaunch_line(project_path: &str, window_name: &str, session_id: Option<&str>) -> Result<Option<String>, String> {
+/// `observed` is the backend the slot last saw in the pane, the one its id
+/// belongs to (board #46): when the recipe is another backend's, the start
+/// is fresh, the recipe's plain line, because a conversation id never
+/// crosses backends and the recent dialect could reach back past an earlier
+/// switch. `None` (never observed) reads the id as before.
+pub fn relaunch_line(project_path: &str, window_name: &str, session_id: Option<&str>, observed: Option<&str>) -> Result<Option<String>, String> {
     let Some((cmd, backend, env, home)) = recipe_parts(project_path, window_name)? else { return Ok(None) };
+    if observed.is_some_and(|o| o != backend) {
+        return Ok(Some(with_env(&env, &cmd)));
+    }
     let cmd = resume_command(&cmd, &backend, session_id, Some(&home), window_name);
     Ok(Some(with_env(&env, &cmd)))
 }
@@ -1564,8 +1572,13 @@ pub fn relaunch_line(project_path: &str, window_name: &str, session_id: Option<&
 /// persisted identity with the EXACT conversation, or `Err` — a recipe that
 /// cannot be read, an unknown backend, or a resume the backend cannot prove
 /// is exact is refused, never relaunched recent or blank.
-pub fn relaunch_line_exact(project_path: &str, window_name: &str, session_id: &str) -> Result<String, String> {
+/// `observed` as in `relaunch_line`: an id another backend recorded is
+/// refused here, since a strict restore never starts blank (board #46).
+pub fn relaunch_line_exact(project_path: &str, window_name: &str, session_id: &str, observed: Option<&str>) -> Result<String, String> {
     let (cmd, backend, env, home) = recipe_parts(project_path, window_name)?.ok_or_else(|| format!("{window_name}: no readable launch recipe"))?;
+    if let Some(o) = observed.filter(|o| *o != backend) {
+        return Err(format!("{window_name}: its saved conversation is {o}'s and it is now defined as {backend}, so there is no exact conversation to resume"));
+    }
     let b = crate::backends::Backend::parse(&backend).ok_or_else(|| format!("{window_name}: unknown backend '{backend}'"))?;
     let cmd = b
         .resume_exact(&cmd, session_id, Some(&home), window_name)
@@ -1684,7 +1697,7 @@ mod relaunch_tests {
             std::fs::create_dir_all(&dir).unwrap();
             std::fs::write(dir.join("session.json"), format!(r#"{{"id":"{id}","agentMode":"{mode}"}}"#)).unwrap();
         };
-        let line = || relaunch_line(ws.to_str().unwrap(), "lead", Some(id)).unwrap().unwrap();
+        let line = || relaunch_line(ws.to_str().unwrap(), "lead", Some(id), None).unwrap().unwrap();
 
         // Recorded id, nothing in the home (the id lives only in ~/.kiro): fresh.
         assert!(!line().contains("--resume"), "global-only id must not resume: {}", line());
@@ -1749,12 +1762,12 @@ mod relaunch_tests {
     #[test]
     fn a_restart_resumes_a_quoted_non_ascii_agent_name() {
         let (ws, id) = v3_agent_with_session("翻译", "翻译", "翻译");
-        let line = relaunch_line(ws.to_str().unwrap(), "翻译", Some(&id)).unwrap().unwrap();
+        let line = relaunch_line(ws.to_str().unwrap(), "翻译", Some(&id), None).unwrap().unwrap();
         assert!(line.contains("--agent '翻译'"), "the fixture really is quoted: {line}");
         assert!(line.ends_with(&format!("--resume-id {id}")), "its own session resumes despite the quotes: {line}");
         // And a vibe session under the same quoted name is still the incident.
         let (ws2, id2) = v3_agent_with_session("翻译", "翻译", "vibe");
-        let vibe = relaunch_line(ws2.to_str().unwrap(), "翻译", Some(&id2)).unwrap().unwrap();
+        let vibe = relaunch_line(ws2.to_str().unwrap(), "翻译", Some(&id2), None).unwrap().unwrap();
         assert!(vibe.contains("--agent '翻译'") && !vibe.contains("--resume"), "vibe stays fresh: {vibe}");
         std::fs::remove_dir_all(&ws).ok();
         std::fs::remove_dir_all(&ws2).ok();
@@ -1769,13 +1782,13 @@ mod relaunch_tests {
     #[test]
     fn the_name_compared_is_the_window_name_not_the_registry_def_name() {
         let (ws, id) = v3_agent_with_session("builder-2", "builder", "builder-2");
-        let line = relaunch_line(ws.to_str().unwrap(), "builder-2", Some(&id)).unwrap().unwrap();
+        let line = relaunch_line(ws.to_str().unwrap(), "builder-2", Some(&id), None).unwrap().unwrap();
         assert!(line.contains("--agent builder-2"), "the window name is what --agent carries: {line}");
         assert!(line.ends_with(&format!("--resume-id {id}")), "agentMode builder-2 resumes as builder-2: {line}");
         // A session whose mode is the BASE def's name belongs to `builder`, not
         // to this window: fresh, even though the registry def is `builder`.
         let (ws2, id2) = v3_agent_with_session("builder-2", "builder", "builder");
-        let other = relaunch_line(ws2.to_str().unwrap(), "builder-2", Some(&id2)).unwrap().unwrap();
+        let other = relaunch_line(ws2.to_str().unwrap(), "builder-2", Some(&id2), None).unwrap().unwrap();
         assert!(!other.contains("--resume"), "a session of the def name is not this window's: {other}");
         std::fs::remove_dir_all(&ws).ok();
         std::fs::remove_dir_all(&ws2).ok();
@@ -1821,6 +1834,38 @@ mod relaunch_tests {
         assert_eq!(launch_command("command kimi --auto", "kimi", "fix it", "lead", true, home, "lead"), "command kimi --auto -c");
     }
 
+    /// Board #46, measured on f7ec95ae: an omp member re-defined as codex and
+    /// restarted once ran `codex resume <omp's id>`, which printed "No saved
+    /// session found" and left a bare shell. The slot's id belongs to the
+    /// backend the slot last observed; a recipe of another backend starts
+    /// FRESH (its plain line, not its recent dialect: `--last` could pick a
+    /// thread from before an earlier switch).
+    #[test]
+    fn a_conversation_is_resumed_only_by_the_backend_that_recorded_it() {
+        let ws = crate::config::test_scratch("tmm-relaunch-switch");
+        let wss = ws.to_str().unwrap();
+        let home = agent_home(wss, "val");
+        std::fs::create_dir_all(&home).unwrap();
+        let cmd = "command codex -c a=b --dangerously-bypass-approvals-and-sandbox";
+        LaunchRecipe { backend: "codex", env: &[], cmd, spawned_by: "", team: None, agent_def: "", member: "", from_member: "", input_mode: "" }.write(&home).unwrap();
+        let omp_id = Some("01a1b041-96d7-73f0-8ef6-840fadf8f1ef");
+        assert_eq!(relaunch_line(wss, "val", omp_id, Some("omp")).unwrap().unwrap(), cmd, "omp's id is not codex's to resume");
+        assert_eq!(relaunch_line(wss, "val", None, Some("omp")).unwrap().unwrap(), cmd, "no codex conversation yet: fresh, not --last");
+        assert!(
+            relaunch_line(wss, "val", Some("01a0-abc"), Some("codex")).unwrap().unwrap().contains("command codex resume 01a0-abc -c a=b"),
+            "codex's own id resumes exactly"
+        );
+        assert!(
+            relaunch_line(wss, "val", Some("01a0-abc"), None).unwrap().unwrap().contains("command codex resume 01a0-abc -c a=b"),
+            "an id whose backend was never observed is read as before"
+        );
+        // The reboot restore is strict (#422): a foreign id is refused with
+        // its reason, never relaunched blank.
+        let err = relaunch_line_exact(wss, "val", omp_id.unwrap(), Some("omp")).unwrap_err();
+        assert!(err.contains("omp") && err.contains("codex"), "{err}");
+        std::fs::remove_dir_all(&ws).ok();
+    }
+
     #[test]
     fn relaunch_line_replays_env_identity_and_resume() {
         let ws = crate::config::test_scratch("tmm-relaunch");
@@ -1829,7 +1874,7 @@ mod relaunch_tests {
         LaunchRecipe { backend: "kiro", env: &[("KIRO_HOME".to_string(), home.to_string_lossy().to_string())], cmd: "command kiro-cli chat --agent lead --model m --trust-all-tools", spawned_by: "", team: None, agent_def: "", member: "", from_member: "", input_mode: "" }
             .write(&home)
             .unwrap();
-        let line = relaunch_line(ws.to_str().unwrap(), "lead", Some("id-1")).unwrap().unwrap();
+        let line = relaunch_line(ws.to_str().unwrap(), "lead", Some("id-1"), None).unwrap().unwrap();
         assert!(line.starts_with("KIRO_HOME="), "isolated home first: {line}");
         assert!(line.contains("--agent lead"), "identity: {line}");
         assert!(line.ends_with("--resume-id id-1"), "conversation resumes: {line}");
@@ -1846,11 +1891,11 @@ mod relaunch_tests {
         // No recorded conversation yet: the managed home is isolated to this
         // one agent, so relaunch the newest conversation instead of opening a
         // blank prompt while the 20s capture tick catches up.
-        let recent = relaunch_line(ws.to_str().unwrap(), "lead", None).unwrap().unwrap();
+        let recent = relaunch_line(ws.to_str().unwrap(), "lead", None, None).unwrap().unwrap();
         assert!(recent.ends_with("--resume"), "managed kiro resumes recent: {recent}");
         // A window with no recipe (hand-started) stays None — the caller falls
         // back to the generic backend line.
-        assert!(relaunch_line(ws.to_str().unwrap(), "byhand", None).unwrap().is_none());
+        assert!(relaunch_line(ws.to_str().unwrap(), "byhand", None, None).unwrap().is_none());
 
         // claude is absent here: its resume depends on the transcripts its
         // home holds (`a_claude_restart_resumes_only_a_conversation_that_exists`).
@@ -1860,9 +1905,9 @@ mod relaunch_tests {
             let ahome = agent_home(ws.to_str().unwrap(), name);
             std::fs::create_dir_all(&ahome).unwrap();
             LaunchRecipe { backend: backend, env: &[], cmd: cmd, spawned_by: "", team: None, agent_def: "", member: "", from_member: "", input_mode: "" }.write(&ahome).unwrap();
-            let exact = relaunch_line(ws.to_str().unwrap(), name, Some("conv-1")).unwrap().unwrap();
+            let exact = relaunch_line(ws.to_str().unwrap(), name, Some("conv-1"), None).unwrap().unwrap();
             assert!(exact.ends_with("--resume conv-1"), "{backend} exact resume: {exact}");
-            let recent = relaunch_line(ws.to_str().unwrap(), name, None).unwrap().unwrap();
+            let recent = relaunch_line(ws.to_str().unwrap(), name, None, None).unwrap().unwrap();
             assert!(recent.ends_with(flag), "{backend} recent resume: {recent}");
         }
 
@@ -1875,12 +1920,12 @@ mod relaunch_tests {
         LaunchRecipe { backend: "codex", env: &[("CODEX_HOME".to_string(), chome.to_string_lossy().to_string())], cmd: "command codex -c a=b --dangerously-bypass-approvals-and-sandbox", spawned_by: "", team: None, agent_def: "", member: "", from_member: "", input_mode: "" }
             .write(&chome)
             .unwrap();
-        let cx = relaunch_line(ws.to_str().unwrap(), "cx", Some("01a0-abc")).unwrap().unwrap();
+        let cx = relaunch_line(ws.to_str().unwrap(), "cx", Some("01a0-abc"), None).unwrap().unwrap();
         assert!(
             cx.contains("command codex resume 01a0-abc -c a=b --dangerously-bypass-approvals-and-sandbox"),
             "subcommand splice: {cx}"
         );
-        let cx_recent = relaunch_line(ws.to_str().unwrap(), "cx", None).unwrap().unwrap();
+        let cx_recent = relaunch_line(ws.to_str().unwrap(), "cx", None, None).unwrap().unwrap();
         assert!(
             cx_recent.contains("command codex resume --last -c a=b --dangerously-bypass-approvals-and-sandbox"),
             "isolated CODEX_HOME can safely resume its last cwd session: {cx_recent}"
@@ -1906,7 +1951,7 @@ mod relaunch_tests {
         std::fs::create_dir_all(codex.join("thread-writer-locks")).unwrap();
         let cmd = "command codex -c a=b --dangerously-bypass-approvals-and-sandbox";
         LaunchRecipe { backend: "codex", env: &[], cmd, spawned_by: "", team: None, agent_def: "", member: "", from_member: "", input_mode: "" }.write(&home).unwrap();
-        let line = |id: Option<&str>| relaunch_line(wss, "cx", id).unwrap().unwrap();
+        let line = |id: Option<&str>| relaunch_line(wss, "cx", id, None).unwrap().unwrap();
         // Review round 1 P1: spawned, no turn yet. codex has a thread lock but
         // no sessions/ directory at all, and nothing was recorded: a fresh
         // start (`resume <lock id>` printed "No saved session found" and left
@@ -2014,8 +2059,8 @@ mod relaunch_tests {
 
         // Spawned, restarted before any turn: with or without the id its
         // SessionStart recorded, the agent comes up fresh.
-        assert_eq!(relaunch_line(wss, "cl", None).unwrap().unwrap(), cmd, "no conversation yet: a fresh start");
-        assert_eq!(relaunch_line(wss, "cl", Some(id)).unwrap().unwrap(), cmd, "a recorded id without its transcript: a fresh start");
+        assert_eq!(relaunch_line(wss, "cl", None, None).unwrap().unwrap(), cmd, "no conversation yet: a fresh start");
+        assert_eq!(relaunch_line(wss, "cl", Some(id), None).unwrap().unwrap(), cmd, "a recorded id without its transcript: a fresh start");
 
         // After a turn: claude filed the transcript under its encoding of the
         // launch cwd (every non-alphanumeric character becomes '-').
@@ -2024,13 +2069,13 @@ mod relaunch_tests {
         let transcripts = home.join("projects").join(&dir);
         std::fs::create_dir_all(&transcripts).unwrap();
         std::fs::write(transcripts.join(format!("{id}.jsonl")), "{}\n").unwrap();
-        assert_eq!(relaunch_line(wss, "cl", Some(id)).unwrap().unwrap(), format!("{cmd} --resume {id}"), "the same conversation, exactly");
-        assert_eq!(relaunch_line(wss, "cl", None).unwrap().unwrap(), format!("{cmd} --continue"), "no id recorded: the newest of this cwd");
+        assert_eq!(relaunch_line(wss, "cl", Some(id), None).unwrap().unwrap(), format!("{cmd} --resume {id}"), "the same conversation, exactly");
+        assert_eq!(relaunch_line(wss, "cl", None, None).unwrap().unwrap(), format!("{cmd} --continue"), "no id recorded: the newest of this cwd");
         // Review P1-R1: the recorded conversation's transcript is gone while an
         // older one remains. Resuming the older one would hand the agent the
         // wrong history, so a recorded id without its transcript starts fresh.
         assert_eq!(
-            relaunch_line(wss, "cl", Some("11111111-2222-3333-4444-555555555555")).unwrap().unwrap(),
+            relaunch_line(wss, "cl", Some("11111111-2222-3333-4444-555555555555"), None).unwrap().unwrap(),
             cmd,
             "a recorded id this home does not hold: fresh, never the older conversation"
         );
@@ -2643,7 +2688,7 @@ mod tests {
         LaunchRecipe { backend: "kiro", env: &r.env, cmd: &r.cmd, spawned_by: "", team: None, agent_def: "", member: "", from_member: "", input_mode: "" }.write(&dir).unwrap();
         let line = relaunch_line(
             dir.parent().unwrap().parent().unwrap().to_str().unwrap(),
-            "tester", Some("abc-123"),
+            "tester", Some("abc-123"), None,
         );
         // agent_home(workspace, name) = <ws>/.tmm/agents/<name>; our temp dir is
         // not that shape, so call the parts directly instead:
