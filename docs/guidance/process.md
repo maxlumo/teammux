@@ -40,10 +40,12 @@
    addressed messages and consolidate backlogs. Search history or ask
    when context is unclear. Speak Chinese to the owner; use English for
    documentation, code, commits and injected process instructions.
-9. **Divide work and review independently:** the lead prevents conflicts
-   without taking over implementation. Use adversarial review, not only
-   implementer self-tests. Board states are todo -> doing -> review -> done;
-   only the reviewer moves work to done.
+9. **Divide work and review independently:** coordination prevents
+   conflicts without taking over implementation. Use adversarial review, not
+   only implementer self-tests. Board states are todo -> doing -> review ->
+   done; only the role assigned the done duty moves work to done, never the
+   implementer. Which role holds each duty is set by the team's definition
+   (§5, Who does what).
 
 ## 2. Required and Forbidden
 
@@ -124,14 +126,25 @@
 - Repeated owner guidance: "先讨论方案，不要直接修改代码";
   "保持中文语言风格干练，不啰嗦"; "流程应该用英文，保持一致性".
 - 2026-09-08: "大家要分工明确，lead 不要过分代劳，不同人要对抗评审，对立统一".
-- A dependency change (package.json / Cargo.toml) is installed in the launch checkout at merge time, and the reviewer runs the suite THERE, not only in the branch worktree — a worktree with private node_modules can be green while the integration checkout is red (2026-09-09: jsdom from board #115 lived only in one worktree; main’s pnpm test failed for an hour before anyone ran it in place). Match the checkout’s package-manager layout (this host: pnpm) when installing.
-- An evidence run closes what it opened, in a `finally`: browser, playwright/agent-browser daemon, preview server. 2026-09-12: five leaked playwright-cli daemons with headless Chromium (17 h to 3.8 days old, two GPU processes at 99% CPU) drove the host to load average 54, and every render test in a review run timed out at 60 s — read first as a branch defect (board #177). A reviewer who sees a burst of timeouts checks the host (`uptime`, `pgrep -fa headless`) before returning FIX FIRST.
+- A dependency change (package.json / Cargo.toml) is installed in the launch checkout at merge time, and verification runs the suite THERE, not only in the branch worktree — a worktree with private node_modules can be green while the integration checkout is red (2026-09-09: jsdom from board #115 lived only in one worktree; main’s pnpm test failed for an hour before anyone ran it in place). Match the checkout’s package-manager layout (this host: pnpm) when installing.
+- An evidence run closes what it opened, in a `finally`: browser, playwright/agent-browser daemon, preview server. 2026-09-12: five leaked playwright-cli daemons with headless Chromium (17 h to 3.8 days old, two GPU processes at 99% CPU) drove the host to load average 54, and every render test in a review run timed out at 60 s — read first as a branch defect (board #177). Whoever verifies and sees a burst of timeouts checks the host (`uptime`, `pgrep -fa headless`) before returning FIX FIRST.
 
 ## 5. The Review Flow (board #105, 2026-09-10)
 
 How an issue travels, as practised on 2026-09-09 across ~50 issues.
 
-**Assignment.** The lead files the issue with the finish line in the body
+**Who does what** (board #40, 2026-11-06). The flow names duties, not
+roles: coordination (filing and assigning issues, approving plans,
+consolidating review findings, watching the review column), implementation,
+independent verification (running the suites in the integration checkout),
+independent review (reading the commits against the checklists), merge, and
+moving to done. **A team's definition decides which role performs each
+duty.** One role may hold several; the implementer never verifies, reviews,
+merges or moves to done its own work. (Before #40 this section gave all of
+review, the suite run and the merge to "the reviewer", which contradicted a
+team whose reviewer does not run tests or merge.)
+
+**Assignment.** Coordination files the issue with the finish line in the body
 (scope, constraints, how to verify) and either `--assignee` at creation or an
 addressed `@name` message; the implementer answers with `tmm board take`.
 One issue at a time per agent; the next is sent after the previous lands.
@@ -140,7 +153,7 @@ One issue at a time per agent; the next is sent after the previous lands.
 module boundaries, or changes a storage key or wire shape: the implementer
 posts a measured plan as board notes (map with line ranges, target shape,
 mechanical step order with the tests that pin each step, non-negotiables);
-the lead approves or corrects on the issue and splits it into child issues.
+coordination approves or corrects on the issue and splits it into child issues.
 No code before approval.
 
 **Implementation** happens in the implementer's own worktree. Mechanical
@@ -151,15 +164,16 @@ filed as its own issue, never fixed inside a move. When ready:
 `tmm board move <id> review` with a note that names the branch, HEAD, the
 base commit and the evidence.
 
-**Review** is done by the reporter (the lead) or, for large changes, by
-one reviewer per guidance lens — architecture, agent bridge, code quality,
+**Review** is done by the reporter or, for large changes, by one review
+per guidance lens — architecture, agent bridge, code quality,
 UI/interaction, security, process — each posting findings as board notes
-tagged with the lens; the lead consolidates. The reviewer reads the commits
-against the matching checklists, then runs the suites **in the integration
-checkout** (a worktree with private `node_modules` can be green while main
-is red). Verdict goes on the issue as a note.
+tagged with the lens; coordination consolidates. Review reads the commits
+against the matching checklists. Verification runs the suites **in the
+integration checkout** (a worktree with private `node_modules` can be green
+while main is red). Each verdict goes on the issue as a note.
 
-**Merge** is the reviewer's act, from the integration checkout: fast-forward
+**Merge** is the act of the role assigned to merge, from the integration
+checkout, after verification and review have passed: fast-forward
 when the branch is on main, cherry-pick when main has moved under it
 (rebase requests go back to the implementer only when a conflict needs
 their judgement). The implementer never merges its own work — a deletion
@@ -178,7 +192,7 @@ would need one, and a merge inside a worktree would try to restart the owner's
 backend from a branch. After a wire change the signed APK and any desktop
 bundle are rebuilt from main. The implementer removes its worktree and branch.
 
-**Done** is the reviewer's move. Owner-visible behaviour (a click the owner
+**Done** is the move of the role assigned to done. Owner-visible behaviour (a click the owner
 reported, a gesture on the phone) stays in `review` after the code is merged
 until the owner confirms on their own client or device; the note records the
 build hash they tested.
@@ -186,5 +200,5 @@ build hash they tested.
 **Signals that the flow is failing:** an implementer's turn ends at an
 acknowledgement with no worktree, commit or note behind it (verify progress
 with `tmm board show` and `git worktree list`, not with replies); a review
-sits unanswered for hours (the lead scans the review column every turn);
+sits unanswered for hours (coordination scans the review column every turn);
 a branch is "ready" but based on a stale main (always state the base).
