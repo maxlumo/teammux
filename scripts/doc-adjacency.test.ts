@@ -83,6 +83,16 @@ test('limit: two /// runs merged into one block are invisible without the change
 
 // The repository check reads the change since the branch left main. Without that base it cannot say
 // anything, and it says so: a visible skip, never a silent pass (orchestrator's condition on #49).
+// Board #51: the 33 stranded JSDoc blocks main had when #49 landed were moved back, so the single-file
+// shapes hold for the whole repository, not only for what a change adds. Separation needs a diff and
+// stays the change test's.
+test('no tracked source file has a stranded doc block', () => {
+  const tracked = execFileSync('git', ['ls-files', '-z', '*.rs', '*.ts', '*.js', '*.mjs', '*.svelte'], { cwd: ROOT, encoding: 'utf8' })
+    .split('\0').filter((p) => p && !p.startsWith('scripts/fixtures/doc-adjacency/'));
+  const found = tracked.flatMap((path) => strandedDocs(path, readFileSync(join(ROOT, path), 'utf8')).map((f) => `${path}:${f.line} ${f.rule}`));
+  assert.deepEqual(found, []);
+});
+
 test('no merge-base is a stated reason, not a base', () => {
   const bare = mkdtempSync(join(tmpdir(), 'doc-adjacency-'));
   try {

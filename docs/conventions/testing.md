@@ -609,8 +609,9 @@ what the change introduces:
   sees #43 S1 and #47 S1. Round 1 (reviewer P2-R1 on `be1647b6`, reproduced
   by validator): the first cut took the attribute line itself for the item,
   so a fn inserted between `#[cfg(test)]` and the documented fn was missed.
-- **Stranded, single file** (counted only when the change added or moved the
-  block): a line-own `/** … */` directly followed by another `/**` block or by
+- **Stranded, single file** (board #51: over EVERY tracked source file, not
+  only the change, since the 33 blocks main had when #49 landed were moved
+  back; the change test still counts what a change adds or moves): a line-own `/** … */` directly followed by another `/**` block or by
   a blank line (a file's opening JSDoc is exempt), or a `///` run followed,
   past blank or `//` lines, by another `///` run.
 
@@ -623,8 +624,10 @@ doc, which also carries `rpc_needing`'s, looks correct; it is caught only
 when a diff shows the item moving away. An item line the same change also
 edits is not followed, so code inserted together with a signature change is
 missed; an attribute's brackets are counted without reading strings, so a
-bracket inside an attribute's string literal can end it early or late. Main had 33 stranded JSDoc blocks when this landed; they are #51, and
-until it lands the single-file rule only counts what a change adds.
+bracket inside an attribute's string literal can end it early or late. #51 moved main's 33 stranded JSDoc blocks back, merged
+pairs that documented one item, and deleted two that documented props or
+behaviour that no longer exist; separation needs a diff, so it stays a
+change check.
 
 ## Three Test Tiers
 
