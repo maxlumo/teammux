@@ -808,10 +808,19 @@ env -u TMUX -u TMUX_PANE -u TMUX_SOCKET TMUX_TMPDIR="$D" tmux kill-server
   answer (`Permission denied`, tmux missing) fails, because a server that
   cannot be asked is not proven safe. A confirmed-absent server has no panes,
   so it passes even with a gateway recorded. Targets and the scratch dir are
-  compared as the FILESYSTEM resolves them (realpath on every part that
-  exists, a dangling symlink followed by its own text), so an alias of the
-  dir, `..`, a trailing slash or macOS's `/var` → `/private/var` cannot hide a
-  link, and a dangling link into a deleted dir is still reported. A managed claude OUTSIDE scratch relinks within the
+  resolved the way the KERNEL resolves a path (`resolveOnDisk`, round 2):
+  component by component from `/`, each symlink followed when it is met, and
+  `..` applied only after that, so `alias/../v/cli` lands at the parent of
+  alias's target, not alias's. Node's JS `realpathSync` normalises `..`
+  lexically first and gets it wrong; the tests compare against
+  `realpathSync.native` (libc `realpath`). The raw link text is kept until
+  then, never `path.resolve`d. Only a component the filesystem says is
+  missing (ENOENT) takes the dangling fallback (the rest as written, below
+  what exists), so a link into a deleted scratch dir is still reported. Any
+  other error on the way (EACCES on a directory that cannot be searched, EIO)
+  and more than 40 symlinks (ELOOP) make the target UNKNOWN, and `check`
+  fails naming the link and the reason. An alias of the dir, `..`, a trailing
+  slash or macOS's `/var` → `/private/var` therefore cannot hide a link. A managed claude OUTSIDE scratch relinks within the
   real install (orchestrator 09:31: builder-3's fork moved it to 2.1.318). That
   is #50's fix at the source (claude's launch env), not this script's.
 - **Scope.** This removes INHERITED ROUTING to the live tmux server and
@@ -823,7 +832,7 @@ env -u TMUX -u TMUX_PANE -u TMUX_SOCKET TMUX_TMPDIR="$D" tmux kill-server
   TMUX_SOCKET -u TMM_SOCKET TMUX_TMPDIR=<private> <command>`, but only the
   helper drops every `TMM_*` and `TOKEN`.
 
-Board #48 is pinned by `scripts/scratch-env.test.ts` (every switch is set over the caller's value, `check` reports a missing one, and the 08:00 shape is reproduced on a fake home: a relinked link and a new link into the dir are both reported, with the earlier target and its repair; round 1: an unreadable link dir fails both the function and the `check` command with no all-clear line, tmux's two absence wordings versus any other error, a link through an alias and a dangling one into a deleted dir, four spellings of the root, and a repair with a space and a quote) and by `scripts/test-rust.test.ts` (`isolatedEnv` sets each switch).
+Board #48 is pinned by `scripts/scratch-env.test.ts` (every switch is set over the caller's value, `check` reports a missing one, and the 08:00 shape is reproduced on a fake home: a relinked link and a new link into the dir are both reported, with the earlier target and its repair; round 1: an unreadable link dir fails both the function and the `check` command with no all-clear line, tmux's two absence wordings versus any other error, a link through an alias and a dangling one into a deleted dir, four spellings of the root, and a repair with a space and a quote; round 2: `alias/../v/cli` and a relative target agree with the kernel's `realpath`, a target through a directory that cannot be searched fails the guard with EACCES, a symlink loop is ELOOP, and a missing component keeps the dangling fallback) and by `scripts/test-rust.test.ts` (`isolatedEnv` sets each switch).
 
 Pinned by `scripts/scratch-env.test.ts`: the macOS KERN_PROCARGS2 parser on
 bytes captured on clawdbjs (the argv copy cut, a value holding

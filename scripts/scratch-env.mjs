@@ -93,7 +93,9 @@ export function readLinks(home) {
     for (const n of names.sort()) {
       const p = join(d, n);
       try {
-        if (lstatSync(p).isSymbolicLink()) links[p] = resolve(dirname(p), readlinkSync(p));
+        // The raw text, joined to the link's dir with NO normalising (#48 round 2): '..'
+        // means something only after the symlinks before it are followed (resolveOnDisk).
+        if (lstatSync(p).isSymbolicLink()) { const t = readlinkSync(p); links[p] = isAbsolute(t) ? t : `${d}/${t}`; }
       } catch (e) {
         if (e.code !== 'ENOENT') unreadable.push(`${p} could not be read (${e.code ?? e.message})`); // ENOENT: gone meanwhile
       }
@@ -107,25 +109,34 @@ export function snapshotLinks(home) {
   return readLinks(home).links;
 }
 
-/** `p` with every symlink in it resolved (#48 round 1: an alias of the scratch dir, or
- * macOS's /var -> /private/var, must not hide a link into it). The part that does not exist
- * (a dangling link into a deleted dir) is kept as written below its nearest real ancestor,
- * and a dangling symlink on the way is followed by its own text. `depth` stops a loop. */
-function canonical(p, depth = 0) {
-  const rest = [];
-  let at = resolve(p);
-  for (;;) {
-    try { return join(realpathSync(at), ...rest.reverse()); } catch { /* not all there */ }
-    if (depth < 40) {
-      try {
-        if (lstatSync(at).isSymbolicLink()) return canonical(join(resolve(dirname(at), readlinkSync(at)), ...rest.reverse()), depth + 1);
-      } catch { /* not there at all */ }
+/** Where `p` lands on disk, resolved as the kernel resolves a path (#48 round 2): component
+ * by component from `/`, each symlink followed when it is met, so `alias/..` is the parent of
+ * alias's TARGET, never of alias. `{path}`, symlink-free; or `{why}` when it cannot be told:
+ * any error but ENOENT (EACCES on an unreadable directory, EIO, ...) and more than 40 symlinks
+ * (ELOOP). Only a CONFIRMED missing component (ENOENT) keeps the rest as written, normalised,
+ * below what exists: a dangling link into a deleted scratch dir is still placed there. */
+export function resolveOnDisk(p) {
+  const queue = String(p).split('/');
+  let cur = '/';
+  let hops = 0;
+  while (queue.length) {
+    const name = queue.shift();
+    if (name === '' || name === '.') continue;
+    if (name === '..') { cur = dirname(cur); continue; }
+    const next = cur === '/' ? `/${name}` : `${cur}/${name}`;
+    let st;
+    try { st = lstatSync(next); } catch (e) {
+      if (e.code === 'ENOENT') return { path: resolve(next, ...queue) };
+      return { why: `${next}: ${e.code ?? e.message}` };
     }
-    const up = dirname(at);
-    if (up === at) return resolve(p);
-    rest.push(basename(at));
-    at = up;
+    if (!st.isSymbolicLink()) { cur = next; continue; }
+    if (++hops > 40) return { why: `${next}: ELOOP (more than 40 symlinks)` };
+    let target;
+    try { target = readlinkSync(next); } catch (e) { return { why: `${next}: ${e.code ?? e.message}` }; }
+    if (isAbsolute(target)) cur = '/';
+    queue.unshift(...target.split('/'));
   }
+  return { path: cur };
 }
 
 /** A word a POSIX shell reads back as exactly `s`. */
@@ -139,16 +150,20 @@ function shellQuote(s) {
  * = nothing escaped, as observed. */
 export function escapedLinks(home, dir, before) {
   const { links, unreadable } = readLinks(home);
-  const root = canonical(dir);
-  const inside = (t) => { const c = canonical(t); return c === root || c.startsWith(root + sep); };
-  const escaped = Object.entries(links)
-    .filter(([, target]) => inside(target))
-    .map(([path, target]) => {
-      const was = before?.[path];
-      const why = before == null ? 'no snapshot from run' : was === undefined ? 'it did not exist before the run' : inside(was) ? `it was ${was}` : `it was ${was}: ln -sfn ${shellQuote(was)} ${shellQuote(path)}`;
-      return `${path} -> ${target}, inside the scratch dir (${why})`;
-    });
-  return [...unreadable, ...escaped];
+  const root = resolveOnDisk(resolve(dir));
+  if (root.why) return [...unreadable, `the scratch dir ${dir} could not be resolved (${root.why})`];
+  const inside = (r) => r.path === root.path || r.path.startsWith(root.path + sep);
+  const out = [...unreadable];
+  for (const [path, target] of Object.entries(links)) {
+    const r = resolveOnDisk(target);
+    if (r.why) { out.push(`${path} -> ${target}: its target could not be resolved (${r.why}), so it is not proven outside the scratch dir`); continue; }
+    if (!inside(r)) continue;
+    const was = before?.[path];
+    const wasInside = was !== undefined && (() => { const w = resolveOnDisk(was); return !w.why && inside(w); })();
+    const why = before == null ? 'no snapshot from run' : was === undefined ? 'it did not exist before the run' : wasInside ? `it was ${was}` : `it was ${was}: ln -sfn ${shellQuote(was)} ${shellQuote(path)}`;
+    out.push(`${path} -> ${target}, inside the scratch dir (${why})`);
+  }
+  return out;
 }
 
 /** The verdict on `tmux show-environment -g` for the private server (#48 round 1): {environ}

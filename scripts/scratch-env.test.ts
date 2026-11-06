@@ -5,7 +5,7 @@
 // definition of "kept away from the real tmux and gateway") and checks a
 // running process for any name that survived.
 import assert from 'node:assert/strict';
-import { mkdtempSync, rmSync, statSync, readFileSync, chmodSync } from 'node:fs';
+import { mkdtempSync, rmSync, statSync, readFileSync, chmodSync, realpathSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import test from 'node:test';
@@ -323,4 +323,64 @@ test('the scratch root is compared as the filesystem resolves it, however it is 
       assert.equal(escapedLinks(home, spelt, null).length, 1, spelt);
     }
   } finally { rmSync(root, { recursive: true, force: true }); }
+});
+
+// #48 round 2 (reviewer at 59a3e4a5, validator's probes): the target resolver follows the
+// kernel. '..' applies only after the symlinks before it are followed on disk, and only a
+// confirmed missing component (ENOENT) takes the dangling fallback; anything else is unknown.
+test('a target is resolved as the kernel does: alias/.. lands where realpath says, and the guard agrees (#48 round 2)', async () => {
+  const { escapedLinks, resolveOnDisk } = await import('./scratch-env.mjs');
+  const { mkdirSync, symlinkSync, writeFileSync } = await import('node:fs');
+  // The KERNEL's answer: libc realpath(3). Node's JS realpathSync normalises '..' lexically too.
+  const kernelPath = (p: string) => realpathSync.native(p);
+  const root = mkdtempSync(join(tmpdir(), 'scratch-env-test-'));
+  try {
+    const home = join(root, 'home');
+    const bin = join(home, '.local', 'bin');
+    const dir = join(root, 'gw');
+    mkdirSync(bin, { recursive: true });
+    mkdirSync(join(dir, 'sub'), { recursive: true });
+    mkdirSync(join(dir, 'v'));
+    writeFileSync(join(dir, 'v', 'cli'), '');
+    symlinkSync(join(dir, 'sub'), join(root, 'alias')); // alias -> gw/sub
+    const raw = `${root}/alias/../v/cli`; // lexically root/v/cli, on disk gw/v/cli
+    symlinkSync(raw, join(bin, 'cli'));
+    const kernel = kernelPath(join(bin, 'cli'));
+    assert.equal(kernel, join(kernelPath(dir), 'v', 'cli'), 'the kernel follows alias before ..');
+    assert.deepEqual(resolveOnDisk(raw), { path: kernel }, 'the resolver gives the kernel\'s answer');
+    assert.equal(escapedLinks(home, dir, null).length, 1, 'so the guard sees it inside the scratch dir');
+    // A relative target, resolved from the link's own dir.
+    symlinkSync('../../../gw/v/cli', join(bin, 'rel'));
+    assert.deepEqual(resolveOnDisk(`${bin}/../../../gw/v/cli`), { path: kernelPath(join(bin, 'rel')) });
+    assert.equal(escapedLinks(home, dir, null).length, 2);
+  } finally { rmSync(root, { recursive: true, force: true }); }
+});
+
+test('a target that cannot be resolved is unknown and fails the guard: an unreadable directory on the way, a loop (#48 round 2)', { skip: process.getuid?.() === 0 }, async () => {
+  const { escapedLinks, resolveOnDisk } = await import('./scratch-env.mjs');
+  const { mkdirSync, symlinkSync, writeFileSync } = await import('node:fs');
+  const root = mkdtempSync(join(tmpdir(), 'scratch-env-test-'));
+  const locked = join(root, 'locked');
+  try {
+    const home = join(root, 'home');
+    const bin = join(home, '.local', 'bin');
+    const dir = join(root, 'gw');
+    mkdirSync(bin, { recursive: true });
+    mkdirSync(join(dir, 'v'), { recursive: true });
+    writeFileSync(join(dir, 'v', 'claude'), '');
+    mkdirSync(locked);
+    symlinkSync(dir, join(locked, 'alias'));
+    symlinkSync(join(locked, 'alias', 'v', 'claude'), join(bin, 'claude'));
+    assert.equal(escapedLinks(home, dir, null).length, 1, 'control: readable, it is inside');
+    chmodSync(locked, 0o000);
+    const found = escapedLinks(home, dir, null);
+    assert.equal(found.length, 1, JSON.stringify(found));
+    assert.match(found[0]!, /its target could not be resolved .*EACCES/u, found[0]);
+    chmodSync(locked, 0o755);
+    symlinkSync(join(root, 'b'), join(root, 'a'));
+    symlinkSync(join(root, 'a'), join(root, 'b'));
+    assert.match(resolveOnDisk(join(root, 'a', 'x')).why ?? '', /ELOOP/u, 'a loop is unknown, never a lexical guess');
+    // Confirmed missing keeps the dangling fallback: a link into a deleted dir is still reported.
+    assert.deepEqual(resolveOnDisk(join(dir, 'gone', 'claude')), { path: join(realpathSync(dir), 'gone', 'claude') });
+  } finally { chmodSync(locked, 0o755); rmSync(root, { recursive: true, force: true }); }
 });
