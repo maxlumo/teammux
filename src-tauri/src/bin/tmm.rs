@@ -72,6 +72,7 @@ USAGE (agent):
   tmm board block <id> <id>[,<id>]    those issues block <id>; `unblock` removes the edges
   tmm board frontier                  open issues whose blockers are all done, with their status
   tmm board show <id>                 one issue with its note thread
+                    [--note <n>]      …only note n, whole: the number a board notice names
   tmm board take <id>                 claim it: assignee = you, status = doing
   tmm board assign <id> <name|->      hand it to someone else; `-` clears the assignee
   tmm board move <id> <todo|doing|review|done>
@@ -891,9 +892,31 @@ async fn main() {
                     let Some(id) = rest.get(1).and_then(|s| s.trim_start_matches('#').parse::<i64>().ok()) else {
                         fail(EXIT_USAGE, "board show needs an issue id: tmm board show 3");
                     };
+                    // Board #42: `--note n` is the exact note a notice named,
+                    // never "the last note" (another can land first).
+                    let only = match flags.get("note") {
+                        None => None,
+                        Some(v) => match v.as_deref().and_then(|t| t.parse::<i64>().ok()).filter(|n| *n >= 1) {
+                            Some(n) => Some(n),
+                            None => fail(EXIT_USAGE, "--note needs a note number, the one a board notice names: tmm board show 42 --note 3"),
+                        },
+                    };
                     let r = rpc(&ctx, "hub_board_get", json!({ "session": session, "id": id })).await;
-                    if ctx.json { println!("{r}"); return; }
                     let names = tmux_mobile::address::Names::from_json(r.get("labels").unwrap_or(&Value::Null));
+                    if let Some(n) = only {
+                        let empty = Vec::new();
+                        let notes = r.get("notes").and_then(|v| v.as_array()).unwrap_or(&empty);
+                        let Some(note) = notes.iter().find(|x| x.get("n").and_then(|v| v.as_i64()) == Some(n)) else {
+                            let have = if notes.is_empty() { "no notes".to_string() } else { format!("notes 1-{}", notes.len()) };
+                            fail(EXIT_ERR, &format!("#{id} has no note {n} (it has {have}): tmm board show {id}"));
+                        };
+                        if ctx.json { println!("{note}"); return; }
+                        let a = names.shown(note.get("author").and_then(|v| v.as_str()).unwrap_or(""));
+                        let b = names.show_body(note.get("body").and_then(|v| v.as_str()).unwrap_or(""));
+                        println!("#{id} note {n} · {a}{}\n{b}", note_label(note));
+                        return;
+                    }
+                    if ctx.json { println!("{r}"); return; }
                     let g = |k: &str| r.get(k).and_then(|v| v.as_str()).unwrap_or("");
                     println!("#{} [{}] {}", id, g("status"), tmux_mobile::projects::issue_ref(g("title"), g("body"), id));
                     if !g("assignee").is_empty() { println!("assignee: {}", names.shown(g("assignee"))); }
@@ -918,12 +941,7 @@ async fn main() {
                     for n in r.get("notes").and_then(|v| v.as_array()).unwrap_or(&empty) {
                         let a = names.shown(n.get("author").and_then(|v| v.as_str()).unwrap_or(""));
                         let b = names.show_body(n.get("body").and_then(|v| v.as_str()).unwrap_or(""));
-                        let label = match (n.get("agreement").and_then(|v| v.as_bool()), n.get("superseded_by").and_then(|v| v.as_i64())) {
-                            (Some(true), Some(next)) => format!(" [agreement, superseded by note {next}]"),
-                            (Some(true), None) => " [agreement]".to_string(),
-                            _ => String::new(),
-                        };
-                        println!("  · {a}{label}: {b}");
+                        println!("  · {a}{}: {b}", note_label(n));
                     }
                 }
                 "add" => {
@@ -2781,7 +2799,7 @@ const VERB_FLAGS: &[VerbFlags] = &[
     VerbFlags { key: "review feedback", ctx: true, flags: &[] },
     VerbFlags { key: "board", ctx: true, flags: &[] },
     VerbFlags { key: "board list", ctx: true, flags: &[] },
-    VerbFlags { key: "board show", ctx: true, flags: &[] },
+    VerbFlags { key: "board show", ctx: true, flags: &["note"] },
     VerbFlags { key: "board add", ctx: true, flags: &["body", "image", "assignee", "blocked-by"] },
     VerbFlags { key: "board block", ctx: true, flags: &[] },
     VerbFlags { key: "board unblock", ctx: true, flags: &[] },
@@ -3910,6 +3928,16 @@ enum NoteNotify {
     Recorded { recipients: Vec<String>, seq: i64, attempted: Vec<String>, notice: Vec<String> },
     RoomFailed { recipients: Vec<String>, line: String, error: String, notice_targets: Vec<String>, notice: Vec<String> },
     Malformed(String),
+}
+
+/// A note's agreement label (board #44), the same in the thread and in
+/// `--note n` (board #42).
+fn note_label(n: &Value) -> String {
+    match (n.get("agreement").and_then(|v| v.as_bool()), n.get("superseded_by").and_then(|v| v.as_i64())) {
+        (Some(true), Some(next)) => format!(" [agreement, superseded by note {next}]"),
+        (Some(true), None) => " [agreement]".to_string(),
+        _ => String::new(),
+    }
 }
 
 fn note_notify_outcome(r: &Value) -> NoteNotify {

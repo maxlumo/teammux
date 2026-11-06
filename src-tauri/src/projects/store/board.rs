@@ -453,7 +453,7 @@ impl Store {
         }
     }
 
-    pub fn issue_note(&self, session: &str, id: i64, author: &str, body: &str, now: i64) -> Result<(), String> {
+    pub fn issue_note(&self, session: &str, id: i64, author: &str, body: &str, now: i64) -> Result<i64, String> {
         self.issue_note_as(session, id, author, body, now, false)
     }
 
@@ -461,7 +461,9 @@ impl Store {
     /// agreement. Declared at write only: an existing note is never re-marked,
     /// so the thread stays append-only and keeps the order agreements were
     /// made in (orchestrator, plan approval). Everything else is a note's.
-    pub fn issue_note_as(&self, session: &str, id: i64, author: &str, body: &str, now: i64, agreement: bool) -> Result<(), String> {
+    /// Answers the note's number `n` as `issue_get` reads it (board #42): a
+    /// notice names exactly this note, never "the last one".
+    pub fn issue_note_as(&self, session: &str, id: i64, author: &str, body: &str, now: i64, agreement: bool) -> Result<i64, String> {
         let body = body.trim();
         if body.is_empty() {
             return Err("an empty note says nothing".into());
@@ -489,7 +491,16 @@ impl Store {
                 "INSERT INTO issue_notes (issue_id, author, body, at, agreement) VALUES (?1, ?2, ?3, ?4, ?5)",
                 rusqlite::params![row_id, author, body, now, agreement as i64],
             )
-            .map(|_| ())
+            .map_err(|e| e.to_string())?;
+        // `n` is the note's position by row id within its issue — the ONE
+        // numbering `issue_get` uses (#44). The connection is the store's
+        // own, so the inserted row id is this write's.
+        self.conn
+            .query_row(
+                "SELECT COUNT(*) FROM issue_notes WHERE issue_id = ?1 AND id <= last_insert_rowid()",
+                [row_id],
+                |r| r.get(0),
+            )
             .map_err(|e| e.to_string())
     }
 
@@ -807,6 +818,24 @@ mod tests {
         // An agreement note is a note: the empty rule and the board gate hold.
         assert!(store.issue_note_as("p", id, "x", "  ", 50, true).is_err());
         assert!(store.issue_note_as("other", id, "x", "sneak", 50, true).is_err());
+    }
+
+    /// Board #42 AC1: a write answers with the number its note is READ under,
+    /// so a notice can name exactly that note even when another note lands
+    /// before anybody reads it.
+    #[test]
+    fn a_note_write_returns_the_number_the_thread_shows_it_under() {
+        let store = Store::open_memory().unwrap();
+        let id = store.issue_save("p", None, Some("t"), None, None, None, "human", 10).unwrap();
+        let other = store.issue_save("p", None, Some("u"), None, None, None, "human", 10).unwrap();
+        assert_eq!(store.issue_note("p", id, "validator", "SHIP", 20).unwrap(), 1);
+        assert_eq!(store.issue_note("p", other, "x", "another issue's note", 21).unwrap(), 1, "numbered per issue");
+        assert_eq!(store.issue_note_as("p", id, "orchestrator", "agreed", 15, true).unwrap(), 2, "by row id, not by clock");
+        assert_eq!(store.issue_note("p", id, "reviewer", "CLEAR", 30).unwrap(), 3);
+        let got = store.issue_get("p", id).unwrap().unwrap();
+        assert_eq!(got["notes"][0]["n"], 1);
+        assert_eq!(got["notes"][0]["body"], "SHIP");
+        assert_eq!(got["notes"][2]["body"], "CLEAR");
     }
 
     /// Board #43 AC3: deleting an issue takes every edge it is in, on either

@@ -97,6 +97,7 @@ its own independent sequence, so always run the command in the intended
 ```bash
 tmm board                       # the whole board, grouped by column
 tmm board show <id>             # one issue + its note thread
+tmm board show <id> --note <n>  # exactly note n, whole: the number a board notice names
 tmm board add "title" [--body <text>] [--assignee <name>]
 tmm board take <id>             # claim it: assignee = you, status = doing
 tmm board move <id> review      # done working — hand it to review

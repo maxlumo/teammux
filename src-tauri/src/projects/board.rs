@@ -113,12 +113,13 @@ pub fn board_save(
     with_store(|store| store.issue_save(session, id, title, body, status, assignee, who, now))
 }
 
-pub fn board_note(session: &str, id: i64, author: &str, body: &str) -> Result<(), String> {
+pub fn board_note(session: &str, id: i64, author: &str, body: &str) -> Result<i64, String> {
     board_note_as(session, id, author, body, false)
 }
 
 /// Board #44: a note, or one DECLARED as the issue's current agreement.
-pub fn board_note_as(session: &str, id: i64, author: &str, body: &str, agreement: bool) -> Result<(), String> {
+/// Answers the note's number `n` (board #42).
+pub fn board_note_as(session: &str, id: i64, author: &str, body: &str, agreement: bool) -> Result<i64, String> {
     let now = chrono::Utc::now().timestamp();
     with_store(|store| store.issue_note_as(session, id, author, body, now, agreement))
 }

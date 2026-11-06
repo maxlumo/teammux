@@ -596,7 +596,7 @@ fn dispatch_hub(req: &Request, notifications: Option<&crate::agent_notifications
                     notice: &|target, line| crate::projects::deliver_chat_line_found(session, target, line).is_some(),
                 });
             }
-            crate::projects::board_note_as(session, issue_id, author, body, agreement).map_err(RpcError::InvalidParams)?;
+            let n = crate::projects::board_note_as(session, issue_id, author, body, agreement).map_err(RpcError::InvalidParams)?;
             // A Board reply is communication, not just storage (board
             // #26, #255): after the note is durable, wake the issue's
             // assignee AND reporter (minus the author and the human) with
@@ -606,7 +606,7 @@ fn dispatch_hub(req: &Request, notifications: Option<&crate::agent_notifications
             // unmanaged target reads the persisted thread later instead
             // of turning a successful note into an RPC failure.
             if let Ok(issue) = crate::projects::board_get(session, issue_id) {
-                if let Some((targets, notice)) = board_note_notice(&issue, author, body) {
+                if let Some((targets, notice)) = board_note_notice(&issue, author, body, n) {
                     let line = format!("[tmm chat {}] {author}: {notice}", stamp_now());
                     for target in &targets {
                         deliver_chat_line(session, target, &line);
@@ -2132,6 +2132,7 @@ fn board_note_notice(
     issue: &serde_json::Value,
     author: &str,
     body: &str,
+    n: i64,
 ) -> Option<(Vec<String>, String)> {
     let mut targets: Vec<String> = Vec::new();
     for key in ["assignee", "created_by"] {
@@ -2154,7 +2155,7 @@ fn board_note_notice(
         return None;
     }
     let notice = format!(
-        "[board #{id} reply] {title} — {note}. Reply on the issue with `tmm board note {id} \"...\"`."
+        "[board #{id} reply] {title} — note {n}: {note}. Whole note: `tmm board show {id} --note {n}`. Reply on the issue with `tmm board note {id} \"...\"`."
     );
     Some((targets, notice))
 }
@@ -2178,8 +2179,8 @@ struct NoteIo<'a> {
     all: &'a dyn Fn() -> Result<Vec<String>, String>,
     /// Does this project declare `name` as a managed agent?
     managed: &'a dyn Fn(&str) -> bool,
-    /// Store the note (`board_note`).
-    store: &'a dyn Fn(&str, i64, &str, &str) -> Result<(), String>,
+    /// Store the note (`board_note`); answers its number `n` (board #42).
+    store: &'a dyn Fn(&str, i64, &str, &str) -> Result<i64, String>,
     /// Record the announcement and hand it to the one delivery path
     /// (`post_and_deliver_found`): the stored row, and the names a live
     /// managed pane was FOUND for.
@@ -2248,7 +2249,9 @@ fn board_note_notify(
         .collect();
     let issue = (io.read)(session, issue_id).map_err(RpcError::InvalidParams)?;
     let targets = notify_targets(&asked, author, io.all, io.managed).map_err(RpcError::InvalidParams)?;
-    let line = notify_line(issue_id, body, &targets);
+    // Checked before the write, when the note has no number yet; the number
+    // is digits, so the stored line routes exactly like this one (board #42).
+    let line = notify_line(issue_id, None, body, &targets);
     // The line must route to EXACTLY the frozen set (review P1-B): the room
     // reads its addresses back with `mention_names`, so anything that reads
     // differently — a name that splits, a routing word — would deliver to
@@ -2259,7 +2262,8 @@ fn board_note_notify(
             targets.iter().map(|t| format!("@{t}")).collect::<Vec<_>>().join(" ")
         )));
     }
-    (io.store)(session, issue_id, author, body).map_err(RpcError::InvalidParams)?;
+    let n = (io.store)(session, issue_id, author, body).map_err(RpcError::InvalidParams)?;
+    let line = notify_line(issue_id, Some(n), body, &targets);
 
     let mut answer = serde_json::json!({ "ok": true, "note": "stored", "recipients": targets, "line": line });
     let recorded = match (io.post)(author, &line) {
@@ -2280,7 +2284,7 @@ fn board_note_notify(
             false
         }
     };
-    let (notice_targets, notice_line) = match board_note_notice(&issue, author, body) {
+    let (notice_targets, notice_line) = match board_note_notice(&issue, author, body, n) {
         Some((all, notice)) => (
             all.into_iter().filter(|t| !(recorded && targets.contains(t))).collect::<Vec<_>>(),
             Some(format!("[tmm chat {}] {author}: {notice}", stamp_now())),
@@ -2393,7 +2397,7 @@ fn notify_targets(
 /// note reading "ask @all" cannot broadcast (board #367 review P1-A). A note
 /// that is only an image has no text line to carry, and says so.
 #[cfg(not(any(target_os = "android", target_os = "ios")))]
-fn notify_line(id: i64, body: &str, targets: &[String]) -> String {
+fn notify_line(id: i64, n: Option<i64>, body: &str, targets: &[String]) -> String {
     let to = targets.iter().map(|t| format!("@{t}")).collect::<Vec<_>>().join(" ");
     let pointer = body
         .lines()
@@ -2401,7 +2405,12 @@ fn notify_line(id: i64, body: &str, targets: &[String]) -> String {
         .find(|l| !l.is_empty() && !(l.starts_with("![](") && l.ends_with(')')))
         .map(|l| crate::address::unaddressed(&excerpt(l, NOTICE_EXCERPT)))
         .unwrap_or_else(|| "(image)".to_string());
-    format!("{to} board #{id}: {pointer} (tmm board show {id})")
+    // Board #42: the line names the EXACT note and the command that prints
+    // it, because another note can land before this one is read.
+    match n {
+        Some(n) => format!("{to} board #{id} note {n}: {pointer} (tmm board show {id} --note {n})"),
+        None => format!("{to} board #{id}: {pointer}"),
+    }
 }
 
 /// First `max` chars, cut on a char boundary, `…`-marked when shortened.
@@ -4074,26 +4083,29 @@ mod tests {
             &issue,
             "human",
             "please revise the retry path",
+            3,
         )
         .expect("a human reply wakes the assigned agent");
         assert_eq!(targets, vec!["builder".to_string()]);
         assert_eq!(
             notice,
-            "[board #26 reply] Reply delivery — please revise the retry path. Reply on the issue with `tmm board note 26 \"...\"`."
+            "[board #26 reply] Reply delivery — note 3: please revise the retry path. Whole note: `tmm board show 26 --note 3`. Reply on the issue with `tmm board note 26 \"...\"`."
         );
 
-        let long = "x".repeat(500);
-        let (_, shortened) = super::board_note_notice(&issue, "lead", &long).unwrap();
+        // However long the note, the interrupt is bounded: the excerpt plus
+        // the head and the two commands (board #42 added `--note n`).
+        let long = "x".repeat(5000);
+        let (_, shortened) = super::board_note_notice(&issue, "lead", &long, 1).unwrap();
         assert!(shortened.contains('…'), "a long note names that more is on the issue");
-        assert!(shortened.chars().count() < 500, "the interrupt stays concise");
+        assert!(shortened.chars().count() < super::NOTICE_EXCERPT + 200, "the interrupt stays concise: {}", shortened.chars().count());
 
         // The human reporter reads the board itself: the assignee's own
         // note on a human-filed issue wakes nobody.
-        assert_eq!(super::board_note_notice(&issue, "builder", "my own note"), None);
+        assert_eq!(super::board_note_notice(&issue, "builder", "my own note", 1), None);
         let unassigned = serde_json::json!({ "id": 1, "title": "T", "assignee": "" });
-        assert_eq!(super::board_note_notice(&unassigned, "human", "hello"), None);
+        assert_eq!(super::board_note_notice(&unassigned, "human", "hello", 1), None);
         let human = serde_json::json!({ "id": 1, "title": "T", "assignee": "human" });
-        assert_eq!(super::board_note_notice(&human, "lead", "hello"), None);
+        assert_eq!(super::board_note_notice(&human, "lead", "hello", 1), None);
 
         // #255 regression (temp/stall-analysis.md #248/#241): a THIRD
         // party's note — validator's SHIP on an issue orchestrator opened
@@ -4101,24 +4113,24 @@ mod tests {
         let shared = serde_json::json!({
             "id": 248, "title": "Addresses", "assignee": "builder", "created_by": "orchestrator",
         });
-        let (both, _) = super::board_note_notice(&shared, "validator", "SHIP @5138fec8").unwrap();
+        let (both, _) = super::board_note_notice(&shared, "validator", "SHIP @5138fec8", 1).unwrap();
         assert_eq!(both, vec!["builder".to_string(), "orchestrator".to_string()]);
         // The assignee's own note reaches the reporter (what board.md always
         // said and the code never did) ...
-        let (up, _) = super::board_note_notice(&shared, "builder", "ready").unwrap();
+        let (up, _) = super::board_note_notice(&shared, "builder", "ready", 1).unwrap();
         assert_eq!(up, vec!["orchestrator".to_string()]);
         // ... and the reporter's note reaches the assignee.
-        let (down, _) = super::board_note_notice(&shared, "orchestrator", "merged").unwrap();
+        let (down, _) = super::board_note_notice(&shared, "orchestrator", "merged", 1).unwrap();
         assert_eq!(down, vec!["builder".to_string()]);
         // An unassigned issue still reaches its agent reporter.
         let filed = serde_json::json!({ "id": 7, "title": "T", "assignee": "", "created_by": "orchestrator" });
-        let (r, _) = super::board_note_notice(&filed, "validator", "repro attached").unwrap();
+        let (r, _) = super::board_note_notice(&filed, "validator", "repro attached", 1).unwrap();
         assert_eq!(r, vec!["orchestrator".to_string()]);
         // A self-filed, self-held issue has nobody else on it; the same
         // name twice (reporter == assignee) is one delivery to a third party.
         let own = serde_json::json!({ "id": 251, "title": "T", "assignee": "builder", "created_by": "builder" });
-        assert_eq!(super::board_note_notice(&own, "builder", "done"), None);
-        let (once, _) = super::board_note_notice(&own, "validator", "SHIP").unwrap();
+        assert_eq!(super::board_note_notice(&own, "builder", "done", 1), None);
+        let (once, _) = super::board_note_notice(&own, "validator", "SHIP", 1).unwrap();
         assert_eq!(once, vec!["builder".to_string()]);
     }
 
@@ -4198,7 +4210,7 @@ mod tests {
                 read: &|_, _| { log("read".into()); self.issue.clone() },
                 all: &|| { log("all".into()); self.all.clone() },
                 managed: &|n| ["dev", "lead", "qa", "validator"].contains(&n),
-                store: &|_, _, _, _| { log("store".into()); Ok(()) },
+                store: &|_, _, _, _| { log("store".into()); Ok(1) },
                 post: &|_, line| { log(format!("post {line}")); self.post.clone() },
                 notice: &|t, _| { log(format!("notice {t}")); self.live.iter().any(|l| l == t) },
             })
@@ -4293,31 +4305,36 @@ mod tests {
     /// that marker at the body's start and would show it raw (#172).
     #[test]
     fn notify_line_points_at_the_note_and_carries_no_address_of_its_own() {
-        let line = super::notify_line(507, "design v5 is on the card\nsecond paragraph", &["orchestrator".to_string(), "human".to_string()]);
-        assert_eq!(line, "@orchestrator @human board #507: design v5 is on the card (tmm board show 507)");
+        let line = super::notify_line(507, Some(4), "design v5 is on the card\nsecond paragraph", &["orchestrator".to_string(), "human".to_string()]);
+        assert_eq!(line, "@orchestrator @human board #507 note 4: design v5 is on the card (tmm board show 507 --note 4)");
+        // Board #42: the routing check runs before the write, when the
+        // number is not known yet. A number is digits, so it can never change
+        // whom the line addresses.
+        let unnumbered = super::notify_line(507, None, "design v5 is on the card", &["orchestrator".to_string(), "human".to_string()]);
+        assert_eq!(crate::address::mention_names(&unnumbered), crate::address::mention_names(&line));
         assert!(!line.contains("[board #"), "no bracket marker: promptParts would show it raw");
 
         // Only the FIRST non-empty line, and only the resolved recipients
         // route: every `@` the note itself carries is escaped, so "ask @all"
         // cannot broadcast (board #367 review P1-A).
-        let quoted = super::notify_line(1, "  \n\nask @all and @validator to re-read", &["lead".to_string()]);
-        assert_eq!(quoted, "@lead board #1: ask ＠all and ＠validator to re-read (tmm board show 1)");
+        let quoted = super::notify_line(1, Some(1), "  \n\nask @all and @validator to re-read", &["lead".to_string()]);
+        assert_eq!(quoted, "@lead board #1 note 1: ask ＠all and ＠validator to re-read (tmm board show 1 --note 1)");
         assert_eq!(crate::address::mention_names(&quoted), vec!["lead".to_string()]);
 
         // A long note is cut on a char boundary with the `…` marker: the
         // line is a pointer, never a second copy.
         let long = "字".repeat(600);
-        let cut = super::notify_line(2, &long, &["lead".to_string()]);
+        let cut = super::notify_line(2, Some(1), &long, &["lead".to_string()]);
         assert!(cut.contains('…'), "a long note is pointed at, not repeated: {cut}");
         assert!(cut.chars().count() < 600, "{}", cut.chars().count());
 
         // An image-only note has no text line to point at and says so
         // instead of carrying a markdown ref into the room.
-        let image = super::notify_line(3, "![](/tmp/shot.png)", &["lead".to_string()]);
-        assert_eq!(image, "@lead board #3: (image) (tmm board show 3)");
+        let image = super::notify_line(3, Some(2), "![](/tmp/shot.png)", &["lead".to_string()]);
+        assert_eq!(image, "@lead board #3 note 2: (image) (tmm board show 3 --note 2)");
         // Text plus an image points at the text.
-        let both = super::notify_line(4, "![](/tmp/a.png)\nthe failing row", &["lead".to_string()]);
-        assert_eq!(both, "@lead board #4: the failing row (tmm board show 4)");
+        let both = super::notify_line(4, Some(1), "![](/tmp/a.png)\nthe failing row", &["lead".to_string()]);
+        assert_eq!(both, "@lead board #4 note 1: the failing row (tmm board show 4 --note 1)");
     }
 
     /// A TITLELESS issue (board #31) is named by its body through the shared
@@ -4327,10 +4344,10 @@ mod tests {
         let titleless = serde_json::json!({
             "id": 31, "title": "", "body": "issue标题可以为空，截前几个字显示", "assignee": "builder",
         });
-        let (_, n) = super::board_note_notice(&titleless, "human", "ok").unwrap();
+        let (_, n) = super::board_note_notice(&titleless, "human", "ok", 1).unwrap();
         assert_eq!(
             n,
-            "[board #31 reply] issue标题可以为空，截前几个字显示 — ok. Reply on the issue with `tmm board note 31 \"...\"`."
+            "[board #31 reply] issue标题可以为空，截前几个字显示 — note 1: ok. Whole note: `tmm board show 31 --note 1`. Reply on the issue with `tmm board note 31 \"...\"`."
         );
     }
 
@@ -6797,6 +6814,55 @@ while True:
         let _ = std::fs::remove_dir_all(&ws);
     }
 
+    /// Board #42 AC1 (the transition): two notes land before the assignee
+    /// reads either. Each typed notice names ITS note, and that number reads
+    /// back exactly that note — "the last note" would be the second one for
+    /// both.
+    #[test]
+    fn each_reply_notice_names_the_exact_note_even_when_another_lands_first() {
+        crate::projects::tests::use_test_store();
+        let session = format!("tmm-note-ref-{}", uuid::Uuid::new_v4());
+        let ws = crate::config::test_scratch("tmm-note-ref-ws");
+        let home = ws.join(".tmm/agents/dev");
+        std::fs::create_dir_all(&home).unwrap();
+        std::fs::write(home.join("launch.json"), r#"{"backend":"kiro","cmd":"kiro-cli chat --agent dev"}"#).unwrap();
+        let created = std::process::Command::new("tmux")
+            .args(["new-session", "-d", "-s", &session, "-n", "dev", "-c", &ws.to_string_lossy(), "cat"])
+            .status()
+            .map(|s| s.success())
+            .unwrap_or(false);
+        if !created {
+            eprintln!("no tmux server — skipping");
+            let _ = std::fs::remove_dir_all(&ws);
+            return;
+        }
+        crate::projects::adopt(&session, Some("note-ref-test")).expect("adopt test project");
+        let id = crate::projects::board_save(&session, None, Some("Ref"), Some("b"), None, Some("dev"), "orchestrator").unwrap();
+        for (who, body) in [("validator", "SHIP at abc123"), ("reviewer", "P1: the cap is silent")] {
+            let r = handle_hub_request(
+                &req("hub_board_note", serde_json::json!({ "session": session, "id": id, "who": who, "body": body })),
+                None,
+            );
+            assert!(r.error.is_none(), "{:?}", r.error.map(|e| e.message));
+        }
+        let lines: Vec<String> = crate::projects::telemetry::owed_rows(&session, "dev")
+            .into_iter()
+            .map(|r| r.line)
+            .filter(|l| l.contains(&format!("[board #{id} reply]")))
+            .collect();
+        assert_eq!(lines.len(), 2, "{lines:?}");
+        let issue = crate::projects::board_get(&session, id).unwrap();
+        for (line, want) in lines.iter().zip(["SHIP at abc123", "P1: the cap is silent"]) {
+            let n: i64 = line.split(" --note ").nth(1).and_then(|t| t.split('`').next()).and_then(|t| t.parse().ok())
+                .unwrap_or_else(|| panic!("the notice names a note number: {line}"));
+            let note = issue["notes"].as_array().unwrap().iter().find(|x| x["n"] == n).expect("that note exists");
+            assert_eq!(note["body"], want, "{line}");
+        }
+
+        let _ = std::process::Command::new("tmux").args(["kill-session", "-t", &session]).status();
+        let _ = std::fs::remove_dir_all(&ws);
+    }
+
     /// `--notify` (board #507) records the note and announces it in ONE call,
     /// in that order, and the announcement REPLACES the issue's own reply
     /// notice for the names it carries — one note is one line per recipient.
@@ -6891,7 +6957,7 @@ while True:
             .filter_map(|m| m["body"].as_str())
             .find(|b| b.contains("second note"))
             .expect("the announcement is recorded in the room");
-        assert_eq!(posted, format!("@dev @human @qa board #{id}: second note (tmm board show {id})"));
+        assert_eq!(posted, format!("@dev @human @qa board #{id} note 2: second note (tmm board show {id} --note 2)"));
         assert!(!posted.contains("[board #"), "a plain mention line, not a bracket shape");
 
         // The DEDUPE: still exactly one reply notice for the first note, and

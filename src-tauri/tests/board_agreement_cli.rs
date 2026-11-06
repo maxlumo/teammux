@@ -182,3 +182,27 @@ fn show_prints_the_current_agreement_first_and_labels_the_superseded_one() {
     assert!(out.contains("· orchestrator [agreement, superseded by note 3]: agreed: resume the newest thread"), "{out}");
     assert!(out.contains("· orchestrator [agreement]: agreed: resume only a proven rollout"), "{out}");
 }
+
+/// Board #42 AC1: a notice names `#N note n`, and `--note n` prints exactly
+/// that note, whole: its head, then its body, and nothing else of the issue.
+/// A number the thread does not have is an error, never the nearest note.
+#[test]
+fn show_note_prints_exactly_the_named_note_and_refuses_one_that_is_not_there() {
+    let f = fake(true);
+    let (ok, out, err) = f.run(&["board", "show", "29", "--note", "2"]);
+    assert!(ok, "{out:?} {err:?}");
+    assert_eq!(out, "#29 note 2 · orchestrator [agreement, superseded by note 3]\nagreed: resume the newest thread\n");
+    assert_eq!(f.methods(), vec!["hub_board_get"]);
+
+    let f = fake(true);
+    let (ok, out, err) = f.run(&["board", "show", "29", "--note", "4"]);
+    assert!(!ok, "{out:?}");
+    assert!(out.is_empty(), "{out:?}");
+    assert!(err.contains("#29 has no note 4") && err.contains("notes 1-3"), "{err:?}");
+
+    let f = fake(true);
+    let (ok, _, err) = f.run(&["board", "show", "29", "--note", "last"]);
+    assert!(!ok);
+    assert!(err.contains("--note needs a note number"), "{err:?}");
+    assert!(f.methods().is_empty(), "refused before the call: {:?}", f.methods());
+}
