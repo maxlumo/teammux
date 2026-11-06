@@ -363,6 +363,18 @@ export function pnpmInstallsIn(worktree, proc = '/proc') {
   return found;
 }
 
+/** A lock rewritten with the content pnpm already installed (`pnpm install
+ * --lockfile-only`) is newer than the marker, and `pnpm install
+ * --frozen-lockfile` then skips the work and leaves the marker as it was:
+ * pnpm's own record of the install, node_modules/.pnpm/lock.yaml, equal to
+ * the lock's project document, says the tree is the lock's (#33). */
+function installedIsLocked(worktree) {
+  try {
+    return readFileSync(join(worktree, 'node_modules', '.pnpm', 'lock.yaml'), 'utf8')
+      === projectDocument(readFileSync(join(worktree, 'pnpm-lock.yaml'), 'utf8'));
+  } catch { return false; }
+}
+
 /** Why the worktree's install is not complete, or null (board #514; pnpm
  * since #33). A start-time preflight, NOT mutual exclusion for the whole run:
  * an install that starts after the scan, or one this user cannot read in
@@ -379,18 +391,6 @@ export function pnpmInstallsIn(worktree, proc = '/proc') {
  * (`test:rust` does not). A test run on a half-written node_modules gave a
  * partial red run (validator, #511: 2978 tests, 20 fails, "Cannot find
  * package …/jsdom"). */
-/** A lock rewritten with the content pnpm already installed (`pnpm install
- * --lockfile-only`) is newer than the marker, and `pnpm install
- * --frozen-lockfile` then skips the work and leaves the marker as it was:
- * pnpm's own record of the install, node_modules/.pnpm/lock.yaml, equal to
- * the lock's project document, says the tree is the lock's (#33). */
-function installedIsLocked(worktree) {
-  try {
-    return readFileSync(join(worktree, 'node_modules', '.pnpm', 'lock.yaml'), 'utf8')
-      === projectDocument(readFileSync(join(worktree, 'pnpm-lock.yaml'), 'utf8'));
-  } catch { return false; }
-}
-
 export function installRefusal({ worktree, installs = pnpmInstallsIn }) {
   if (!existsSync(join(worktree, 'package.json'))) return null;
   const fix = `run \`pnpm install --frozen-lockfile\` alone in ${worktree}, wait for it to exit, then retry`;

@@ -201,15 +201,15 @@ type FakeConnection = {
   api: Record<string, (...args: unknown[]) => Promise<unknown>>;
 };
 
+/** The registry key of the connection whose api is being called right now
+ * (set around each mocked RPC): a mock that answers PER SERVER reads it. */
+let askingKey = '';
+const asking = () => askingKey;
 /** The mocked transport as the connection layer App wires: the fleet's
  * registry gives every key an INDEPENDENT fake connection with a real
  * dispose, and the connect form's candidates are fakes of their own. A case
  * can therefore see an idle connection, a destroyed one, and which one an
  * RPC went over (`rpc@<key>:<name>`). */
-/** The registry key of the connection whose api is being called right now
- * (set around each mocked RPC): a mock that answers PER SERVER reads it. */
-let askingKey = '';
-const asking = () => askingKey;
 function withSlot<M extends Record<string, any>>(module: M, candidateAt?: (url: string) => Promise<string> | string): M {
   const m = module as Record<string, any>;
   const calls: string[] | undefined = m.__calls;
@@ -465,11 +465,11 @@ const savedNav = (serverId: string, target: string, cells: readonly string[] = [
 type MachineAt = (url: string, n: number) => string;
 const byAddress: MachineAt = (url) => (url.includes('//b') ? 'm-b' : 'm-a');
 
-/** A transport that answers as whichever machine the address belongs to, and
- * that a case can DROP — which is how a failover begins. */
 /** Hold a dial before it answers: resolve the returned promise to let it. */
 type DialGate = (url: string, n: number) => Promise<void> | null;
 
+/** A transport that answers as whichever machine the address belongs to, and
+ * that a case can DROP — which is how a failover begins. */
 function twoServerTransport(calls: string[], machineAt: MachineAt = byAddress, extra: Record<string, unknown> = {}, gate: DialGate = () => null,
   /** What a dial a later one REPLACED does when it is let go: answer anyway
    * (a slow socket's late auth), or fail as `Connection` fails a superseded
@@ -2008,14 +2008,14 @@ const refusing = (keys: string[]) => {
     },
   };
 };
+/** `inert`, however Svelte set it: jsdom has no `inert` property of its own,
+ * so it may land as an attribute or as the property. */
+const isInert = (el: any) => el.hasAttribute('inert') || el.inert === true;
 /** While the app is blocked on its storage, the server tree is HELD, not
  * gone (board #335 ③a; orchestrator 08:17, one mechanism, Single included):
  * every server page that is mounted sits inside the inert, hidden wrapper,
  * where no input reaches it and the write gate holds what it writes. Before
  * ③a these cases asserted that no server page was mounted at all. */
-/** `inert`, however Svelte set it: jsdom has no `inert` property of its own,
- * so it may land as an attribute or as the property. */
-const isInert = (el: any) => el.hasAttribute('inert') || el.inert === true;
 const assertHeldTree = (app: any, what: string, opts: { source?: boolean; fresh?: boolean } = {}) => {
   const pages = [...app.document.querySelectorAll('.term-page, .files-page, .file-main')];
   // A first boot that never passed its gates has nothing to hold: no server
@@ -4363,14 +4363,14 @@ test('P1-4 (reviewer 15:06; orchestrator 16:32): an alert on a live background a
 // ─── #335 ③b-2: the focus moves between members; a leave walk asks the
 // member being destroyed, on its own tree ──────────────────────────────
 
-/** Pick `name` from the server list in Settings → Connection, opening it
- * first unless it is already on screen (a focus move leaves the page where
- * it was). */
 /** A Settings › Connection row's pick button, and its text (#458). */
 const rowOf = (h: Awaited<ReturnType<typeof bootApp>>, name: string) => [...h.app.document.querySelectorAll<HTMLButtonElement>('.preferences .sm-pick')]
   .find((b) => b.querySelector('.sm-name')?.textContent === name);
 const rowText = (h: Awaited<ReturnType<typeof bootApp>>, name: string) => rowOf(h, name)?.textContent ?? '';
 
+/** Pick `name` from the server list in Settings → Connection, opening it
+ * first unless it is already on screen (a focus move leaves the page where
+ * it was). */
 async function pickServer(h: Awaited<ReturnType<typeof bootApp>>, name: string) {
   const row = () => [...h.app.document.querySelectorAll<HTMLButtonElement>('.preferences button')]
     .find((b) => new RegExp(`^${name}\\b`, 'iu').test((b.textContent ?? '').trim()));
@@ -4947,8 +4947,6 @@ test('P1-1 / #458: Aggregate, picking a member that is not connected moves nothi
 });
 
 // ─── #458: a picker's row is the person's choice of focus ───────────────
-/** Three saved servers, Aggregate, CURRENT alpha. beta's and charlie's own
- * dials hang (`hold`) or fail (`down`) until let go; alpha is up. */
 /** Web Crypto whose digest of one (address, token) text is held until the
  * test lets it go (`hold` returns the promise to wait on, or null). */
 function holdDigests(window: any, hold: (text: string) => Promise<void> | null) {
@@ -4958,6 +4956,8 @@ function holdDigests(window: any, hold: (text: string) => Promise<void> | null) 
     : ((v) => (typeof v === 'function' ? v.bind(t) : v))(Reflect.get(t, k))) });
   Object.defineProperty(window, 'crypto', { value: { subtle, getRandomValues: real.getRandomValues.bind(real), randomUUID: real.randomUUID.bind(real) }, configurable: true });
 }
+/** Three saved servers, Aggregate, CURRENT alpha. beta's and charlie's own
+ * dials hang (`hold`) or fail (`down`) until let go; alpha is up. */
 async function choiceWorld(context: TestContext, opts: { down?: string[]; refuse?: string[]; rpc?: Record<string, unknown>; page?: string; bAs?: string; seed?: Record<string, string>; holdDigest?: (text: string) => Promise<void> | null; noTick?: boolean } = {}) {
   /** The page's `navigator.connection`, so a test can say the network changed. */
   let network: EventTarget | null = null;
