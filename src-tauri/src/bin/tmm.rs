@@ -2960,14 +2960,6 @@ async fn try_rpc(ctx: &Ctx, method: &str, params: Value) -> Result<Value, (i32, 
 /// marker as a literal, so tmm sends none of the six to it.
 const MCP_MASKED: &str = "mcp_masked";
 
-/// `rpc` for a call that only an up-to-date server can do (board #377): the
-/// login answer's `caps` is read BEFORE the call is sent, so a server that
-/// lacks `need` is refused with nothing written. Without this a `tmm board
-/// assign` against an older gateway would save a label no agent is ever told
-/// about and print a success line.
-/// What a write needing `need` says when the server's login lacks it (board
-/// #377; #382 for `spawn_join`): what it cannot do, how to get it, and that
-/// nothing was written.
 /// The list row's tail for an issue that is still blocked (board #43):
 /// ` · blocked by #38`. An issue whose blockers are all done says nothing.
 fn blocked_note(issue: &Value) -> String {
@@ -2991,6 +2983,14 @@ fn issue_numbers(raw: &str, verb: &str) -> Vec<i64> {
     }
 }
 
+/// `rpc` for a call that only an up-to-date server can do (board #377): the
+/// login answer's `caps` is read BEFORE the call is sent, so a server that
+/// lacks `need` is refused with nothing written. Without this a `tmm board
+/// assign` against an older gateway would save a label no agent is ever told
+/// about and print a success line.
+/// What a write needing `need` says when the server's login lacks it (board
+/// #377; #382 for `spawn_join`): what it cannot do, how to get it, and that
+/// nothing was written.
 fn cap_refusal(need: &str) -> String {
     match need {
         MCP_MASKED => format!(
