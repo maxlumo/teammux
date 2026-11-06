@@ -419,11 +419,6 @@
   const live = () => bound()?.connection ?? null;
   /** The bound server's centre: what its Hub records into and jumps from. */
   const focusCentre = $derived(serverStates.get(scopeRuntime)?.centre ?? noServerCentre);
-  /** The bell's UNION over the included servers (③c-4, `centre-union`):
-   * every member's list — the focus's and each background member's, in
-   * saved order — tagged by the ③c-1 rule; a member not connected right now
-   * is listed unavailable (D6: shown, not counted read, not cleared). Single
-   * includes one server, so the union is that server's list, as before. */
   /** A saved server's index when NO runtime holds it (reviewer P1-C3 on
    * 018d4fa5: a member that never came up — offline from boot, refusing its
    * token — still has its own slot's alerts, and D6 says an unreachable
@@ -439,6 +434,11 @@
     if (!log) { log = createAlertLog(createServerStore(localStorage, id, writeGate)); indexOnlyLogs.set(id, log); }
     return log;
   };
+  /** The bell's UNION over the included servers (③c-4, `centre-union`):
+   * every member's list — the focus's and each background member's, in
+   * saved order — tagged by the ③c-1 rule; a member not connected right now
+   * is listed unavailable (D6: shown, not counted read, not cleared). Single
+   * includes one server, so the union is that server's list, as before. */
   const centreSources = $derived.by(() => {
     // The ACTIVE owner of each id (P1-C3 (c)): the focus always; among the
     // members a published one over an orphan — a retained editor's old
@@ -581,13 +581,13 @@
     if (next && !views.has(next) && held && held.id !== entry.id && mergedInto(localStorage, held.id) === entry.id) views.set(next, viewOf(held));
     return { keep: false, runtime: next };
   }
-  /** Server `id`'s state for a runtime about to be bound: fresh from its own
-   * slots, or — when identity repair folded the bound handle's id into `id` —
-   * that same machine's Files record handed over. */
   /** A server's state over its own store, behind the write gate: the ONE
    * place one is built (a bound server's through `stateFor`, a background
    * member's at its publish). */
   function freshState(id) { return createServerState(createServerStore(localStorage, id, writeGate)); }
+  /** Server `id`'s state for a runtime about to be bound: fresh from its own
+   * slots, or — when identity repair folded the bound handle's id into `id` —
+   * that same machine's Files record handed over. */
   function stateFor(id) {
     const held = scopeSwap.bound();
     const replaced = held ? { id: held.id, state: serverStates.get(held) } : null;
@@ -1872,31 +1872,6 @@
     });
   }
 
-  /** The socket now answers as ANOTHER saved entry: a boot dial's
-   * `elsewhere` (reviewer P1-a on cc5e517e), or an automatic reconnect whose
-   * address reached a different known machine (reviewer, 18:54 on
-   * 5ca0e79e). Two different facts arrive as that one verdict:
-   *
-   *   - the entry was an address-only alias of that machine, and identity
-   *     repair ABSORBED it: CURRENT already names the canonical entry, so the
-   *     app simply comes up on it;
-   *   - both entries are known machines and BOTH stay: the address that used
-   *     to reach A reaches B now. CURRENT still names A, and bringing the app
-   *     up would rebuild A's runtime over B's socket. The socket is B's, so
-   *     the app ARRIVES at B the way the connect page arrives at a different
-   *     server — CURRENT moves to B (`activateConnected`), and the app comes
-   *     up on B through the swap (`onConnected(true)`).
-   *
-   * Arriving destroys A's tree, so A's editors are asked FIRST, through the
-   * one leave walk: losing the socket is not consent to discard local edits.
-   * On a fresh boot nothing is dirty and the walk asks nothing. A "stay"
-   * keeps A's tree with its handle still refusing (`hold`), closes B's
-   * socket, and says why on the connect page — and nothing automatic dials
-   * again (`heldOffline`) until the person connects. While the walk asks,
-   * the socket is held: no reconnect, address change or second walk starts
-   * (`serverSwitch.guard`). `attempt` is the claim or handover the socket
-   * was taken under: if someone else took it anyway, this arrival is not
-   * the app's any more and does nothing. */
   /** Before an arrival replaces the tree that is bound, ask its pages (the
    * leave guards): true to go on, false when the person keeps editing — the
    * app then stays on the source, offline, with what was typed — and null
@@ -1924,6 +1899,31 @@
     }
     return leave;
   }
+  /** The socket now answers as ANOTHER saved entry: a boot dial's
+   * `elsewhere` (reviewer P1-a on cc5e517e), or an automatic reconnect whose
+   * address reached a different known machine (reviewer, 18:54 on
+   * 5ca0e79e). Two different facts arrive as that one verdict:
+   *
+   *   - the entry was an address-only alias of that machine, and identity
+   *     repair ABSORBED it: CURRENT already names the canonical entry, so the
+   *     app simply comes up on it;
+   *   - both entries are known machines and BOTH stay: the address that used
+   *     to reach A reaches B now. CURRENT still names A, and bringing the app
+   *     up would rebuild A's runtime over B's socket. The socket is B's, so
+   *     the app ARRIVES at B the way the connect page arrives at a different
+   *     server — CURRENT moves to B (`activateConnected`), and the app comes
+   *     up on B through the swap (`onConnected(true)`).
+   *
+   * Arriving destroys A's tree, so A's editors are asked FIRST, through the
+   * one leave walk: losing the socket is not consent to discard local edits.
+   * On a fresh boot nothing is dirty and the walk asks nothing. A "stay"
+   * keeps A's tree with its handle still refusing (`hold`), closes B's
+   * socket, and says why on the connect page — and nothing automatic dials
+   * again (`heldOffline`) until the person connects. While the walk asks,
+   * the socket is held: no reconnect, address change or second walk starts
+   * (`serverSwitch.guard`). `attempt` is the claim or handover the socket
+   * was taken under: if someone else took it anyway, this arrival is not
+   * the app's any more and does nothing. */
   async function arrivedElsewhere(result, attempt, chain = null) {
     if (migrationBlocked) { connected = false; return t('migrationBlockedNote'); }
     // Someone took over since the dial (a newer connect, a switch): this
@@ -2867,9 +2867,6 @@
   function switchAddress(address) { void serverSwitch.retryAt(address); }
   function switchBack() { void serverSwitch.back(loadServers(localStorage)); }
 
-  /** The `+` row: the Settings connect form IS the add flow (it upserts by
-   *  address on success), so the row only takes you there. No disconnect —
-   *  the current server stays live until the new one authenticates. */
   /** The `+` row and the failed panel's Edit: the connect fields in a
    * dialog inside the shell (board 315). Open/cancel write nothing; submit is
    * the one switch path. */
@@ -3305,16 +3302,6 @@
     view.navRestored = target;
   }
 
-  /** The navigation the app comes up with, for ONE confirmed runtime.
-   *
-   * It runs after that runtime is actually bound (reviewer P1-a): the swap
-   * shows nothing for a tick, and filtering against that emptiness dropped
-   * every pane of the server being brought up — an ordinary A→B→A lost both
-   * sides' terminal and split. A restore for a runtime that is no longer the
-   * one on screen does nothing, so a stale swap cannot restore over a later
-   * one's work, and the saved-state effect waits until the restore for the
-   * bound runtime has finished (`navRestored`) rather than writing an empty
-   * navigation over the record it was about to read. */
   /** Fill ONE tree's view from its server's saved navigation (③b-1): the
    * pane and the split, filtered to this runtime, and dropped again if its
    * session has gone. The focused restore and a background member's both go
@@ -3354,6 +3341,16 @@
     return s;
   }
 
+  /** The navigation the app comes up with, for ONE confirmed runtime.
+   *
+   * It runs after that runtime is actually bound (reviewer P1-a): the swap
+   * shows nothing for a tick, and filtering against that emptiness dropped
+   * every pane of the server being brought up — an ordinary A→B→A lost both
+   * sides' terminal and split. A restore for a runtime that is no longer the
+   * one on screen does nothing, so a stale swap cannot restore over a later
+   * one's work, and the saved-state effect waits until the restore for the
+   * bound runtime has finished (`navRestored`) rather than writing an empty
+   * navigation over the record it was about to read. */
   async function restoreNavFor(target) {
     await scopeSwap.settled();
     if (!target || scopeSwap.shown() !== target) return;
