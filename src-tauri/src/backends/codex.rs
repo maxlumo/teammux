@@ -793,8 +793,8 @@ struct PaneThread {
 /// Board #29, measured on codex-cli 0.166.0 (scratch CODEX_HOME): `/new`
 /// creates `thread-writer-locks/<new thread id>.lock` at once, and the new
 /// thread's rollout (`sessions/YYYY/MM/DD/rollout-…-<id>.jsonl`) only at its
-/// first prompt; no hook, no session index entry, no database row changes
-/// before that. A window kill leaves the locks; the next codex start
+/// first prompt; no hook fires and no session index entry is written
+/// before that (codex's database was not compared: the dumps were empty). A window kill leaves the locks; the next codex start
 /// removes those of threads it does not run (a fresh start keeps only its
 /// own, `resume <id>` only that id's). So the NEWEST lock (mtime) names the
 /// thread the pane was in. Without a rollout it is an empty new
@@ -806,21 +806,26 @@ struct PaneThread {
 /// measured version (`NEW_THREAD_MEASURED`). A thread the hub saw as a
 /// sub-agent child (`CHILD_THREADS`) is never taken for the pane's own: a
 /// wrong fresh start loses a live conversation, which is worse than
-/// reviving a cleared one. `None` when the locks cannot be read or none
-/// qualifies.
+/// reviving a cleared one. `None` when none qualifies, or when anything
+/// the choice rests on cannot be read (the child record, a lock entry or its
+/// mtime, a sessions directory): "cannot tell" never resumes a lock's id
+/// (review rounds 1 and 2).
 fn pane_thread(home: &std::path::Path) -> Option<PaneThread> {
     let codex = home.join("codex");
-    let children = std::fs::read_to_string(home.join(CHILD_THREADS)).unwrap_or_default();
-    let locks = std::fs::read_dir(codex.join("thread-writer-locks")).ok()?;
-    let (_, id) = locks
-        .flatten()
-        .filter_map(|e| {
-            let name = e.file_name().to_str()?.strip_suffix(".lock")?.to_string();
-            let when = e.metadata().ok()?.modified().ok()?;
-            Some((when, name))
-        })
-        .filter(|(_, id)| is_thread_id(id) && !children.lines().any(|c| c == id))
-        .max()?;
+    let children = read_child_threads(home).ok()?;
+    let mut newest: Option<(std::time::SystemTime, String)> = None;
+    for e in std::fs::read_dir(codex.join("thread-writer-locks")).ok()? {
+        let e = e.ok()?;
+        let Some(id) = e.file_name().to_str().and_then(|n| n.strip_suffix(".lock")).map(str::to_string) else { continue };
+        if !is_thread_id(&id) || children.lines().any(|c| c == id) {
+            continue;
+        }
+        let when = e.metadata().ok()?.modified().ok()?;
+        if newest.as_ref().is_none_or(|n| (when, &id) > (n.0, &n.1)) {
+            newest = Some((when, id));
+        }
+    }
+    let (_, id) = newest?;
     let has_rollout = has_rollout(&codex.join("sessions"), &id)?;
     Some(PaneThread { id, has_rollout })
 }
@@ -843,7 +848,16 @@ fn has_rollout(sessions: &std::path::Path, id: &str) -> Option<bool> {
     let suffix = format!("-{id}.jsonl");
     let dirs = |p: &std::path::Path| -> Option<Vec<std::path::PathBuf>> {
         match std::fs::read_dir(p) {
-            Ok(d) => Some(d.flatten().map(|e| e.path()).filter(|p| p.is_dir()).collect()),
+            Ok(d) => {
+                let mut out = Vec::new();
+                for e in d {
+                    let e = e.ok()?;
+                    if std::fs::metadata(e.path()).ok()?.is_dir() {
+                        out.push(e.path());
+                    }
+                }
+                Some(out)
+            }
             Err(e) if e.kind() == std::io::ErrorKind::NotFound => Some(Vec::new()),
             Err(_) => None,
         }
@@ -851,9 +865,10 @@ fn has_rollout(sessions: &std::path::Path, id: &str) -> Option<bool> {
     for y in dirs(sessions)? {
         for m in dirs(&y)? {
             for d in dirs(&m)? {
-                let files = std::fs::read_dir(&d).ok()?;
-                if files.flatten().any(|f| f.file_name().to_str().is_some_and(|n| n.starts_with("rollout-") && n.ends_with(&suffix))) {
-                    return Some(true);
+                for f in std::fs::read_dir(&d).ok()? {
+                    if f.ok()?.file_name().to_str().is_some_and(|n| n.starts_with("rollout-") && n.ends_with(&suffix)) {
+                        return Some(true);
+                    }
                 }
             }
         }
@@ -868,13 +883,25 @@ pub(crate) const NEW_THREAD_MEASURED: &str = "0.166.0";
 /// sub-agent children (hook payloads carry `agent_id`, board #169).
 pub(crate) const CHILD_THREADS: &str = "codex-child-threads";
 
-/// Record `id` as a sub-agent child thread of this home (once).
+/// The child record's text. A record that does not exist yet holds no
+/// children; one that exists but cannot be read is an error, never empty
+/// (review round 2 P1-R1: read as empty, it let a known child's lock pass
+/// for the pane's own thread, and the writer replaced the whole list).
+fn read_child_threads(home: &std::path::Path) -> std::io::Result<String> {
+    match std::fs::read_to_string(home.join(CHILD_THREADS)) {
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(String::new()),
+        r => r,
+    }
+}
+
+/// Record `id` as a sub-agent child thread of this home (once). An
+/// unreadable record is left as it is and reported.
 pub(crate) fn note_child_thread(home: &std::path::Path, id: &str) -> Result<(), String> {
     if !super::shared::exact_id_ok(id) {
         return Ok(());
     }
     let path = home.join(CHILD_THREADS);
-    let mut known = std::fs::read_to_string(&path).unwrap_or_default();
+    let mut known = read_child_threads(home).map_err(|e| format!("{}: {e}; left as it is", path.display()))?;
     if known.lines().any(|l| l == id) {
         return Ok(());
     }

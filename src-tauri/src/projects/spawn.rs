@@ -1968,6 +1968,27 @@ mod relaunch_tests {
             std::fs::set_permissions(&sessions, std::fs::Permissions::from_mode(0o755)).unwrap();
             assert_eq!(unreadable, resume(old), "cannot tell: never `resume <lock id>`");
         }
+        // Review round 2 P1-R1: the child record exists but cannot be read.
+        // A known child may hold the newest lock, so the lock reading is
+        // unknown: today's line, never `resume <lock id>`; and the writer
+        // leaves the record as it is instead of replacing it.
+        {
+            use std::os::unix::fs::PermissionsExt;
+            let record = home.join(crate::backends::codex::CHILD_THREADS);
+            let child_dir = std::fs::create_dir(&record);
+            child_dir.unwrap();
+            assert_eq!(line(Some(old)), resume(old), "an unreadable child record (a directory): never `resume <lock id>`");
+            std::fs::remove_dir(&record).unwrap();
+            std::fs::write(&record, format!("{new}\n")).unwrap();
+            std::fs::set_permissions(&record, std::fs::Permissions::from_mode(0o000)).unwrap();
+            let unreadable = line(Some(old));
+            let noted = crate::backends::codex::note_child_thread(&home, "01a1acf4-0000-7000-8000-000000000001");
+            std::fs::set_permissions(&record, std::fs::Permissions::from_mode(0o644)).unwrap();
+            assert_eq!(unreadable, resume(old), "an unreadable child record naming the newest lock: never resume the child");
+            assert!(noted.is_err(), "an unreadable record is reported, not taken as empty");
+            assert_eq!(std::fs::read_to_string(&record).unwrap(), format!("{new}\n"), "an unreadable record is not overwritten");
+            std::fs::remove_file(&record).unwrap();
+        }
         crate::backends::codex::set_test_version(Some("0.167.0"));
         assert_eq!(line(Some(old)), resume(old), "an unmeasured version keeps the recorded id");
         crate::backends::codex::set_test_version(Some("0.166.0"));
