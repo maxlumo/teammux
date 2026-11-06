@@ -10,7 +10,7 @@ import { mkdtempSync, rmSync, statSync, readFileSync, chmodSync, realpathSync, m
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import test from 'node:test';
-import { cliExecutables, configChanges, leaks, outsideLinks, realConfigHashes, runScratch } from './scratch-env.mjs';
+import { cliExecutables, configChanges, inLiveRig, leaks, outsideLinks, realConfigHashes, runScratch } from './scratch-env.mjs';
 
 const nul = (pairs: string[]) => pairs.join('\0') + '\0';
 
@@ -41,11 +41,11 @@ test('run writes the private config BEFORE the first launch, so a gateway never 
     const cfg = join(dir, 'xdg-config', 'teammux', 'config.toml');
     let seen = '';
     const spawn = () => { seen = readFileSync(cfg, 'utf8'); return { pid: 7, unref() {} }; };
-    runScratch({ dir, argv: ['./server'], env: { PATH: '/bin' }, spawn, port: 19950 });
+    runScratch({ inRig: true, dir, argv: ['./server'], env: { PATH: '/bin' }, spawn, port: 19950 });
     assert.match(seen, /^host = "127\.0\.0\.1"\nport = 19950\ntoken = "[0-9a-f]{32}"\n$/u, 'the config the process starts on');
     assert.equal(statSync(cfg).mode & 0o777, 0o600);
-    assert.throws(() => runScratch({ dir, argv: ['./server'], env: {}, spawn, port: 9899 }), /9899/, 'the live default port is refused');
-    for (const bad of [0, 70000, 1.5]) assert.throws(() => runScratch({ dir, argv: ['./server'], env: {}, spawn, port: bad }), /port/);
+    assert.throws(() => runScratch({ inRig: true, dir, argv: ['./server'], env: {}, spawn, port: 9899 }), /9899/, 'the live default port is refused');
+    for (const bad of [0, 70000, 1.5]) assert.throws(() => runScratch({ inRig: true, dir, argv: ['./server'], env: {}, spawn, port: bad }), /port/);
   } finally { rmSync(root, { recursive: true, force: true }); }
 });
 
@@ -59,7 +59,7 @@ test('run starts the command with the isolated env in a dir private on every lev
       calls.push({ cmd, args, env: opts.env });
       return { pid: 4242, unref() {} };
     };
-    const pid = runScratch({ dir, argv: ['./server', '--flag'], env: { PATH: '/bin', TMUX: '/tmp/tmux-1000/default,1,0', TMUX_PANE: '%1', TMM_SOCKET: '/live.sock', TOKEN: 't' }, spawn });
+    const pid = runScratch({ inRig: true, dir, argv: ['./server', '--flag'], env: { PATH: '/bin', TMUX: '/tmp/tmux-1000/default,1,0', TMUX_PANE: '%1', TMM_SOCKET: '/live.sock', TOKEN: 't' }, spawn });
     assert.equal(pid, 4242);
     assert.equal(calls.length, 1);
     assert.deepEqual([calls[0]!.cmd, calls[0]!.args], ['./server', ['--flag']]);
@@ -75,7 +75,7 @@ test('run starts the command with the isolated env in a dir private on every lev
     assert.equal(readFileSync(join(dir, 'pid'), 'utf8').trim(), '4242');
     // An existing, too-open level is tightened, not trusted.
     chmodSync(join(dir, 'xdg-config'), 0o775);
-    runScratch({ dir, argv: ['./server'], env: { PATH: '/bin' }, spawn });
+    runScratch({ inRig: true, dir, argv: ['./server'], env: { PATH: '/bin' }, spawn });
     assert.equal(statSync(join(dir, 'xdg-config')).mode & 0o777, 0o700);
   } finally { rmSync(root, { recursive: true, force: true }); }
 });
@@ -84,10 +84,10 @@ test('run refuses a dir that is not a fresh private path of ours, and a missing 
   const root = mkdtempSync(join(tmpdir(), 'scratch-env-test-'));
   try {
     const spawn = () => { throw new Error('must not start'); };
-    assert.throws(() => runScratch({ dir: '', argv: ['./server'], env: {}, spawn }), /a scratch dir/);
-    assert.throws(() => runScratch({ dir: join(root, 'gw'), argv: [], env: {}, spawn }), /a command/);
-    assert.throws(() => runScratch({ dir: 'relative/gw', argv: ['./server'], env: {}, spawn }), /absolute/);
-    assert.throws(() => runScratch({ dir: '/tmp', argv: ['./server'], env: {}, spawn }), /not your own/, 'a shared dir is never tightened or used');
+    assert.throws(() => runScratch({ inRig: true, dir: '', argv: ['./server'], env: {}, spawn }), /a scratch dir/);
+    assert.throws(() => runScratch({ inRig: true, dir: join(root, 'gw'), argv: [], env: {}, spawn }), /a command/);
+    assert.throws(() => runScratch({ inRig: true, dir: 'relative/gw', argv: ['./server'], env: {}, spawn }), /absolute/);
+    assert.throws(() => runScratch({ inRig: true, dir: '/tmp', argv: ['./server'], env: {}, spawn }), /not your own/, 'a shared dir is never tightened or used');
   } finally { rmSync(root, { recursive: true, force: true }); }
 });
 
@@ -185,7 +185,7 @@ test('run starts the command with every CLI\'s documented no-update switch, and 
     const dir = join(root, 'gw');
     let env: Record<string, string | undefined> = {};
     const spawn = (_c: string, _a: string[], opts: { env: Record<string, string | undefined> }) => { env = opts.env; return { pid: 9, unref() {} }; };
-    runScratch({ dir, argv: ['./server'], env: { PATH: '/bin', DISABLE_AUTOUPDATER: '0' }, spawn, home: join(root, 'home') });
+    runScratch({ inRig: true, dir, argv: ['./server'], env: { PATH: '/bin', DISABLE_AUTOUPDATER: '0' }, spawn, home: join(root, 'home') });
     for (const [k, v] of Object.entries(UPDATE_SWITCHES)) assert.equal(env[k], v, k);
   } finally { rmSync(root, { recursive: true, force: true }); }
   const dir = '/tmp/b3-x/gw';
@@ -280,7 +280,7 @@ test('the private server env: confirmed absent is no server; any other tmux erro
   assert.deepEqual(serverEnvVerdict({ status: 0, stdout: 'A=1\n-B\nC=2\n', stderr: '' }), { environ: 'A=1\0C=2\0' });
 });
 
-test('check, the command: an unreadable link dir fails it with the reason and never prints the all-clear line (#48 round 1)', { skip: process.platform !== 'linux' || process.getuid?.() === 0 }, async () => {
+test('check, the command: an unreadable link dir fails it with the reason and never prints the all-clear line (#48 round 1)', { skip: process.platform !== 'linux' || process.getuid?.() === 0 ? 'linux, not root' : !existsSync('/.dockerenv') ? 'runs scratch-env itself: only inside a container (#55; node scripts/isolated.mjs -- pnpm test)' : false }, async () => {
   const { spawnSync } = await import('node:child_process');
   const { mkdirSync } = await import('node:fs');
   const root = mkdtempSync(join(tmpdir(), 'scratch-env-test-'));
@@ -288,7 +288,7 @@ test('check, the command: an unreadable link dir fails it with the reason and ne
   const bin = join(home, '.local', 'bin');
   const dir = join(root, 'gw');
   const script = join(import.meta.dirname, 'scratch-env.mjs');
-  const env = { ...process.env, HOME: home };
+  const env = { ...process.env, HOME: home, TMM_LIVE_RIG_MARKER: rigMarker() };
   try {
     mkdirSync(bin, { recursive: true });
     assert.equal(spawnSync(process.execPath, [script, 'run', dir, '--', '/bin/sleep', '20'], { env }).status, 0);
@@ -408,7 +408,7 @@ test('run gives the scratch a COPY of the user codex config the render links, ne
     const dir = join(root, 'gw');
     let env: Record<string, string | undefined> = {};
     const spawn = (_c: string, _a: string[], opts: { env: Record<string, string | undefined> }) => { env = opts.env; return { pid: 7, unref() {} }; };
-    runScratch({ dir, argv: ['./server'], env: { PATH: '/bin', HOME: home }, spawn, home });
+    runScratch({ inRig: true, dir, argv: ['./server'], env: { PATH: '/bin', HOME: home }, spawn, home });
     const copy = join(dir, 'codex-user');
     assert.equal(env.CODEX_HOME, copy, 'the gateway renders from the copy');
     for (const name of ['config.toml', 'personal.config.toml', 'auth.json']) {
@@ -502,14 +502,14 @@ test('run refuses a link at the copy dir, replaces a symlink or hard link at a f
     const dir = join(root, 'gw');
     mkdirSync(dir, { mode: 0o700 });
     symlinkSync(victim, join(dir, 'codex-user'));
-    assert.throws(() => runScratch({ dir, argv: ['./server'], env: { PATH: '/bin', HOME: home }, spawn, home }), /codex-user/);
+    assert.throws(() => runScratch({ inRig: true, dir, argv: ['./server'], env: { PATH: '/bin', HOME: home }, spawn, home }), /codex-user/);
     const dir2 = join(root, 'gw2');
     mkdirSync(join(dir2, 'codex-user'), { recursive: true, mode: 0o700 });
     symlinkSync(join(victim, 'config.toml'), join(dir2, 'codex-user', 'config.toml'));
     writeFileSync(join(victim, 'auth.json'), 'theirs\n', { mode: 0o644 });
     linkSync(join(victim, 'auth.json'), join(dir2, 'codex-user', 'auth.json')); // a HARD link (reviewer 14:51)
     const inodes = ['config.toml', 'auth.json'].map((n) => statSync(join(victim, n)).ino);
-    runScratch({ dir: dir2, argv: ['./server'], env: { PATH: '/bin', HOME: home }, spawn, home });
+    runScratch({ inRig: true, dir: dir2, argv: ['./server'], env: { PATH: '/bin', HOME: home }, spawn, home });
     for (const name of ['config.toml', 'auth.json']) {
       const st = lstatSync(join(dir2, 'codex-user', name));
       assert.ok(st.isFile() && !st.isSymbolicLink() && st.nlink === 1, `${name}: a fresh file of its own`);
@@ -544,5 +544,27 @@ test('an unreadable scratch subtree or real config file is a failure by path, ne
     try {
       assert.ok(configChanges(before, realConfigHashes(home, {})).some((l) => l.includes(join(home, '.codex')) && l.includes('EACCES')), 'an unreadable codex home is not an empty one');
     } finally { chmodSync(join(home, '.codex'), 0o755); }
+  } finally { rmSync(root, { recursive: true, force: true }); }
+});
+
+// Board #55 (owner, 2026-11-06 15:07): "do not test on this machine". scratch-env runs only inside
+// the Docker live rig, whose image alone carries the marker; on the host it refuses and names the
+// command to use.
+/** A marker file for the one test that runs scratch-env itself, inside a container. */
+const rigMarker = () => { const m = join(mkdtempSync(join(tmpdir(), 'scratch-env-rig-')), 'marker'); writeFileSync(m, ''); return m; };
+
+test('run refuses outside the Docker live rig and names the command to use (#55)', () => {
+  const root = mkdtempSync(join(tmpdir(), 'scratch-env-test-'));
+  try {
+    let spawned = false;
+    const spawn = () => { spawned = true; return { pid: 7, unref() {} }; };
+    assert.throws(() => runScratch({ dir: join(root, 'gw'), argv: ['./server'], env: { PATH: '/bin' }, spawn, inRig: false }), /only inside the Docker live rig.*pnpm run test:live:docker/su);
+    assert.ok(!spawned && !existsSync(join(root, 'gw')), 'nothing started, nothing written');
+    const marker = join(root, 'marker'), dockerenv = join(root, '.dockerenv');
+    assert.equal(inLiveRig({ marker, dockerenv }), false);
+    writeFileSync(marker, '');
+    assert.equal(inLiveRig({ marker, dockerenv }), false, 'the marker alone is not a container');
+    writeFileSync(dockerenv, '');
+    assert.equal(inLiveRig({ marker, dockerenv }), true);
   } finally { rmSync(root, { recursive: true, force: true }); }
 });
