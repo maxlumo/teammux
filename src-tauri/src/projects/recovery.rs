@@ -799,6 +799,17 @@ fn commit_provider(session: &str, window: &str, (turn, text): (String, String), 
     }
 }
 
+/// Record the turn end the hooks missed for an ORDINARY failure the CLI
+/// ended the turn on (board #52; codex 0.166.0's max_output_tokens, a 429):
+/// plain rest, idle + `last_turn_failed` (#354), with no notice. Once per
+/// turn, by the CLI's own turn id (`error|<turn_id>`, the same durable
+/// identity rule as #39's `provider|<turn_id>`), against the turn version
+/// read before the observation. True when accepted.
+fn commit_failed(session: &str, window: &str, turn: &str, seen: u64) -> bool {
+    use super::telemetry::{record_missed_end, Identity, Missed, FAILED_DETAIL};
+    matches!(record_missed_end(session, window, FAILED_DETAIL, Identity::Paint(&format!("error|{turn}")), seen), Missed::Ended | Missed::Attached)
+}
+
 /// Record the turn end the hooks missed for an EXHAUSTED recovery decision
 /// (capped or given up): once per incident (`Identity::Incident`, review
 /// P1-D), the mark committed only when telemetry accepted it. `seen` is the
@@ -927,9 +938,15 @@ pub fn check_once() {
                 .then(|| super::telemetry::cli_turn(&project.session, &p.window_name))
                 .flatten();
             if let Some(found) = open.and_then(|turn| Some((super::managed_home(&project.session, &p.window_name)?, turn)))
-                .and_then(|(home, turn)| crate::backends::Backend::parse(backend)?.provider_end(&home, &turn))
+                .and_then(|(home, turn)| crate::backends::Backend::parse(backend)?.failed_end(&home, &turn))
             {
-                commit_provider(&project.session, &p.window_name, found, seen);
+                // A failure a person must clear keeps its detail and its one
+                // notice (#39); any other error the CLI ended the turn on is
+                // plain rest, said to nobody (board #52, #354).
+                match found {
+                    (turn, Some(text)) => commit_provider(&project.session, &p.window_name, (turn, text), seen),
+                    (turn, None) => commit_failed(&project.session, &p.window_name, &turn, seen),
+                };
                 continue;
             }
             let Ok(tail) = crate::tmux::capture_pane_plain(&target, Some(0)) else { continue };
@@ -1532,10 +1549,12 @@ mod tests {
     /// the turn's requesters and the human. Nothing is typed. An older turn's
     /// error that was never recorded never ends a new prompt (round 1, the
     /// end is bound to the prompt hook's turn id); a newer prompt over the
-    /// same rollout is not ended by the recorded one either, and the next
-    /// real end clears it. A real tmux window, a real managed home.
+    /// same rollout is not ended by the recorded one either. Board #52: an
+    /// ORDINARY error on a turn's own end (max_output_tokens, a 429) ends it
+    /// as plain rest, with no notice. The next real end clears the detail.
+    /// A real tmux window, a real managed home.
     #[test]
-    fn a_codex_turn_its_rollout_ended_on_a_provider_failure_is_ended_and_said_once() {
+    fn a_codex_turn_its_rollout_ended_on_an_error_is_ended_once_and_only_a_provider_failure_is_said() {
         use super::super::telemetry as tm;
         super::super::tests::use_test_store();
         let mut scratch = crate::tmux::Scratch::new("rec-provider");
@@ -1617,11 +1636,48 @@ mod tests {
         }
         assert_eq!(crate::tmux::capture_pane_plain(&format!("{session}:cx"), Some(0)).unwrap_or_default(), typed_before, "nothing typed");
         // A newer prompt over the same rollout: the old error never ends it.
-        tm::record_prompt_outcome(&session, "cx", "[tmm chat 2026-11-05 16:10] human: @cx carry on", None, Some("01a1ac71-0000-7000-8000-000000000002"));
+        let next = "01a1ac71-0000-7000-8000-000000000002";
+        tm::record_prompt_outcome(&session, "cx", "[tmm chat 2026-11-05 16:10] human: @cx carry on", None, Some(next));
         check_once();
         assert_eq!(tm::derive(&session, "cx", 0).state, "running", "the newer turn is open");
         assert_eq!(spy.0.lock().unwrap().len(), 1, "still one notice");
-        // Its real end clears the detail and the text.
+        // Board #52: that turn ends on an ORDINARY error, reviewer's real
+        // max_output_tokens line of 2026-11-06 01:29 (its turn id swapped):
+        // codex sends no end hook, so the rollout ends it, as plain rest
+        // (#354: idle + last_turn_failed), with no notice and no error text.
+        let append = |rows: &[serde_json::Value]| {
+            use std::io::Write as _;
+            let text = rows.iter().map(|v| format!("\n{v}")).collect::<String>();
+            std::fs::OpenOptions::new().append(true).open(&rollout_file).unwrap().write_all(text.as_bytes()).unwrap();
+        };
+        append(&[
+            serde_json::json!({"type":"event_msg","payload":{"type":"task_started","turn_attribution":{"turn_id":next}}}),
+            serde_json::json!({"timestamp":"2026-11-06T01:29:23.149Z","ordinal":1289,"type":"event_msg","payload":{"type":"task_complete","root_turn_id":next,"turn_id":next,"last_agent_message":null,
+                "error":{"message":"Incomplete response returned, reason: max_output_tokens","codex_error_info":"other"},"started_at":1793928323,"completed_at":1793928563,"duration_ms":240062,"time_to_first_token_ms":6424}}),
+        ]);
+        check_once();
+        check_once();
+        let st = tm::derive(&session, "cx", 0);
+        assert_eq!((st.state.as_str(), st.detail.as_str(), st.error.as_str()), ("idle", tm::FAILED_DETAIL, ""), "plain rest");
+        let ends: Vec<(String, String)> = tm::recent_events(&session, 0).into_iter().filter(|e| e.kind == "notif").map(|e| (e.text, e.tool)).collect();
+        assert_eq!(ends.len(), 2, "one end for that turn over two ticks: {ends:?}");
+        assert_eq!(ends[1], ("failed".to_string(), tm::FAILED_DETAIL.to_string()));
+        assert_eq!(spy.0.lock().unwrap().len(), 1, "no notice for an ordinary error");
+        // And a 429 on the next prompt's own turn: the same plain rest.
+        let third = "01a1ac72-0000-7000-8000-000000000003";
+        tm::record_prompt_outcome(&session, "cx", "[tmm chat 2026-11-05 16:20] human: @cx again", None, Some(third));
+        append(&[
+            serde_json::json!({"type":"event_msg","payload":{"type":"task_started","turn_attribution":{"turn_id":third}}}),
+            serde_json::json!({"type":"event_msg","payload":{"type":"task_complete","turn_id":third,"last_agent_message":null,
+                "error":{"message":"unexpected status 429 Too Many Requests","codex_error_info":{"http_connection_failed":{"http_status_code":429}}}}}),
+        ]);
+        check_once();
+        let st = tm::derive(&session, "cx", 0);
+        assert_eq!((st.state.as_str(), st.detail.as_str()), ("idle", tm::FAILED_DETAIL), "a 429 rests too");
+        assert_eq!(spy.0.lock().unwrap().len(), 1, "still one notice");
+        assert_eq!(crate::tmux::capture_pane_plain(&format!("{session}:cx"), Some(0)).unwrap_or_default(), typed_before, "nothing typed");
+        // A new prompt, then its real end, clears the detail and the text.
+        tm::record_prompt_outcome(&session, "cx", "[tmm chat 2026-11-05 16:30] human: @cx last", None, Some("01a1ac73-0000-7000-8000-000000000004"));
         tm::record_notification_with(&session, "cx", "completed", crate::backends::EndQuality::Said);
         let st = tm::derive(&session, "cx", 0);
         assert_eq!((st.state.as_str(), st.detail.as_str(), st.error.as_str()), ("idle", "", ""));

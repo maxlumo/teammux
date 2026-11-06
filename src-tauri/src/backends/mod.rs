@@ -534,17 +534,18 @@ impl Backend {
         }
     }
 
-    /// The open turn's provider failure a person must clear, from the
-    /// CLI's OWN file, for a backend that sends no end hook on it (board #39
-    /// slice 2): `(identity, text)`, the text redacted. `open` is the CLI's
-    /// own id for the open prompt (`telemetry::cli_turn`); only that turn's
-    /// end counts (round 1). codex reads its rollout's newest
-    /// `task_complete`. kiro's managed v2 engine writes no
-    /// record of a failed turn (measured on 2.37.1), so it has none.
+    /// The open turn's FAILED end, from the CLI's OWN file, for a backend
+    /// that sends no end hook on a failed turn (board #39 slice 2, #52):
+    /// `(identity, provider)`, `provider` the redacted text of a failure only
+    /// a person can clear, `None` for an ordinary failure. `open` is the
+    /// CLI's own id for the open prompt (`telemetry::cli_turn`); only that
+    /// turn's end counts. codex reads its rollout's newest `task_complete`.
+    /// kiro's managed v2 engine writes no record of a failed turn (measured
+    /// on 2.37.1), so it has none.
     #[cfg(not(any(target_os = "android", target_os = "ios")))]
-    pub fn provider_end(self, home: &std::path::Path, open: &str) -> Option<(String, String)> {
+    pub fn failed_end(self, home: &std::path::Path, open: &str) -> Option<(String, Option<String>)> {
         match self {
-            Backend::Codex => codex::provider_end(home, open),
+            Backend::Codex => codex::failed_end(home, open),
             _ => None,
         }
     }
@@ -554,7 +555,7 @@ impl Backend {
     /// (`shared::provider_failure`), read from this backend's own hook
     /// payload. `None` for an ordinary failure and for every other event.
     /// codex and kiro send no end hook on such a failure (AC1); codex's is
-    /// read from its own file (`provider_end`).
+    /// read from its own file (`failed_end`).
     pub fn provider_failure(self, payload: &serde_json::Map<String, serde_json::Value>) -> Option<String> {
         match self {
             Backend::Claude => claude::provider_failure(payload),
