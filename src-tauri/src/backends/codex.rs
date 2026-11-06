@@ -715,11 +715,16 @@ pub(crate) fn render_codex(
 /// (`codex resume <id>`, #29), measured on 0.166.0. The banner a fresh start
 /// paints (`OpenAI Codex`, `Starting MCP servers`) is NOT on a resumed screen,
 /// so a restart's ready edge never fired on it (round 1, validator P1-a).
+/// Board #47: a resuming codex paints that placeholder while still
+/// `Resuming session…` and drops an Enter typed then (7/7 saved failures).
+/// Not ready while it shows: typing only once it is gone submitted 15/15
+/// mid-turn resumes, 6/6 idle resumes and a fresh start.
 #[cfg(not(any(target_os = "android", target_os = "ios")))]
 pub(crate) fn startup_confirmation() -> Option<shared::StartupConfirmation> {
     Some(shared::StartupConfirmation {
         markers: shared::CODEX_FOLDER_TRUST_MARKERS.to_vec(),
         ready_markers: vec!["Ask Codex to do anything"],
+        not_ready_markers: vec!["Resuming session"],
         accept_keys: vec!["Enter"],
         timeout: std::time::Duration::from_secs(120),
     })
@@ -1107,6 +1112,22 @@ pub(crate) fn set_up_need_in(home: &std::path::Path) -> super::readiness::Need {
 
 #[cfg(test)]
 mod tests {
+
+    /// Board #47, measured on codex-cli 0.166.0: a RESUMED codex paints its
+    /// composer placeholder while it is still `Resuming session…`, and an Enter
+    /// typed then is dropped (7/7 saved failures had it on screen; typing only
+    /// once it is gone submitted 15/15 mid-turn resumes, 6/6 idle resumes and a
+    /// fresh start). The frame is captured at +0.75 s after a restart; the
+    /// settled screen is the same pane once loaded.
+    #[cfg(not(any(target_os = "android", target_os = "ios")))]
+    #[test]
+    fn a_resuming_codex_is_not_ready_until_its_session_has_loaded() {
+        let c = super::startup_confirmation().unwrap();
+        let resuming = "  >_ OpenAI Codex (v0.166.0)\n     loading\n  Resuming session\u{2026}\n\u{203a} Ask Codex to do anything\n  ? for shortcuts\n";
+        let settled = "  Worked for 3s \u{2022} 6:49 AM\n\u{203a} Ask Codex to do anything\n  GPT-6.1-Sol high \u{b7} Context 1% used \u{b7} ~/b47-ws \u{b7} Reply with WARMUP\n  ? for shortcuts\n";
+        assert!(!crate::backends::shared::startup_already_ready(resuming, &c), "the placeholder while resuming is not ready");
+        assert!(crate::backends::shared::startup_already_ready(settled, &c), "the loaded composer is");
+    }
 
     /// Board #28, measured on codex-cli 0.166.0: `/new` fires no hook and
     /// writes no rollout; the new session opens at its first prompt, which

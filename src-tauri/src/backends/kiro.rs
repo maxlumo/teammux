@@ -1098,6 +1098,7 @@ pub(crate) fn startup_confirmation() -> Option<super::shared::StartupConfirmatio
     Some(super::shared::StartupConfirmation {
         markers: Vec::new(),
         ready_markers: vec!["ask a question or describe a task"],
+        not_ready_markers: Vec::new(),
         accept_keys: Vec::new(),
         timeout: std::time::Duration::from_secs(120),
     })
