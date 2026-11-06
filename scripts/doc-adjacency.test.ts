@@ -8,12 +8,12 @@
 // files before and after each change.
 import assert from 'node:assert/strict';
 import { execFileSync } from 'node:child_process';
-import { mkdtempSync, readFileSync, rmSync } from 'node:fs';
+import { mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import test from 'node:test';
 import { fileURLToPath } from 'node:url';
-import { changeBase, changedSources, introducedBy, strandedDocs } from './doc-adjacency.mjs';
+import { changeBase, changedSources, introducedBy, strandedDocs, trackedSources } from './doc-adjacency.mjs';
 
 const ROOT = fileURLToPath(new URL('..', import.meta.url));
 
@@ -86,11 +86,27 @@ test('limit: two /// runs merged into one block are invisible without the change
 // Board #51: the 33 stranded JSDoc blocks main had when #49 landed were moved back, so the single-file
 // shapes hold for the whole repository, not only for what a change adds. Separation needs a diff and
 // stays the change test's.
-test('no tracked source file has a stranded doc block', () => {
-  const tracked = execFileSync('git', ['ls-files', '-z', '*.rs', '*.ts', '*.js', '*.mjs', '*.svelte'], { cwd: ROOT, encoding: 'utf8' })
-    .split('\0').filter((p) => p && !p.startsWith('scripts/fixtures/doc-adjacency/'));
-  const found = tracked.flatMap((path) => strandedDocs(path, readFileSync(join(ROOT, path), 'utf8')).map((f) => `${path}:${f.line} ${f.rule}`));
+test('no tracked source file has a stranded doc block', (t) => {
+  const { paths, skip } = trackedSources(ROOT);
+  if (skip) { t.skip(skip); return; }
+  const found = paths.flatMap((path) => strandedDocs(path, readFileSync(join(ROOT, path), 'utf8')).map((f) => `${path}:${f.line} ${f.rule}`));
   assert.deepEqual(found, []);
+});
+
+// Round 1 (reviewer, reproduced by validator-2 on 6ea72ed3): the listing threw where #49 promised a visible
+// skip (no repository), and a tracked file deleted in the working tree threw ENOENT though nothing is left
+// in it to strand.
+test('the repository listing skips visibly without git and leaves out a deleted file', () => {
+  const dir = mkdtempSync(join(tmpdir(), 'doc-adjacency-'));
+  try {
+    assert.match(String(trackedSources(dir).skip), /^skipped: no git listing/u);
+    execFileSync('git', ['init', '-q', dir]);
+    writeFileSync(join(dir, 'kept.ts'), 'export const a = 1;\n');
+    writeFileSync(join(dir, 'gone.ts'), 'export const b = 2;\n');
+    execFileSync('git', ['-C', dir, 'add', '.']);
+    rmSync(join(dir, 'gone.ts'));
+    assert.deepEqual(trackedSources(dir), { paths: ['kept.ts'] });
+  } finally { rmSync(dir, { recursive: true, force: true }); }
 });
 
 test('no merge-base is a stated reason, not a base', () => {

@@ -191,3 +191,12 @@ export function changedSources(root, base) {
       return { path, before: old.status === 0 ? old.stdout : '', after: readFileSync(join(root, path), 'utf8') };
     });
 }
+
+/** Every tracked source file the single-file shapes hold for (board #51): { paths } relative to ROOT, the
+ * incident fixtures aside and a file deleted in the working tree left out (nothing is left in it to
+ * strand), or { skip } naming why git could not list them (#49: a visible skip, never a pass). */
+export function trackedSources(root) {
+  const r = git(root, ['ls-files', '-z', '*.rs', '*.ts', '*.js', '*.mjs', '*.svelte']);
+  if (r.status !== 0) return { skip: `skipped: no git listing of ${root} (${(r.stderr || r.error?.message || 'no output').trim().split('\n')[0]})` };
+  return { paths: r.stdout.split('\0').filter((p) => p && !p.startsWith(FIXTURES) && existsSync(join(root, p))) };
+}

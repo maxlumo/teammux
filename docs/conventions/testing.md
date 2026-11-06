@@ -616,8 +616,10 @@ what the change introduces:
   past blank or `//` lines, by another `///` run.
 
 Its fixtures are verbatim excerpts of the three incidents, before and after.
-With no merge-base (no git, no `main` ref, a shallow checkout) the test is a
-visible skip, `skipped: no merge-base …`, never a pass. **What it cannot
+With no merge-base (no git, no `main` ref, a shallow checkout) the change test
+is a visible skip, `skipped: no merge-base …`, never a pass; the repository
+test likewise skips as `skipped: no git listing …` when git cannot list, and
+leaves out a tracked file deleted in the working tree (#51 round 1). **What it cannot
 see**: it reads lines, not meaning. Two `///` runs that touch are one block
 to it (builder-2 on #43), so a file read alone, like main's `cap_refusal`
 doc, which also carries `rpc_needing`'s, looks correct; it is caught only
