@@ -518,3 +518,90 @@ test('Board: the new-issue control appearing or leaving re-fits the Name + tag s
     assert.ok(stack().classList.contains('fit-wrapped'), 'and the stack is re-fitted to the smaller room');
   } finally { await app.close(); }
 });
+
+// ── Board #43: blocking edges. The card says what still blocks it; the detail
+// edits the edges through `boardBlock`, one immediate request per change. ──
+const blockBoard = [
+  { ...issue, id: 1, title: 'Blocker', status: 'doing', blocked_by: [], blocked: false },
+  { ...issue, id: 2, title: 'Waits', blocked_by: [1], blocked: true },
+  { ...issue, id: 3, title: 'Free', blocked_by: [], blocked: false },
+];
+const blockCounts = { todo: 2, doing: 1, review: 0, done: 0, total: 3 };
+const openCard = async (app: App, title: string) => {
+  [...app.document.querySelectorAll<HTMLButtonElement>('.card')].find(c => c.querySelector('.c-title')?.textContent === title)!.click();
+  await flush(app);
+};
+
+test('a blocked card names what blocks it; a free one says nothing (#43)', async context => {
+  const app = await (await compiled).mount(context, {
+    props: { session: 'fixture', visible: true },
+    setup(window) { window.Element.prototype.getAnimations = () => []; },
+    modules: [rpc({ getCaps: () => ['board_dispatch', 'board_blocks'], boardCounts: async () => ({ counts: { fixture: blockCounts } }), boardList: async () => ({ issues: blockBoard }) })],
+  });
+  try {
+    await flush(app);
+    const meta = (title: string) => [...app.document.querySelectorAll('.card')].find(c => c.querySelector('.c-title')?.textContent === title)!.querySelector('.c-meta')!.textContent!.replace(/\s+/g, ' ');
+    assert.match(meta('Waits'), /blocked by #1/);
+    assert.doesNotMatch(meta('Free'), /blocked/);
+    assert.doesNotMatch(meta('Blocker'), /blocked/);
+  } finally { await app.close(); }
+});
+
+test('the detail removes and adds a blocker, one request each, then reads the issue back (#43)', async context => {
+  const calls: unknown[][] = [];
+  let reads = 0;
+  let current = blockBoard[1]!;
+  const app = await (await compiled).mount(context, {
+    props: { session: 'fixture', visible: true },
+    setup(window) { window.Element.prototype.getAnimations = () => []; },
+    modules: [rpc({
+      getCaps: () => ['board_dispatch', 'board_blocks'],
+      boardCounts: async () => ({ counts: { fixture: blockCounts } }),
+      boardList: async () => ({ issues: blockBoard }),
+      boardGet: async (_s: string, id: number) => { reads++; return id === 2 ? current : blockBoard.find(i => i.id === id); },
+      boardBlock: async (session: string, id: number, edit: { add?: number[]; remove?: number[] }) => {
+        calls.push(JSON.parse(JSON.stringify([session, id, edit])));
+        current = { ...current, blocked_by: edit.remove ? [] : [3], blocked: false };
+        return { ok: true, added: edit.add ?? [], removed: edit.remove ?? [] };
+      },
+    })],
+  });
+  try {
+    await flush(app);
+    await openCard(app, 'Waits');
+    const chip = app.document.querySelector<HTMLButtonElement>('.d-blocks .chip-btn')!;
+    assert.equal(chip.textContent?.replace(/\s+/g, ''), '#1');
+    assert.equal(chip.getAttribute('aria-label'), 'Remove #1 as a blocker');
+    const before = reads;
+    chip.click(); await flush(app);
+    assert.deepEqual(calls, [['fixture', 2, { remove: [1] }]]);
+    assert.ok(reads > before, 'the issue is read back after the edit');
+    assert.equal(app.document.querySelector('.d-blocks .chip-btn'), null);
+
+    // Add: the picker offers the board's OTHER issues that are not already blockers.
+    app.document.querySelector<HTMLButtonElement>('.d-blocks .sel-trigger')!.click(); await flush(app);
+    const options = [...app.document.querySelectorAll<HTMLButtonElement>('.sel-opt')].map(o => o.textContent?.trim());
+    assert.ok(options.some(o => o?.startsWith('#3')), `${options}`);
+    assert.ok(options.some(o => o?.startsWith('#1')), `${options}`);
+    assert.ok(!options.some(o => o?.startsWith('#2')), 'an issue cannot block itself');
+    [...app.document.querySelectorAll<HTMLButtonElement>('.sel-opt')].find(o => o.textContent?.trim().startsWith('#3'))!.click();
+    await flush(app);
+    assert.deepEqual(calls[1], ['fixture', 2, { add: [3] }]);
+    assert.equal(app.document.querySelector('.d-blocks .chip-btn')?.textContent?.replace(/\s+/g, ''), '#3');
+  } finally { await app.close(); }
+});
+
+test('a server without board_blocks shows the edges but offers no edit (#43)', async context => {
+  const app = await (await compiled).mount(context, {
+    props: { session: 'fixture', visible: true },
+    setup(window) { window.Element.prototype.getAnimations = () => []; },
+    modules: [rpc({ getCaps: () => ['board_dispatch'], boardCounts: async () => ({ counts: { fixture: blockCounts } }), boardList: async () => ({ issues: blockBoard }), boardGet: async (_s: string, id: number) => blockBoard.find(i => i.id === id) })],
+  });
+  try {
+    await flush(app);
+    await openCard(app, 'Waits');
+    assert.equal(app.document.querySelector<HTMLButtonElement>('.d-blocks .chip-btn')!.disabled, true);
+    assert.equal(app.document.querySelector<HTMLButtonElement>('.d-blocks .sel-trigger')!.disabled, true);
+    assert.match(app.document.querySelector('.d-blocks')!.textContent ?? '', /Update the server/);
+  } finally { await app.close(); }
+});

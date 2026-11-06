@@ -32,9 +32,15 @@ export const MCP_MASKED = 'mcp_masked';
  * offered only when this is announced, and is absent (not empty) when it is known not to be. */
 export const BACKENDS_CHECK = 'backends_check';
 
+/** `hub_board_block` exists and `hub_board_save` keeps `blocked_by` on a create (board #43).
+ * An older server ignores the key and files the issue with no edges, which reads as a success,
+ * so the Board offers no edge edit without this. */
+export const BOARD_BLOCKS = 'board_blocks';
+
 /** What an older server lacking a capability means for the person, per cap. */
 const TOO_OLD: Record<string, string> = {
   [BOARD_DISPATCH]: 'This server is older than the app. Update the server to assign.',
+  [BOARD_BLOCKS]: 'This server is older than the app. Update the server to edit blockers.',
   [SPAWN_JOIN]: 'This server is older than the app. Update the server to start an agent inside a team.',
   [AGENT_TEAM]: 'This server is older than the app. Update the server to move an agent between teams.',
   [HUB_FILES]: 'This server is older than the app. Update the server to list files.',

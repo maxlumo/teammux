@@ -15,7 +15,7 @@ import type { ProjectRow } from '../projects/projects.ts';
 import type { BackendInfo } from './agents.ts';
 import type { SystemStatus as SystemStatusReading } from '../system/system.ts';
 import type { Connection, TeamMessage } from './connection.ts';
-import { AGENT_TEAM, BOARD_DISPATCH, CapError, HUB_FILES, MCP_MASKED, SPAWN_JOIN, holdForLogin, requireCap } from './login-caps.ts';
+import { AGENT_TEAM, BOARD_BLOCKS, BOARD_DISPATCH, CapError, HUB_FILES, MCP_MASKED, SPAWN_JOIN, holdForLogin, requireCap } from './login-caps.ts';
 
 // ─── Protocol types ──────────────────────────────────────────────────────
 
@@ -150,6 +150,10 @@ export interface BoardIssue {
   /** Original title/body may change only while unassigned and before any Agent activity. */
   editable: boolean;
   notes: number | { author: string; body: string; at: number }[];
+  /** Board #43: the blockers' numbers, in order, and whether ANY is not done
+   * (derived by the server on every read). Absent on an older server. */
+  blocked_by?: number[];
+  blocked?: boolean;
 }
 /** Per-column counts on every returned row (server-side zero-filled over the
  * four fixed statuses) plus an explicit total — "is this board empty" is one
@@ -472,6 +476,18 @@ export function createWsApi(connection: Connection) {
     call<{ ok: boolean }>('hub_board_note', { session, id, body, who: 'human' });
   const boardDelete = (session: string, id: number) =>
     call<{ ok: boolean }>('hub_board_delete', { session, id });
+  /** Add or remove blocking edges of one issue (board #43). Needs
+   * `board_blocks` on the current socket's login (the #377 gate: the runtime
+   * waits for an unanswered login, the check is synchronous in the block that
+   * sends). The server refuses a cycle, a self-edge or another board's number
+   * with nothing written. */
+  const boardBlock = Object.assign(
+    async (session: string, id: number, edit: { add?: number[]; remove?: number[] }) => {
+      requireCap(connection, BOARD_BLOCKS);
+      return call<{ ok: boolean; added: number[]; removed: number[]; issue?: BoardIssue | null }>('hub_board_block', { session, id, ...edit, who: 'human' });
+    },
+    { hold: (): Promise<void> | undefined => holdForLogin(connection) },
+  );
   /** Read the activity feed. Newest page by default; `before` walks backwards
    * with the exact (ts, id) pair the previous page's `oldest` handed back. */
   const hubActivity = (
@@ -686,7 +702,7 @@ export function createWsApi(connection: Connection) {
     projectDown, projectRename, projectArchive, projectDelete, projectAutostart, hubPost,
     hubCommand, hubLog, hubLogAround, hubSearch, hubFiles, hubMsgArchive, hubMsgRestore, hubMsgPurge, hubRooms,
     hubUnread, hubRead, systemStatus, hubArchive, hubAgents, boardList, boardCounts,
-    boardGet, boardSave, boardNote, boardDelete, hubActivity, hubSpawn, hubSpawnTeam,
+    boardGet, boardSave, boardNote, boardDelete, boardBlock, hubActivity, hubSpawn, hubSpawnTeam,
     hubAgentStop, hubAgentRemove, hubAgentInterrupt, hubAgentInputMode, hubAgentSetTeam, hubAgentRestart, hubAgentFork, hubAgentRename,
     hubTeamRestart, registryList, registrySave, registryDelete, globalPromptGet,
     globalPromptSet, teamsList, teamsSave, teamsDelete, backendsList, backendsCheck, modelsList, skillsList,
@@ -742,7 +758,7 @@ export const RPC_KIND = {
   hubRooms: 'read', hubUnread: 'read', hubRead: 'write', systemStatus: 'read',
   hubArchive: 'write', hubAgents: 'read',
   boardList: 'read', boardCounts: 'read', boardGet: 'read',
-  boardSave: 'write', boardNote: 'write', boardDelete: 'write',
+  boardSave: 'write', boardNote: 'write', boardDelete: 'write', boardBlock: 'write',
   hubActivity: 'read', hubSpawn: 'write', hubSpawnTeam: 'write',
   hubAgentStop: 'write', hubAgentRemove: 'write', hubAgentInterrupt: 'write', hubAgentInputMode: 'write', hubAgentSetTeam: 'write',
   hubAgentRestart: 'write', hubAgentFork: 'write', hubAgentRename: 'write', hubTeamRestart: 'write',

@@ -37,7 +37,7 @@
   import { feedbackPosition } from '../ui/feedback-position.ts';
   import { copyText } from '../core/clipboard.ts';
   import { scheduleCompletion } from '../ui/feedback-lifetime.ts';
-  import { BOARD_DISPATCH, lacksCap } from '../core/login-caps.ts';
+  import { BOARD_BLOCKS, BOARD_DISPATCH, lacksCap } from '../core/login-caps.ts';
   import { draftOf, draftDirty, draftValid, draftPatch, isSubmitChord, rebaseDraft, issueRef, countsOf, applyCounts, visibleBoards, boardTitle, chipCols, assigneeView, rememberBackends } from './board.ts';
   import { messageActsSet, messageActsCopyLanded, messageActsCopyFailed, messageActsExpired, MESSAGE_ACTS_IDLE, type MessageActsState } from './message-actions.ts';
   import { scrollFade } from '../core/scrollFade.ts';
@@ -59,7 +59,7 @@
   const serverId = guardOwner.id;
   const catalog = scope.state.backends;
   const backendIcon = catalog.icon;
-  const { boardList, boardGet, boardSave, boardNote, boardDelete, boardCounts, projectList, hubAgents, hubRooms } = guardOwner.api;
+  const { boardList, boardGet, boardSave, boardNote, boardDelete, boardBlock, boardCounts, projectList, hubAgents, hubRooms } = guardOwner.api;
   /** The capabilities of THIS server's current authenticated socket (board
    * #377): `undefined` while its login has not answered (or while it is being
    * redialled), `[]` for an older server that announced none. Observed, not
@@ -77,6 +77,11 @@
    * bound to the socket that carries the call. An unanswered login is not a
    * no here either — the save waits for it there. */
   const assignBlocked = () => lacksCap(loginCaps, BOARD_DISPATCH);
+  /** Board #43: is this server KNOWN to be too old to edit blocking edges?
+   * Shown only (disabled controls and why); `ws-api.boardBlock` refuses. */
+  const blocksLocked = () => lacksCap(loginCaps, BOARD_BLOCKS);
+  /** `#1, #2`: an issue's blockers as the card and the room say them. */
+  const blockList = (i: BoardIssue) => (i.blocked_by ?? []).map((n) => `#${n}`).join(', ');
   /** Why a write did not go, in this page's words: the two gate refusals
    * (board #377) have their own copy; anything else is the server's message. */
   const saveError = (e: unknown) => {
@@ -833,6 +838,33 @@
     } catch (e) { if (alive && again.session === cur) err = saveError(e); }
     finally { busy = false; submitting = false; }
   }
+  /** Board #43: one immediate edge edit on the open issue — not part of the
+   * draft (an edge has no undo of its own: removing it IS the undo). The
+   * request owns a frozen context like every other write here, and the
+   * issue is read back after it. */
+  async function editBlocks(edit: { add?: number[]; remove?: number[] }) {
+    if (!sel || busy) return;
+    const ctx = freeze();
+    const id = sel.id;
+    busy = true; submitting = true;
+    try {
+      await boardBlock(ctx.session, id, edit);
+      if (!owns(ctx)) return;
+      await refetchSel(ctx);
+    } catch (e) {
+      if (!owns(ctx)) return;
+      err = (e as { code?: string } | null)?.code === 'server_too_old' ? t('boardBlocksOldServer') : saveError(e);
+    } finally { busy = false; submitting = false; }
+  }
+  /** The issues the open one may be blocked by: the board's others that are
+   * not already its blockers, by number. The server still refuses a cycle. */
+  function blockerOptions(open: BoardIssue) {
+    const have = new Set(open.blocked_by ?? []);
+    return issues
+      .filter((i) => i.id !== open.id && !have.has(i.id))
+      .sort((a, b) => a.id - b.id)
+      .map((i) => ({ value: String(i.id), label: `#${i.id} ${issueRef(i)}` }));
+  }
   async function addNote() {
     if (!sel || !noteStage.sendable(noteText) || busy || blocked(noteStage)) return;
     const ctx = freeze();
@@ -1245,6 +1277,25 @@
         {#if assignBlocked()}<span class="meta-bit">{t('boardAssignOldServer')}</span>{/if}
         {#if sel.created_by}<span class="meta-bit">{t('boardOpenedBy')} <span class="m-name">{names.shown(sel.created_by)}</span></span>{/if}
       </div>
+      <!-- Blocking edges (board #43): each blocker is a chip whose tap removes
+           it, and the shared Select adds one. Immediate, like a note: an edge
+           is not part of the draft. Absent on an older server (no field). -->
+      {#if sel.blocked_by}
+        <div class="d-meta d-blocks">
+          <span class="meta-bit">{t('boardBlockers')}</span>
+          {#each sel.blocked_by as n (n)}
+            <button class="chip-btn" type="button" aria-label={t('boardRemoveBlocker').replace('{n}', String(n))}
+              title={t('boardRemoveBlocker').replace('{n}', String(n))} disabled={submitting || blocksLocked()}
+              onclick={() => editBlocks({ remove: [n] })}>#{n} <Icon name="x" size={10} /></button>
+          {/each}
+          {#key blockList(sel)}
+            <Select value="" dense placeholder={t('boardAddBlocker')} ariaLabel={t('boardAddBlocker')}
+              disabled={submitting || blocksLocked()} options={blockerOptions(sel)}
+              onchange={(v: string) => { const n = Number(v); if (n > 0) editBlocks({ add: [n] }); }} />
+          {/key}
+          {#if blocksLocked()}<span class="meta-bit">{t('boardBlocksOldServer')}</span>{/if}
+        </div>
+      {/if}
       {#if sel.editable}
         <textarea class="d-body-edit" bind:this={bodyEl} bind:value={draft.body} use:autoGrow={draft.body} placeholder={t('boardBodyPh')} rows="3"
           onkeydown={onChord(saveDraft)} onpaste={pasteInto(bodyStage)} readonly={submitting}></textarea>
@@ -1400,6 +1451,7 @@
               {#if i.body && i.title?.trim()}<span class="c-body">{cardText(i).body}</span>{/if}
               <span class="c-meta">
                 #{i.id}
+                {#if i.blocked}· {t('boardBlockedBy')} {blockList(i)}{/if}
                 {#if i.created_by}· {t('boardBy')} {names.shown(i.created_by)}{/if}
                 {#if i.assignee}
                   {@const who = assigneeView(i.assignee, agents, s, backends, catalog)}
