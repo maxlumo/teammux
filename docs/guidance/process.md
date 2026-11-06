@@ -164,8 +164,8 @@ filed as its own issue, never fixed inside a move. When ready:
 `tmm board move <id> review` with a note that names the branch, HEAD, the
 base commit and the evidence.
 
-**Review** is done by the reporter or, for large changes, by one review
-per guidance lens — architecture, agent bridge, code quality,
+**Review** is done by the role the team assigns or, for large changes, by
+one reviewer per guidance lens — architecture, agent bridge, code quality,
 UI/interaction, security, process — each posting findings as board notes
 tagged with the lens; coordination consolidates. Review reads the commits
 against the matching checklists. Verification runs the suites **in the
