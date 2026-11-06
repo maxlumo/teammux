@@ -76,6 +76,8 @@ USAGE (agent):
   tmm board assign <id> <name|->      hand it to someone else; `-` clears the assignee
   tmm board move <id> <todo|doing|review|done>
   tmm board note <id> <text> [--image <path|url>]  progress/decisions ON the issue
+                    [--agreement]     …declared the issue's CURRENT agreement (supersedes the last;
+                                      `board show` prints it first; a note is never re-marked)
                     [--notify @name[,@name|@all|@human]]   …and announce it in the room in
                                       the SAME call: one line pointing at the note, so the
                                       note and its announcement cannot be sent out of order
@@ -899,12 +901,27 @@ async fn main() {
                         let still = r.get("blocked").and_then(|v| v.as_bool()).unwrap_or(false);
                         println!("{}", if still { format!("blocked by {list}") } else { format!("blockers: {list} (all done)") });
                     }
+                    // Board #44: the current agreement comes FIRST, before the
+                    // original text and the thread, so the next reader starts
+                    // from what is agreed now; the thread keeps every earlier
+                    // one, labelled.
+                    if let Some(cur) = r.get("agreement").filter(|v| v.is_object()) {
+                        let a = names.shown(cur.get("author").and_then(|v| v.as_str()).unwrap_or(""));
+                        let b = names.show_body(cur.get("body").and_then(|v| v.as_str()).unwrap_or(""));
+                        let n = cur.get("n").and_then(|v| v.as_i64()).unwrap_or(0);
+                        println!("current agreement (note {n}, {a}): {b}");
+                    }
                     if !g("body").is_empty() { println!("\n{}\n", g("body")); }
                     let empty = Vec::new();
                     for n in r.get("notes").and_then(|v| v.as_array()).unwrap_or(&empty) {
                         let a = names.shown(n.get("author").and_then(|v| v.as_str()).unwrap_or(""));
                         let b = names.show_body(n.get("body").and_then(|v| v.as_str()).unwrap_or(""));
-                        println!("  · {a}: {b}");
+                        let label = match (n.get("agreement").and_then(|v| v.as_bool()), n.get("superseded_by").and_then(|v| v.as_i64())) {
+                            (Some(true), Some(next)) => format!(" [agreement, superseded by note {next}]"),
+                            (Some(true), None) => " [agreement]".to_string(),
+                            _ => String::new(),
+                        };
+                        println!("  · {a}{label}: {b}");
                     }
                 }
                 "add" => {
@@ -1101,18 +1118,32 @@ async fn main() {
                             // kept batching in the wrong order — has nothing
                             // left to batch. Without the flag this is the
                             // same single call it always was.
+                            // `--agreement` (board #44) declares the note the
+                            // issue's current agreement as it is written, on
+                            // either path. An older server would store a plain
+                            // note as if it had worked, so it is refused
+                            // before the call.
+                            let agreement = flags.contains_key("agreement");
                             if !flags.contains_key("notify") {
-                                rpc(&ctx, "hub_board_note", json!({ "session": session, "id": id, "body": text, "who": who })).await
+                                let mut params = json!({ "session": session, "id": id, "body": text, "who": who });
+                                if agreement {
+                                    params["agreement"] = json!(true);
+                                    rpc_needing(&ctx, "board_agreement", "hub_board_note", params).await
+                                } else {
+                                    rpc(&ctx, "hub_board_note", params).await
+                                }
                             } else {
                                 let names = notify_names(flags.get("notify").cloned().flatten().as_deref())
                                     .unwrap_or_else(|e| fail(EXIT_USAGE, &e));
-                                let params = json!({ "session": session, "id": id, "body": text, "who": who, "notify": names });
+                                let mut params = json!({ "session": session, "id": id, "body": text, "who": who, "notify": names });
+                                if agreement { params["agreement"] = json!(true); }
+                                let need = if agreement { "board_notify,board_agreement" } else { "board_notify" };
                                 // The capability is checked on the connection
                                 // that would carry the flag: an older gateway
                                 // refuses BEFORE the note is written, rather
                                 // than storing it and announcing nothing.
                                 let sent = std::cell::Cell::new(false);
-                                let r = match try_rpc_tracked(&ctx, "hub_board_note", params, Some("board_notify"), Some(&sent)).await {
+                                let r = match try_rpc_tracked(&ctx, "hub_board_note", params, Some(need), Some(&sent)).await {
                                     Ok(v) => v,
                                     // The call may have reached the server
                                     // (board #445's `sent`): then BOTH halves
@@ -2723,7 +2754,7 @@ const VERB_FLAGS: &[VerbFlags] = &[
     VerbFlags { key: "board assign", ctx: true, flags: &[] },
     VerbFlags { key: "board take", ctx: true, flags: &[] },
     VerbFlags { key: "board move", ctx: true, flags: &[] },
-    VerbFlags { key: "board note", ctx: true, flags: &["image", "notify"] },
+    VerbFlags { key: "board note", ctx: true, flags: &["image", "notify", "agreement"] },
     VerbFlags { key: "merge", ctx: true, flags: &["expect", "message-file", "dry-run"] },
     VerbFlags { key: "spawn", ctx: true, flags: &["brief", "join", "team"] },
     VerbFlags { key: "teams", ctx: true, flags: &[] },
@@ -3013,6 +3044,9 @@ fn cap_refusal(need: &str) -> String {
         ),
         "agent_team" => format!(
             "this server cannot move an agent between teams (its login answer lacks `{need}`) — update the server. Nothing was changed."
+        ),
+        "board_agreement" => format!(
+            "this server is older than agreement notes (its login answer lacks `{need}`; an older server would store a plain note as if it were the agreement) — update the server. Nothing was saved."
         ),
         "board_blocks" => format!(
             "this server is older than blocking edges (its login answer lacks `{need}`): it neither keeps blockers nor says which issues are blocked — update the server. Nothing was read or saved."

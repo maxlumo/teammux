@@ -105,9 +105,14 @@ tmm board note <id> "found the root cause in store.rs; fix is one COALESCE"
 tmm board add "title" --blocked-by 38,39   # filed with the issues that block it
 tmm board block <id> 38          # #38 blocks <id>; `unblock` removes the edge
 tmm board frontier               # open issues whose blockers are all done (with status)
+tmm board note <id> "agreed: …" --agreement   # the issue's CURRENT agreement; show prints it first
 ```
 
 Conventions that keep the board honest:
+- When a decision settles what the issue now requires, post it as ONE
+  `--agreement` note instead of leaving it spread over the thread; the next
+  reader's `tmm board show` starts from it. A new agreement supersedes the
+  last, and nothing is rewritten.
 - Declare a dependency as an edge (`--blocked-by`, `block`), not as prose in
   the body: the frontier is derived from edges and status, and a blocker
   reaching done is what puts an issue on it. A blocker informs; it never

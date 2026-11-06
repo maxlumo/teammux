@@ -65,6 +65,7 @@ tmm board take <id>                  claim: assignee = you, status = doing
 tmm board assign <id> <name|->        hand it to someone else; `-` clears it (#367)
 tmm board move <id> <todo|doing|review|done>
 tmm board note <id> <text> [--image <path|url>]  progress/decisions ON the issue (an image alone is a note)
+                    [--agreement]   …declared the issue's CURRENT agreement (#44): it supersedes the last one
                     [--notify @name[,@name|@all|@human]]   …and announce it in the room in the SAME
                                      call (board #507): one plain mention line pointing at the note
 
@@ -605,6 +606,16 @@ Tests. Pure: `notify_targets` (freezing; `all` as the declared set, read only wh
 - **Numbers are checked at the door.** `38`, `#38` and `38,39` are accepted; an empty list or anything else is a usage error with nothing sent.
 
 Pinned by `tests/board_blocks_cli.rs` (one save carrying `blocked_by`; the older server refused with no write, and `frontier` refused on it in text and JSON; a row without its blocking state refused; `block`/`unblock` one edit each; malformed lists refused before any call; the frontier's rows and JSON from a mixed board; `list`/`show` naming the blockers).
+
+## The current agreement (board #44, 2026-11-06)
+
+`tmm board note <id> "…" --agreement` posts a note DECLARED as the issue's current agreement; the newest such note is current and every earlier one stays in the thread, superseded. `tmm board show <id>` prints `current agreement (note N, author): text` FIRST, before the original text and the thread, and labels each agreement note in the thread `[agreement]` or `[agreement, superseded by note N]`. The design (declared at write, never re-marked; derived on every read; numbered by row id) is board.md § An issue points to its current agreement.
+
+- **One call, either note path.** `--agreement` rides the plain note and the `--notify` note alike (`agreement: true` in the one `hub_board_note`); there is no separate verb to mark an existing note, because a note is never re-marked. To bring an older agreement back, post a new one that cites it ("as note 9").
+- **Refused before writing on an older server.** It needs the `board_agreement` cap (with `--notify`, both caps), because an older server ignores the key and stores a plain note as if it were the agreement. A plain note on that server still goes.
+- **An older server's `show` prints no agreement**, because it sends none: the absence makes no claim.
+
+Pinned by `tests/board_agreement_cli.rs` (one call carrying the flag, with and without `--notify`, and none on a plain note; refused on an older server on both paths, a plain note still going; `show` prints the current agreement before the original text and the thread, and labels the superseded one).
 
 ## Waking an agent later (`--in` / `--at`, board #275)
 
