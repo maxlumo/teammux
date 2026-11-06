@@ -1512,6 +1512,7 @@ fn issue_numbers(p: &serde_json::Value, key: &str) -> Result<Vec<i64>, RpcError>
 /// The room record of a blocking-edge change (board #43), in the sys
 /// grammar `sysParts` reads: verb, the issue as subject, the detail after
 /// the em-dash. None when nothing changed.
+#[cfg(not(any(target_os = "android", target_os = "ios")))]
 fn board_block_line(verb: &str, id: i64, named: &str, numbers: &[i64]) -> Option<String> {
     if numbers.is_empty() {
         return None;

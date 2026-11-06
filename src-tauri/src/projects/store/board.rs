@@ -65,6 +65,15 @@ fn blocker_path(conn: &rusqlite::Connection, from: i64, to: i64) -> Result<Optio
 }
 
 impl Store {
+    /// Every additive Board shape, as the heal floor sees it: the v15 edit
+    /// lock, the v16 numbering and the v34 blocking edges (board #43). One
+    /// family call, so `heal` in mod.rs stays the connection's.
+    pub(super) fn ensure_board_shape(&self) -> Result<(), String> {
+        self.ensure_issue_edit_lock()?;
+        self.ensure_issue_numbering()?;
+        self.ensure_issue_blocks()
+    }
+
     /// The v34 shape (also a heal floor): blocking edges between issues of
     /// one board, keyed by the hidden row ids so a project rename carries
     /// them and deleting either issue drops the edge.

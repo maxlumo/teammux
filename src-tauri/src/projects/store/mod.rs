@@ -109,8 +109,7 @@ impl Store {
     fn heal(&mut self) -> Result<(), String> {
         // Additive Board state gets the same partial-build protection as
         // deliveries below: never trust a version stamp more than the schema.
-        self.ensure_issue_edit_lock()?;
-        self.ensure_issue_numbering()?;
+        self.ensure_board_shape()?;
         self.conn
             .execute_batch(
                 "CREATE TABLE IF NOT EXISTS deliveries (
@@ -154,7 +153,6 @@ impl Store {
         self.ensure_restore_holds()?;
         self.ensure_hub_read()?;
         self.ensure_agent_names()?;
-        self.ensure_issue_blocks()?;
         // Board #437: the capture tick asks which sessions hold a typed chat
         // line not yet reported. Only those rows are in this index, so the
         // tick never rescans warned, held or command rows. An index, not a
