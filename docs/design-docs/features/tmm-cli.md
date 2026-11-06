@@ -85,6 +85,9 @@ tmm agent list                       windows + agent detection + derived state
 tmm agent backends [--test kiro]     backend readiness on this server: installed / set up / answers (#492)
 tmm agent backends --models          each CLI's declared model ids, their kind and the baseline default (#511)
 tmm agent interrupt|stop|restart|remove <name>
+tmm agent restart --team <team> [--only a,b]   align a team with its definition (#286); --only restarts those
+                                     members alone, so a re-defined member (a new backend, #46) takes effect and
+                                     nobody else is restarted; a name the team lacks fails (exit 1), no --only name is usage
 tmm agent mode <name> queue|steer    kiro only: its Ctrl+S, this session (#271)
 tmm agent fork <name> [--as <new>]   a NEW agent from a running one's definition (#383)
 tmm agent rename <name> <label>      show and address it as <label> in this project; the window, home and

@@ -150,6 +150,8 @@ USAGE (human or agent — self-management):
   tmm agent stop|restart <name>       stop it, or bring it back resuming its conversation
   tmm agent restart --team <team>     align a team with its CURRENT definition: restart who
                                       it still has, start who it gained, stop who it dropped
+                    [--only a,b]      …only those members: a re-defined member takes effect
+                                      and nobody else restarts (#46); an unknown name fails
   tmm agent fork <name> [--as <new>]  start a NEW agent from a running one's definition (backend,
                                       model, effort, mode, prompt, skills, MCP, team): fresh home,
                                       fresh conversation; the source is untouched
@@ -1308,7 +1310,12 @@ async fn main() {
         ("agent", rest) if rest.first().map(String::as_str) == Some("restart") && flags.get("team").cloned().flatten().is_some() => {
             let session = need_project(&ctx);
             let team = flags.get("team").cloned().flatten().unwrap_or_default();
-            let r = rpc(&ctx, "hub_team_restart", json!({ "session": session, "team": team })).await;
+            let only = only_flag(&flags).unwrap_or_else(|e| fail(EXIT_USAGE, &e));
+            let mut params = json!({ "session": session, "team": team });
+            if let Some(names) = &only {
+                params["only"] = json!(names);
+            }
+            let r = rpc(&ctx, "hub_team_restart", params).await;
             if ctx.json {
                 println!("{r}");
             } else {
@@ -1322,7 +1329,13 @@ async fn main() {
                 for e in &errors {
                     eprintln!("tmm: {}: {}", e["name"].as_str().unwrap_or("?"), e["error"].as_str().unwrap_or("?"));
                 }
-                if !errors.is_empty() {
+                // `only` narrows; the server drops a name the team does not
+                // have, so it is said here, not taken for "nothing to do".
+                let missing = only_missing(only.as_deref().unwrap_or_default(), &r);
+                for name in &missing {
+                    eprintln!("tmm: {name}: not a member of team {team}; nothing was done to it");
+                }
+                if !errors.is_empty() || !missing.is_empty() {
                     std::process::exit(1);
                 }
             }
@@ -1362,6 +1375,9 @@ async fn main() {
             if matches!(rest.first().map(String::as_str), Some("stop" | "restart" | "remove" | "interrupt")) =>
         {
             let action = rest[0].clone();
+            if flags.contains_key("only") {
+                fail(EXIT_USAGE, "--only narrows a team restart: tmm agent restart --team <team> --only <name>[,<name>]");
+            }
             let session = need_project(&ctx);
             let Some(name) = rest.get(1).cloned() else {
                 fail(EXIT_USAGE, &format!("agent {action} needs a name: tmm agent {action} <name>"));
@@ -2515,6 +2531,26 @@ fn fork_as_flag(flags: &std::collections::HashMap<String, Option<String>>) -> Re
     }
 }
 
+/// `--only a,b` on a team restart (board #46): the members to restart, so a
+/// re-defined member takes effect without restarting the others. Absent is
+/// the whole team; present without a name is a usage error.
+fn only_flag(flags: &std::collections::HashMap<String, Option<String>>) -> Result<Option<Vec<String>>, String> {
+    let Some(raw) = flags.get("only") else { return Ok(None) };
+    let names: Vec<String> = raw.as_deref().unwrap_or("").split(',').map(str::trim).filter(|n| !n.is_empty()).map(str::to_string).collect();
+    if names.is_empty() {
+        return Err("--only needs member names: tmm agent restart --team <team> --only <name>[,<name>]".to_string());
+    }
+    Ok(Some(names))
+}
+
+/// The `--only` names a team restart's answer does not mention anywhere: the
+/// team has no such member.
+fn only_missing(only: &[String], answer: &Value) -> Vec<String> {
+    let named = |n: &str| ["restarted", "spawned", "stopped", "kept"].iter().any(|k| answer[*k].as_array().is_some_and(|a| a.iter().any(|v| v.as_str() == Some(n))))
+        || answer["errors"].as_array().is_some_and(|a| a.iter().any(|e| e["name"].as_str() == Some(n)));
+    only.iter().filter(|n| !named(n)).cloned().collect()
+}
+
 /// A flag that only narrows a SEARCH, given without `--grep`: `tmm log --from bob` would
 /// print the plain log and say nothing, the worst answer to a narrowing that was asked
 /// for (board #432, validator). `--global` already failed this way; `--all` and
@@ -2622,7 +2658,7 @@ const VALUED: &[&str] = &["project", "agent", "server", "output", "since", "limi
                           "name", "session", "with-agent", "backend", "model", "effort", "input-mode", "system", "skills", "mcp",
                           "ref", "source", "description", "def", "grep", "image", "notify", "body", "assignee", "team", "join", "file",
                           "in", "at", "to", "code", "signal", "re", "as", "from", "before", "lines", "cols", "note", "args-json", "test",
-                          "expect", "message-file", "blocked-by"];
+                          "expect", "message-file", "blocked-by", "only"];
 
 /// An argument is a flag only if it has a flag's SHAPE: `-x`, `--name`, `--name=value`, a letter
 /// first and then letters, digits, `_` or `-` (board #456). Anything else that begins with `-`
@@ -2769,7 +2805,7 @@ const VERB_FLAGS: &[VerbFlags] = &[
     VerbFlags { key: "agent list", ctx: true, flags: &[] },
     VerbFlags { key: "agent backends", ctx: true, flags: &["test", "models"] },
     VerbFlags { key: "agent stop", ctx: true, flags: &[] },
-    VerbFlags { key: "agent restart", ctx: true, flags: &["team"] },
+    VerbFlags { key: "agent restart", ctx: true, flags: &["team", "only"] },
     VerbFlags { key: "agent remove", ctx: true, flags: &[] },
     VerbFlags { key: "agent interrupt", ctx: true, flags: &[] },
     VerbFlags { key: "agent mode", ctx: true, flags: &[] },
@@ -5272,7 +5308,7 @@ mod flags_contract {
         reads_seen(src, text, &mut BTreeSet::new())
     }
     fn reads_seen(src: &str, text: &str, seen: &mut BTreeSet<&'static str>) -> BTreeSet<String> {
-        const HELPERS: &[&str] = &["log_search_params", "log_from", "log_before", "search_flag_without_grep", "fork_as_flag", "spawn_params", "registry_def", "image_refs"];
+        const HELPERS: &[&str] = &["log_search_params", "log_from", "log_before", "search_flag_without_grep", "fork_as_flag", "only_flag", "spawn_params", "registry_def", "image_refs"];
         let mut found = BTreeSet::new();
         // A read may be wrapped over several lines (`flags\n    .get("limit")`): read it compacted.
         let compact = text.split_whitespace().collect::<Vec<_>>().join(" ").replace(" .get(", ".get(").replace(" .contains_key(", ".contains_key(");
