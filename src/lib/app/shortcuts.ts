@@ -183,11 +183,6 @@ const MODIFIER_CODES = new Set([
   'MetaLeft', 'MetaRight', 'ShiftLeft', 'ShiftRight',
 ]);
 
-/** THE parse entry, used by the handler and the recorder alike (board 316
- * review): an event that is character input is never a shortcut — an IME
- * composition (isComposing / keyCode 229), or AltGr, which Windows and Linux
- * report as Ctrl+Alt while it types a character. Plain Alt stays usable (the
- * terminal window keys use it). */
 /** The one "is this character input?" predicate: an IME composition
  * (isComposing / 229), AltGr (its modifier state), or a dead key (`Dead`: a
  * composition start, whatever modifiers it is reported with). The handler
@@ -198,6 +193,11 @@ export function isCharacterInput(event: KeyboardEvent): boolean {
   return typeof event.getModifierState === 'function' && event.getModifierState('AltGraph');
 }
 
+/** THE parse entry, used by the handler and the recorder alike (board 316
+ * review): an event that is character input is never a shortcut — an IME
+ * composition (isComposing / keyCode 229), or AltGr, which Windows and Linux
+ * report as Ctrl+Alt while it types a character. Plain Alt stays usable (the
+ * terminal window keys use it). */
 export function shortcutFromEvent(event: KeyboardEvent): string {
   if (!event.code || MODIFIER_CODES.has(event.code)) return '';
   if (isCharacterInput(event)) return '';

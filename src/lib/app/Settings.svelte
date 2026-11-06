@@ -11,6 +11,10 @@
   import { t } from '../core/i18n.svelte.ts';
   import { createFeedbackLifetime, type FeedbackValue } from '../ui/feedback-lifetime.ts';
 
+  /** The server's own bring-up after the candidate. `committed`, when given,
+   * resolves once it can no longer be cancelled (its runtime is being
+   * bound): from then on the form offers no Cancel. */
+  type SecondHalf = { done: Promise<string | null>; cancel(): void; committed?: Promise<unknown> };
   /** One connect attempt's own connection (board #335 ②b-4): App's
    * CANDIDATE, not the socket any server's pages are using. It reaches
    * whatever answers at the address, and nobody knows which server that is
@@ -18,10 +22,6 @@
    * and closed once identity is recorded; the server's own runtime then
    * dials. `current()` is App's answer to "is the app still waiting on this
    * attempt?": false once a newer attempt, a switch or a leave took over. */
-  /** The server's own bring-up after the candidate. `committed`, when given,
-   * resolves once it can no longer be cancelled (its runtime is being
-   * bound): from then on the form offers no Cancel. */
-  type SecondHalf = { done: Promise<string | null>; cancel(): void; committed?: Promise<unknown> };
   type Candidate = {
     connect(url: string, token: string): Promise<unknown>;
     setSocket(socket: string): Promise<unknown>;

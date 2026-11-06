@@ -123,15 +123,12 @@
      *  of its own (nav-state's agentsLivesInSettings). The desktop rail keeps
      *  its own Agents page, so this stays false there. */
     showAgents?: boolean;
-    /** The server the embedded AgentsPage is bound to — its GUEST scope
-     * (board #335 ②b-3): App's bound runtime and that runtime's state.
-     * Preferences itself is the person's and needs neither; with no runtime
-     * the guest renders nothing, like every server-bound subtree. */
     /** Every bound member's GUEST scope (board #335 ③a, reviewer P1-C on the
      * ③ plan): its runtime and state. Each member keeps its own Agents editor,
      * mounted on first open and kept, so a focus change never destroys a
-     * draft in one; only the `guestShown` one is visible and takes input. */
-    /** Each member's runtime, its state, and its NAME by the one tag rule
+     * draft in one; only the `guestShown` one is visible and takes input.
+     *
+     * Each member's runtime, its state, and its NAME by the one tag rule
      * (③c-5, reviewer P2 on 018d4fa5: a touch guest's head must say whose
      * it is like the desktop page's does; App hands the same `serverTag`
      * answer it hands every tree, never CURRENT's name). */
@@ -144,8 +141,9 @@
      * guest editor stays mounted — a draft in it survives — but takes no
      * input, and this says why. */
     guestHeld?: string;
-    /** Forwarded to the embedded AgentsPage: the Hub's "configure agent" jump. */
-    /** One agent's or team's editor to open, on the server it names
+    /** Forwarded to the embedded AgentsPage: the Hub's "configure agent" jump.
+     *
+     * One agent's or team's editor to open, on the server it names
      * (`serverId`); only that member's guest takes it. */
     agentsEditRequest?: { serverId: string; name: string; kind?: 'agent' | 'team'; n: number } | null;
     /** A one-shot "open this category" request — `{ tab, n }`, the same shape

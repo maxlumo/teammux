@@ -441,16 +441,6 @@ function noteMerges(storage: Store, dropped: string[], survivorId: string): void
   storage.setItem(MERGES_KEY, JSON.stringify(Object.fromEntries(kept)));
 }
 
-/**
- * The saved entry `id` now IS, by the merges identity repair actually made:
- * `id` itself while it is saved, the survivor it was folded into (following a
- * chain of later merges), or '' when nothing shows it to be any saved entry.
- *
- * The '' case is the point (reviewer P1-a, 2026-10-10): an id absent from the
- * registry may have been forgotten, or belong to a record written by a server
- * this client never saved, and re-pointing it at whichever server is current
- * would open that server's same-named pane — a stranger's terminal.
- */
 /** The survivor an absorbed `id` is being folded into, even while the
  * absorption is still OPEN — its registry committed but its merge note not
  * yet written (board #335 ③b, reviewer P1-B on 4c7cd64c): the move journal
@@ -463,6 +453,16 @@ export function absorbedInto(storage: Store, id: string): string {
   return open ? mergedInto(storage, open.to) : '';
 }
 
+/**
+ * The saved entry `id` now IS, by the merges identity repair actually made:
+ * `id` itself while it is saved, the survivor it was folded into (following a
+ * chain of later merges), or '' when nothing shows it to be any saved entry.
+ *
+ * The '' case is the point (reviewer P1-a, 2026-10-10): an id absent from the
+ * registry may have been forgotten, or belong to a record written by a server
+ * this client never saved, and re-pointing it at whichever server is current
+ * would open that server's same-named pane — a stranger's terminal.
+ */
 export function mergedInto(storage: Store, id: string): string {
   if (!id) return '';
   const saved = new Set(loadServers(storage).map((s) => s.id));
