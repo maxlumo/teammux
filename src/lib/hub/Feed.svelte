@@ -114,8 +114,9 @@
   }
 
   /** A click inside a bubble that landed on a PATH link (board #99). Returns
-   * true when the click is ours — the caller stops the bubble's own toggle. */
-  /** The bubble's ONE reference-link route: a file path opens its preview,
+   * true when the click is ours — the caller stops the bubble's own toggle.
+   *
+   * The bubble's ONE reference-link route: a file path opens its preview,
    * and a `#<id>` link (board #340) opens that issue on the Board, the route
    * a board line's jump takes. Either way the click is not a click on the
    * bubble (it does not also flip the action row). */
@@ -239,10 +240,6 @@
   }
   let scrollFrame = 0;
 
-  /** One bubble, one continuous motion: select it while it is naturally inside
-   * the viewport, then let CSS sticky catch that SAME element as it leaves in
-   * the current scroll direction. In an empty stretch of a long reply, retain
-   * it; never swap to another invisible message at an arbitrary midpoint. */
   /** The height a folded message should not exceed — a fifth of the
    * conversation, the owner's number. It is an ESTIMATE that feeds the line
    * budget below, never a cap on the box: the bubble is never clipped, the
@@ -466,6 +463,10 @@
     withReadingAnchor(() => { expanded = next; });
   }
 
+  /** One bubble, one continuous motion: select it while it is naturally inside
+   * the viewport, then let CSS sticky catch that SAME element as it leaves in
+   * the current scroll direction. In an empty stretch of a long reply, retain
+   * it; never swap to another invisible message at an arbitrary midpoint. */
   function syncAsk(direction = askDir, reset = false) {
     if (!feedEl) { askKey = ''; askEdge = ''; askHeld = false; return; }
     // Chromium's offsetTop for a sticky element is its HELD position. Read that

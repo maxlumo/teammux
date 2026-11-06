@@ -455,6 +455,12 @@ export function unreadSenders(feed: readonly { seq?: number; ts?: number; from?:
   return out;
 }
 
+/** A bare image reference in prose: an http(s) URL or an absolute/`~` path
+ * ending in an image extension. Agents rarely write markdown image syntax —
+ * they answer "截图在 /tmp/shot.png" (owner, 2026-08-26: "如果有图片的返回
+ * 可以返回图片路径或者 url，然后你正确读图渲染出来"). */
+const BARE_IMG = String.raw`(?:https?:\/\/[^\s<>()"']+?|(?<=^|[\s"'【（(:：=])~?\/[^\s<>()"':]+?)\.(?:png|jpe?g|webp|gif|bmp|svg)(?:\?[^\s<>()"']*)?`;
+
 /** Markdown image references in a message body, split from the prose.
  *
  * `tmm send --image` appends `![](src)` lines, and agents write the same syntax
@@ -462,12 +468,6 @@ export function unreadSenders(feed: readonly { seq?: number; ts?: number; from?:
  * because a local path is not a URL a webview can load: the src has to go
  * through the file service first, which means the client needs the list, not an
  * `<img>` tag it would have to rewrite afterwards. Text keeps its markdown. */
-/** A bare image reference in prose: an http(s) URL or an absolute/`~` path
- * ending in an image extension. Agents rarely write markdown image syntax —
- * they answer "截图在 /tmp/shot.png" (owner, 2026-08-26: "如果有图片的返回
- * 可以返回图片路径或者 url，然后你正确读图渲染出来"). */
-const BARE_IMG = String.raw`(?:https?:\/\/[^\s<>()"']+?|(?<=^|[\s"'【（(:：=])~?\/[^\s<>()"':]+?)\.(?:png|jpe?g|webp|gif|bmp|svg)(?:\?[^\s<>()"']*)?`;
-
 export function splitImages(body: string | null | undefined): { text: string; images: string[] } {
   const images: string[] = [];
   let text = (body ?? '')
@@ -625,29 +625,6 @@ export function clampStepsRows(v: unknown): number {
  * ellipsis: this is a Chinese-first UI and `...` reads as three periods. */
 export const ELIDE = '……';
 
-/**
- * Shorten `text` from the TAIL — a plain rear truncation, with the marker
- * glued INLINE to the last kept content, never on a line of its own.
- *
- * Every long USER message renders folded by default (owner, 2026-08-27:
- * "用户如果发送过长消息 直接后截断的形式 最后文末不用换行三个点 中间不要了，
- * 默认用户消息都截断 不要显示太多"), which retired the middle elision the held
- * anchor used (head + …… + tail): the fold is no longer a landmark's reminder
- * of both ends of an ask but the feed's default economy, and a default wants
- * the simplest shape — the start of the message, cut where the budget runs out.
- *
- * Two shapes need cutting:
- *  · MANY LINES → keep the first whole lines (markdown stays parseable),
- *    marker appended to the last one.
- *  · ONE LONG PARAGRAPH → line counting cannot help, so cut characters, on a
- *    word boundary rather than mid-word (CJK has no spaces; a run without one
- *    is cut where asked).
- *
- * `maxLines` is derived by the caller from the height it may occupy and the
- * measured line height, so a big screen shows more lines than a small one.
- * Returns the text unchanged when it already fits — the common case, and the
- * caller relies on identity to skip re-rendering.
- */
 /** A folded user message's line budget on a COMPACT screen: a constant.
  * On the phone the old screen-derived budget (20% of the chat column) gave
  * 6–8 lines — too tall for a screen that fits three bubbles (board #4) — and
@@ -676,7 +653,30 @@ export function foldLines(compact: boolean, basis: number, lineHeight: number): 
   return Math.max(3, Math.floor((maxPx - 26) / lh));
 }
 
-/** Fold a long user message to `maxLines` VISUAL lines (board #53).
+/**
+ * Shorten `text` from the TAIL — a plain rear truncation, with the marker
+ * glued INLINE to the last kept content, never on a line of its own.
+ *
+ * Every long USER message renders folded by default (owner, 2026-08-27:
+ * "用户如果发送过长消息 直接后截断的形式 最后文末不用换行三个点 中间不要了，
+ * 默认用户消息都截断 不要显示太多"), which retired the middle elision the held
+ * anchor used (head + …… + tail): the fold is no longer a landmark's reminder
+ * of both ends of an ask but the feed's default economy, and a default wants
+ * the simplest shape — the start of the message, cut where the budget runs out.
+ *
+ * Two shapes need cutting:
+ *  · MANY LINES → keep the first whole lines (markdown stays parseable),
+ *    marker appended to the last one.
+ *  · ONE LONG PARAGRAPH → line counting cannot help, so cut characters, on a
+ *    word boundary rather than mid-word (CJK has no spaces; a run without one
+ *    is cut where asked).
+ *
+ * `maxLines` is derived by the caller from the height it may occupy and the
+ * measured line height, so a big screen shows more lines than a small one.
+ * Returns the text unchanged when it already fits — the common case, and the
+ * caller relies on identity to skip re-rendering.
+ *
+ * Fold a long user message to `maxLines` VISUAL lines (board #53).
  *
  * The first cut budgeted SOURCE lines and only fell back to characters when
  * the line count already fit — so one giant paragraph among the first lines
@@ -1384,12 +1384,6 @@ export function markIssueRefs(html: string, ids: ReadonlySet<number>): string {
 
 export type FeedLevel = 'chat' | 'status' | 'tools';
 
-/** Lifecycle lines the server posts into the room (a spawn, a `tmm done`) are
- * events, not prose, and render as a centered system line rather than a chat
- * bubble. The marker is `[tmm] `; the two glyph prefixes are the pre-2026-08
- * spelling and stay recognized because the room is persisted — old messages
- * must not regress into bubbles. Returns the text without its marker, or null
- * when the body is ordinary prose. */
 /** Wrap every VALID `@address` in a rendered message in the span the bubble
  * sets apart (`.m-to`). Owner, 2026-09-29 (#273): "一个消息里如果有 @ 多个角色
  * 这些有效的 @ 都应该被高亮起来；如果是无效的 就不要高亮了" — the server types a
@@ -1518,6 +1512,12 @@ export function foldedCommandArgs(cmd: SentCommand, maxLines: number, perLine = 
   return cmd.args ? cutTail(cmd.args, maxLines, perLine) : null;
 }
 
+/** Lifecycle lines the server posts into the room (a spawn, a `tmm done`) are
+ * events, not prose, and render as a centered system line rather than a chat
+ * bubble. The marker is `[tmm] `; the two glyph prefixes are the pre-2026-08
+ * spelling and stay recognized because the room is persisted — old messages
+ * must not regress into bubbles. Returns the text without its marker, or null
+ * when the body is ordinary prose. */
 export function systemLine(body: string | null | undefined): string | null {
   for (const marker of ['[tmm] ', '⚡ ', '✔ ']) {
     if (body?.startsWith(marker)) return body.slice(marker.length);
@@ -1739,12 +1739,6 @@ export function noteStateColor(state: string): string {
   }
 }
 
-/**
- * Same calendar day in LOCAL time — the rule behind the feed's date
- * separators. UTC arithmetic would flip the divider at 08:00 for a UTC+8
- * reader, which is exactly the reader who asked for it ("我希望在有新日期的
- * 地方能有一个标注", owner 2026-08-20).
- */
 /** How far apart two bubbles of one sender may be and still read as one
  * run (board #331). */
 export const RUN_GAP_MS = 5 * 60_000;
@@ -1767,6 +1761,12 @@ export function continuesRun(prev: FeedBlock | undefined, b: FeedBlock): boolean
   return true;
 }
 
+/**
+ * Same calendar day in LOCAL time — the rule behind the feed's date
+ * separators. UTC arithmetic would flip the divider at 08:00 for a UTC+8
+ * reader, which is exactly the reader who asked for it ("我希望在有新日期的
+ * 地方能有一个标注", owner 2026-08-20).
+ */
 export function sameDay(a: number, b: number): boolean {
   const da = new Date(a);
   const db = new Date(b);

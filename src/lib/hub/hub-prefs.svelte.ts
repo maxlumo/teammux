@@ -199,14 +199,14 @@ export function createHubPrefs(storage: Store, prefs: AppPrefs = appPrefs) {
       if (session) storage.setItem(PROJECT_KEY, session);
       else storage.removeItem(PROJECT_KEY);
     },
-    /** Follow a project onto its new tmux session name: the per-project prefs are
-     * keyed by that name, so a rename would otherwise silently drop the room's
-     * lead and its read marker. */
     /** Read every per-project map again from storage: an identity merge just
      * merged an absorbed server's slots into this server's (board #335 ③b).
      * Every setter writes through, so nothing in memory is newer than the
      * slots and nothing is lost by re-reading. */
     reload() { Object.assign(state, stored()); },
+    /** Follow a project onto its new tmux session name: the per-project prefs are
+     * keyed by that name, so a rename would otherwise silently drop the room's
+     * lead and its read marker. */
     renameSession(from: string, to: string) {
       if (!from || !to || from === to) return;
       for (const map of [state.leads, state.seen, state.drafts, state.drawers, state.rosterExpanded] as Record<string, unknown>[]) {

@@ -1381,9 +1381,9 @@
   function toggleFilter(name) {
     setFilter(filterAgent === name ? '' : name, 'user');
   }
-  /** How the filter's subject is named to the reader: 'you' for the human. */
   /** A room's names (board #21): the labels of the project that room is. */
   const roomNames = (roomName) => agentNames(labelsBy[rows.find((r) => roomKey(r) === roomName)?.project.session ?? ''] ?? (roomName === room(selected) ? labelsBy[selected] : undefined));
+  /** How the filter's subject is named to the reader: 'you' for the human. */
   const filterName = (name, roomName = room(selected)) => (name === HUMAN ? t('hubSearchYou') : roomNames(roomName).shown(name));
   /* The mode is shown and exited only on its card (#238), so it lasts only
      while the strip draws one: a live or a stopped identity. An agent removed
@@ -1641,8 +1641,9 @@
    * existing `hub_spawn`, run in order so the roster appears in the order it was
    * picked. In 'start' mode the new roster also gets a lead — the first that can
    * hire, else the first picked, the same rule pickLead applies to a live room.
-   * In 'add' mode whoever you were talking to stays the recipient. */
-  /** The batch is FROZEN at confirmation (reviewer P1-C on 56a3ad44, the
+   * In 'add' mode whoever you were talking to stays the recipient.
+   *
+   * The batch is FROZEN at confirmation (reviewer P1-C on 56a3ad44, the
    * #329/#377 rule): the project, the Join, the names and the brief are the
    * ones the person confirmed. A project switch while it runs stops the rest
    * (`selectionGeneration`), so nothing lands in the other project and
@@ -2311,9 +2312,6 @@
     return () => { for (const dispose of disposers) dispose(); };
   });
 
-  /** An agent's verbs — shared by its card and context menus. */
-  /** One order for every agent menu — rising consequence, destructive last
-   * (owner, 2026-08-25: "停止删除应该靠后"), interrupt in the warn tone. */
   /** "Move to team t" per other running team and, for a JOINED agent,
    * "Leave team t" (board #384): the drag's form for touch and keyboard, flat
    * items in the one menu. None for a member its team's definition places.
@@ -2334,6 +2332,10 @@
         onselect: () => moveAgent(a.name, '', session) }] : []),
     ];
   }
+  /** An agent's verbs — shared by its card and context menus.
+   *
+   * One order for every agent menu — rising consequence, destructive last
+   * (owner, 2026-08-25: "停止删除应该靠后"), interrupt in the warn tone. */
   function agentItems(name) {
     const session = selected;
     const config = openAgentConfig

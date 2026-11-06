@@ -89,10 +89,10 @@
   }
   onDestroy(() => measureRoot?.remove());
 
-  /** One measurement transaction owns natural height and the signature band. */
   /** A style write that changes nothing is not a write (#466): an equal
    * value would still dirty the element and force the next read to lay out. */
   const put = (style, prop, value) => { if (style[prop] !== value) style[prop] = value; };
+  /** One measurement transaction owns natural height and the signature band. */
   function growComposer() {
     const el = composerEl;
     const row = el?.parentElement;
