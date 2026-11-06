@@ -589,6 +589,38 @@ caught does not show that every transient is. Reports say "sampled geometry"
 frames needs a trace or a screenshot, and a case the script did not exercise (a
 thumbnail whose size arrives late) is not named as covered.
 
+## A change does not separate a doc comment from its item (board #49)
+
+Three times on 2026-11-06 a change left a doc comment above the wrong item,
+each caught only by a validator reading by eye: #43 S1 (two helpers inserted
+between `cap_refusal`'s `///` doc and its fn, tmm.rs), #43 S2 (`blockPicks`
+inserted between `editBlocks`'s JSDoc and the function, Board.svelte) and #47
+S1 (`fn resuming` inserted between `startup_confirmation`'s doc and its item,
+codex.rs). `scripts/doc-adjacency.test.ts` (in `pnpm test`) diffs the working
+tree, untracked files included, against `merge-base(HEAD, main)` and fails on
+what the change introduces:
+
+- **Separation**: a doc block whose item was directly below it, where the
+  item and a doc line both survive and the change put code (anything but doc
+  or attribute lines) between them. This is the only rule that sees #43 S1
+  and #47 S1.
+- **Stranded, single file** (counted only when the change added or moved the
+  block): a line-own `/** … */` directly followed by another `/**` block or by
+  a blank line (a file's opening JSDoc is exempt), or a `///` run followed,
+  past blank or `//` lines, by another `///` run.
+
+Its fixtures are verbatim excerpts of the three incidents, before and after.
+With no merge-base (no git, no `main` ref, a shallow checkout) the test is a
+visible skip, `skipped: no merge-base …`, never a pass. **What it cannot
+see**: it reads lines, not meaning. Two `///` runs that touch are one block
+to it (builder-2 on #43), so a file read alone, like main's `cap_refusal`
+doc, which also carries `rpc_needing`'s, looks correct; it is caught only
+when a diff shows the item moving away. An item line the same change also
+edits is not followed, so code inserted together with a signature change is
+missed; a multi-line attribute inserted between a doc and its item reads as
+code (a false red). Main had 33 stranded JSDoc blocks when this landed; they are #51, and
+until it lands the single-file rule only counts what a change adds.
+
 ## Three Test Tiers
 
 ### 1. Unit tests — `<module>.test.ts`
