@@ -5351,6 +5351,43 @@ mod tests {
         }
     }
 
+    /// Board #42 (orchestrator 13:03): the guard is what tears a session
+    /// down, so an assertion that fails part-way still leaves nothing on the
+    /// tmux server. The 11:59 leak came from a trailing `kill-session` that a
+    /// panic skipped.
+    #[test]
+    fn a_test_that_panics_part_way_leaves_no_session_behind() {
+        let session = format!("tmm-guard-pin-{}", uuid::Uuid::new_v4());
+        let ws = crate::config::test_scratch("tmm-guard-pin-ws");
+        let created = std::process::Command::new("tmux")
+            .args(["new-session", "-d", "-s", &session, "-c", &ws.to_string_lossy(), "cat"])
+            .status()
+            .map(|s| s.success())
+            .unwrap_or(false);
+        if !created {
+            eprintln!("no tmux server — skipping");
+            let _ = std::fs::remove_dir_all(&ws);
+            return;
+        }
+        let alive = |name: &str| {
+            std::process::Command::new("tmux")
+                .args(["has-session", "-t", &format!("={name}")])
+                .stderr(std::process::Stdio::null())
+                .status()
+                .map(|s| s.success())
+                .unwrap_or(false)
+        };
+        assert!(alive(&session), "the session exists before the panic");
+        let (name, dir) = (session.clone(), ws.clone());
+        let outcome = std::panic::catch_unwind(move || {
+            let _teardown = KillOnDrop(name, dir);
+            panic!("an assertion failing part-way");
+        });
+        assert!(outcome.is_err(), "the body did panic");
+        assert!(!alive(&session), "the panic still tore the session down");
+        assert!(!ws.exists(), "and its workspace");
+    }
+
     /// Board #250 (validator 16:31), on the real delivery path: two
     /// multi-line messages to two DIFFERENT managed panes, posted at the same
     /// moment, each held between its paste buffer's load and paste. Each pane
