@@ -648,7 +648,7 @@ Incidents 2026-11-05 07:38 and 2026-11-06 06:25: a `/clear` sent to an agent tha
 - **The answer.** A command typed at once prints `✓ /clear → x` as before. One that waits prints `✓ /clear → x waits for its turn to end — cancel: tmm send --cancel <id>`, one line per agent for `@all`. When it is typed, and what the lines behind a reset wait for (its effect, never a timer), is in hub-composer.md § `--when-idle`.
 - **Cancel.** `tmm send --cancel <id>` takes only the id (`12` or `#12`). Only the command's sender or the human may cancel it, the wakes' courtesy rule (above), read from the room line the command was accepted under. The room records the cancel under the canceller; the lines held behind it are offered to the window again at once. A command already typed and still waiting for its effect (a reset, hub-composer.md § `--when-idle`) is cancelled the same way, said as `no longer waiting for it to take effect`. An id that took effect, was cancelled, is a chat line or another project's is refused (`hub_command_cancel`).
 
-Pinned by `tests/send_when_idle_cli.rs` (the call carries `when_idle`; refused on an older server, nothing sent; the refusals send nothing; cancel carries only the id) and `a_waiting_command_is_cancelled_once_and_said` (`server/hub_rpc.rs`). Negative control: sending `--when-idle` without the cap check turns the older-server test red.
+Pinned by `tests/send_when_idle_cli.rs` (the call carries `when_idle`; refused on an older server, nothing sent; the refusals send nothing; cancel carries only the id) and `a_held_command_is_cancelled_once_and_said` (`projects/delivery/when_idle.rs`). Negative control: sending `--when-idle` without the cap check turns the older-server test red.
 
 ## The gateway (`tmm gateway`, board #323)
 

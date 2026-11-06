@@ -295,47 +295,18 @@ fn dispatch_hub(req: &Request, notifications: Option<&crate::agent_notifications
                 notes.push(format!("not run for {}", app_refused.join("; ")));
             }
             let tail = if notes.is_empty() { String::new() } else { format!(" ({})", notes.join("; ")) };
-            // One room line, under the sender: what was typed now, and who
-            // waits for its turn to end (its id is what `--cancel` reads the
-            // sender from).
-            let names: Vec<&str> = waiting.iter().map(|(w, _)| w.as_str()).collect();
-            let held = match names.len() {
-                0 => String::new(),
-                1 => format!("{} waits for its turn to end", names[0]),
-                _ => format!("{} wait for their turns to end", names.join(", ")),
-            };
-            let to = [sent.join(", "), held].into_iter().filter(|s| !s.is_empty()).collect::<Vec<_>>().join("; ");
-            let _ = rooms::post_routed_as(&room, &msg_id, from, &format!("[tmm] {} → {}{}", text, to, tail), &[]);
+            // One room line, under the sender (`delivery::accepted_line`).
+            let _ = rooms::post_routed_as(&room, &msg_id, from, &crate::projects::delivery::accepted_line(text, &sent, &waiting, &tail), &[]);
             let waiting: Vec<serde_json::Value> = waiting.iter().map(|(w, id)| serde_json::json!({ "agent": w, "id": id })).collect();
             Ok(serde_json::json!({ "sent": sent, "waiting": waiting, "command": text, "refused": refused }))
         }
 
-        // Cancel a `/command` waiting for its agent's idle edge (board #45,
-        // `tmm send --cancel <id>`; the id is what `--when-idle` printed). Only
-        // its sender or the human may cancel it: the wakes' courtesy rule
-        // against a teammate's mistake, not a security boundary (tmm-cli.md
-        // § wakes). Its sender is the room line it was accepted under, whose
-        // id the row carries. The lines held behind it are offered to the
-        // window again at once: typed now if its turn is over, else at its end.
+        // Cancel a held `/command` (board #45, `tmm send --cancel <id>`):
+        // `delivery::cancel_command`.
         "hub_command_cancel" => {
             let id = p.get("id").and_then(|v| v.as_i64()).ok_or_else(|| RpcError::InvalidParams("missing required param: id".into()))?;
             let from = p.get("from").and_then(|v| v.as_str()).filter(|s| !s.is_empty()).unwrap_or("human");
-            let row = crate::projects::telemetry::cancel_held_command(session, id, |row| {
-                let sender = rooms::message_by_ref(&room, &row.msg_id).and_then(|m| m["from"].as_str().map(str::to_string));
-                match sender {
-                    Some(by) if by != from && from != "human" => Err(format!("command #{id} was sent by {by}; only they or the human can cancel it")),
-                    _ => Ok(()),
-                }
-            })
-            .map_err(RpcError::InvalidParams)?;
-            let said = match row.verbatim {
-                // Typed, its effect not seen yet: the lines behind it stop waiting.
-                Some(crate::projects::store::CommandHold::Typed) => format!("[tmm] {} → {}: no longer waiting for it to take effect", row.line, row.window),
-                _ => format!("[tmm] {} → {} cancelled before its turn ended", row.line, row.window),
-            };
-            let _ = rooms::post_routed(&room, from, &said, &[]);
-            crate::projects::delivery::flush(session, &row.window);
-            Ok(serde_json::json!({ "id": id, "agent": row.window, "command": row.line, "cancelled": true }))
+            crate::projects::delivery::cancel_command(session, id, from).map_err(RpcError::InvalidParams)
         }
 
         "hub_post" => {
@@ -6516,52 +6487,6 @@ while True:
             ],
             "one line per command, under its sender; the refused one records nothing"
         );
-    }
-
-    /// Board #45: a command waiting for its agent's idle edge is cancelled
-    /// by its id, by its sender (a teammate is refused, as for a wake). The
-    /// row goes, the room says so under the canceller, the
-    /// lines held behind it stay held for the next trigger, and a second
-    /// cancel (or a chat line's id, or another project's) is refused.
-    #[test]
-    fn a_waiting_command_is_cancelled_once_and_said() {
-        crate::projects::tests::use_test_store();
-        let session = format!("tmm-cancel-{}", uuid::Uuid::new_v4());
-        let call = |m: &str, params: serde_json::Value| handle_hub_request(&req(m, params), None);
-        let tm = crate::projects::telemetry::record_held_command;
-        let id = tm(&session, "dev", "/clear", "m1").unwrap();
-        rooms::post_routed_as(&project_room(&session), "m1", "lead", "[tmm] /clear → dev waits for its turn to end", &[]).unwrap();
-        crate::projects::telemetry::record_held(&session, "dev", "[tmm chat] the brief", 0, "m2").unwrap();
-        let line = crate::projects::telemetry::held_rows(&session, "dev")[1].id;
-        let other = call("hub_command_cancel", serde_json::json!({ "session": "elsewhere", "id": id, "from": "lead" }));
-        assert!(other.error.is_some(), "another project's id cancels nothing");
-        let chat = call("hub_command_cancel", serde_json::json!({ "session": session, "id": line, "from": "lead" }));
-        assert!(chat.error.is_some(), "a chat line is not a waiting command");
-        let mate = call("hub_command_cancel", serde_json::json!({ "session": session, "id": id, "from": "reviewer" }));
-        assert!(mate.error.as_ref().is_some_and(|e| e.message.contains("was sent by lead; only they or the human")), "{:?}", mate.error.map(|e| e.message));
-        let r = call("hub_command_cancel", serde_json::json!({ "session": session, "id": id, "from": "lead" }));
-        assert_eq!(r.result, Some(serde_json::json!({ "id": id, "agent": "dev", "command": "/clear", "cancelled": true })), "{:?}", r.error.map(|e| e.message));
-        let again = call("hub_command_cancel", serde_json::json!({ "session": session, "id": id, "from": "lead" }));
-        assert!(again.error.as_ref().is_some_and(|e| e.message.contains(&format!("no command #{id} is waiting"))), "{:?}", again.error.map(|e| e.message));
-        let held: Vec<String> = crate::projects::telemetry::held_rows(&session, "dev").into_iter().map(|r| r.line).collect();
-        assert_eq!(held, ["[tmm chat] the brief"], "the line behind it is kept");
-        // A TYPED command still waiting for its effect is cancelled too: the
-        // lines behind it stop waiting for it.
-        let typed = tm(&session, "dev", "/compact", "m1").unwrap();
-        assert!(crate::projects::telemetry::set_command_typed(typed, true).unwrap());
-        assert!(call("hub_command_cancel", serde_json::json!({ "session": session, "id": typed, "from": "human" })).error.is_none(), "the human may cancel any");
-        let room: Vec<(String, String)> = call("hub_log", serde_json::json!({ "session": session }))
-            .result
-            .and_then(|v| v.get("messages").and_then(|m| m.as_array()).cloned())
-            .unwrap_or_default()
-            .iter()
-            .filter_map(|m| Some((m.get("from")?.as_str()?.to_string(), m.get("body")?.as_str()?.to_string())))
-            .collect();
-        assert_eq!(room, vec![
-            ("lead".to_string(), "[tmm] /clear → dev waits for its turn to end".to_string()),
-            ("lead".to_string(), "[tmm] /clear → dev cancelled before its turn ended".to_string()),
-            ("human".to_string(), "[tmm] /compact → dev: no longer waiting for it to take effect".to_string()),
-        ]);
     }
 
     /// Board #45 through the real door and a real pane: `when_idle` on a busy

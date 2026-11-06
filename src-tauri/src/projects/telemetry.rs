@@ -947,6 +947,13 @@ pub fn delivery_decision() -> std::sync::MutexGuard<'static, ()> {
     turn_order()
 }
 
+/// Test-only: is the turn-fact lock held right now (by anyone)? Board #45:
+/// a held command's keys must go in under it.
+#[cfg(test)]
+pub fn turn_order_is_held() -> bool {
+    TURN_ORDER.try_lock().is_err()
+}
+
 /// Test-only: runs once inside the next prompt's critical section, so a test
 /// can race another turn fact against it and prove it waits (board #264).
 #[cfg(test)]
@@ -1450,7 +1457,17 @@ pub fn record_command_delivery(session: &str, window: &str, echo: &str, msg_id: 
     // under the turn-fact lock (validator 12:07): else an end could read
     // "no prompt", this read "idle" and insert an Idle row, and that end
     // retire the brand-new command before it was even typed.
-    let _order = turn_order();
+    let order = turn_order();
+    record_command_delivery_held(&order, session, window, echo, msg_id)
+}
+
+/// `record_command_delivery` for a caller that already holds the turn-fact
+/// lock (`delivery_decision`, board #45: a `--when-idle` command released in
+/// the delivery decision's step). The lock is not reentrant, so a holder
+/// never takes it twice (validator-2's 15:25 deadlock: claude's `/goal`).
+pub fn record_command_delivery_held(_order: &std::sync::MutexGuard<'static, ()>, session: &str, window: &str, echo: &str, msg_id: &str) -> Option<i64> {
+    recovery_mark(session);
+    with_rec(session, window, |_| {});
     let running = store()
         .lock()
         .unwrap()

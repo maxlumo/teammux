@@ -23,6 +23,10 @@ use std::sync::{Arc, Mutex, OnceLock};
 
 use super::telemetry;
 
+mod when_idle;
+pub use when_idle::{accepted_line, cancel_command, check_command_effects, command_session_started, command_when_idle, WhenIdle};
+use when_idle::{end_held_commands, release_command, Ending};
+
 /// The most characters one combined prompt carries (board #257). Held lines
 /// are packed whole, oldest first, until the next would pass it; the rest
 /// stay held for the next turn's end, so an overflow becomes the fewest
@@ -213,37 +217,6 @@ pub(crate) fn stop_cli(session: &str, window: &str, kill: impl FnOnce() -> Resul
     taken.announce(session, window);
     end_held_commands(session, window, Ending::Stop);
     Ok(())
-}
-
-/// What ended a window's CLI, for its held `/command`s (board #45).
-#[derive(Clone, Copy)]
-enum Ending {
-    Stop,
-    Restart,
-}
-
-/// The held `/command`s a stop or a restart ends (board #45), under the
-/// window lock, each said once in the room under its sender. A STOP ends
-/// every one: a reset left waiting must never fire into whatever the agent
-/// is next given (reviewer's retro on #45). A RESTART ends only a typed one
-/// whose effect has not come: the CLI it was typed into is gone, so its effect
-/// never will, and it is not typed again; one still waiting stays and is
-/// typed at the new CLI's idle edge (#38's ready edge comes first). The lines
-/// behind an ended one are no longer held by it.
-fn end_held_commands(session: &str, window: &str, ending: Ending) {
-    use super::store::CommandHold::{Typed, Waiting};
-    for row in telemetry::held_rows(session, window) {
-        let said = match (ending, row.verbatim) {
-            (Ending::Stop, Some(Waiting)) => format!("[tmm] {} → {window} was not typed: {window} was stopped", row.line),
-            (Ending::Stop, Some(Typed)) => format!("[tmm] {} → {window}: {window} was stopped before it took effect", row.line),
-            (Ending::Restart, Some(Typed)) => format!("[tmm] {} → {window}: {window} was restarted before it took effect; it is not typed again", row.line),
-            _ => continue,
-        };
-        if telemetry::cancel_held_command(session, row.id, |_| Ok(())).is_ok() {
-            threads_before().lock().unwrap().remove(&row.id);
-            say_command(session, &row, &said);
-        }
-    }
 }
 
 /// The window's current pane and its screen, the one read a ready check
@@ -1101,7 +1074,7 @@ fn deliver_gated(
         return if steered { type_steered(session, window, target, line, ask_at, msg_id, behind) } else { type_now(session, window, target, line, ask_at, msg_id) };
     }
     if may_release(known, busy, strict.is_some(), &held) {
-        flush_locked(session, window, target, steered.then_some(behind));
+        flush_locked(session, window, target, steered.then_some(behind), Some(&_order));
     } else if strict.is_some() {
         warn_if_overdue(session, window);
     }
@@ -1212,7 +1185,7 @@ fn flush_at(session: &str, window: &str, target: &str) {
     // runs steer (#276), so its rows are owed no echo.
     // (`busy` here is the hook-known running turn, `known && turn_busy`: no in-flight anchor.)
     let steered = (busy && strict.is_none() && input_mode(session, window) == Some("steer")).then_some(0);
-    flush_locked(session, window, target, steered);
+    flush_locked(session, window, target, steered, None);
 }
 
 /// May the window's held lines be typed now? The ONE release rule (board
@@ -1247,11 +1220,14 @@ fn may_release(known: bool, busy: bool, strict: bool, held: &[super::store::Deli
 /// it are packed only up to it, a waiting one first in line is typed ALONE by
 /// its own rule (`release_command`), and a typed one whose effect has not
 /// come yet holds everything behind it.
-fn flush_locked(session: &str, window: &str, target: &str, steered: Option<i64>) {
+///
+/// `order` is the turn-fact lock when the caller holds it (the delivery
+/// decision): what a command's receipt is recorded under, never taken twice.
+fn flush_locked(session: &str, window: &str, target: &str, steered: Option<i64>, order: Option<&std::sync::MutexGuard<'static, ()>>) {
     let rows = telemetry::held_rows(session, window);
     match rows.first().map(|r| (r, r.verbatim)) {
         Some((_, Some(super::store::CommandHold::Typed))) => return,
-        Some((row, Some(super::store::CommandHold::Waiting))) => return release_command(session, window, target, row, true),
+        Some((row, Some(super::store::CommandHold::Waiting))) => return release_command(session, window, target, row, true, order),
         _ => {}
     }
     let lines = rows.iter().position(|r| r.verbatim.is_some()).unwrap_or(rows.len());
@@ -1304,195 +1280,6 @@ fn flush_steered(session: &str, window: &str, target: &str, batch: &[super::stor
         }
         Err(e) => telemetry::record_undelivered(session, window, &shown, e.trim()),
     }
-}
-
-/// May a held `/command` be typed into `window` now (board #45)? Only at its
-/// idle edge, by turn facts and #38's readiness, never by the pane and never
-/// by `HOLD_MAX_SECS` (a reset typed into a running turn is the 07:38
-/// incident): the turn is KNOWN and not busy, no line typed into it still
-/// owes its echo (#281: a delivery just typed has started a turn the hooks
-/// have not reported yet, the 06:25 incident), the window is not starting
-/// (#38) or held by a restore (#422), and a CLI that loses typed text is
-/// ready (#404). Asked under the window lock.
-fn command_idle(session: &str, window: &str) -> bool {
-    telemetry::turn_known(session, window)
-        && strict_occupied(session, window) != Some(true)
-        && !telemetry::turn_busy(session, window)
-        && telemetry::in_flight_row(session, window).is_none()
-        && !super::restore_hold::held(session, window)
-        && !starting(session, window)
-}
-
-/// What `command_when_idle` did with one window's command.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum WhenIdle {
-    /// The window was at its idle edge: typed now.
-    Typed,
-    /// Held for the idle edge: the row id, what `tmm send --cancel` names.
-    Waiting(i64),
-}
-
-/// `tmm send "@x /cmd" --when-idle` for one window (board #45): the command
-/// becomes a held row in the ONE deliveries queue, behind every line already
-/// held and ahead of every line sent later, and is typed alone and verbatim
-/// at the window's idle edge (`release_command`). The decision is made under
-/// the window lock and the turn-fact lock, in the same step as the typing, so
-/// no delivery can start a turn between "is it idle?" and the keys. `msg_id`
-/// is its room line's id: its sender is read from that line. `Err`: the row
-/// could not be written; nothing is typed.
-pub fn command_when_idle(session: &str, window: &str, target: &str, command: &str, msg_id: &str) -> Result<WhenIdle, String> {
-    let lock = window_lock(session, window);
-    let _guard = lock.lock().unwrap();
-    let _order = telemetry::delivery_decision();
-    let first = telemetry::held_rows(session, window).is_empty();
-    let id = telemetry::record_held_command(session, window, command, msg_id)?;
-    if let Some(row) = first.then(|| telemetry::held_rows(session, window).into_iter().find(|r| r.id == id)).flatten() {
-        // Typed now, it is said by the caller's own line (`hub_command`).
-        release_command(session, window, target, &row, false);
-    }
-    let waiting = telemetry::held_rows(session, window).iter().any(|r| r.id == id && r.verbatim == Some(super::store::CommandHold::Waiting));
-    Ok(if waiting { WhenIdle::Waiting(id) } else { WhenIdle::Typed })
-}
-
-/// The thread a window ran before its `NewThread` command was typed (board
-/// #45), by row id. In memory: after a gateway restart a typed command has
-/// none, its effect cannot be compared, and its lines wait for the notice.
-fn threads_before() -> &'static Mutex<HashMap<i64, Option<String>>> {
-    static BEFORE: OnceLock<Mutex<HashMap<i64, Option<String>>>> = OnceLock::new();
-    BEFORE.get_or_init(Default::default)
-}
-
-/// Type a waiting `/command` that is first in line, if the window is at its
-/// idle edge (board #45): ALONE, verbatim (no stamp, no `＠`), through the one
-/// send door, never in the same flush as a line behind it. Its row is marked
-/// typed BEFORE the keys go in (an effect racing the Enter finds it) and put
-/// back to waiting if the pane refuses them. A command whose backend declares
-/// an effect (`Backend::command_effect`) keeps its row until that effect is
-/// seen, holding every line behind it; one with none is retired once typed,
-/// and the lines behind it go at the next trigger. The receipt rides the
-/// command's own room line, as `hub_command`'s does. `later`: it waited, so
-/// its typing is said in the room under its sender.
-fn release_command(session: &str, window: &str, target: &str, row: &super::store::DeliveryRow, later: bool) {
-    if !command_idle(session, window) {
-        return;
-    }
-    let backend = recipe_backend(session, window);
-    let (name, args) = row.line.split_once(char::is_whitespace).map_or((row.line.as_str(), ""), |(n, a)| (n, a.trim()));
-    let effect = backend.and_then(|b| b.command_effect(name));
-    let before = (effect == Some(crate::backends::CommandEffect::NewThread))
-        .then(|| backend.zip(super::managed_home(session, window)).and_then(|(b, home)| b.current_thread(&home)));
-    if !matches!(telemetry::set_command_typed(row.id, true), Ok(true)) {
-        return;
-    }
-    let receipt = backend.and_then(|b| b.command_echo(name, args)).and_then(|echo| telemetry::record_command_delivery(session, window, &echo, &row.msg_id));
-    match type_verbatim(session, window, target, &row.line) {
-        Ok(()) => {
-            match effect {
-                None => telemetry::forget_delivery(row.id),
-                Some(_) => {
-                    if let Some(before) = before {
-                        threads_before().lock().unwrap().insert(row.id, before);
-                    }
-                }
-            }
-            if later {
-                say_command(session, row, &format!("[tmm] {} → {window} (its turn ended)", row.line));
-            }
-            super::vitals::sniff_window_soon(session, window);
-        }
-        Err(e) => {
-            if let Some(id) = receipt {
-                telemetry::forget_delivery(id);
-            }
-            let _ = telemetry::set_command_typed(row.id, false);
-            if !kept_at_write(&e) {
-                telemetry::record_held_blocked(session, window, std::slice::from_ref(row), e.trim());
-            }
-        }
-    }
-}
-
-/// A room line about a held command, under the sender of the line it was
-/// accepted under (its `msg_id`), `tmm` when that line cannot be found.
-fn say_command(session: &str, row: &super::store::DeliveryRow, body: &str) {
-    let room = super::rooms::session_room(session);
-    let from = super::rooms::message_by_ref(&room, &row.msg_id).and_then(|m| m["from"].as_str().map(str::to_string)).unwrap_or_else(|| NOTICE_SENDER.to_string());
-    if let Err(e) = super::rooms::post(&room, &from, body) {
-        eprintln!("delivery: '{body}' was not written to the room: {e}");
-    }
-}
-
-/// The typed command first in `window`'s line has taken effect: its row is
-/// retired and the lines behind it are offered at once (board #45). Under
-/// the window lock; true when it retired one.
-fn command_took_effect(session: &str, window: &str, effect: crate::backends::CommandEffect, seen: impl Fn(&super::store::DeliveryRow) -> bool) -> bool {
-    let lock = window_lock(session, window);
-    let _guard = lock.lock().unwrap();
-    let Some(row) = telemetry::held_rows(session, window).into_iter().next() else { return false };
-    if row.verbatim != Some(super::store::CommandHold::Typed) {
-        return false;
-    }
-    let name = row.line.split_whitespace().next().unwrap_or_default();
-    if recipe_backend(session, window).and_then(|b| b.command_effect(name)) != Some(effect) || !seen(&row) {
-        return false;
-    }
-    telemetry::forget_delivery(row.id);
-    threads_before().lock().unwrap().remove(&row.id);
-    true
-}
-
-/// The CLI in `window` reported a `SessionStart` (board #45): the effect of a
-/// typed `/clear` or `/compact` that declares it (claude; codex `/compact`).
-/// Called by the hook path for every `SessionStart`; a window with no typed
-/// command first in line changes nothing.
-pub fn command_session_started(session: &str, window: &str) {
-    if command_took_effect(session, window, crate::backends::CommandEffect::SessionStart, |_| true) {
-        flush(session, window);
-    }
-}
-
-/// The capture tick's pass over typed commands (board #45): a `NewThread`
-/// effect (codex `/clear`, `/new`) is seen when the pane's thread is no
-/// longer the one it ran before the command; a command whose effect has not
-/// come within its backend's start timeout (#38's) is said ONCE, and its
-/// lines stay held (never typed on a timeout); `tmm send --cancel <id>`
-/// releases them.
-pub fn check_command_effects() {
-    for session in telemetry::held_sessions() {
-        for window in telemetry::held_windows(&session) {
-            let Some(row) = telemetry::held_rows(&session, &window).into_iter().next() else { continue };
-            if row.verbatim != Some(super::store::CommandHold::Typed) {
-                continue;
-            }
-            let backend = recipe_backend(&session, &window);
-            let changed = |row: &super::store::DeliveryRow| {
-                let Some(before) = threads_before().lock().unwrap().get(&row.id).cloned() else { return false };
-                let now = backend.zip(super::managed_home(&session, &window)).and_then(|(b, home)| b.current_thread(&home));
-                now.is_some() && now != before
-            };
-            if command_took_effect(&session, &window, crate::backends::CommandEffect::NewThread, changed) {
-                flush(&session, &window);
-                continue;
-            }
-            let wait = command_effect_timeout(backend);
-            if super::now().saturating_sub(row.ts) >= wait.as_secs() && telemetry::warn_command_once(row.id) {
-                say_command(&session, &row, &format!(
-                    "[tmm] {} → {window} has not taken effect after {} s; the lines behind it stay held — cancel: tmm send --cancel {}",
-                    row.line, wait.as_secs(), row.id
-                ));
-            }
-        }
-    }
-}
-
-/// How long a typed command may wait for its effect before it is said: the
-/// backend's own start timeout (#38), else `HOLD_MAX_SECS`.
-fn command_effect_timeout(backend: Option<crate::backends::Backend>) -> std::time::Duration {
-    #[cfg(test)]
-    if let Some(t) = *START_TIMEOUT_IN_TEST.lock().unwrap() {
-        return t;
-    }
-    backend.and_then(|b| b.startup_confirmation()).map_or(std::time::Duration::from_secs(HOLD_MAX_SECS), |c| c.timeout)
 }
 
 /// An interrupt ends the window's turn and DROPS its held lines (board #257
@@ -1680,6 +1467,8 @@ thread_local! {
     /// Test seam: when `Some`, typing is recorded here instead of reaching
     /// tmux, and `REFUSE` decides the outcome.
     static TYPED: std::cell::RefCell<Option<Vec<String>>> = const { std::cell::RefCell::new(None) };
+    /// Board #45: for each faked verbatim typing, was the turn-fact lock held?
+    static VERBATIM_UNDER_TURN_LOCK: std::cell::RefCell<Vec<bool>> = const { std::cell::RefCell::new(Vec::new()) };
     static REFUSE: std::cell::RefCell<Option<String>> = const { std::cell::RefCell::new(None) };
 }
 
@@ -1688,6 +1477,7 @@ fn type_verbatim(session: &str, window: &str, target: &str, text: &str) -> Resul
     if TYPED.with(|t| t.borrow().is_none()) {
         return send_into_locked(session, window, target, text);
     }
+    VERBATIM_UNDER_TURN_LOCK.with(|v| v.borrow_mut().push(telemetry::turn_order_is_held()));
     if let Some(e) = REFUSE.with(|r| r.borrow().clone()) {
         return Err(e);
     }
@@ -1733,11 +1523,12 @@ mod tests {
         assert_eq!(msgs.last().unwrap()["from"], "tmm");
     }
 
-    fn fake() {
+    pub(super) fn fake() {
         TYPED.with(|t| *t.borrow_mut() = Some(Vec::new()));
+        VERBATIM_UNDER_TURN_LOCK.with(|v| v.borrow_mut().clear());
         REFUSE.with(|r| *r.borrow_mut() = None);
     }
-    fn typed() -> Vec<String> {
+    pub(super) fn typed() -> Vec<String> {
         TYPED.with(|t| t.borrow().clone().unwrap_or_default())
     }
     fn refuse(e: Option<&str>) {
@@ -1873,14 +1664,14 @@ mod tests {
     fn warns(session: &str) -> Vec<String> {
         telemetry::recent_events(session, 0).into_iter().filter(|e| e.kind == "warn").map(|e| e.text).collect()
     }
-    fn busy(session: &str, window: &str) {
+    pub(super) fn busy(session: &str, window: &str) {
         record_prompt(session, window, "[tmm chat 2026-09-28 03:00] human: @dev a long task");
         assert!(telemetry::turn_busy(session, window));
     }
-    fn end(session: &str, window: &str) {
+    pub(super) fn end(session: &str, window: &str) {
         record_notification(session, window, "completed");
     }
-    fn setup(tag: &str) -> String {
+    pub(super) fn setup(tag: &str) -> String {
         crate::projects::tests::use_test_store();
         fake();
         format!("coalesce-{tag}-{}", uuid::Uuid::new_v4())
@@ -1888,7 +1679,7 @@ mod tests {
 
     /// A managed agent's home with a launch recipe, in a project the store
     /// knows — what `recipe_mode` reads.
-    fn agent_with_recipe(scratch: &crate::tmux::Scratch, session: &str, window: &str, backend: &str, mode: &str) {
+    pub(super) fn agent_with_recipe(scratch: &crate::tmux::Scratch, session: &str, window: &str, backend: &str, mode: &str) {
         crate::projects::tests::use_test_store();
         let path = scratch.path();
         if crate::projects::project_for_session(session).unwrap().is_none() { crate::projects::with_store(|s| s.insert_project(&crate::projects::Project {
@@ -2813,7 +2604,7 @@ mod tests {
         sql("CREATE TEMP TRIGGER retire_fault BEFORE DELETE ON deliveries
              WHEN OLD.line LIKE '%retire-fault-b%'
              BEGIN SELECT RAISE(ABORT, 'locked'); END;");
-        flush_locked(&s, "dev", "t", Some(0));
+        flush_locked(&s, "dev", "t", Some(0), None);
         assert!(typed().is_empty(), "the retire failed: nothing typed");
         assert_eq!((held(&s, "dev"), pending(&s, "dev")), (2, 0), "both rows still held (the first DELETE rolled back)");
         sql("DROP TRIGGER retire_fault;");
@@ -2821,7 +2612,7 @@ mod tests {
         // The retire succeeds, the "process dies" before typing: refuse the
         // keys to stand in for the lost moment. No row is left to sweep.
         refuse(Some("server gone"));
-        flush_locked(&s, "dev", "t", Some(0));
+        flush_locked(&s, "dev", "t", Some(0), None);
         assert_eq!((held(&s, "dev"), pending(&s, "dev")), (0, 0), "retired before the keys: nothing pending, ever");
         let w = warns(&s);
         assert_eq!(w.len(), 1, "a line that did not land is SAID once (#250): {w:?}");
@@ -2836,7 +2627,7 @@ mod tests {
         for tag in ["x", "y"] {
             deliver_as(&t, "dev", "t", &format!("[tmm chat 03:05] lead: @dev {tag}"), &format!("m-{tag}"), true);
         }
-        flush_locked(&t, "dev", "t", Some(0));
+        flush_locked(&t, "dev", "t", Some(0), None);
         assert_eq!(typed().len(), 1);
         assert_eq!((held(&t, "dev"), pending(&t, "dev")), (0, 0));
         let named: Vec<String> = telemetry::recent_events(&t, 0).into_iter().filter(|e| e.kind == "steered").flat_map(|e| e.deliveries).map(|d| d.msg).collect();
@@ -3093,7 +2884,7 @@ mod tests {
             telemetry::record_held(&b, "dev", &format!("[tmm chat 2026-10-20 08:5{n}] lead: @dev {n} {long}"), 0, &format!("b{n}")).unwrap();
         }
         busy(&b, "dev");
-        flush_locked(&b, "dev", "t", Some(0));
+        flush_locked(&b, "dev", "t", Some(0), None);
         assert_eq!(steered_refs(&b).len(), 1);
         assert!(steered_refs(&b).iter().all(|(_, behind)| *behind == 0), "{:?}", steered_refs(&b));
     }
@@ -3300,211 +3091,4 @@ mod tests {
         assert!(unconfirmed_line_without_source("dev", &[("bob".into(), "08:41".into())]).contains("an earlier line typed to it; 1 later message followed it into the same prompt: bob 08:41;"));
     }
 
-    // ---- Board #45: a /command held for the agent's next idle edge. ----
-
-    fn waiting(r: Result<WhenIdle, String>) -> i64 {
-        match r {
-            Ok(WhenIdle::Waiting(id)) => id,
-            other => panic!("expected Waiting, got {other:?}"),
-        }
-    }
-    fn held_lines(session: &str, window: &str) -> Vec<(String, Option<crate::projects::store::CommandHold>)> {
-        telemetry::held_rows(session, window).into_iter().map(|r| (r.line, r.verbatim)).collect()
-    }
-    fn age_rows(session: &str, secs: u64) {
-        crate::projects::with_store(|s| s.conn_for_test().execute("UPDATE deliveries SET ts = ts - ?2 WHERE session = ?1", rusqlite::params![session, secs as i64]).map_err(|e| e.to_string())).unwrap();
-    }
-
-    /// Board #45, the 07:38 incident (2026-11-05): a `/clear` for a BUSY agent
-    /// landed queued in its composer and an assignment started work before it.
-    /// Held instead: nothing typed into the running turn, not by the overdue
-    /// rule either; the assignment sent later waits behind it; at the turn's
-    /// end the command is typed ALONE, and the assignment only at the next
-    /// trigger (no effect is declared for this window).
-    #[test]
-    fn a_command_for_a_busy_agent_waits_for_its_turn_end_and_goes_alone_before_later_lines() {
-        let s = setup("idle-0738");
-        busy(&s, "dev");
-        waiting(command_when_idle(&s, "dev", "t", "/clear", "m1"));
-        assert!(deliver_as(&s, "dev", "t", "[tmm chat 2026-11-05 07:38] orchestrator: @dev the #47 brief", "m2", false));
-        assert!(typed().is_empty(), "nothing enters the running turn: {:?}", typed());
-        age_rows(&s, HOLD_MAX_SECS + 60);
-        flush_at(&s, "dev", "t");
-        assert!(typed().is_empty(), "never by the overdue rule: {:?}", typed());
-        end(&s, "dev");
-        flush_at(&s, "dev", "t");
-        assert_eq!(typed(), ["/clear"], "alone, verbatim, at the turn's end");
-        assert_eq!(held_lines(&s, "dev").len(), 1, "the brief waits for the next trigger");
-        flush_at(&s, "dev", "t");
-        assert_eq!(typed(), ["/clear", "[tmm chat 2026-11-05 07:38] orchestrator: @dev the #47 brief"]);
-    }
-
-    /// Board #45, the 06:25 incident (2026-11-06): the agent read idle, but an
-    /// automatic delivery had just been typed and started a turn the hooks had
-    /// not reported yet; the `/clear` then queued behind the next brief. The
-    /// typed line owes its echo (#281), so the command waits for THAT turn's
-    /// end, and the brief sent after it waits behind it: it never enters the
-    /// conversation the reset discards.
-    #[test]
-    fn a_command_waits_out_a_turn_a_delivery_just_started_and_the_next_brief_waits_behind_it() {
-        let s = setup("idle-0625");
-        let reply = "[tmm chat 2026-11-06 06:25] tmm: [board #47 reply] @dev CLEAR";
-        assert!(deliver_as(&s, "dev", "t", reply, "m0", false));
-        assert_eq!(typed(), [reply], "typed at once: the window was idle");
-        waiting(command_when_idle(&s, "dev", "t", "/clear", "m1"));
-        assert!(deliver_as(&s, "dev", "t", "[tmm chat 2026-11-06 06:26] orchestrator: @dev the next brief", "m2", false));
-        assert_eq!(typed(), [reply], "neither the command nor the brief: the reply's turn is under way");
-        record_prompt(&s, "dev", reply);
-        flush_at(&s, "dev", "t");
-        assert_eq!(typed(), [reply], "its turn runs");
-        end(&s, "dev");
-        flush_at(&s, "dev", "t");
-        assert_eq!(typed(), [reply, "/clear"]);
-        flush_at(&s, "dev", "t");
-        assert_eq!(typed().last().map(String::as_str), Some("[tmm chat 2026-11-06 06:26] orchestrator: @dev the next brief"));
-    }
-
-    /// Board #45: an idle agent with nothing in flight gets the command at
-    /// once, in the same locked step as the decision; nothing stays held.
-    #[test]
-    fn a_command_for_an_idle_agent_is_typed_at_once() {
-        let s = setup("idle-now");
-        assert_eq!(command_when_idle(&s, "dev", "t", "/compact", "m1"), Ok(WhenIdle::Typed));
-        assert_eq!(typed(), ["/compact"]);
-        assert!(held_lines(&s, "dev").is_empty());
-    }
-
-    /// Board #45: in a queue-mode agent the command takes its place among the
-    /// held lines: the lines before it are one combined prompt WITHOUT it,
-    /// typed at the turn's end; it is typed alone at the end of the turn they
-    /// open; the lines after it come last.
-    #[test]
-    fn a_command_keeps_its_place_among_held_lines_and_is_never_combined() {
-        let s = setup("idle-queue");
-        busy(&s, "dev");
-        let a = "[tmm chat 2026-11-06 08:00] lead: @dev before";
-        let b = "[tmm chat 2026-11-06 08:02] lead: @dev after";
-        assert!(deliver_as(&s, "dev", "t", a, "m1", true));
-        waiting(command_when_idle(&s, "dev", "t", "/clear", "m2"));
-        assert!(deliver_as(&s, "dev", "t", b, "m3", true));
-        end(&s, "dev");
-        flush_at(&s, "dev", "t");
-        assert_eq!(typed(), [a], "the lines before it, without it");
-        record_prompt(&s, "dev", a);
-        flush_at(&s, "dev", "t");
-        assert_eq!(typed(), [a], "their turn runs");
-        end(&s, "dev");
-        flush_at(&s, "dev", "t");
-        assert_eq!(typed(), [a, "/clear"]);
-        flush_at(&s, "dev", "t");
-        assert_eq!(typed(), [a, "/clear", b]);
-    }
-
-    /// Board #45 (orchestrator's ruling on Q1): the lines behind a reset wait
-    /// for its EFFECT, never a timer. claude's `/clear` is seen by its
-    /// SessionStart; until then a typed command holds them, and past the start
-    /// timeout it is said ONCE in the room, the lines still held.
-    #[test]
-    fn the_lines_behind_a_reset_wait_for_its_effect_and_a_missing_one_is_said_once() {
-        let mut scratch = crate::tmux::Scratch::new("when-idle-effect");
-        let s = scratch.session("s");
-        agent_with_recipe(&scratch, &s, "cl", "claude", "");
-        fake();
-        let brief = "[tmm chat 2026-11-06 09:00] lead: @cl the brief";
-        busy(&s, "cl");
-        let id = waiting(command_when_idle(&s, "cl", "t", "/clear", "m1"));
-        assert!(deliver_as(&s, "cl", "t", brief, "m2", false));
-        end(&s, "cl");
-        flush_at(&s, "cl", "t");
-        assert_eq!(typed(), ["/clear"]);
-        flush_at(&s, "cl", "t");
-        assert_eq!(typed(), ["/clear"], "the brief waits for the reset to take effect");
-        assert_eq!(held_lines(&s, "cl")[0], ("/clear".to_string(), Some(crate::projects::store::CommandHold::Typed)));
-        // No effect within the timeout: said once, nothing typed.
-        let room = crate::projects::rooms::session_room(&s);
-        let said = || crate::projects::rooms::history_page(&room, None, 100)["messages"].as_array().unwrap().iter()
-            .filter(|m| m["body"].as_str().is_some_and(|b| b.contains("has not taken effect"))).count();
-        *START_TIMEOUT_IN_TEST.lock().unwrap() = Some(std::time::Duration::ZERO);
-        check_command_effects();
-        check_command_effects();
-        *START_TIMEOUT_IN_TEST.lock().unwrap() = None;
-        assert_eq!(said(), 1, "said once");
-        assert!(crate::projects::rooms::history_page(&room, None, 100)["messages"].as_array().unwrap().iter()
-            .any(|m| m["body"].as_str().is_some_and(|b| b.contains(&format!("cancel: tmm send --cancel {id}")))));
-        assert_eq!(typed(), ["/clear"], "never typed on a timeout");
-        // Its SessionStart, late: the reset took effect; the brief is next.
-        command_session_started(&s, "cl");
-        assert_eq!(held_lines(&s, "cl"), [(brief.to_string(), None)]);
-        flush_at(&s, "cl", "t");
-        assert_eq!(typed(), ["/clear", brief]);
-    }
-
-    /// Board #45: codex reports no hook on `/clear`; its effect is a new
-    /// newest thread lock, unlike the one before the command (measured on
-    /// 0.166.0). The capture tick compares; an unchanged thread holds the lines.
-    #[test]
-    fn a_codex_reset_takes_effect_when_its_thread_changes() {
-        let mut scratch = crate::tmux::Scratch::new("when-idle-codex");
-        let s = scratch.session("s");
-        agent_with_recipe(&scratch, &s, "cx", "codex", "queue");
-        fake();
-        let home = std::path::Path::new(&scratch.path()).join(".tmm/agents/cx");
-        let locks = home.join("codex/thread-writer-locks");
-        std::fs::create_dir_all(&locks).unwrap();
-        std::fs::create_dir_all(home.join("codex/sessions")).unwrap();
-        std::fs::write(locks.join("01a1b0c7-0000-7000-8000-00000000000a.lock"), "").unwrap();
-        assert!(crate::backends::Backend::Codex.current_thread(&home).is_some(), "the fixture names a thread");
-        let brief = "[tmm chat 2026-11-06 09:10] lead: @cx the brief";
-        assert_eq!(command_when_idle(&s, "cx", "t", "/clear", "m1"), Ok(WhenIdle::Typed), "idle: typed at once");
-        assert!(deliver_as(&s, "cx", "t", brief, "m2", true));
-        check_command_effects();
-        assert_eq!(held_lines(&s, "cx").len(), 2, "the same thread: no effect yet");
-        std::thread::sleep(std::time::Duration::from_millis(20));
-        std::fs::write(locks.join("01a1b0cc-0000-7000-8000-00000000000b.lock"), "").unwrap();
-        check_command_effects();
-        assert_eq!(held_lines(&s, "cx"), [(brief.to_string(), None)], "a new thread: the reset took effect");
-    }
-
-    /// Board #45 AC2: what a restart, a stop and an interrupt do to a held
-    /// command. A RESTART keeps a waiting one (typed at the new CLI's idle
-    /// edge) and ends a typed one whose effect has not come (its CLI is gone;
-    /// never typed again); a STOP ends every one, so no reset left waiting can
-    /// erase what the agent is given next; an INTERRUPT drops it with the held
-    /// lines (#257 decision 1). Each end is said once in the room; the lines
-    /// behind are kept.
-    #[test]
-    fn a_restart_keeps_a_waiting_command_and_a_stop_or_interrupt_ends_it() {
-        let mut scratch = crate::tmux::Scratch::new("when-idle-life");
-        let s = scratch.session("s");
-        agent_with_recipe(&scratch, &s, "cl", "claude", "");
-        fake();
-        use crate::projects::store::CommandHold::{Typed, Waiting};
-        let brief = "[tmm chat 2026-11-06 10:00] lead: @cl the brief";
-        let room = crate::projects::rooms::session_room(&s);
-        let said = || -> Vec<String> {
-            crate::projects::rooms::history_page(&room, None, 100)["messages"].as_array().unwrap().iter()
-                .filter_map(|m| m["body"].as_str().map(str::to_string)).filter(|b| b.starts_with("[tmm] /")).collect()
-        };
-        busy(&s, "cl");
-        waiting(command_when_idle(&s, "cl", "t", "/clear", "m1"));
-        assert!(deliver_as(&s, "cl", "t", brief, "m2", false));
-        replace_cli(&s, "cl", None, || Ok(())).unwrap();
-        assert_eq!(held_lines(&s, "cl"), [("/clear".to_string(), Some(Waiting)), (brief.to_string(), None)], "a restart keeps a waiting command");
-        end(&s, "cl");
-        flush_at(&s, "cl", "t");
-        assert_eq!(typed(), ["/clear"]);
-        assert_eq!(held_lines(&s, "cl")[0].1, Some(Typed));
-        replace_cli(&s, "cl", None, || Ok(())).unwrap();
-        assert_eq!(held_lines(&s, "cl"), [(brief.to_string(), None)], "a typed one ends: its CLI is gone");
-        assert_eq!(said(), ["[tmm] /clear → cl (its turn ended)", "[tmm] /clear → cl: cl was restarted before it took effect; it is not typed again"]);
-        busy(&s, "cl");
-        waiting(command_when_idle(&s, "cl", "t", "/compact", "m3"));
-        stop_cli(&s, "cl", || Ok(())).unwrap();
-        assert_eq!(held_lines(&s, "cl"), [(brief.to_string(), None)], "a stop ends a waiting one; the line stays");
-        assert_eq!(said().last().map(String::as_str), Some("[tmm] /compact → cl was not typed: cl was stopped"));
-        waiting(command_when_idle(&s, "cl", "t", "/clear", "m4"));
-        interrupt(&s, "cl", || telemetry::record_interrupt(&s, "cl"));
-        assert!(held_lines(&s, "cl").is_empty(), "an interrupt drops it with the held lines");
-        assert_eq!(typed(), ["/clear"], "none of them was typed");
-    }
 }
