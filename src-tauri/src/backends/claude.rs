@@ -370,7 +370,18 @@ pub(crate) fn render_claude(
         format!(" --model {}", crate::shell::quote(def.model.trim()))
     };
     Ok(Rendered {
-        env: vec![("CLAUDE_CONFIG_DIR".into(), home.to_string_lossy().to_string())],
+        env: vec![
+            ("CLAUDE_CONFIG_DIR".into(), home.to_string_lossy().to_string()),
+            // Board #50: CLAUDE_CONFIG_DIR is the agent's, but HOME is the
+            // user's, so claude's own updater installed into the user's
+            // ~/.local/share/claude/versions and relinked ~/.local/bin/claude
+            // (four times on 2026-11-06, once a downgrade to 2.1.318). kimi's
+            // KIMI_CODE_NO_AUTO_UPDATE and codex's check_for_update_on_startup
+            // keep those CLIs out of the user's install the same way. The
+            // documented switch, read by 2.1.319; `DISABLE_UPDATES` would also
+            // block a typed `claude update`, so it is not set.
+            ("DISABLE_AUTOUPDATER".into(), "1".into()),
+        ],
         cmd: format!(
             "command claude --mcp-config {} --strict-mcp-config --settings {}{}{} --dangerously-skip-permissions",
             crate::shell::quote(&mcpfile.to_string_lossy()),

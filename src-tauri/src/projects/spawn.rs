@@ -3493,6 +3493,25 @@ hooks = [ { type = "command", command = "/opt/guard.sh" } ]
         }
     }
 
+    /// Board #50: a managed claude's updater installed into the REAL
+    /// `~/.local/share/claude/versions/` and relinked the user's
+    /// `~/.local/bin/claude` (CLAUDE_CONFIG_DIR is the agent's home, HOME is
+    /// real): 08:00, 08:55 and 09:11 from scratch runs, 09:30 from a real fork
+    /// (2.1.319 → 2.1.318). Like kimi's KIMI_CODE_NO_AUTO_UPDATE, the launch
+    /// env carries claude's documented switch; `DISABLE_UPDATES`, which also
+    /// blocks a typed `claude update`, is not set.
+    #[test]
+    fn a_managed_claude_never_updates_the_users_install() {
+        let dir = crate::config::test_scratch("tmm-cc-noupdate");
+        std::fs::create_dir_all(&dir).unwrap();
+        let d = def("claude");
+        let prompt = build_prompt(&d, "t", "p", "", "", "");
+        let r = render_claude(&d, "t", &dir, &dir, &prompt, &[]).unwrap();
+        assert!(r.env.iter().any(|(k, v)| k == "DISABLE_AUTOUPDATER" && v == "1"), "{:?}", r.env);
+        assert!(!r.env.iter().any(|(k, _)| k == "DISABLE_UPDATES"), "a typed `claude update` still works");
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
     /// Effort rides each backend's own knob (owner, 2026-08-22: "agent配置里
     /// 应该有thinking effort的配置选项"): a `--effort` flag for kiro/claude/
     /// grok (measured on each CLI); for codex, the managed profile's
