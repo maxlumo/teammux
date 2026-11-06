@@ -71,7 +71,13 @@ async function mount(context: TestContext, opts: Opts = {}) {
         return opts.answer ? opts.answer(patch) : { id: patch.id ?? 9 };
       },
       boardDelete: async () => ({}),
-      boardNote: async (session: string, id: number, body: string) => { calls.notes.push({ id, body, session }); if (opts.note) await opts.note(); return {}; },
+      boardNote: async (session: string, id: number, body: string, extra?: { agreement?: boolean }) => {
+        // The write path's own gate (ws-api.boardNote, board #44): an agreement on a socket whose
+        // login lacks `board_agreement` is refused BEFORE anything is sent or stored.
+        if (extra?.agreement && !(capsNow ?? []).includes('board_agreement')) throw Object.assign(new Error('server too old'), { code: 'server_too_old' });
+        calls.notes.push({ id, body, session, ...(extra ? { extra: JSON.parse(JSON.stringify(extra)) } : {}) });
+        if (opts.note) await opts.note(); return {};
+      },
       hubPost: async (session: string, body: string) => { calls.posts.push({ session, body }); return {}; },
       fsMkdir: async () => ({}),
       ...ch.rpc,
@@ -1052,4 +1058,65 @@ test('a local attachment that opens while a chat image\'s signature is held cann
     assert.equal(lb()?.getAttribute('src'), 'blob:thumb', 'A\u2019s late answer does not replace the later open');
     assert.equal(app.q('.lb .lb-download'), null, 'and the local picture still has no download');
   } finally { for (const p of pending) p.done({ url: 'https://dl.test/x' }); await app.close(); }
+});
+
+// ── Board #44 round 1 (reviewer P2-R1, P2-R2 on f2f45486) ────────────────────
+const SHOT = '/work/fixture/.tmm/uploads/agreed-12345678.webp';
+const agreeing = (body: string) => ({
+  ...issueA, id: 1, editable: false, assignee: 'builder',
+  agreement: { n: 1, author: 'orchestrator', body, at: 100 },
+  notes: [{ n: 1, author: 'orchestrator', body, at: 100, agreement: true, superseded_by: null }],
+});
+
+test('the current agreement shows its images through the thread\'s own strip and viewer (#44 P2-R1)', async (context) => {
+  for (const [label, body, text] of [['image-only', `![](${SHOT})`, ''], ['mixed', `agreed: as drawn\n![](${SHOT})`, 'agreed: as drawn']] as const) {
+    const app = await mount(context, { issues: [agreeing(body)], caps: ['board_dispatch', 'board_agreement'] });
+    try {
+      app.q<HTMLButtonElement>('.card')!.click(); await app.flush();
+      const block = app.q('.d-agreement')!;
+      assert.equal(block.querySelector('.n-text')?.textContent ?? '', text, `${label}: the text, never the path`);
+      assert.equal(block.querySelectorAll('.shots').length, 1, `${label}: the image is in the first block`);
+      assert.equal(block.querySelectorAll('.shots .ci-link').length, 1, `${label}: as the feed's image atom`);
+      assert.ok(!(block.textContent ?? '').includes('.tmm/uploads'), `${label}: a reference stays a reference`);
+      block.querySelector<HTMLButtonElement>('.shots .ci-link')!.click(); await app.flush();
+      assert.ok(app.q('.lightbox, .lb, [class*="light"]'), `${label}: the shared viewer opens from the block`);
+      assert.equal(app.back(), true); await app.flush();
+      assert.equal(app.q('.lightbox, .lb, [class*="light"]'), null, `${label}: Back closes the viewer first`);
+      assert.ok(app.q('.detail'));
+    } finally { await app.close(); }
+  }
+});
+
+test('a checked agreement draft that loses the capability keeps its text and intent, and opts out explicitly (#44 P2-R2)', async (context) => {
+  const app = await mount(context, { issues: [agreeing('agreed: A')], caps: ['board_dispatch', 'board_agreement'] });
+  try {
+    app.q<HTMLButtonElement>('.card')!.click(); await app.flush();
+    const toggle = () => app.q<HTMLButtonElement>('.note-opts [role=switch]');
+    const box = () => app.q<HTMLTextAreaElement>('.note-input')!;
+    const send = async () => { app.q<HTMLButtonElement>('.note-add .icon-btn.go')!.click(); await app.flush(); };
+    toggle()!.click(); await app.flush();
+    await app.type(box(), 'agreed: A plus B');
+    assert.equal(toggle()!.getAttribute('aria-checked'), 'true');
+
+    await app.setCaps(['board_dispatch']); // reconnected to an OLDER server, the draft checked
+    assert.ok(toggle(), 'the checked switch stays: the intent is shown, not hidden');
+    assert.equal(toggle()!.getAttribute('aria-checked'), 'true');
+    assert.equal(toggle()!.disabled, false, 'and it can be turned off');
+    assert.match(app.q('.note-opts')!.textContent ?? '', /older than the app/u, 'and it says why');
+
+    await send(); // refused by the write path: nothing stored, nothing lost
+    assert.equal(app.calls.notes.length, 0);
+    assert.equal(box().value, 'agreed: A plus B', 'the text is kept');
+    assert.equal(toggle()!.getAttribute('aria-checked'), 'true', 'the intent is kept, never silently dropped');
+    assert.match(app.q('.err')?.textContent ?? '', /older than the app/u);
+
+    toggle()!.click(); await app.flush(); // the explicit opt-out
+    assert.equal(toggle(), null, 'unchecked on this server: hidden again, as on a fresh old-server load');
+    await send();
+    assert.deepEqual(app.calls.notes, [{ id: 1, body: 'agreed: A plus B', session: 'fixture' }], 'posted as a plain note');
+    assert.equal(box().value, '');
+
+    await app.setCaps(['board_dispatch', 'board_agreement']); // and back to one that can
+    assert.equal(toggle()!.getAttribute('aria-checked'), 'false');
+  } finally { await app.close(); }
 });

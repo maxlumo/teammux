@@ -890,7 +890,11 @@
       if (!owns(ctx)) return; // the note is saved; another issue's box is not ours to clear
       noteAgreement = false; noteText = ''; noteStage.clear(); // persisted
       await refetchSel(ctx);
-    } catch (e) { if (owns(ctx)) err = String((e as Error)?.message ?? e); }
+    } catch (e) {
+      // The text and the agreement intent stay for the retry (board #44 P2-R2): a server
+      // too old for an agreement says so in this page's words.
+      if (owns(ctx)) err = agreement && (e as { code?: string } | null)?.code === 'server_too_old' ? t('boardAgreementOldServer') : String((e as Error)?.message ?? e);
+    }
     finally { busy = false; submitting = false; }
   }
   // ── Delete is CONFIRMED, and the request is CAPTURED (board #29): the
@@ -1350,6 +1354,10 @@
             <span class="n-author">{names.shown(sel.agreement.author)}</span>
           </div>
           <div class="n-wrap"><div class="n-text" lang={hanLang(sel.agreement.body)}>{withImages(sel.agreement.body.trim()).text}</div></div>
+          <!-- Its images through the thread's OWN strip and viewer (reviewer
+               P2-R1 on f2f45486: an image-only agreement showed an empty
+               bubble here while the thread showed the picture). -->
+          {@render shots(withImages(sel.agreement.body).images)}
         </div>
       {/if}
       <div class="notes" bind:this={notesEl}>
@@ -1388,11 +1396,18 @@
            Switch, part of the note draft. ABSENT on a server known not to
            keep agreements (the backends_check precedent: offered only when
            announced), because such a server sends none either; an unanswered
-           login is not a no, and the write path's gate decides then. -->
-      {#if !agreementLocked()}
+           login is not a no, and the write path's gate decides then. One
+           exception (reviewer P2-R2 on f2f45486): a CHECKED draft that loses
+           the capability keeps its switch, checked, with the reason, so the
+           intent stays visible and the person can turn it off to post the
+           text as a plain note. On such a server it can only be turned off;
+           nothing turns an agreement into a plain note behind the person's
+           back. -->
+      {#if !agreementLocked() || noteAgreement}
         <div class="note-opts">
           <Switch checked={noteAgreement} label={t('boardPostAgreement')} disabled={submitting}
-            onchange={(on: boolean) => { if (!submitting) noteAgreement = on; }} />
+            onchange={(on: boolean) => { if (!submitting && (!on || !agreementLocked())) noteAgreement = on; }} />
+          {#if agreementLocked()}<span class="meta-bit">{t('boardAgreementOldServer')}</span>{/if}
         </div>
       {/if}
       <div class="note-add">
