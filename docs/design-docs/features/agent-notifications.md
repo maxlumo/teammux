@@ -405,9 +405,12 @@ sentence ("invalid API key", "insufficient credit", "request too large",
 `max_output_tokens` and every other failure retry by themselves, so they stay
 an ordinary failed end with no notice (#354). The text is redacted before
 anything stores or sends it (orchestrator's ruling, 07:48). A URL's query
-string is dropped. `sk-…`, the token after `Bearer`, the value of `key=`,
-`token=`, `api_key=` and the like, and any run of 32 or more key characters
-holding letters and digits become `<REDACTED>`. The status, the CLI's error
+string and its userinfo (`user:pass@`) are dropped. `sk-…`, the token after
+`Bearer` or `Basic`, the value of `key`, `token`, `api_key` and the like in
+any case and in every assignment form (`key=v`, `key="v"`, YAML `key: v`, JSON
+`"key":"v"`), and any run of 32 or more key characters holding letters and
+digits become `<REDACTED>` (the JSON, colon, Basic and userinfo forms were
+validator's round-0 P2: credential-shaped text that reached the room). The status, the CLI's error
 kind and the provider's sentence stay, and so does a request id (a UUID's
 groups are short). The text is cut at 300 characters.
 

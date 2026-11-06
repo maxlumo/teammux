@@ -679,6 +679,28 @@ fn has_number(text: &str, n: u16) -> bool {
 }
 
 const REDACTED: &str = "<REDACTED>";
+
+/// Where a secret key's value starts, when `chars[after..]` is what follows a
+/// key name: `=`, or `:` (a JSON key's closing quote first), then optional
+/// spaces and an opening quote. `None` when no assignment follows, so a key
+/// word in prose is left alone.
+fn secret_value_start(chars: &[char], after: usize) -> Option<usize> {
+    let mut j = after;
+    if chars.get(j) == Some(&'"') {
+        j += 1;
+    }
+    if !matches!(chars.get(j), Some('=') | Some(':')) {
+        return None;
+    }
+    j += 1;
+    while chars.get(j) == Some(&' ') {
+        j += 1;
+    }
+    if matches!(chars.get(j), Some('"') | Some('\'')) {
+        j += 1;
+    }
+    Some(j)
+}
 const SECRET_KEYS: [&str; 9] = ["key", "api_key", "apikey", "token", "access_token", "secret", "password", "sig", "signature"];
 
 /// Masks what is shaped like a credential in a provider's error text
@@ -705,6 +727,14 @@ fn redact(text: &str) -> String {
         }
         if !in_url && boundary && (at(i, "https://") || at(i, "http://")) {
             in_url = true;
+            // URL userinfo (`user:pass@host`) is dropped whole.
+            let host = i + if at(i, "https://") { 8 } else { 7 };
+            let authority_end = (host..chars.len()).find(|&j| chars[j].is_whitespace() || matches!(chars[j], '/' | '?' | '#' | '"' | '\'' | ',' | ')' | '<' | '>')).unwrap_or(chars.len());
+            if let Some(user_end) = (host..authority_end).rev().find(|&j| chars[j] == '@') {
+                out.extend(&chars[i..host]);
+                i = user_end + 1;
+                continue;
+            }
         }
         if in_url && c == '?' {
             // The whole query, up to where the URL ends.
@@ -719,8 +749,8 @@ fn redact(text: &str) -> String {
             i = token_end(i);
             continue;
         }
-        if boundary && at(i, "bearer ") {
-            let start = i + "bearer ".len();
+        if let Some(scheme) = ["bearer ", "basic "].into_iter().find(|w| boundary && at(i, w)) {
+            let start = i + scheme.len();
             let end = token_end(start);
             if end > start {
                 out.extend(&chars[i..start]);
@@ -730,14 +760,13 @@ fn redact(text: &str) -> String {
             }
         }
         if boundary {
-            if let Some(k) = SECRET_KEYS.iter().find(|k| at(i, &format!("{k}=")) || at(i, &format!("{k}=\""))) {
-                let mut start = i + k.len() + 1;
+            // `key=v`, `key="v"`, `key: v` (YAML) and `"key":"v"` (JSON), any case.
+            if let Some(start) = SECRET_KEYS.iter().filter(|k| at(i, k)).find_map(|k| secret_value_start(&chars, i + k.len())) {
                 out.extend(&chars[i..start]);
-                if chars.get(start) == Some(&'"') {
-                    start += 1;
+                let end = (start..chars.len()).find(|&j| chars[j].is_whitespace() || matches!(chars[j], '&' | '"' | '\'' | ',' | ';' | ')' | '}')).unwrap_or(chars.len());
+                if end > start {
+                    out.push_str(REDACTED);
                 }
-                let end = (start..chars.len()).find(|&j| chars[j].is_whitespace() || matches!(chars[j], '&' | '"' | '\'' | ',' | ';' | ')')).unwrap_or(chars.len());
-                out.push_str(REDACTED);
                 i = end;
                 continue;
             }
@@ -806,7 +835,24 @@ mod tests {
         let got = provider_failure(Some(401), None, "unexpected status 401 Unauthorized, url: https://gw.example/v1/responses?key=SECRET&x=1, request id: req_0a1b2c").unwrap();
         assert_eq!(got, "unexpected status 401 Unauthorized, url: https://gw.example/v1/responses, request id: req_0a1b2c");
         let got = provider_failure(Some(402), None, "402 token=abc123 api_key=\"zz9\" denied").unwrap();
-        assert_eq!(got, "402 token=<REDACTED> api_key=<REDACTED>\" denied");
+        assert_eq!(got, "402 token=<REDACTED> api_key=\"<REDACTED>\" denied", "a quoted value keeps its quotes");
+        // validator's round-0 P2: the JSON, colon, Basic-auth and userinfo
+        // forms of the same shapes.
+        let got = provider_failure(Some(401), None, r#"401 {"error":"bad key","api_key":"AbCd1234EfGh5678"}"#).unwrap();
+        assert_eq!(got, r#"401 {"error":"bad key","api_key":"<REDACTED>"}"#);
+        let got = provider_failure(Some(401), None, "401 rejected api_key: AbCd1234EfGh5678 for this org").unwrap();
+        assert_eq!(got, "401 rejected api_key: <REDACTED> for this org");
+        let got = provider_failure(Some(401), None, "401 Authorization: Basic dXNlcjpwYXNzd29yZA== refused").unwrap();
+        assert_eq!(got, "401 Authorization: Basic <REDACTED> refused");
+        let got = provider_failure(Some(401), None, "401 url: https://user:hunter2pass@api.example.com/v1/messages").unwrap();
+        assert_eq!(got, "401 url: https://api.example.com/v1/messages");
+        let got = provider_failure(Some(401), None, "401 Unauthorized: API_KEY: AbCd1234EfGh5678 TOKEN=zz9").unwrap();
+        assert_eq!(got, "401 Unauthorized: API_KEY: <REDACTED> TOKEN=<REDACTED>", "any case");
+        let combined = r#"413 POST https://alice:s3cret@gw.example/v1/messages?key=Q1 failed: {"error":{"message":"too large","api_key": "AbCd1234EfGh5678"}} Authorization: Basic dXNlcjpwYXNzd29yZA== Bearer eyJ.abc"#;
+        assert_eq!(provider_failure(Some(413), None, combined).unwrap(),
+            r#"413 POST https://gw.example/v1/messages failed: {"error":{"message":"too large","api_key": "<REDACTED>"}} Authorization: Basic <REDACTED> Bearer <REDACTED>"#, "one combined payload");
+        let got = provider_failure(Some(401), None, "401 Unauthorized: Authentication failed").unwrap();
+        assert_eq!(got, "401 Unauthorized: Authentication failed", "a word after a colon is not a value");
         let hex = "0123456789abcdef0123456789abcdef01234567";
         let got = provider_failure(Some(401), None, &format!("401 credential {hex} expired (Request ID: 6f1c2d3e-aaaa-4bbb-8ccc-0123456789ab)")).unwrap();
         assert_eq!(got, "401 credential <REDACTED> expired (Request ID: 6f1c2d3e-aaaa-4bbb-8ccc-0123456789ab)", "a long run goes; a request id stays");
