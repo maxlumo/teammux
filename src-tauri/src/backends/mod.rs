@@ -19,6 +19,16 @@ pub(crate) mod omp;
 pub mod readiness;
 pub(crate) mod shared;
 
+/// What shows a reset command took effect (board #45), each a fact the CLI
+/// itself reports, never a pane paint or a timer.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum CommandEffect {
+    /// Its `SessionStart` hook, of any source, after the command was typed.
+    SessionStart,
+    /// The pane's conversation thread changed from the one before it was typed.
+    NewThread,
+}
+
 /// How a completed turn ended, as far as its reply tells (board #355).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum EndQuality {
@@ -260,6 +270,27 @@ impl Backend {
         match self {
             Backend::Dsh => dsh::new_conversation(home),
             _ => Err(format!("{} has no app-run /new", self.name())),
+        }
+    }
+
+    /// The fact that shows this CLI's reset command `name` took effect, for a
+    /// `--when-idle` command (board #45): the lines held behind it wait for
+    /// it, never for a timer. `None`: no effect was measured, nothing waits.
+    /// Declared per backend, only where it was measured.
+    pub fn command_effect(self, name: &str) -> Option<CommandEffect> {
+        match self {
+            Backend::Claude => claude::command_effect(name),
+            Backend::Codex => codex::command_effect(name),
+            _ => None,
+        }
+    }
+
+    /// The conversation thread the pane runs now, for a `NewThread` effect
+    /// (board #45): codex's newest thread lock. `None` elsewhere.
+    pub fn current_thread(self, home: &std::path::Path) -> Option<String> {
+        match self {
+            Backend::Codex => codex::current_thread(home),
+            _ => None,
         }
     }
 

@@ -1168,15 +1168,15 @@ mod tests {
         let v: i64 = store.conn.query_row("PRAGMA user_version", [], |r| r.get(0)).unwrap();
         assert_eq!(v, SCHEMA_VERSION);
         assert_eq!(SCHEMA_VERSION, 36);
-        assert!(!store.pending_deliveries("s", Some("w")).unwrap()[0].verbatim);
+        assert!(store.pending_deliveries("s", Some("w")).unwrap()[0].verbatim.is_none());
         let held = store.held_deliveries("s", "w").unwrap();
-        assert_eq!((held.len(), held[0].line.as_str(), held[0].verbatim), (1, "held line", false));
+        assert_eq!((held.len(), held[0].line.as_str(), held[0].verbatim), (1, "held line", None));
         store.insert_held_command("s", "w", "/compact", 102, "m3").unwrap();
-        assert!(store.held_deliveries("s", "w").unwrap()[1].verbatim);
+        assert_eq!(store.held_deliveries("s", "w").unwrap()[1].verbatim, Some(CommandHold::Waiting));
         store.conn.execute_batch("ALTER TABLE deliveries DROP COLUMN verbatim;").unwrap();
         drop(store);
         let store = Store::open(&path).unwrap();
-        assert!(!store.held_deliveries("s", "w").unwrap()[0].verbatim, "healed on open");
+        assert!(store.held_deliveries("s", "w").unwrap()[0].verbatim.is_none(), "healed on open");
     }
 
     /// The heal step, which is not hypothetical: a dev binary built in the

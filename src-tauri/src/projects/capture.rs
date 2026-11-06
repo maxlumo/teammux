@@ -458,6 +458,10 @@ pub async fn capture_loop() {
                 // noticed within one tick, and the backoff ladder is measured in
                 // tens of seconds, so 20s granularity costs nothing.
                 recovery::check_once();
+                // Board #45: a typed `--when-idle` command's effect that no
+                // hook reports (codex's new thread), and its one notice when
+                // none came within the start timeout.
+                super::delivery::check_command_effects();
                 // Board #437: an unconfirmed typed line is reported on this
                 // tick too, so it is found without a reader. Report only:
                 // nothing is typed into the target pane or retyped.

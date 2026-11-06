@@ -1084,6 +1084,26 @@ pub(crate) fn command_echo(_name: &str, _args: &str) -> Option<String> {
     None
 }
 
+/// The fact that shows the reset command `name` took effect (board #45),
+/// measured 2026-11-06 on codex-cli 0.166.0 (scratch gateway, a hook spy):
+/// `/clear` writes a new thread-writer lock ~0.3 s after its Enter and fires
+/// no hook until the next prompt; `/new` is the same rule, but opens a picker
+/// first, so no lock appears until a person answers it; `/compact` keeps the
+/// thread and fires `SessionStart {source: compact}` when compaction ends.
+pub(crate) fn command_effect(name: &str) -> Option<super::CommandEffect> {
+    match name {
+        "/clear" | "/new" => Some(super::CommandEffect::NewThread),
+        "/compact" => Some(super::CommandEffect::SessionStart),
+        _ => None,
+    }
+}
+
+/// The thread the pane runs now, by its newest lock (`pane_thread`, board
+/// #29): what a `NewThread` effect compares against the one before.
+pub(crate) fn current_thread(home: &std::path::Path) -> Option<String> {
+    pane_thread(home).map(|t| t.id)
+}
+
 #[cfg(not(any(target_os = "android", target_os = "ios")))]
 pub(crate) fn known() -> crate::projects::agents::KnownAgent {
     crate::projects::agents::KnownAgent {

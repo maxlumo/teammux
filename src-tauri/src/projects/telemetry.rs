@@ -1502,6 +1502,18 @@ pub fn record_held_command(session: &str, window: &str, command: &str, msg_id: &
     queue(|s| s.insert_held_command(session, window, command, now(), msg_id))
 }
 
+/// Mark a held command typed (`true`, before its keys go in) or back to
+/// waiting (`false`, the pane refused them) (board #45). `Ok(false)`: it is
+/// no held command any more.
+pub fn set_command_typed(id: i64, typed: bool) -> Result<bool, String> {
+    queue(|s| s.set_command_typed(id, typed, now()))
+}
+
+/// Claim a typed command's one "has not taken effect" notice (board #45).
+pub fn warn_command_once(id: i64) -> bool {
+    queue(|s| s.warn_command_once(id)).unwrap_or(false)
+}
+
 /// Cancel a held command of `session` (board #45) if `may` allows it for
 /// that row: the row it was. `Err` names why not — no held command `id` there
 /// (typed already, cancelled, a chat line, another project's), `may`'s own
@@ -1511,7 +1523,7 @@ pub fn cancel_held_command(
     id: i64,
     may: impl FnOnce(&super::store::DeliveryRow) -> Result<(), String>,
 ) -> Result<super::store::DeliveryRow, String> {
-    let gone = || format!("no command #{id} is waiting in this project (typed already, or cancelled)");
+    let gone = || format!("no command #{id} is waiting in this project (it took effect, or was cancelled)");
     let row = queue(|s| s.held_command(session, id))?.ok_or_else(gone)?;
     may(&row)?;
     queue(|s| s.delete_held_command(session, id))?.ok_or_else(gone)
@@ -3093,7 +3105,7 @@ mod tests {
         crate::projects::store::DeliveryRow { ask_at, ..row(id, line, 0) }
     }
     fn row(id: i64, line: &str, ts: u64) -> crate::projects::store::DeliveryRow {
-        crate::projects::store::DeliveryRow { id, window: "w".into(), line: line.into(), ts, msg_id: String::new(), warned: false, command: None, ask_at: 0, verbatim: false }
+        crate::projects::store::DeliveryRow { id, window: "w".into(), line: line.into(), ts, msg_id: String::new(), warned: false, command: None, ask_at: 0, verbatim: None }
     }
     const MARK: (i64, u64) = (0, 0);
 

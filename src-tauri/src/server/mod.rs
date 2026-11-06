@@ -44,11 +44,14 @@ pub type NotificationHub = Arc<AgentNotificationHub>;
 /// which reads as a success, so a client sends neither without it. `board_agreement` (board #44):
 /// `hub_board_note` keeps `agreement: true`, and `hub_board_get` carries `agreement`, each note's
 /// `n` and `superseded_by`. An older server ignores the key and stores a plain note, so a client
-/// sends no agreement without it. An older server announces no `caps` at all, and a client that
+/// sends no agreement without it. `command_when_idle` (board #45): `hub_command` keeps `when_idle: true`,
+/// holding the command for the agent's idle edge and answering `waiting`. An older server ignores the
+/// key and types the command at once, into a turn that may be running, so `tmm send --when-idle` sends
+/// nothing without it. An older server announces no `caps` at all, and a client that
 /// needs one refuses the write instead of saving a label nobody acts on. The
 /// phone's server has no Hub, so it announces none.
 #[cfg(not(any(target_os = "android", target_os = "ios")))]
-pub(crate) const LOGIN_CAPS: &[&str] = &["board_dispatch", "board_notify", "spawn_join", "agent_team", "hub_files", "mcp_masked", "backends_check", "board_blocks", "board_agreement"];
+pub(crate) const LOGIN_CAPS: &[&str] = &["board_dispatch", "board_notify", "spawn_join", "agent_team", "hub_files", "mcp_masked", "backends_check", "board_blocks", "board_agreement", "command_when_idle"];
 #[cfg(any(target_os = "android", target_os = "ios"))]
 pub(crate) const LOGIN_CAPS: &[&str] = &[];
 

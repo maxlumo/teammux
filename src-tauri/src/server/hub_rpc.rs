@@ -183,6 +183,9 @@ fn dispatch_hub(req: &Request, notifications: Option<&crate::agent_notifications
                 Some((n, a)) => (n, a.trim()),
                 None => (text, ""),
             };
+            // Board #45: held for each target's idle edge instead of typed now.
+            let when_idle = p.get("when_idle").and_then(|v| v.as_bool()).unwrap_or(false);
+            let mut waiting: Vec<(String, i64)> = Vec::new();
             let mut sent: Vec<String> = Vec::new();
             let mut refused: Vec<String> = Vec::new();
             // Other windows an app-run command could not reach (board #411): said on the room line.
@@ -211,6 +214,12 @@ fn dispatch_hub(req: &Request, notifications: Option<&crate::agent_notifications
                 // one) is not typed: a `/word` in a dsh pane is a task for the
                 // model. Its refusal is this window's, like a refused typing.
                 if let (Some(b), Some(ws)) = (backend, ws.as_deref()) {
+                    // An app-run command is no keystroke: it cannot wait for
+                    // the CLI's idle edge, and is never run behind one.
+                    if when_idle && b.app_command(name, args).is_some() {
+                        refused.push(format!("{}: {name} is run by the app at once, so --when-idle does not apply", pane.window_name));
+                        continue;
+                    }
                     if let Some(parsed) = b.app_command(name, args) {
                         // A refusal of the command's own arguments, or a profile it could not
                         // update, answers the caller: it is no undelivered chat line.
@@ -231,6 +240,17 @@ fn dispatch_hub(req: &Request, notifications: Option<&crate::agent_notifications
                         }
                         continue;
                     }
+                }
+                // Board #45: held in the window's one deliveries queue and typed
+                // alone at its idle edge (`delivery::command_when_idle`), which
+                // also waits out a restore hold or a start instead of refusing.
+                if when_idle {
+                    match crate::projects::delivery::command_when_idle(session, &pane.window_name, &target, text, &msg_id) {
+                        Ok(crate::projects::delivery::WhenIdle::Typed) => sent.push(pane.window_name.clone()),
+                        Ok(crate::projects::delivery::WhenIdle::Waiting(id)) => waiting.push((pane.window_name.clone(), id)),
+                        Err(e) => refused.push(format!("{}: not held: {}", pane.window_name, e.trim())),
+                    }
+                    continue;
                 }
                 // A window a restore made and has not seen ready (board #422
                 // round 3) may still be a shell: a /word typed there runs a
@@ -264,10 +284,10 @@ fn dispatch_hub(req: &Request, notifications: Option<&crate::agent_notifications
                     }
                 }
             }
-            if sent.is_empty() && !refused.is_empty() {
+            if sent.is_empty() && waiting.is_empty() && !refused.is_empty() {
                 return Err(RpcError::Internal(format!("not sent — {}", refused.join("; "))));
             }
-            if sent.is_empty() {
+            if sent.is_empty() && waiting.is_empty() {
                 return Err(RpcError::InvalidParams(format!("no managed agent named '{agent}' in session '{session}'")));
             }
             // A target whose app command failed while another succeeded: said, not dropped.
@@ -275,8 +295,19 @@ fn dispatch_hub(req: &Request, notifications: Option<&crate::agent_notifications
                 notes.push(format!("not run for {}", app_refused.join("; ")));
             }
             let tail = if notes.is_empty() { String::new() } else { format!(" ({})", notes.join("; ")) };
-            let _ = rooms::post_routed_as(&room, &msg_id, from, &format!("[tmm] {} → {}{}", text, sent.join(", "), tail), &[]);
-            Ok(serde_json::json!({ "sent": sent, "command": text, "refused": refused }))
+            // One room line, under the sender: what was typed now, and who
+            // waits for its turn to end (its id is what `--cancel` reads the
+            // sender from).
+            let names: Vec<&str> = waiting.iter().map(|(w, _)| w.as_str()).collect();
+            let held = match names.len() {
+                0 => String::new(),
+                1 => format!("{} waits for its turn to end", names[0]),
+                _ => format!("{} wait for their turns to end", names.join(", ")),
+            };
+            let to = [sent.join(", "), held].into_iter().filter(|s| !s.is_empty()).collect::<Vec<_>>().join("; ");
+            let _ = rooms::post_routed_as(&room, &msg_id, from, &format!("[tmm] {} → {}{}", text, to, tail), &[]);
+            let waiting: Vec<serde_json::Value> = waiting.iter().map(|(w, id)| serde_json::json!({ "agent": w, "id": id })).collect();
+            Ok(serde_json::json!({ "sent": sent, "waiting": waiting, "command": text, "refused": refused }))
         }
 
         // Cancel a `/command` waiting for its agent's idle edge (board #45,
@@ -297,7 +328,12 @@ fn dispatch_hub(req: &Request, notifications: Option<&crate::agent_notifications
                 }
             })
             .map_err(RpcError::InvalidParams)?;
-            let _ = rooms::post_routed(&room, from, &format!("[tmm] {} → {} cancelled before its turn ended", row.line, row.window), &[]);
+            let said = match row.verbatim {
+                // Typed, its effect not seen yet: the lines behind it stop waiting.
+                Some(crate::projects::store::CommandHold::Typed) => format!("[tmm] {} → {}: no longer waiting for it to take effect", row.line, row.window),
+                _ => format!("[tmm] {} → {} cancelled before its turn ended", row.line, row.window),
+            };
+            let _ = rooms::post_routed(&room, from, &said, &[]);
             crate::projects::delivery::flush(session, &row.window);
             Ok(serde_json::json!({ "id": id, "agent": row.window, "command": row.line, "cancelled": true }))
         }
@@ -6509,6 +6545,11 @@ while True:
         assert!(again.error.as_ref().is_some_and(|e| e.message.contains(&format!("no command #{id} is waiting"))), "{:?}", again.error.map(|e| e.message));
         let held: Vec<String> = crate::projects::telemetry::held_rows(&session, "dev").into_iter().map(|r| r.line).collect();
         assert_eq!(held, ["[tmm chat] the brief"], "the line behind it is kept");
+        // A TYPED command still waiting for its effect is cancelled too: the
+        // lines behind it stop waiting for it.
+        let typed = tm(&session, "dev", "/compact", "m1").unwrap();
+        assert!(crate::projects::telemetry::set_command_typed(typed, true).unwrap());
+        assert!(call("hub_command_cancel", serde_json::json!({ "session": session, "id": typed, "from": "human" })).error.is_none(), "the human may cancel any");
         let room: Vec<(String, String)> = call("hub_log", serde_json::json!({ "session": session }))
             .result
             .and_then(|v| v.get("messages").and_then(|m| m.as_array()).cloned())
@@ -6519,6 +6560,65 @@ while True:
         assert_eq!(room, vec![
             ("lead".to_string(), "[tmm] /clear → dev waits for its turn to end".to_string()),
             ("lead".to_string(), "[tmm] /clear → dev cancelled before its turn ended".to_string()),
+            ("human".to_string(), "[tmm] /compact → dev: no longer waiting for it to take effect".to_string()),
+        ]);
+    }
+
+    /// Board #45 through the real door and a real pane: `when_idle` on a busy
+    /// agent types nothing and answers `waiting` with the row id, one room line
+    /// saying so under the sender; the turn's end types it alone and says that
+    /// too. An idle agent gets it at once, as `sent`. An app-run command
+    /// (dsh's `/model`) is refused for `when_idle`, never run behind a turn.
+    #[test]
+    fn a_when_idle_command_waits_for_the_turn_end_and_is_said_twice() {
+        crate::projects::tests::use_test_store();
+        let session = format!("tmm-whenidle-{}", uuid::Uuid::new_v4());
+        let ws = crate::config::test_scratch("tmm-whenidle-ws");
+        for (name, backend) in [("lead", "kiro"), ("dev", "kiro"), ("ds", "dsh")] {
+            let home = ws.join(".tmm/agents").join(name);
+            std::fs::create_dir_all(&home).unwrap();
+            std::fs::write(home.join("launch.json"), serde_json::json!({ "backend": backend, "cmd": format!("{backend} {name}"), "team": "" }).to_string()).unwrap();
+        }
+        let created = std::process::Command::new("tmux")
+            .args(["new-session", "-d", "-s", &session, "-n", "lead", "-c", &ws.to_string_lossy(), "cat"])
+            .status().map(|s| s.success()).unwrap_or(false);
+        if !created {
+            eprintln!("no tmux server — skipping");
+            let _ = std::fs::remove_dir_all(&ws);
+            return;
+        }
+        let _cleanup = KillOnDrop(session.clone(), ws.clone());
+        for name in ["dev", "ds"] {
+            std::process::Command::new("tmux").args(["new-window", "-d", "-t", &session, "-n", name, "-c", &ws.to_string_lossy(), "cat"]).status().unwrap();
+        }
+        crate::projects::adopt(&session, Some("whenidle-test")).expect("adopt project");
+        let call = |params: serde_json::Value| handle_hub_request(&req("hub_command", params), None);
+        let dev = || crate::tmux::capture_pane_plain(&format!("{session}:dev"), Some(0)).unwrap_or_default();
+        let room = || -> Vec<(String, String)> {
+            handle_hub_request(&req("hub_log", serde_json::json!({ "session": session })), None).result
+                .and_then(|v| v.get("messages").and_then(|m| m.as_array()).cloned()).unwrap_or_default().iter()
+                .filter_map(|m| Some((m.get("from")?.as_str()?.to_string(), m.get("body")?.as_str()?.to_string()))).collect()
+        };
+        crate::projects::telemetry::record_prompt(&session, "dev", "[tmm chat 2026-11-06 07:30] lead: @dev a long task");
+        let r = call(serde_json::json!({ "session": session, "agent": "dev", "text": "/compact", "from": "lead", "when_idle": true }));
+        let res = r.result.unwrap_or_else(|| panic!("{:?}", r.error.map(|e| e.message)));
+        assert_eq!(res["sent"], serde_json::json!([]));
+        let id = res["waiting"][0]["id"].as_i64().expect("an id");
+        assert_eq!(res["waiting"], serde_json::json!([{ "agent": "dev", "id": id }]));
+        std::thread::sleep(std::time::Duration::from_millis(300));
+        assert!(!dev().contains("/compact"), "nothing typed into the running turn: {:?}", dev());
+        crate::projects::telemetry::record_notification(&session, "dev", "completed");
+        crate::projects::delivery::flush(&session, "dev");
+        std::thread::sleep(std::time::Duration::from_millis(400));
+        assert!(dev().contains("/compact"), "typed at the turn's end: {:?}", dev());
+        let idle = call(serde_json::json!({ "session": session, "agent": "dev", "text": "/clear", "from": "lead", "when_idle": true })).result.unwrap();
+        assert_eq!((idle["sent"].clone(), idle["waiting"].clone()), (serde_json::json!(["dev"]), serde_json::json!([])), "idle: at once");
+        let app = call(serde_json::json!({ "session": session, "agent": "ds", "text": "/model x", "from": "lead", "when_idle": true }));
+        assert!(app.error.as_ref().is_some_and(|e| e.message.contains("run by the app at once")), "{:?}", app.error.map(|e| e.message));
+        assert_eq!(room(), vec![
+            ("lead".to_string(), "[tmm] /compact → dev waits for its turn to end".to_string()),
+            ("lead".to_string(), "[tmm] /compact → dev (its turn ended)".to_string()),
+            ("lead".to_string(), "[tmm] /clear → dev".to_string()),
         ]);
     }
 

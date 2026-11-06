@@ -70,8 +70,8 @@ pub struct DeliveryRow {
     pub ask_at: usize,
     /// A `/command` held for the window's next idle edge (board #45, v36):
     /// typed alone and verbatim, never combined with lines, never stamped.
-    /// `false` for a chat line.
-    pub verbatim: bool,
+    /// `None` for a chat line.
+    pub verbatim: Option<CommandHold>,
 }
 
 /// What one unconfirmed report wrote (`Store::report_unconfirmed`, board
@@ -111,6 +111,28 @@ pub enum CommandLife {
     /// Typed into a RUNNING turn, so the CLI queued it behind that turn: no
     /// prompt may take it until the turn ends (`end_command_turn`).
     Queued,
+}
+
+/// Where a held `/command` is (board #45), stored as `deliveries.verbatim`
+/// 1 / 2; 0 is a chat line. Both stay HELD rows, so every line behind one
+/// waits behind it.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum CommandHold {
+    /// Waiting for the window's next idle edge; not typed yet.
+    Waiting,
+    /// Typed; the lines behind it wait for its effect (a reset the CLI
+    /// reports), never for a timer.
+    Typed,
+}
+
+impl CommandHold {
+    fn from_code(code: i64) -> Option<Self> {
+        match code {
+            1 => Some(CommandHold::Waiting),
+            2 => Some(CommandHold::Typed),
+            _ => None,
+        }
+    }
 }
 
 /// Test seam (#41 round 1): the next in-flight commits fail as a whole.
@@ -679,12 +701,42 @@ impl Store {
             .map_err(|e| format!("insert held command: {e}"))
     }
 
+    /// Move a held command between waiting and typed (board #45): typed is
+    /// written BEFORE its keys go in, so an effect that races the Enter finds
+    /// it, and put back to waiting when the pane refused the keys. False when
+    /// `id` is no held command any more (cancelled, dropped).
+    pub fn set_command_typed(&self, id: i64, typed: bool, ts: u64) -> Result<bool, String> {
+        let (to, from) = if typed { (2, 1) } else { (1, 2) };
+        self.conn
+            .execute(
+                "UPDATE deliveries SET verbatim = ?2, ts = CASE WHEN ?2 = 2 THEN ?4 ELSE ts END WHERE id = ?1 AND held = 1 AND verbatim = ?3",
+                rusqlite::params![id, to, from, ts as i64],
+            )
+            .map(|n| n > 0)
+            .map_err(|e| format!("set held command typed: {e}"))
+    }
+
+    /// The raw connection, for a test that must age a row (board #45).
+    #[cfg(test)]
+    pub fn conn_for_test(&self) -> &rusqlite::Connection {
+        &self.conn
+    }
+
+    /// Mark a typed command's one "has not taken effect" notice as made
+    /// (board #45; the row's `warned`). True when this call marked it.
+    pub fn warn_command_once(&self, id: i64) -> Result<bool, String> {
+        self.conn
+            .execute("UPDATE deliveries SET warned = 1 WHERE id = ?1 AND held = 1 AND verbatim = 2 AND warned = 0", rusqlite::params![id])
+            .map(|n| n > 0)
+            .map_err(|e| format!("warn held command: {e}"))
+    }
+
     /// One held command of `session` (board #45), or `None` (see below).
     pub fn held_command(&self, session: &str, id: i64) -> Result<Option<DeliveryRow>, String> {
         Ok(self
             .delivery_rows(
                 "SELECT id, win, line, ts, msg_id, warned, command, ask_at, verbatim FROM deliveries
-                 WHERE id = ?1 AND session = ?2 AND held = 1 AND verbatim = 1",
+                 WHERE id = ?1 AND session = ?2 AND held = 1 AND verbatim <> 0",
                 vec![Box::new(id), Box::new(session.to_string())],
             )?
             .pop())
@@ -697,7 +749,7 @@ impl Store {
         let Some(row) = self.held_command(session, id)? else { return Ok(None) };
         let n = self
             .conn
-            .execute("DELETE FROM deliveries WHERE id = ?1 AND held = 1 AND verbatim = 1", rusqlite::params![id])
+            .execute("DELETE FROM deliveries WHERE id = ?1 AND held = 1 AND verbatim <> 0", rusqlite::params![id])
             .map_err(|e| format!("cancel held command: {e}"))?;
         Ok((n > 0).then_some(row))
     }
@@ -723,7 +775,7 @@ impl Store {
                     warned: r.get::<_, i64>(5)? != 0,
                     command: CommandLife::from_code(r.get::<_, i64>(6)?),
                     ask_at: r.get::<_, i64>(7)?.try_into().unwrap_or(0),
-                    verbatim: r.get::<_, i64>(8)? != 0,
+                    verbatim: CommandHold::from_code(r.get::<_, i64>(8)?),
                 })
             })
             .map_err(|e| format!("query held deliveries: {e}"))?;
@@ -868,7 +920,7 @@ impl Store {
                     warned: r.get::<_, i64>(5)? != 0,
                     command: CommandLife::from_code(r.get::<_, i64>(6)?),
                     ask_at: r.get::<_, i64>(7)?.try_into().unwrap_or(0),
-                    verbatim: r.get::<_, i64>(8)? != 0,
+                    verbatim: CommandHold::from_code(r.get::<_, i64>(8)?),
                 })
             })
             .map_err(|e| format!("query deliveries: {e}"))?;
@@ -1272,8 +1324,8 @@ mod tests {
         let id = store.insert_held_command("s", "w", "/clear", 101, "m2").unwrap();
         store.insert_held_delivery("s", "w", "[tmm chat] after", 0, 102, "m3").unwrap();
         let held = store.held_deliveries("s", "w").unwrap();
-        let got: Vec<(&str, bool)> = held.iter().map(|r| (r.line.as_str(), r.verbatim)).collect();
-        assert_eq!(got, vec![("[tmm chat] before", false), ("/clear", true), ("[tmm chat] after", false)]);
+        let got: Vec<(&str, Option<CommandHold>)> = held.iter().map(|r| (r.line.as_str(), r.verbatim)).collect();
+        assert_eq!(got, vec![("[tmm chat] before", None), ("/clear", Some(CommandHold::Waiting)), ("[tmm chat] after", None)]);
         assert_eq!(held[1].msg_id, "m2");
         assert_eq!(store.delete_held_command("other", id).unwrap(), None, "another session's id cancels nothing");
         assert_eq!(store.delete_held_command("s", held[0].id).unwrap(), None, "a chat line is not a command");

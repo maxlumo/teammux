@@ -603,6 +603,14 @@ pub(crate) fn command_echo(name: &str, args: &str) -> Option<String> {
     (name == "/goal" && !args.is_empty()).then(|| format!("/goal {args}"))
 }
 
+/// The fact that shows the reset command `name` took effect (board #45),
+/// measured 2026-11-06 on Claude Code 2.1.319 (scratch gateway, a hook spy):
+/// `/clear` fires `SessionStart {source: clear}` ~0.3 s after its Enter, and
+/// `/compact` fires `SessionStart {source: compact}` when compaction ends.
+pub(crate) fn command_effect(name: &str) -> Option<super::CommandEffect> {
+    matches!(name, "/clear" | "/compact").then_some(super::CommandEffect::SessionStart)
+}
+
 #[cfg(not(any(target_os = "android", target_os = "ios")))]
 pub(crate) fn known() -> crate::projects::agents::KnownAgent {
     crate::projects::agents::KnownAgent {

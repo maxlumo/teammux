@@ -32,7 +32,7 @@ mod restore_hold;
 mod rooms;
 mod schema;
 mod wakes;
-pub use activity::{person_paint_key, person_paint_prefix, ActivityRow, CommandLife, DeliveryRow, PromptRow, TurnFact, TurnFacts, GENERATION_REPLACED};
+pub use activity::{person_paint_key, person_paint_prefix, ActivityRow, CommandHold, CommandLife, DeliveryRow, PromptRow, TurnFact, TurnFacts, GENERATION_REPLACED};
 pub use projects::{Project, Slot, SlotKind};
 pub use restore::{Checkpoint, CheckpointProject, CheckpointWindow, RestoreIntents, TmuxInstance};
 pub use restore_batch::{finished_word, settle, Batch, BatchOp, BatchProject, BatchRevision, BatchScan, BatchWindow, Finished, ProjectState, WindowState, NO_WINDOW, RELEASED};

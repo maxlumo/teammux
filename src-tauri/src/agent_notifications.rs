@@ -544,6 +544,15 @@ impl AgentNotificationHub {
                 let (session, window, _) = envelope.pane()?;
                 self.remember_session(&session, &window, &envelope.backend, id);
             }
+            // Board #45: the effect a typed `/clear` or `/compact` waits for
+            // (claude; codex `/compact`), so the lines held behind it go now.
+            // A sub-agent's own SessionStart is never the window's.
+            #[cfg(not(any(target_os = "android", target_os = "ios")))]
+            if crate::backends::Backend::parse(&envelope.backend).and_then(|b| b.subagent_thread(&envelope.payload)).is_none() {
+                if let Ok((session, window, _)) = envelope.pane() {
+                    crate::projects::delivery::command_session_started(&session, &window);
+                }
+            }
             return Ok(());
         }
         // A SUB-AGENT thread's event is the agent's own work, like a tool call
@@ -2616,6 +2625,47 @@ mod tests {
             eprintln!("could not adopt a project — skipped the assertions");
         }
 
+        let _ = std::process::Command::new("tmux").args(["kill-session", "-t", &session]).status();
+        let _ = std::fs::remove_dir_all(&ws);
+        let _ = std::fs::remove_dir_all(root);
+    }
+
+    /// Board #45 through the real inbox: claude's SessionStart is the effect
+    /// a typed `--when-idle` `/clear` waits for, so it retires that command and
+    /// the lines behind it are next. A SessionStart for a window with no typed
+    /// command first in line changes nothing.
+    #[test]
+    fn a_session_start_is_the_effect_a_typed_reset_waits_for() {
+        crate::projects::tests::use_test_store();
+        let session = format!("tmm-effect-{}", uuid::Uuid::new_v4());
+        let ws = crate::config::test_scratch("tmm-effect-ws");
+        std::fs::create_dir_all(ws.join(".tmm/agents/cl")).unwrap();
+        std::fs::write(ws.join(".tmm/agents/cl/launch.json"), json!({ "backend": "claude", "cmd": "claude", "team": "" }).to_string()).unwrap();
+        let created = std::process::Command::new("tmux")
+            .args(["new-session", "-d", "-s", &session, "-n", "cl", "-c", &ws.to_string_lossy(), "sleep 60"])
+            .status().map(|s| s.success()).unwrap_or(false);
+        assert!(created, "a tmux server is required (pnpm run test:rust provides one)");
+        crate::projects::adopt(&session, Some("effect-test")).expect("adopt project");
+        let pane_id = String::from_utf8(std::process::Command::new("tmux").args(["display-message", "-p", "-t", &session, "#{pane_id}"]).output().unwrap().stdout).unwrap().trim().to_string();
+        let root = crate::config::test_scratch("tmm-effect-hub");
+        let hub = AgentNotificationHub::load_at(root.clone());
+        std::fs::create_dir_all(root.join("inbox")).unwrap();
+        let put = |name: &str, payload: Value| {
+            std::fs::write(root.join("inbox").join(name), serde_json::to_vec(&json!({"backend": "claude", "pane_id": pane_id, "payload": payload})).unwrap()).unwrap();
+        };
+        let tm = crate::projects::telemetry::held_rows;
+        put("0-start.json", json!({"hook_event_name": "SessionStart", "source": "startup", "session_id": "s0"}));
+        hub.consume_inbox();
+        let id = crate::projects::telemetry::record_held_command(&session, "cl", "/clear", "m1").unwrap();
+        crate::projects::telemetry::record_held(&session, "cl", "[tmm chat 2026-11-06 09:00] lead: @cl the brief", 0, "m2").unwrap();
+        put("1-start.json", json!({"hook_event_name": "SessionStart", "source": "startup", "session_id": "s1"}));
+        hub.consume_inbox();
+        assert_eq!(tm(&session, "cl").len(), 2, "a command still waiting is no reset that took effect");
+        assert!(crate::projects::telemetry::set_command_typed(id, true).unwrap());
+        put("2-start.json", json!({"hook_event_name": "SessionStart", "source": "clear", "session_id": "s2"}));
+        hub.consume_inbox();
+        let left: Vec<String> = tm(&session, "cl").into_iter().map(|r| r.line).collect();
+        assert!(!left.iter().any(|l| l == "/clear"), "the typed reset took effect: {left:?}");
         let _ = std::process::Command::new("tmux").args(["kill-session", "-t", &session]).status();
         let _ = std::fs::remove_dir_all(&ws);
         let _ = std::fs::remove_dir_all(root);
