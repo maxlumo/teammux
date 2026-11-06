@@ -534,6 +534,21 @@ impl Backend {
         }
     }
 
+    /// The text of a failed turn end that only a person can clear (board
+    /// #39: no credit, a bad key, a request too large), redacted and bounded
+    /// (`shared::provider_failure`), read from this backend's own hook
+    /// payload. `None` for an ordinary failure and for every other event.
+    /// codex and kiro send no end hook on such a failure (AC1), so theirs is
+    /// not read here.
+    pub fn provider_failure(self, payload: &serde_json::Map<String, serde_json::Value>) -> Option<String> {
+        match self {
+            Backend::Claude => claude::provider_failure(payload),
+            Backend::Kimi => kimi::provider_failure(payload),
+            Backend::Omp => omp::provider_failure(payload),
+            _ => None,
+        }
+    }
+
     /// The kind ("completed"/"failed"/"permission_required"/"input_required")
     /// carried by one hook payload, read with this backend's own key spelling
     /// and screening rules — each arm lives on the backend's file (board

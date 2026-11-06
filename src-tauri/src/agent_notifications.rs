@@ -649,7 +649,9 @@ impl AgentNotificationHub {
         // Resolve the reply edge BEFORE recording this stop. On a server
         // restart the in-memory edge is gone, so the durable activity log
         // recovers the prompt newer than the previous turn end.
-        let reply_to = if normalized.kind == "completed" {
+        // A provider failure a person must clear closes the edge too: its
+        // notice goes to the same requesters (board #39).
+        let reply_to = if normalized.kind == "completed" || normalized.provider_error.is_some() {
             self.take_reply_targets(&session, &window)
         } else {
             Vec::new()
@@ -663,7 +665,10 @@ impl AgentNotificationHub {
             // end, in one step: a separate "and it was empty" write could land
             // on a different end.
             // (Under a restore generation, its row is the hold's acceptance too.)
-            let _ = crate::projects::telemetry::record_notification_with(&session, &window, &normalized.kind, normalized.quality);
+            let _ = match &normalized.provider_error {
+                Some(text) => crate::projects::telemetry::record_provider_failure(&session, &window, text),
+                None => crate::projects::telemetry::record_notification_with(&session, &window, &normalized.kind, normalized.quality),
+            };
             // A turn edge (stop, ask) means the CLI just repainted its footer —
             // the context-usage number is at its freshest right here.
             crate::projects::vitals::sniff_window_soon(&session, &window);
@@ -690,7 +695,10 @@ impl AgentNotificationHub {
 
         let _ = pane;
         #[cfg(not(any(target_os = "android", target_os = "ios")))]
-        let post = if normalized.kind == "completed" { self.auto_post_body(&session, &window, &normalized) } else { None };
+        let post = if normalized.kind == "completed" { self.auto_post_body(&session, &window, &normalized) } else { self.provider_failure_notice(&session, &window, &normalized) };
+        // The notice is for the person too, who reads the room (board #39).
+        #[cfg(not(any(target_os = "android", target_os = "ios")))]
+        let reply_to = if post.is_some() && normalized.kind == "failed" { with_human(reply_to) } else { reply_to };
         #[cfg(any(target_os = "android", target_os = "ios"))]
         let post = None;
         self.finish_end(EndTail {
@@ -765,6 +773,18 @@ impl AgentNotificationHub {
         // rename landed between hook fire and consume) is gone.
         crate::projects::managed_home(session, window)?;
         Some(truncate(reply, MAX_REPLY_CHARS))
+    }
+
+    /// The ONE notice of a turn that ended on a provider error only a person
+    /// can clear (board #39, the incident: 4 hours of plain idle): posted
+    /// through the reply path, so the requesters get it typed and the room
+    /// records it. Managed windows only, like a final reply. The text is
+    /// already redacted (`shared::provider_failure`).
+    #[cfg(not(any(target_os = "android", target_os = "ios")))]
+    fn provider_failure_notice(&self, session: &str, window: &str, normalized: &Normalized) -> Option<String> {
+        let text = normalized.provider_error.as_deref()?;
+        crate::projects::managed_home(session, window)?;
+        Some(format!("[tmm] stopped on a provider error a person must clear: {text}"))
     }
 
     pub fn helper_command(&self, backend: &str) -> String {
@@ -1234,6 +1254,20 @@ struct Normalized {
     /// only; the phone never consumes the inbox.
     #[cfg_attr(any(target_os = "android", target_os = "ios"), allow(dead_code))]
     quality: crate::backends::EndQuality,
+    /// A failed end only a person can clear (board #39): the provider's
+    /// error text, redacted and bounded (`Backend::provider_failure`).
+    /// `None` for every other event and for an ordinary failure.
+    provider_error: Option<String>,
+}
+
+/// The reply edge plus the human, once (board #39): a provider failure's
+/// notice is for the person who must clear it, whoever asked.
+#[cfg(not(any(target_os = "android", target_os = "ios")))]
+fn with_human(mut to: Vec<String>) -> Vec<String> {
+    if !to.iter().any(|t| t == crate::address::HUMAN) {
+        to.push(crate::address::HUMAN.to_string());
+    }
+    to
 }
 
 /// `normalize_in` without a managed home — the shape every test and the
@@ -1279,11 +1313,13 @@ fn normalize_in(envelope: &InboxEnvelope, home: Option<&Path>) -> Result<Normali
     } else {
         crate::backends::EndQuality::Unknown
     };
+    let provider_error = if kind == "failed" { backend.provider_failure(payload) } else { None };
     Ok(Normalized {
         kind: kind.into(),
         agent_session_id: string_field(payload, &["session_id", "sessionId"]),
         full_reply,
         quality,
+        provider_error,
     })
 }
 
@@ -2131,6 +2167,122 @@ mod tests {
         );
 
         let _ = std::process::Command::new("tmux").args(["kill-session", "-t", &session]).status();
+        let _ = std::fs::remove_dir_all(root);
+    }
+
+    /// Board #39 AC4: each measured backend's provider failure normalises to
+    /// a failed end with its redacted text; an ordinary failure, and an end
+    /// that is not a failure, carry none. Payloads as builder-2 measured them
+    /// (claude 2.1.318, kimi 2.5.1, omp 18.15.0 via our extension).
+    #[test]
+    fn each_measured_backends_provider_failure_normalises_with_its_text() {
+        let norm = |backend: &str, payload: Value| {
+            normalize(&InboxEnvelope { backend: backend.into(), pane_id: "%1".into(), payload, tmm_tmux: None, launch: None, resolved: None, restore: None }).unwrap()
+        };
+        let fake = "sk-FAKE0123456789abcdefFAKE0123456789";
+        let n = norm("claude", json!({"hook_event_name":"StopFailure","error":"authentication_failed","last_assistant_message":format!("Please run /login · API Error: 401 invalid API key {fake}")}));
+        assert_eq!((n.kind.as_str(), n.provider_error.as_deref()), ("failed", Some("authentication_failed: Please run /login · API Error: 401 invalid API key <REDACTED>")));
+        let n = norm("kimi", json!({"hook_event_name":"StopFailure","error_type":"APIStatusError","error_message":"invalid API key","session_id":"s","cwd":"/w"}));
+        assert_eq!((n.kind.as_str(), n.provider_error.as_deref()), ("failed", Some("APIStatusError: invalid API key")));
+        let omp = r#"401 {"type":"error","error":{"type":"authentication_error","message":"invalid API key"}}"#;
+        let n = norm("omp", json!({"hook_event_name":"StopFailure","error_status":401,"error_message":omp,"session_id":"s"}));
+        assert_eq!((n.kind.as_str(), n.provider_error.as_deref()), ("failed", Some(omp)));
+        for (backend, payload) in [
+            ("claude", json!({"hook_event_name":"StopFailure","error":"rate_limit","last_assistant_message":"API Error: 429"})),
+            ("kimi", json!({"hook_event_name":"StopFailure","error_type":"APIStatusError","error_message":"Error code: 503"})),
+            ("omp", json!({"hook_event_name":"StopFailure","error_status":529,"error_message":"overloaded"})),
+        ] {
+            let n = norm(backend, payload);
+            assert_eq!((n.kind.as_str(), n.provider_error), ("failed", None), "{backend}: ordinary");
+        }
+        let n = norm("claude", json!({"hook_event_name":"Stop","last_assistant_message":"401 tests pass"}));
+        assert_eq!((n.kind.as_str(), n.provider_error), ("completed", None));
+    }
+
+    /// Board #39, the incident: builder-2's claude ended on "API Error: 402
+    /// insufficient credit" and derived plain idle for 4 hours. A failed end a
+    /// person must clear is idle with `provider_failed` and the redacted text,
+    /// and ONE notice goes along the turn's reply edge plus the human; the
+    /// next good turn clears it; an ordinary failure posts nothing and stays
+    /// `last_turn_failed` (#354). A real tmux window, a real managed home,
+    /// claude 2.1.318's StopFailure payloads.
+    #[test]
+    fn a_provider_failure_a_person_must_clear_is_said_once_and_cleared_by_the_next_good_turn() {
+        crate::projects::tests::use_test_store();
+        let session = format!("tmm-pf-{}", uuid::Uuid::new_v4());
+        let ws = crate::config::test_scratch("tmm-pf-ws");
+        std::fs::create_dir_all(ws.join(".tmm/agents/dev")).unwrap();
+        std::fs::write(ws.join(".tmm/agents/dev/launch.json"), "{}").unwrap();
+        let created = std::process::Command::new("tmux")
+            .args(["new-session", "-d", "-s", &session, "-n", "dev", "-c", &ws.to_string_lossy(), "sleep 60"])
+            .status()
+            .map(|s| s.success())
+            .unwrap_or(false);
+        if !created {
+            eprintln!("no tmux server — skipping");
+            return;
+        }
+        assert!(crate::projects::adopt(&session, Some("pf-test")).is_ok(), "the project is adopted");
+        let pane_id = String::from_utf8(
+            std::process::Command::new("tmux").args(["display-message", "-p", "-t", &session, "#{pane_id}"]).output().unwrap().stdout,
+        ).unwrap().trim().to_string();
+        struct Spy(std::sync::Mutex<Vec<(String, String, Vec<String>)>>);
+        impl RoomPoster for Spy {
+            fn post_final(&self, _session: &str, agent: &str, body: &str, reply_to: &[String]) -> Result<(), String> {
+                self.0.lock().unwrap().push((agent.into(), body.into(), reply_to.to_vec()));
+                Ok(())
+            }
+        }
+        let spy = std::sync::Arc::new(Spy(std::sync::Mutex::new(Vec::new())));
+        let root = crate::config::test_scratch("tmm-pf-hub");
+        let hub = AgentNotificationHub::load_at(root.clone());
+        hub.set_room_poster(spy.clone());
+        let (_, win, _) = crate::tmux::resolve_pane_id(&pane_id).expect("pane resolves");
+        std::fs::create_dir_all(root.join("inbox")).unwrap();
+        let mut n = 0;
+        let mut feed = |payload: Value| {
+            n += 1;
+            std::fs::write(root.join("inbox").join(format!("{n}-ev.json")), serde_json::to_vec(&json!({"backend": "claude", "pane_id": pane_id, "payload": payload})).unwrap()).unwrap();
+            hub.consume_inbox();
+        };
+        let status = || crate::projects::telemetry::derive(&session, "dev", 0);
+        let fake = "sk-ant-api03-FAKEfakeFAKEfake0123456789abcdefABCDEF";
+
+        let asked = "[tmm chat 2026-11-06 08:00] lead: @dev fix it";
+        hub.start_turn(&session, &win, reply_targets("", asked));
+        feed(json!({"hook_event_name": "UserPromptSubmit", "prompt": asked, "session_id": "c1"}));
+        feed(json!({"hook_event_name": "StopFailure", "error": "unknown", "session_id": "c1",
+            "last_assistant_message": format!("API Error: 402 insufficient credit for key {fake}; contact your tenant owner")}));
+        let st = status();
+        assert_eq!((st.state.as_str(), st.detail.as_str()), ("idle", "provider_failed"), "at rest, and a person must act");
+        assert_eq!(st.error, "unknown: API Error: 402 insufficient credit for key <REDACTED>; contact your tenant owner");
+        {
+            let posts = spy.0.lock().unwrap();
+            assert_eq!(posts.len(), 1, "one notice: {posts:?}");
+            let (agent, body, to) = &posts[0];
+            assert_eq!(agent, "dev");
+            assert_eq!(body, "[tmm] stopped on a provider error a person must clear: unknown: API Error: 402 insufficient credit for key <REDACTED>; contact your tenant owner");
+            assert_eq!(to, &vec!["lead".to_string(), "human".to_string()], "the requester, and the human");
+            assert!(!body.contains("FAKEfake"), "no key reaches the room");
+        }
+
+        // The next good turn clears it.
+        feed(json!({"hook_event_name": "UserPromptSubmit", "prompt": "/login done, carry on", "session_id": "c1"}));
+        feed(json!({"hook_event_name": "Stop", "last_assistant_message": "Fixed.", "session_id": "c1"}));
+        let st = status();
+        assert_eq!((st.state.as_str(), st.detail.as_str(), st.error.as_str()), ("idle", "", ""));
+
+        // An ordinary failure: plain rest, no notice.
+        feed(json!({"hook_event_name": "UserPromptSubmit", "prompt": "again", "session_id": "c1"}));
+        feed(json!({"hook_event_name": "StopFailure", "error": "rate_limit", "last_assistant_message": "API Error: 429 rate limited", "session_id": "c1"}));
+        let st = status();
+        assert_eq!((st.state.as_str(), st.detail.as_str(), st.error.as_str()), ("idle", "last_turn_failed", ""));
+        let posts = spy.0.lock().unwrap();
+        assert_eq!(posts.iter().filter(|(_, b, _)| b.starts_with("[tmm] stopped")).count(), 1, "still the one notice: {posts:?}");
+        drop(posts);
+
+        let _ = std::process::Command::new("tmux").args(["kill-session", "-t", &session]).status();
+        let _ = std::fs::remove_dir_all(&ws);
         let _ = std::fs::remove_dir_all(root);
     }
 

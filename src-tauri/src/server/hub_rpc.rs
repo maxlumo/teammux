@@ -2939,6 +2939,9 @@ fn agent_states(session: &str) -> serde_json::Value {
                 "joined": managed && crate::projects::joined_team(ws.as_deref(), &p.window_name).is_some(),
                 "state": if agent.is_some() { st.state.as_str() } else { "shell" },
                 "detail": st.detail,
+                // The provider's error text of a `provider_failed` end (board
+                // #39), redacted at the door; absent otherwise.
+                "error": if st.error.is_empty() { serde_json::Value::Null } else { st.error.clone().into() },
                 "since": st.since,
                 "vitals": if vitals.is_empty() { serde_json::Value::Null } else { serde_json::to_value(&vitals).unwrap_or(serde_json::Value::Null) },
                 // queue|steer this session runs, where the backend has the choice (#271).

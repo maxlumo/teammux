@@ -615,9 +615,205 @@ pub(crate) fn confirm_startup_prompt_or(
     });
 }
 
+/// The longest provider-error text an agent's status and its notice carry
+/// (board #39): enough for the status, the kind and the provider's sentence.
+pub(crate) const PROVIDER_ERROR_MAX_CHARS: usize = 300;
+
+/// HTTP statuses a provider answers when only a person can clear it: a bad
+/// or expired credential (401, 403), no credit (402), a request too large
+/// to be accepted again (413). A retry fails the same way every time.
+const PERSON_STATUSES: [u16; 4] = [401, 402, 403, 413];
+
+/// claude's `StopFailure` `error` values (2.1.318) that a person must clear,
+/// and the ones that clear by themselves. Anything else is read by its text.
+const PERSON_KINDS: [&str; 3] = ["authentication_failed", "billing_error", "invalid_request"];
+const ORDINARY_KINDS: [&str; 3] = ["rate_limit", "server_error", "max_output_tokens"];
+
+/// Measured sentences that say the same without a status (board #39 AC1:
+/// kimi 2.5.1 "invalid API key"; the incident's claude "Request too large";
+/// codex 0.166.0 "Payload Too Large"; the gateway's "insufficient credit").
+const PERSON_PHRASES: [&str; 5] = ["invalid api key", "insufficient credit", "request too large", "payload too large", "please run /login"];
+
+/// The ONE reading of a turn that ended on a provider error (board #39):
+/// `Some(text)` when only a person can clear it, the text redacted and
+/// bounded, with the CLI's error `kind` and the `status` in front when the
+/// provider's message does not already say them; `None` for an ordinary
+/// failure, which retries by itself and stays plain rest (#354). Each
+/// backend's file extracts (status, kind, text) from its own payload.
+pub(crate) fn provider_failure(status: Option<u16>, kind: Option<&str>, text: &str) -> Option<String> {
+    let text = text.trim();
+    let kind = kind.map(str::trim).filter(|k| !k.is_empty());
+    if kind.is_some_and(|k| ORDINARY_KINDS.contains(&k)) {
+        return None;
+    }
+    let lower = text.to_lowercase();
+    let person = kind.is_some_and(|k| PERSON_KINDS.contains(&k))
+        || status.is_some_and(|s| PERSON_STATUSES.contains(&s))
+        || PERSON_STATUSES.iter().any(|s| has_number(text, *s))
+        || PERSON_PHRASES.iter().any(|p| lower.contains(p));
+    if !person {
+        return None;
+    }
+    let mut out = String::new();
+    for head in [kind.map(str::to_string), status.map(|s| s.to_string())].into_iter().flatten() {
+        if !text.contains(&head) {
+            out.push_str(&head);
+            out.push_str(": ");
+        }
+    }
+    out.push_str(&redact(text));
+    if out.chars().count() > PROVIDER_ERROR_MAX_CHARS {
+        out = out.chars().take(PROVIDER_ERROR_MAX_CHARS).collect::<String>() + "…";
+    }
+    Some(out)
+}
+
+/// `n` as a whole number in `text`, not part of a longer one.
+fn has_number(text: &str, n: u16) -> bool {
+    let n = n.to_string();
+    text.match_indices(&n).any(|(i, _)| {
+        let before = text[..i].chars().next_back();
+        let after = text[i + n.len()..].chars().next();
+        !before.is_some_and(|c| c.is_ascii_digit()) && !after.is_some_and(|c| c.is_ascii_digit())
+    })
+}
+
+const REDACTED: &str = "<REDACTED>";
+const SECRET_KEYS: [&str; 9] = ["key", "api_key", "apikey", "token", "access_token", "secret", "password", "sig", "signature"];
+
+/// Masks what is shaped like a credential in a provider's error text
+/// (orchestrator, board #39): a URL's query string is dropped, `sk-…`, the
+/// token after `Bearer`, the value of `key=`/`token=`/… and any run of 32 or
+/// more key characters holding both letters and digits are `<REDACTED>`. A
+/// request id survives (a UUID's groups are short), so does the status.
+fn redact(text: &str) -> String {
+    let chars: Vec<char> = text.chars().collect();
+    let key_char = |c: char| c.is_ascii_alphanumeric() || matches!(c, '+' | '/' | '=' | '_');
+    let token_end = |from: usize| (from..chars.len()).find(|&j| !(key_char(chars[j]) || matches!(chars[j], '-' | '.'))).unwrap_or(chars.len());
+    let at = |i: usize, word: &str| {
+        let w: Vec<char> = word.chars().collect();
+        i + w.len() <= chars.len() && chars[i..i + w.len()].iter().zip(&w).all(|(a, b)| a.eq_ignore_ascii_case(b))
+    };
+    let mut out = String::with_capacity(text.len());
+    let mut i = 0;
+    let mut in_url = false;
+    while i < chars.len() {
+        let c = chars[i];
+        let boundary = i == 0 || !key_char(chars[i - 1]) && chars[i - 1] != '-';
+        if c.is_whitespace() || matches!(c, '"' | '\'' | ',' | ')' | '<' | '>') {
+            in_url = false;
+        }
+        if !in_url && boundary && (at(i, "https://") || at(i, "http://")) {
+            in_url = true;
+        }
+        if in_url && c == '?' {
+            // The whole query, up to where the URL ends.
+            while i < chars.len() && !(chars[i].is_whitespace() || matches!(chars[i], '"' | '\'' | ',' | ')' | '<' | '>')) {
+                i += 1;
+            }
+            in_url = false;
+            continue;
+        }
+        if boundary && at(i, "sk-") {
+            out.push_str(REDACTED);
+            i = token_end(i);
+            continue;
+        }
+        if boundary && at(i, "bearer ") {
+            let start = i + "bearer ".len();
+            let end = token_end(start);
+            if end > start {
+                out.extend(&chars[i..start]);
+                out.push_str(REDACTED);
+                i = end;
+                continue;
+            }
+        }
+        if boundary {
+            if let Some(k) = SECRET_KEYS.iter().find(|k| at(i, &format!("{k}=")) || at(i, &format!("{k}=\""))) {
+                let mut start = i + k.len() + 1;
+                out.extend(&chars[i..start]);
+                if chars.get(start) == Some(&'"') {
+                    start += 1;
+                }
+                let end = (start..chars.len()).find(|&j| chars[j].is_whitespace() || matches!(chars[j], '&' | '"' | '\'' | ',' | ';' | ')')).unwrap_or(chars.len());
+                out.push_str(REDACTED);
+                i = end;
+                continue;
+            }
+        }
+        if boundary && key_char(c) {
+            let end = (i..chars.len()).find(|&j| !key_char(chars[j])).unwrap_or(chars.len());
+            let run = &chars[i..end];
+            if run.len() >= 32 && run.iter().any(|c| c.is_ascii_digit()) && run.iter().any(|c| c.is_ascii_alphabetic()) {
+                out.push_str(REDACTED);
+                i = end;
+                continue;
+            }
+            out.extend(run);
+            i = end;
+            continue;
+        }
+        out.push(c);
+        i += 1;
+    }
+    out
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// Board #39: the failures only a person can clear, from the texts the
+    /// incident and builder-2's AC1 measurement captured; the ordinary ones
+    /// (they retry by themselves) are not.
+    #[test]
+    fn a_provider_failure_a_person_must_clear_is_told_from_an_ordinary_one() {
+        let claude_401 = "Please run /login · API Error: 401 invalid API key";
+        assert_eq!(provider_failure(None, Some("authentication_failed"), claude_401).as_deref(), Some("authentication_failed: Please run /login · API Error: 401 invalid API key"));
+        let too_large = "Request too large (max 32MB). Accumulated images and attachments in the conversation. Run /compact";
+        assert_eq!(provider_failure(None, Some("invalid_request"), too_large).as_deref(), Some(format!("invalid_request: {too_large}").as_str()));
+        let credit = "API Error: 402 insufficient credit; contact your tenant owner";
+        assert_eq!(provider_failure(None, Some("unknown"), credit).as_deref(), Some(format!("unknown: {credit}").as_str()), "claude files the gateway's 402 as unknown");
+        assert!(provider_failure(None, Some("billing_error"), "Your credit balance is too low").is_some());
+        assert_eq!(provider_failure(None, Some("APIStatusError"), "invalid API key").as_deref(), Some("APIStatusError: invalid API key"), "kimi 2.5.1");
+        let omp = r#"401 {"type":"error","error":{"type":"authentication_error","message":"invalid API key"}}"#;
+        assert_eq!(provider_failure(Some(401), None, omp).as_deref(), Some(omp), "a status the text already says is not said twice");
+        assert_eq!(provider_failure(Some(413), None, "Payload Too Large").as_deref(), Some("413: Payload Too Large"));
+        assert!(provider_failure(Some(403), None, "forbidden").is_some());
+        // Ordinary: they retry by themselves, and stay plain rest (#354).
+        assert_eq!(provider_failure(None, Some("rate_limit"), "API Error: 429 rate limited"), None);
+        assert_eq!(provider_failure(None, Some("server_error"), "API Error: 500 internal server error"), None);
+        assert_eq!(provider_failure(None, Some("max_output_tokens"), "output limit"), None);
+        assert_eq!(provider_failure(None, Some("unknown"), "API Error: Connection error."), None);
+        assert_eq!(provider_failure(Some(429), None, "429 too many requests"), None);
+        assert_eq!(provider_failure(Some(529), None, "overloaded"), None);
+        assert_eq!(provider_failure(None, Some("APIStatusError"), "Error code: 500"), None);
+        assert_eq!(provider_failure(None, None, "took 4013 ms"), None, "a status is a whole number");
+        assert_eq!(provider_failure(None, None, ""), None);
+    }
+
+    /// Board #39 (orchestrator, 07:48): the text goes to the room, panes and
+    /// the wire, so a credential-shaped string and a URL's query are masked;
+    /// the status, the CLI's error kind and the provider's message stay.
+    #[test]
+    fn a_provider_failures_text_is_redacted_and_bounded() {
+        let fake = "sk-ant-api03-FAKEfakeFAKEfake0123456789abcdefABCDEF";
+        let got = provider_failure(None, Some("authentication_failed"), &format!("API Error: 401 invalid x-api-key {fake}")).unwrap();
+        assert_eq!(got, "authentication_failed: API Error: 401 invalid x-api-key <REDACTED>");
+        let got = provider_failure(Some(401), None, "401 Authorization: Bearer abc.DEF-ghi_123 rejected").unwrap();
+        assert_eq!(got, "401 Authorization: Bearer <REDACTED> rejected");
+        let got = provider_failure(Some(401), None, "unexpected status 401 Unauthorized, url: https://gw.example/v1/responses?key=SECRET&x=1, request id: req_0a1b2c").unwrap();
+        assert_eq!(got, "unexpected status 401 Unauthorized, url: https://gw.example/v1/responses, request id: req_0a1b2c");
+        let got = provider_failure(Some(402), None, "402 token=abc123 api_key=\"zz9\" denied").unwrap();
+        assert_eq!(got, "402 token=<REDACTED> api_key=<REDACTED>\" denied");
+        let hex = "0123456789abcdef0123456789abcdef01234567";
+        let got = provider_failure(Some(401), None, &format!("401 credential {hex} expired (Request ID: 6f1c2d3e-aaaa-4bbb-8ccc-0123456789ab)")).unwrap();
+        assert_eq!(got, "401 credential <REDACTED> expired (Request ID: 6f1c2d3e-aaaa-4bbb-8ccc-0123456789ab)", "a long run goes; a request id stays");
+        let long = format!("413 {}", "x ".repeat(400));
+        let got = provider_failure(Some(413), None, &long).unwrap();
+        assert!(got.chars().count() <= PROVIDER_ERROR_MAX_CHARS + 1 && got.ends_with('…'), "{got}");
+    }
 
     /// Board #38 round 1: a pane that never shows its ready furniture runs
     /// `on_timeout` once, and never `on_ready`.

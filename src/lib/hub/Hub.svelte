@@ -44,7 +44,7 @@
   import HubSearch from './HubSearch.svelte';
   import { createHubSearch } from './hub-search.svelte.ts';
   import { agentNames, patchNames, RESERVED_LABELS } from './names.ts';
-  import { HUMAN, agentHue, quotePreview, stateDotColor, mergeMessages, mergeEvents, backendColor as colorOf, feedBlocks, filterBlocks, mergeStates, pickLead, pickDrawerAgent, addressed, addressedTeam, mentionTokens, mentionedAgents, unreadSenders, stoppedAgents, slashCommand, inputModeSwitch, issueSpans, systemLine } from './hub.ts';
+  import { HUMAN, agentHue, quotePreview, stateDotColor, mergeMessages, mergeEvents, backendColor as colorOf, feedBlocks, filterBlocks, mergeStates, pickLead, pickDrawerAgent, addressed, addressedTeam, mentionTokens, mentionedAgents, unreadSenders, stoppedAgents, slashCommand, inputModeSwitch, issueSpans, systemLine, detailWords } from './hub.ts';
   import { issueRef } from './board.ts';
   import { AGENT_TEAM, lacksCap } from '../core/login-caps.ts';
   import { resolvePathRef } from '../core/path-links.ts';
@@ -2516,11 +2516,12 @@
     return label.startsWith('hubState_') ? state : label;
   }
   /** A status detail in words: the person-needed ones name their remedy
-   * (board #362 c); any other detail reads as the server wrote it. */
-  function detailLabel(detail) {
+   * (board #362 c), then the provider's error text when there is one (board
+   * #39); any other detail reads as the server wrote it. */
+  function detailLabel(detail, error = '') {
     if (!detail) return '';
     const label = t('hubDetail_' + detail);
-    return label.startsWith('hubDetail_') ? detail : label;
+    return detailWords(label.startsWith('hubDetail_') ? detail : label, error);
   }
 
   // ── Hover explains (motion.md principle 16, wave 9). ONE shared card

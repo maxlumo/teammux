@@ -3262,7 +3262,7 @@ fn agent_list_text(r: &Value) -> String {
     for a in r.get("agents").and_then(|a| a.as_array()).unwrap_or(&empty) {
         let s = |k: &str| a.get(k).and_then(|v| v.as_str()).unwrap_or("");
         let w = a.get("window").and_then(|v| v.as_u64()).unwrap_or(0);
-        let tail = detail_tail(s("detail"));
+        let tail = detail_tail(s("detail"), s("error"));
         let label = s("label");
         let who = if label.is_empty() || label == s("name") { s("name").to_string() } else { format!("{label} ({})", s("name")) };
         match a.get("agent").and_then(|v| v.as_str()) {
@@ -3605,12 +3605,15 @@ fn backends_text(r: &Value) -> String {
     out
 }
 
-fn detail_tail(detail: &str) -> String {
-    match (detail.is_empty(), tmux_mobile::projects::recovery::person_remedy(detail)) {
-        (true, _) => String::new(),
+/// The status detail, its remedy when a person must act, and the provider's
+/// error text when the server sent one (board #39).
+fn detail_tail(detail: &str, error: &str) -> String {
+    let words = match (detail.is_empty(), tmux_mobile::projects::recovery::person_remedy(detail)) {
+        (true, _) => return String::new(),
         (false, Some(remedy)) => format!(" — {detail} ({remedy})"),
         (false, None) => format!(" — {detail}"),
-    }
+    };
+    if error.is_empty() { words } else { format!("{words}: {error}") }
 }
 
 /// The wake a finished task sends: who, which task, how it ended, after how
@@ -4392,11 +4395,16 @@ old — X []
     /// other detail prints as before.
     #[test]
     fn agent_list_names_the_remedy_of_a_detail_that_needs_a_person() {
-        assert_eq!(super::detail_tail("auth_expired"), " — auth_expired (run mwinit, then restart it)");
-        assert_eq!(super::detail_tail("conversation_blocked"), " — conversation_blocked (save its state, then clear the conversation)");
-        assert_eq!(super::detail_tail("recovery_exhausted"), " — recovery_exhausted (auto-continue stopped; needs a person)");
-        assert_eq!(super::detail_tail("last_turn_failed"), " — last_turn_failed");
-        assert_eq!(super::detail_tail(""), "");
+        assert_eq!(super::detail_tail("auth_expired", ""), " — auth_expired (run mwinit, then restart it)");
+        assert_eq!(super::detail_tail("conversation_blocked", ""), " — conversation_blocked (save its state, then clear the conversation)");
+        assert_eq!(super::detail_tail("recovery_exhausted", ""), " — recovery_exhausted (auto-continue stopped; needs a person)");
+        assert_eq!(super::detail_tail("last_turn_failed", ""), " — last_turn_failed");
+        assert_eq!(super::detail_tail("", ""), "");
+        // Board #39: a provider failure also prints the provider's own words.
+        assert_eq!(
+            super::detail_tail("provider_failed", "unknown: API Error: 402 insufficient credit"),
+            " — provider_failed (its provider refused it; fix what the error says, then send it a line): unknown: API Error: 402 insufficient credit"
+        );
     }
 
     use tmux_mobile::build_info::Build;

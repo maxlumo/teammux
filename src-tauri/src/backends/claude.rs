@@ -625,6 +625,18 @@ pub(crate) fn normalize_kind(
     }
 }
 
+/// A `StopFailure` a person must clear (board #39), as its text: claude
+/// 2.1.318 names the error's kind in `error` and says it in
+/// `last_assistant_message` (the transcript's `isApiErrorMessage` row says
+/// the same). `None` for any other event or an ordinary failure.
+pub(crate) fn provider_failure(payload: &serde_json::Map<String, Value>) -> Option<String> {
+    let field = |k: &str| crate::agent_notifications::string_field(payload, &[k]);
+    if field("hook_event_name").as_deref() != Some("StopFailure") {
+        return None;
+    }
+    super::shared::provider_failure(None, field("error").as_deref(), &field("last_assistant_message").unwrap_or_default())
+}
+
 /// claude shares kiro's snake_case key with PascalCase values
 /// ("UserPromptSubmit"). It shipped WITHOUT this arm once, which made the
 /// dedup flag sticky for its windows: the first `tmm send` suppressed the
@@ -744,6 +756,21 @@ mod tests {
     use super::*;
 
     const SENTINEL: &str = "SENTINEL-511";
+
+    /// Board #39 AC1, measured on 2.1.318 (builder-2, scratch home, invalid
+    /// key) and in the incident's transcript: `StopFailure` carries the
+    /// error's kind in `error` and its text in `last_assistant_message`.
+    #[test]
+    fn a_stop_failure_a_person_must_clear_carries_its_text() {
+        let failure = |error: &str, text: &str| provider_failure(serde_json::json!({"hook_event_name":"StopFailure","error":error,"last_assistant_message":text,"session_id":"s"}).as_object().unwrap());
+        assert_eq!(failure("authentication_failed", "Please run /login · API Error: 401 invalid API key").as_deref(), Some("authentication_failed: Please run /login · API Error: 401 invalid API key"));
+        assert_eq!(failure("unknown", "API Error: 402 insufficient credit; contact your tenant owner").as_deref(), Some("unknown: API Error: 402 insufficient credit; contact your tenant owner"));
+        assert!(failure("invalid_request", "Request too large (max 32MB). Run /compact").is_some());
+        assert_eq!(failure("rate_limit", "API Error: 429"), None, "it retries by itself");
+        assert_eq!(failure("server_error", "API Error: 500"), None);
+        let stop = serde_json::json!({"hook_event_name":"Stop","last_assistant_message":"401 tests pass"});
+        assert_eq!(provider_failure(stop.as_object().unwrap()), None, "only a failed end is read");
+    }
 
     /// Board #22: `--continue` is chosen only when claude's OWN directory for
     /// the workspace holds a transcript. claude 2.1.318 names it by replacing

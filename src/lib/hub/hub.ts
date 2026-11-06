@@ -79,11 +79,19 @@ export function stateNeedsYou(state: string, detail = ''): boolean {
  * (`recovery_exhausted`), or a reboot restore started it and has not seen it
  * ready (`restore_not_ready`, board #422: a prompt typed into it releases
  * it). Never auto-continued; each has its remedy in the hover
- * (`hubDetail_<detail>`). */
-export const PERSON_DETAILS: readonly string[] = ['auth_expired', 'conversation_blocked', 'recovery_exhausted', 'restore_not_ready'];
+ * (`hubDetail_<detail>`). A turn that ended on a provider error only a person
+ * can clear (`provider_failed`, board #39: no credit, a bad key, a request
+ * too large) also carries the provider's own words in `error`. */
+export const PERSON_DETAILS: readonly string[] = ['auth_expired', 'conversation_blocked', 'recovery_exhausted', 'restore_not_ready', 'provider_failed'];
 
 export function needsPerson(detail: string | undefined | null): boolean {
   return !!detail && PERSON_DETAILS.includes(detail);
+}
+
+/** A status detail's words followed by the provider's error text, when the
+ * server sent one (board #39: already redacted and bounded there). */
+export function detailWords(label: string, error: string | undefined | null = ''): string {
+  return label && error ? `${label}: ${error}` : label;
 }
 
 /** Four capacity bands, not a colour ramp (#180, owner 2026-09-12).

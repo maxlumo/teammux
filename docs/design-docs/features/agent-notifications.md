@@ -371,7 +371,56 @@ The process half of the incident is in
   error instead (agent-status.md).
 - Grok 1.0.5 (camelCase `hookEventName`; `stop` counts only with reason
   `end_turn`, `stop_failure` is failed) and OMP (our own telemetry extension
-  emits claude-shaped `Stop`) are read the same way.
+  emits claude-shaped `Stop`, and `StopFailure` for a refused turn, below) are
+  read the same way.
+
+**A turn the provider refused for good is said once, at its end** (board #39,
+2026-11-06). The incident: builder-2's claude stopped at 20:10 on "Request too
+large (max 32MB)", then failed on "API Error: 402 insufficient credit; contact
+your tenant owner". Its StopFailure arrived, but the hub stored only `failed`,
+so the agent derived plain idle. Nobody knew until the human asked at 00:22,
+over 4 hours later. The reviewer's codex failed the same way twice that day on
+"413 Payload Too Large". builder-2 measured each backend's failed end in
+scratch homes with an invalid key (the table is on board #39):
+- claude 2.1.318 sends `StopFailure` with `error` (an enum:
+  `authentication_failed`, `billing_error`, `invalid_request`, `rate_limit`,
+  `server_error`, `max_output_tokens`, `unknown`) and the text in
+  `last_assistant_message`. The gateway's 402 arrives as `unknown`. claude
+  retried the 401 ten times, then sent ONE StopFailure.
+- kimi 2.5.1 sends `StopFailure` with `error_type` and `error_message`.
+- omp 18.15.0 ends the turn with `agent_end`, whose last assistant message has
+  `stopReason: "error"`, `errorStatus` and `errorMessage`. Our extension now
+  reports that as `StopFailure {error_status, error_message}`, not as a `Stop`
+  with an empty reply.
+- codex 0.166.0 and kiro-cli 2.37.1 send NO end hook (their rollout and
+  session file hold the error). Their readers are #39's second slice.
+
+Each backend's file reads its own payload (`provider_failure`, through
+`Backend::provider_failure`). ONE predicate decides whether only a person can
+clear it (`backends::shared::provider_failure`): a status of 401, 402, 403 or
+413 (given, or as a whole number in the text), claude's
+`authentication_failed`, `billing_error` or `invalid_request`, or a measured
+sentence ("invalid API key", "insufficient credit", "request too large",
+"payload too large", "Please run /login"). `rate_limit`, `server_error`,
+`max_output_tokens` and every other failure retry by themselves, so they stay
+an ordinary failed end with no notice (#354). The text is redacted before
+anything stores or sends it (orchestrator's ruling, 07:48). A URL's query
+string is dropped. `sk-…`, the token after `Bearer`, the value of `key=`,
+`token=`, `api_key=` and the like, and any run of 32 or more key characters
+holding letters and digits become `<REDACTED>`. The status, the CLI's error
+kind and the provider's sentence stay, and so does a request id (a UUID's
+groups are short). The text is cut at 300 characters.
+
+Such an end is the one `failed` end row with `provider_failed` in its `tool`
+column (agent-status.md). It takes the turn's reply edge, which otherwise only
+a completed end does, and posts ONE notice through the final-reply path,
+`[tmm] stopped on a provider error a person must clear: <text>`. The notice is
+recorded to the requesters plus `human`, and typed as `[reply]` to the
+requesting agents. Managed windows only, like a final reply. A retry inside
+the CLI sends no extra end, so it makes no extra notice. Tests:
+`a_provider_failure_a_person_must_clear_is_said_once_and_cleared_by_the_next_good_turn`,
+`each_measured_backends_provider_failure_normalises_with_its_text`,
+`a_turn_the_provider_refused_is_reported_as_a_stop_failure_with_its_error`.
 
 **kiro payload shapes by engine (kiro-cli 2.22.1, board #207, measured):** v2
 `Stop` carries `assistant_response`/`last_assistant_message`; v3 `Stop` is

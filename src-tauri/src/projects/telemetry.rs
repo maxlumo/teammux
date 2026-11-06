@@ -96,6 +96,13 @@ struct Rec {
     /// paint is seen on a turn that had already ended (an interrupt, say), the
     /// detail is put on that end and no second end is written. (0, "") = none.
     person_end: (u64, String),
+    /// The provider's error text of a hook end that failed on something only
+    /// a person can clear (board #39), with the `end_seq` it belongs to:
+    /// compared with the CURRENT `end_seq` like `person_end`, so the next end
+    /// of any kind clears it. Memory only: a restart keeps the end's detail
+    /// (its row's `tool` column) and loses the text, which the room's notice
+    /// still holds. (0, "") = none.
+    person_error: (u64, String),
     /// The persisted activity row id of the current end (`end`), 0 when it
     /// has none (its INSERT failed, or a test that does not persist). The
     /// one identity of an end that a restart keeps (board #362 review P1-C
@@ -189,6 +196,11 @@ pub struct AgentStatus {
     /// When the state began — the turn's start for `running`, so a client can
     /// render "running 2m14s" without keeping its own clock.
     pub since: u64,
+    /// The provider's error text, redacted and bounded, when the turn ended
+    /// on a failure only a person can clear (board #39, detail
+    /// `provider_failed`). '' otherwise, and not sent.
+    #[serde(skip_serializing_if = "String::is_empty")]
+    pub error: String,
 }
 
 fn now() -> u64 {
@@ -1043,14 +1055,14 @@ fn turn_fact_held_row(
 /// The store stamps it at its INSERT (board #414); a test that needs a
 /// chosen time dates it with `record_notification_at`.
 pub fn record_notification(session: &str, window: &str, kind: &str) {
-    let _ = notification(session, window, kind, None, EndQuality::Unknown);
+    let _ = notification(session, window, kind, None, EndQuality::Unknown, None);
 }
 
 /// `record_notification` at a time the test names (seconds): a dated fact,
 /// test-only by the compiler (board #414 review P2-A).
 #[cfg(test)]
 pub fn record_notification_at(session: &str, window: &str, kind: &str, at: u64) {
-    let _ = notification(session, window, kind, Some(at), EndQuality::Unknown);
+    let _ = notification(session, window, kind, Some(at), EndQuality::Unknown, None);
 }
 
 /// `record_notification` for a stop whose reply the caller has already read
@@ -1068,18 +1080,31 @@ pub fn record_notification_at(session: &str, window: &str, kind: &str, at: u64) 
 /// Returns the durable row the fact was written as (`None`: its write
 /// failed), for a restored window's first accepted fact (board #422).
 pub fn record_notification_with(session: &str, window: &str, kind: &str, quality: EndQuality) -> Option<i64> {
-    notification(session, window, kind, None, quality)
+    notification(session, window, kind, None, quality, None)
+}
+
+/// The status detail of an agent whose turn ended on a provider error only a
+/// person can clear (board #39): no credit, a bad key, a request too large.
+pub const PROVIDER_FAILED_DETAIL: &str = "provider_failed";
+
+/// A hook's FAILED end that a person must clear (board #39): the same one
+/// end row a failed stop writes, with `provider_failed` in its `tool` column
+/// (the column a missed end's detail uses, so a restart replays the detail),
+/// and the error's `text` on the window's record. The next end of any kind
+/// supersedes both.
+pub fn record_provider_failure(session: &str, window: &str, text: &str) -> Option<i64> {
+    notification(session, window, "failed", None, EndQuality::Unknown, Some(text))
 }
 
 /// `record_notification_with` at a time the test names. Test-only.
 #[cfg(test)]
 pub fn record_notification_with_at(session: &str, window: &str, kind: &str, at: u64, quality: EndQuality) {
-    let _ = notification(session, window, kind, Some(at), quality);
+    let _ = notification(session, window, kind, Some(at), quality, None);
 }
 
 /// `at`: `None` for the observed fact; `Some` only from a test's dated
 /// wrapper.
-fn notification(session: &str, window: &str, kind: &str, at: Option<u64>, quality: EndQuality) -> Option<i64> {
+fn notification(session: &str, window: &str, kind: &str, at: Option<u64>, quality: EndQuality, provider_error: Option<&str>) -> Option<i64> {
     let completed = kind == "completed";
     let kind_is_ask = matches!(kind, "permission_required" | "input_required");
     // ONE critical section (board #264, orchestrator 11:57): whether the
@@ -1092,7 +1117,8 @@ fn notification(session: &str, window: &str, kind: &str, at: Option<u64>, qualit
         .unwrap()
         .get(&(session.to_string(), window.to_string()))
         .is_some_and(|r| r.prompt.is_some() && r.prompt_seq > r.end_seq);
-    let event = ("notif", kind.to_string(), String::new(), String::new(), Vec::new());
+    let detail = if provider_error.is_some() { PROVIDER_FAILED_DETAIL.to_string() } else { String::new() };
+    let event = ("notif", kind.to_string(), detail, String::new(), Vec::new());
     let kind = kind.to_string();
     let mut fact_seq = 0;
     let (_, row) = turn_fact_held_row(&order, session, window, at, |_| false, Some(event), |r, ts, seq| match kind.as_str() {
@@ -1105,6 +1131,10 @@ fn notification(session: &str, window: &str, kind: &str, at: Option<u64>, qualit
             r.end_seq = seq;
             fact_seq = seq;
             r.ask = None; // a finished turn cannot still be asking
+            if let Some(text) = provider_error {
+                r.person_end = (seq, PROVIDER_FAILED_DETAIL.to_string());
+                r.person_error = (seq, text.to_string());
+            }
             if completed {
                 match quality {
                     EndQuality::Empty => r.empty_end_seq = seq,
@@ -2761,7 +2791,7 @@ fn derive_from(rec: &Rec, activity_ts: u64, now: u64) -> AgentStatus {
     // which is all a hookless backend gives us.
     if newest == 0 {
         let state = if now.saturating_sub(activity_ts) < ACTIVE_SECS { "running" } else { "idle" };
-        return AgentStatus { state: state.into(), detail: String::new(), since: activity_ts };
+        return AgentStatus { state: state.into(), detail: String::new(), since: activity_ts, error: String::new() };
     }
 
     // A turn that ended is REST, however it ended. A failed stop names
@@ -2777,13 +2807,14 @@ fn derive_from(rec: &Rec, activity_ts: u64, now: u64) -> AgentStatus {
         } else {
             String::new()
         };
-        return AgentStatus { state: "idle".into(), detail, since: turn_end };
+        let error = if rec.person_error.0 != 0 && rec.person_error.0 == rec.end_seq { rec.person_error.1.clone() } else { String::new() };
+        return AgentStatus { state: "idle".into(), detail, since: turn_end, error };
     }
 
     // Blocked on the human, and nothing has happened since.
     if ask_k > tool_k && ask_k >= prompt_k {
         let kind = rec.ask.as_ref().map(|(k, _)| k.clone()).unwrap_or_default();
-        return AgentStatus { state: "waiting".into(), detail: kind, since: ask_ts };
+        return AgentStatus { state: "waiting".into(), detail: kind, since: ask_ts, error: String::new() };
     }
 
     // A turn is open. Its last observed tool explains what it is doing.
@@ -2794,7 +2825,7 @@ fn derive_from(rec: &Rec, activity_ts: u64, now: u64) -> AgentStatus {
         .map(|(l, _)| l.clone())
         .unwrap_or_default();
     let since = if prompt_ts > 0 { prompt_ts } else { tool_ts };
-    AgentStatus { state: "running".into(), detail, since }
+    AgentStatus { state: "running".into(), detail, since, error: String::new() }
 }
 
 /// Test-only (board #414, #419): the store's activity clock held at the
@@ -4485,6 +4516,32 @@ mod tests {
     /// end WITHOUT it, and no second end exists; the next capture tick that
     /// still sees the paint attaches it again (tested here as the same
     /// commit at the replayed version), still with no row.
+    /// Board #39: a provider failure is ONE end row with its detail in the
+    /// `tool` column, so a restart replays `provider_failed`; the text is
+    /// memory only (the room's notice keeps it). A later end clears both.
+    #[test]
+    fn a_provider_failure_is_one_end_whose_detail_survives_a_restart() {
+        crate::projects::tests::use_test_store();
+        PERSIST_IN_TEST.with(|p| p.set(true));
+        let session = format!("provider-{}", uuid::Uuid::new_v4());
+        let ends = || crate::projects::with_store(|s| s.activity_since(&session, 0, 50)).unwrap().into_iter().filter(|r| r.kind == "notif").map(|r| (r.text, r.tool)).collect::<Vec<_>>();
+        record_prompt(&session, "w1", "[tmm chat 2026-11-06 08:00] lead: @w1 go");
+        assert!(record_provider_failure(&session, "w1", "unknown: API Error: 402 insufficient credit").is_some());
+        assert_eq!(ends(), vec![("failed".to_string(), PROVIDER_FAILED_DETAIL.to_string())], "one end, its detail in the row");
+        let st = derive(&session, "w1", 0);
+        assert_eq!((st.state.as_str(), st.detail.as_str(), st.error.as_str()), ("idle", "provider_failed", "unknown: API Error: 402 insufficient credit"));
+        simulate_restart(&session);
+        recovery_mark(&session);
+        let st = derive(&session, "w1", 0);
+        assert_eq!((st.state.as_str(), st.detail.as_str(), st.error.as_str()), ("idle", "provider_failed", ""), "the detail is replayed; the text is memory");
+        record_prompt(&session, "w1", "go again");
+        assert_eq!(derive(&session, "w1", 0).state, "running");
+        record_notification_with(&session, "w1", "completed", EndQuality::Said);
+        let st = derive(&session, "w1", 0);
+        assert_eq!((st.detail.as_str(), st.error.as_str()), ("", ""), "the next good end clears it");
+        PERSIST_IN_TEST.with(|p| p.set(false));
+    }
+
     #[test]
     fn a_detail_on_an_ended_turn_is_memory_and_is_attached_again_after_a_restart() {
         crate::projects::tests::use_test_store();

@@ -34,7 +34,7 @@
     const lines = [{ label: t('hubHoverCommand'), value: a.command || '—' }];
     const n = panes.filter((p) => p.session === selected && p.window === a.window).length;
     if (n) lines.push({ label: t('hubHoverPanes'), value: String(n) });
-    if (a.agent) lines.push({ label: t('hubHoverState'), value: [stateLabel(a.state), detailLabel(a.detail)].filter(Boolean).join(' · '), tone: stateTone(a.state, a.detail) });
+    if (a.agent) lines.push({ label: t('hubHoverState'), value: [stateLabel(a.state), detailLabel(a.detail, a.error)].filter(Boolean).join(' · '), tone: stateTone(a.state, a.detail) });
     return { title: `${a.window}:${names.shown(a.name)}`, lines };
   }
 </script>

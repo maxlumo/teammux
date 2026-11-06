@@ -468,6 +468,16 @@ pub(crate) fn normalize_kind(
     }
 }
 
+/// A `StopFailure` a person must clear (board #39), as its text: kimi 2.5.1
+/// carries `error_type` and `error_message` (measured on an invalid key).
+pub(crate) fn provider_failure(payload: &serde_json::Map<String, Value>) -> Option<String> {
+    let field = |k: &str| crate::agent_notifications::string_field(payload, &[k]);
+    if field("hook_event_name").as_deref() != Some("StopFailure") {
+        return None;
+    }
+    super::shared::provider_failure(None, field("error_type").as_deref(), &field("error_message").unwrap_or_default())
+}
+
 /// kimi spells the turn-start event like claude/codex (measured).
 pub(crate) fn is_user_prompt_submit(payload: &Value) -> bool {
     payload
@@ -577,6 +587,16 @@ pub(crate) fn set_up_need_in(home: &Path) -> super::readiness::Need {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// Board #39 AC1, measured on 2.5.1 (builder-2, scratch home, invalid
+    /// key): `StopFailure` carries `error_type` and `error_message`.
+    #[test]
+    fn a_stop_failure_a_person_must_clear_carries_its_text() {
+        let failure = |message: &str| provider_failure(json!({"hook_event_name":"StopFailure","error_type":"APIStatusError","error_message":message,"session_id":"s","cwd":"/tmp/ws"}).as_object().unwrap());
+        assert_eq!(failure("invalid API key").as_deref(), Some("APIStatusError: invalid API key"));
+        assert_eq!(failure("Error code: 429 - rate limited"), None);
+        assert_eq!(provider_failure(json!({"hook_event_name":"Stop","error_message":"invalid API key"}).as_object().unwrap()), None);
+    }
 
     /// The measured 2.0.2 payload shapes: a Stop and an Interrupt both end
     /// the turn, StopFailure fails it, the prompt event is recognised, and

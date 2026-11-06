@@ -318,7 +318,7 @@
   }
 
   function cardInfo(a) {
-    const lines = [{ label: t('hubHoverState'), value: [stateLabel(a.state), detailLabel(a.detail)].filter(Boolean).join(' · '), tone: stateTone(a.state, a.detail) }];
+    const lines = [{ label: t('hubHoverState'), value: [stateLabel(a.state), detailLabel(a.detail, a.error)].filter(Boolean).join(' · '), tone: stateTone(a.state, a.detail) }];
     const model = runtimeLabel(a);
     if (model) lines.push({ label: t('hubHoverModel'), value: model });
     if (a.vitals?.context_pct != null) lines.push({ label: t('hubHoverCtx'), value: `${a.vitals.context_pct}%` });
@@ -436,7 +436,7 @@
           <button type="button" class="agent-select"
             aria-pressed={isAddressed(a.name)}
             aria-disabled={targetable(a.name) ? undefined : 'true'}
-            aria-label={[`${names.shown(a.name)} · ${stateLabel(a.state)}`, a.team, detailLabel(a.detail), vitalsLine(a.vitals), unread.has(a.name) ? t('hubUnread') : '', mentioned ? t('hubToAlsoHint').replace('{names}', `@${names.shown(a.name)}`) : '', filterAgent === a.name ? t('hubFilterItem') : ''].filter(Boolean).join(' · ')}
+            aria-label={[`${names.shown(a.name)} · ${stateLabel(a.state)}`, a.team, detailLabel(a.detail, a.error), vitalsLine(a.vitals), unread.has(a.name) ? t('hubUnread') : '', mentioned ? t('hubToAlsoHint').replace('{names}', `@${names.shown(a.name)}`) : '', filterAgent === a.name ? t('hubFilterItem') : ''].filter(Boolean).join(' · ')}
             use:hoverInfo={() => cardInfo(a)}
             onclick={(e) => clickAgent(e, a.name)} ondblclick={(e) => focusAgent(e, a.name)}
             use:doubletap={{ scope: selected, ondoubletap: () => showOnly(a.name) }}

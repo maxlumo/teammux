@@ -158,7 +158,7 @@ test('native selection owns hover and context; stopped slots never select or res
   assert.match(off, /disabled=\{acting\}/u);
   assert.doesNotMatch(off, /selectTarget|interrupt\(|startAgent|a-start|aria-pressed/u);
   assert.doesNotMatch(source, /role="button"|onkeydown|position:\s*fixed/u);
-  for (const fact of ['runtimeLabel(a)', 'fmtElapsed(a.since, tick)', 'stateTone(a.state, a.detail)', 'detailLabel(a.detail)', "t('hubHoverTarget')", "t('hubHoverPath')", "t('hubToDmLong')", "t('hubToAlsoHint')"]) {
+  for (const fact of ['runtimeLabel(a)', 'fmtElapsed(a.since, tick)', 'stateTone(a.state, a.detail)', 'detailLabel(a.detail, a.error)', "t('hubHoverTarget')", "t('hubHoverPath')", "t('hubToDmLong')", "t('hubToAlsoHint')"]) {
     assert.ok(source.includes(fact), `retained hover fact: ${fact}`);
   }
 });
@@ -449,8 +449,9 @@ test('a failed agent says why on the phone too: the state line carries the detai
   // The long-press menu on a touch device renders cardInfo (#223), so the
   // reason of a real CLI failure is reachable without a hover.
   // The detail goes through Hub's `detailLabel` (board #362 c), so one that
-  // needs a person names its remedy; any other reads as the server wrote it.
-  assert.match(source, /const lines = \[\{ label: t\('hubHoverState'\), value: \[stateLabel\(a\.state\), detailLabel\(a\.detail\)\]\.filter\(Boolean\)\.join\(' · '\)/u);
+  // needs a person names its remedy, then the provider's error text when the
+  // server sent one (board #39); any other reads as the server wrote it.
+  assert.match(source, /const lines = \[\{ label: t\('hubHoverState'\), value: \[stateLabel\(a\.state\), detailLabel\(a\.detail, a\.error\)\]\.filter\(Boolean\)\.join\(' · '\)/u);
 });
 
 test('a card is dragged onto a team by the ONE press-drag, in the existing tokens (board #384)', () => {

@@ -99,6 +99,8 @@ pub fn person_remedy(detail: &str) -> Option<&'static str> {
         EXHAUSTED => Some("auto-continue stopped; needs a person"),
         // A reboot restore started it and has not seen it ready (board #422).
         super::telemetry::RESTORE_NOT_READY_DETAIL => Some("restored, not ready; type a prompt into it"),
+        // Its provider refused the turn: no credit, a bad key, a request too large (board #39).
+        super::telemetry::PROVIDER_FAILED_DETAIL => Some("its provider refused it; fix what the error says, then send it a line"),
         _ => None,
     }
 }
