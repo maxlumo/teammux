@@ -429,9 +429,22 @@ pub fn refresh_agent(project_path: &str, session: &str, window_name: &str) -> Re
     // #452 (a)): a recipe that exists and cannot be read or parsed used to be
     // taken for "no recipe", so the start went ahead on the old materials
     // silently, skipping the render and everything it enforces.
+    let Some((def, p)) = refresh_target(&section, project_path, window_name)? else { return Ok(false) };
+    let team_opt = (!p.team.is_empty()).then_some(p.team.as_str());
+    materialize(&section, &def, window_name, session, project_path, "", &p.by, team_opt, &p.agent_def, &p.member, &p.from_member)
+        .map(|_| true)
+        .map_err(|e| format!("{window_name}: its materials could not be brought up to date, so it is not started: {e}"))
+}
+
+/// What a start renders from the recipe in `section`: the CURRENT definition and the recipe's
+/// provenance, or `None` to keep the recipe's materials (no recipe, the definition gone, or a
+/// model or effort that no longer validates). `Err` refuses the start (#448, #452 (a)). One
+/// reading for the render (`refresh_agent`) and for the backend the start will launch
+/// (`launch_backend`, board #46 round 2), so the two cannot disagree.
+fn refresh_target(section: &super::recipe::RecipeSection, project_path: &str, window_name: &str) -> Result<Option<(RegAgent, Provenance)>, String> {
     let recipe = match section.read() {
         Ok(Some(r)) => r,
-        Ok(None) => return Ok(false),
+        Ok(None) => return Ok(None),
         Err(e) => return Err(format!("{window_name}: {e}, so it is not started")),
     };
     let p = provenance_of(&recipe);
@@ -452,19 +465,32 @@ pub fn refresh_agent(project_path: &str, session: &str, window_name: &str) -> Re
                 p.agent_def, p.team
             );
         }
-        return Ok(false);
+        return Ok(None);
     };
     // A def edited into an invalid model must not brick the restart: keep the
     // old materials rather than write a config the backend will refuse.
     if super::models::validate(&def.backend, &def.model).is_err()
         || super::models::validate_effort(&def.backend, &def.effort).is_err()
     {
-        return Ok(false);
+        return Ok(None);
     }
-    let team_opt = (!p.team.is_empty()).then_some(p.team.as_str());
-    materialize(&section, &def, window_name, session, project_path, "", &p.by, team_opt, &p.agent_def, &p.member, &p.from_member)
-        .map(|_| true)
-        .map_err(|e| format!("{window_name}: its materials could not be brought up to date, so it is not started: {e}"))
+    Ok(Some((def, p)))
+}
+
+/// The backend a start of `window_name` will LAUNCH (board #46 round 2): the current
+/// definition's when the start re-renders the home, else the recipe's. Read BEFORE the start
+/// writes anything, so its hold (`delivery::begin_start`, before the kill) and its ready watch
+/// (`delivery::watch_start`, after the launch) are decided on the same backend. Before, the
+/// hold read the OLD recipe and the watch the new one: codex→omp left a hold no omp screen
+/// clears, and omp→dsh wrote none, so a line went into the shell (validator-2 F2, F3 on
+/// 5fa2c61e).
+pub fn launch_backend(project_path: &str, window_name: &str) -> Option<crate::backends::Backend> {
+    let section = super::recipe::recipe_section(&agent_home(project_path, window_name));
+    if let Ok(Some((def, _))) = refresh_target(&section, project_path, window_name) {
+        return crate::backends::Backend::parse(&def.backend);
+    }
+    let recipe = section.read().ok().flatten()?;
+    crate::backends::Backend::parse(recipe.get("backend")?.as_str()?)
 }
 
 /// Start a managed window again from scratch, in its own home (the restart's
@@ -3928,6 +3954,30 @@ hooks = [ { type = "command", command = "/opt/guard.sh" } ]
 
         super::super::teams_delete("mvteam").ok();
         for n in ["mvbase", "mvsolo"] { super::super::registry_delete(n).ok(); }
+        std::fs::remove_dir_all(&ws).ok();
+    }
+
+    /// Board #46 round 2: the backend a start LAUNCHES is the current definition's when the start
+    /// re-renders, read before anything is written; with the definition gone it is the recipe's.
+    #[test]
+    fn the_launched_backend_is_the_current_definitions_before_the_render() {
+        super::super::tests::use_test_store();
+        let ws = crate::config::test_scratch("tmm-launch-backend");
+        let ws_str = ws.to_string_lossy().to_string();
+        let name = "lbagent";
+        let save = |backend: &str| {
+            super::super::registry_save(&json!({ "name": name, "backend": backend, "model": "", "effort": "", "system": "x", "skills": "[]", "mcp": "[]" })).unwrap()
+        };
+        save("kiro");
+        let def = super::super::registry_get(name).unwrap().expect("saved def");
+        materialize(&super::super::recipe::recipe_section(&agent_home(&ws_str, name)), &def, name, "proj", &ws_str, "", "lead", None, name, "", "").unwrap();
+        assert_eq!(launch_backend(&ws_str, name), Some(crate::backends::Backend::Kiro));
+        save("codex");
+        let recipe = std::fs::read_to_string(agent_home(&ws_str, name).join("launch.json")).unwrap();
+        assert_eq!(launch_backend(&ws_str, name), Some(crate::backends::Backend::Codex), "the definition, before the render");
+        assert_eq!(std::fs::read_to_string(agent_home(&ws_str, name).join("launch.json")).unwrap(), recipe, "nothing written");
+        super::super::registry_delete(name).unwrap();
+        assert_eq!(launch_backend(&ws_str, name), Some(crate::backends::Backend::Kiro), "the definition gone: the recipe's");
         std::fs::remove_dir_all(&ws).ok();
     }
 

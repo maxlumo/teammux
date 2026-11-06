@@ -118,8 +118,20 @@ fn read_mark(path: &std::path::Path) -> Option<StartMark> {
 /// an earlier mark of this same restart already recorded. A mark that cannot
 /// be written is an `Err` (round 3, P1-R5): the caller refuses its start
 /// before any kill, as Stop refuses an unrecordable stop.
-pub(crate) fn begin_start(session: &str, window: &str) -> Result<Option<String>, String> {
-    if recipe_backend(session, window).and_then(|b| b.startup_confirmation()).is_none() {
+///
+/// `backend` is the one this start LAUNCHES (`spawn::launch_backend`, read before
+/// anything is written), never the recipe as it is now: a switched restart
+/// re-renders the recipe only after the kill (board #46 round 2). A backend
+/// with no ready screen retires a mark the window still carries, since no
+/// screen of it will ever clear one (codex→omp left one holding every line).
+pub(crate) fn begin_start(session: &str, window: &str, backend: Option<crate::backends::Backend>) -> Result<Option<String>, String> {
+    if backend.and_then(|b| b.startup_confirmation()).is_none() {
+        if let Some(path) = mark_path(session, window) {
+            let _g = marks_lock().lock().unwrap();
+            if read_mark(&path).is_some() {
+                std::fs::remove_file(&path).map_err(|e| format!("'{window}' was not restarted: an old starting hold could not be removed: {e}"))?;
+            }
+        }
         return Ok(None);
     }
     let path = mark_path(session, window).ok_or_else(|| format!("'{window}' has no home to record its start in"))?;
@@ -135,6 +147,10 @@ pub(crate) fn begin_start(session: &str, window: &str) -> Result<Option<String>,
         .map_err(|e| format!("'{window}' was not restarted: its starting hold could not be recorded: {e}"))?;
     Ok(Some(mark.id))
 }
+
+/// A test's ready timeout, so a start that never becomes ready ends in seconds.
+#[cfg(test)]
+pub(crate) static START_TIMEOUT_IN_TEST: std::sync::Mutex<Option<std::time::Duration>> = std::sync::Mutex::new(None);
 
 #[cfg(test)]
 pub(crate) static MARK_WRITE_FAILS: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
@@ -154,13 +170,13 @@ fn retire_own(path: &std::path::Path, id: &str) -> bool {
 /// its check finishes (into the OLD CLI) before the hold exists, and every
 /// later one sees it. A hold that cannot be written refuses the kill
 /// (P1-R5). A kill that fails retires this start's hold: the old CLI runs on.
-pub(crate) fn replace_cli(session: &str, window: &str, kill: impl FnOnce() -> Result<(), String>) -> Result<Option<String>, String> {
+pub(crate) fn replace_cli(session: &str, window: &str, backend: Option<crate::backends::Backend>, kill: impl FnOnce() -> Result<(), String>) -> Result<Option<String>, String> {
     // Board #41: echoes the old CLI already wrote settle their rows before the kill, so a line
     // it did take is not reported.
     crate::agent_notifications::drain_inbox();
     let lock = window_lock(session, window);
     let _guard = lock.lock().unwrap();
-    let id = begin_start(session, window)?;
+    let id = begin_start(session, window, backend)?;
     let retire_hold = || {
         if let (Some(id), Some(path)) = (&id, mark_path(session, window)) {
             let _g = marks_lock().lock().unwrap();
@@ -250,8 +266,14 @@ pub(crate) fn is_starting(session: &str, window: &str) -> bool {
 /// mark and the lines stay, and the held warn tells the senders once. Run by
 /// the start, and again by a gateway that restarts while a mark is on disk
 /// (round 2, P1-R2), so the lines go out without waiting for a Hub read.
-pub(crate) fn watch_start(session: &str, window: &str) {
-    let Some(confirmation) = recipe_backend(session, window).and_then(|b| b.startup_confirmation()) else { return };
+/// `backend` is the one the start launched, the same its hold was decided on
+/// (board #46 round 2).
+pub(crate) fn watch_start(session: &str, window: &str, backend: Option<crate::backends::Backend>) {
+    let Some(mut confirmation) = backend.and_then(|b| b.startup_confirmation()) else { return };
+    #[cfg(test)]
+    if let Some(t) = *START_TIMEOUT_IN_TEST.lock().unwrap() {
+        confirmation.timeout = t;
+    }
     let secs = confirmation.timeout.as_secs();
     let (s, w) = (session.to_string(), window.to_string());
     let (s2, w2) = (s.clone(), w.clone());
@@ -1133,7 +1155,8 @@ pub fn flush_on_start() {
         // it, and its ready edge is watched again here.
         for window in telemetry::held_windows(&session) {
             if is_starting(&session, &window) {
-                watch_start(&session, &window);
+                // The home is the launched backend's by now: its recipe says which.
+                watch_start(&session, &window, recipe_backend(&session, &window));
             }
         }
         flush_idle(&session);
