@@ -139,10 +139,12 @@ consolidating review findings, watching the review column), implementation,
 independent verification (running the suites in the integration checkout),
 independent review (reading the commits against the checklists), merge, and
 moving to done. **A team's definition decides which role performs each
-duty.** One role may hold several; the implementer never verifies, reviews,
-merges or moves to done its own work. (Before #40 this section gave all of
-review, the suite run and the merge to "the reviewer", which contradicted a
-team whose reviewer does not run tests or merge.)
+duty.** One role may hold several. The implementer runs its own required
+checks (§1.3, §2) before handoff, but the sign-off is someone else's:
+independent verification, independent review, merge and moving to done are
+never performed by the implementer of that work. (Before #40 this section
+gave all of review, the suite run and the merge to "the reviewer", which
+contradicted a team whose reviewer does not run tests or merge.)
 
 **Assignment.** Coordination files the issue with the finish line in the body
 (scope, constraints, how to verify) and either `--assignee` at creation or an
