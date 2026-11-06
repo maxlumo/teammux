@@ -41,11 +41,14 @@ pub type NotificationHub = Arc<AgentNotificationHub>;
 /// section; an older server answers method-not-found, which the page must never read as "not
 /// installed". `board_blocks` (board #43): `hub_board_save` accepts `blocked_by` on a create and
 /// `hub_board_block` exists. An older server ignores the key and files the issue with no edges,
-/// which reads as a success, so a client sends neither without it. An older server announces no `caps` at all, and a client that
+/// which reads as a success, so a client sends neither without it. `board_agreement` (board #44):
+/// `hub_board_note` keeps `agreement: true`, and `hub_board_get` carries `agreement`, each note's
+/// `n` and `superseded_by`. An older server ignores the key and stores a plain note, so a client
+/// sends no agreement without it. An older server announces no `caps` at all, and a client that
 /// needs one refuses the write instead of saving a label nobody acts on. The
 /// phone's server has no Hub, so it announces none.
 #[cfg(not(any(target_os = "android", target_os = "ios")))]
-pub(crate) const LOGIN_CAPS: &[&str] = &["board_dispatch", "board_notify", "spawn_join", "agent_team", "hub_files", "mcp_masked", "backends_check", "board_blocks"];
+pub(crate) const LOGIN_CAPS: &[&str] = &["board_dispatch", "board_notify", "spawn_join", "agent_team", "hub_files", "mcp_masked", "backends_check", "board_blocks", "board_agreement"];
 #[cfg(any(target_os = "android", target_os = "ios"))]
 pub(crate) const LOGIN_CAPS: &[&str] = &[];
 

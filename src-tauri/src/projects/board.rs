@@ -114,8 +114,13 @@ pub fn board_save(
 }
 
 pub fn board_note(session: &str, id: i64, author: &str, body: &str) -> Result<(), String> {
+    board_note_as(session, id, author, body, false)
+}
+
+/// Board #44: a note, or one DECLARED as the issue's current agreement.
+pub fn board_note_as(session: &str, id: i64, author: &str, body: &str, agreement: bool) -> Result<(), String> {
     let now = chrono::Utc::now().timestamp();
-    with_store(|store| store.issue_note(session, id, author, body, now))
+    with_store(|store| store.issue_note_as(session, id, author, body, now, agreement))
 }
 
 /// Board #43 P1-R1: file a NEW issue with its initial blockers in one

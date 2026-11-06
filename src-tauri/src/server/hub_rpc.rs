@@ -572,6 +572,13 @@ fn dispatch_hub(req: &Request, notifications: Option<&crate::agent_notifications
             };
             let body = p.get("body").and_then(|v| v.as_str()).unwrap_or("");
             let author = p.get("who").and_then(|v| v.as_str()).unwrap_or("human");
+            // Board #44 (cap `board_agreement`): the note is DECLARED the
+            // issue's current agreement as it is written, on either path.
+            let agreement = match p.get("agreement") {
+                None | Some(serde_json::Value::Null) => false,
+                Some(serde_json::Value::Bool(b)) => *b,
+                Some(_) => return Err(RpcError::InvalidParams("agreement must be true or false".into())),
+            };
             // `--notify` (board #507) is its own path: the note AND the room
             // line that announces it, in ONE call. Without the key this arm
             // is exactly what it always was.
@@ -584,12 +591,12 @@ fn dispatch_hub(req: &Request, notifications: Option<&crate::agent_notifications
                         None => Err("this session belongs to no project, so @all names nobody".into()),
                     },
                     managed: &|name| crate::projects::is_managed_in(ws.as_deref(), name),
-                    store: &|session, id, author, body| crate::projects::board_note(session, id, author, body),
+                    store: &|session, id, author, body| crate::projects::board_note_as(session, id, author, body, agreement),
                     post: &|from, line| post_and_deliver_found(session, &room, from, line, false),
                     notice: &|target, line| crate::projects::deliver_chat_line_found(session, target, line).is_some(),
                 });
             }
-            crate::projects::board_note(session, issue_id, author, body).map_err(RpcError::InvalidParams)?;
+            crate::projects::board_note_as(session, issue_id, author, body, agreement).map_err(RpcError::InvalidParams)?;
             // A Board reply is communication, not just storage (board
             // #26, #255): after the note is durable, wake the issue's
             // assignee AND reporter (minus the author and the human) with
@@ -3108,6 +3115,35 @@ mod tests {
 
     fn issue_count(session: &str) -> usize {
         crate::projects::board_list(session).expect("board")["issues"].as_array().map_or(0, |a| a.len())
+    }
+
+    /// Board #44: `hub_board_note` with `agreement: true` stores the note as
+    /// the issue's current agreement (the plain and the `notify` path alike);
+    /// anything but a boolean is refused with nothing written.
+    #[test]
+    fn a_note_can_be_posted_as_the_current_agreement_through_either_note_path() {
+        let session = project_with(&["builder"]);
+        let id = issue_id(&save_issue(&session, serde_json::json!({ "title": "scope" })));
+        let note = |params: serde_json::Value| {
+            let mut params = params;
+            params["session"] = serde_json::json!(session);
+            params["id"] = serde_json::json!(id);
+            handle_hub_request(&req("hub_board_note", params), None)
+        };
+        assert!(note(serde_json::json!({ "body": "plain", "who": "builder" })).error.is_none());
+        let r = note(serde_json::json!({ "body": "agreed: A", "who": "orchestrator", "agreement": true }));
+        assert!(r.error.is_none(), "{:?}", r.error.map(|e| e.message));
+        assert_eq!(stored(&session, id).unwrap()["agreement"]["n"], 2);
+        let r = note(serde_json::json!({ "body": "agreed: B", "who": "orchestrator", "agreement": true, "notify": ["builder"] }));
+        assert!(r.error.is_none(), "{:?}", r.error.map(|e| e.message));
+        let got = stored(&session, id).unwrap();
+        assert_eq!(got["agreement"]["n"], 3);
+        assert_eq!(got["agreement"]["body"], "agreed: B");
+        assert_eq!(got["notes"][1]["superseded_by"], 3);
+
+        let r = note(serde_json::json!({ "body": "sneaky", "agreement": "yes" }));
+        assert_eq!(r.error.unwrap().message, "agreement must be true or false");
+        assert_eq!(stored(&session, id).unwrap()["notes"].as_array().unwrap().len(), 3, "nothing written");
     }
 
     /// Board #43: `hub_board_block` adds and removes edges and leaves one room

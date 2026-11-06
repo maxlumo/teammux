@@ -49,7 +49,7 @@ pub mod vitals;
 pub mod wakes;
 
 // Every path a caller names stays `projects::X` (board #152).
-pub use board::{BOARD_STATUSES, ISSUE_REF_CHARS, board_block, board_counts, board_create_blocked, board_delete, board_get, board_list, board_note, board_save, issue_ref};
+pub use board::{BOARD_STATUSES, ISSUE_REF_CHARS, board_block, board_counts, board_create_blocked, board_delete, board_get, board_list, board_note, board_note_as, board_save, issue_ref};
 pub use rooms::{archive_msg, archived_ids, archived_msgs, unarchive_msgs};
 pub use registry::{global_prompt_get, global_prompt_set, registry_delete, registry_get, registry_list, registry_save, registry_set_model_effort, team_get, teams_delete, teams_list, teams_save};
 pub(crate) use registry::{with_registry_mcp, with_registry_skills};
