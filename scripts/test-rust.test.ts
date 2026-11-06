@@ -96,6 +96,16 @@ test('a test process cannot reach the real config, data or state dir: the XDG ro
   assert.equal(bare.XDG_CONFIG_HOME, '/tmp/iso-y/xdg-config');
 });
 
+test('no CLI started under the isolated env may update itself: each documented switch is set, over the caller\'s (#48)', () => {
+  // Incidents 08:00, 08:55, 09:11 (2026-11-06): a claude under a private XDG_DATA_HOME but the real
+  // HOME installed into the private dir and relinked the REAL ~/.local/bin/claude there.
+  const env = isolatedEnv({ PATH: '/bin', DISABLE_AUTOUPDATER: '0' }, '/tmp/iso-x');
+  assert.equal(env.DISABLE_AUTOUPDATER, '1', 'claude: background updates (measured: no relink with it, one in 10 s without)');
+  assert.equal(env.DISABLE_UPDATES, '1', 'claude: also a manual claude update/install');
+  assert.equal(env.KIMI_CODE_NO_AUTO_UPDATE, '1', 'kimi');
+  assert.equal(env.KIRO_NO_AUTO_UPDATE, '1', 'kiro (read by kiro-cli-chat; its documented door is a setting under the real HOME)');
+});
+
 test('a run creates the dir, hands it to cargo, kills only servers under it by -S, and removes it', async () => {
   const { existsSync, mkdirSync } = await import('node:fs');
   const { spawnSync: realSpawn } = await import('node:child_process');

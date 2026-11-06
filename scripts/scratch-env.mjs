@@ -29,11 +29,13 @@
 // tmux server" holds the rule and its reason.
 import { spawn as nodeSpawn, spawnSync } from 'node:child_process';
 import { randomBytes } from 'node:crypto';
-import { chmodSync, existsSync, mkdirSync, readFileSync, statSync, writeFileSync } from 'node:fs';
-import { isAbsolute, join, resolve } from 'node:path';
-import { tmpdir } from 'node:os';
+import { chmodSync, existsSync, lstatSync, mkdirSync, readdirSync, readFileSync, readlinkSync, statSync, writeFileSync } from 'node:fs';
+import { dirname, isAbsolute, join, resolve, sep } from 'node:path';
+import { homedir, tmpdir } from 'node:os';
 import { fileURLToPath } from 'node:url';
-import { isolatedEnv } from './test-rust.mjs';
+import { isolatedEnv, UPDATE_SWITCHES } from './test-rust.mjs';
+
+export { UPDATE_SWITCHES };
 
 /** Names whose presence points a process at the live tmux server or gateway. */
 const EXACT = ['TMUX', 'TMUX_PANE', 'TMUX_SOCKET', 'TOKEN'];
@@ -62,7 +64,58 @@ export function leaks(environ, dir) {
     const fallback = name === 'TMUX_TMPDIR' && !got ? " (tmux falls back to /tmp, the live server's socket dir)" : '';
     out.push(`${name} is ${got === undefined ? 'unset' : `'${got}'`}${fallback}, not ${want[name]}`);
   }
+  // Board #48: a CLI without its switch may update itself and relink the real ~/.local/bin.
+  for (const [name, value] of Object.entries(UPDATE_SWITCHES)) {
+    const got = vars.get(name);
+    if (got !== value) out.push(`${name} is ${got === undefined ? 'unset' : `'${got}'`}, not ${value} (the CLI may update itself and relink the real ~/.local/bin)`);
+  }
   return out;
+}
+
+/** Where the user's CLIs are linked from (board #48): the shared bin dir every installer
+ * relinks, and kimi's own. Read only, never changed. */
+export function linkDirs(home) {
+  return [join(home, '.local', 'bin'), join(home, '.kimi-code', 'bin')];
+}
+
+/** Every symlink in the user's link dirs and its absolute target, as {path: target}. A dir
+ * that does not exist has none. */
+export function snapshotLinks(home) {
+  const out = {};
+  for (const d of linkDirs(home)) {
+    let names = [];
+    try { names = readdirSync(d); } catch { continue; }
+    for (const n of names.sort()) {
+      const p = join(d, n);
+      try {
+        if (lstatSync(p).isSymbolicLink()) out[p] = resolve(dirname(p), readlinkSync(p));
+      } catch { /* gone meanwhile */ }
+    }
+  }
+  return out;
+}
+
+/** The user's links that now point INTO the scratch dir (board #48, the 08:00 shape), each
+ * with what it pointed at before the run (`before`, run's snapshot; null when there is none)
+ * and the one command that repairs it. Empty = none escaped. */
+export function escapedLinks(home, dir, before) {
+  const inside = (t) => t === resolve(dir) || t.startsWith(resolve(dir) + sep);
+  return Object.entries(snapshotLinks(home))
+    .filter(([, target]) => inside(target))
+    .map(([path, target]) => {
+      const was = before?.[path];
+      const why = before == null ? 'no snapshot from run' : was === undefined ? 'it did not exist before the run' : inside(was) ? `it was ${was}` : `it was ${was}: ln -sfn ${was} ${path}`;
+      return `${path} -> ${target}, inside the scratch dir (${why})`;
+    });
+}
+
+/** The private tmux server's global environment, which every pane and so every managed
+ * agent inherits (board #48: run's own env does not reach a pane when another client
+ * started the server). null when no server is running. */
+function privateServerEnv(dir) {
+  const r = spawnSync('tmux', ['show-environment', '-g'], { env: isolatedEnv(process.env, dir), encoding: 'utf8' });
+  if (r.status !== 0) return null;
+  return r.stdout.split('\n').filter((l) => l && !l.startsWith('-')).join('\0') + '\0';
 }
 
 /** sysctl(KERN_PROCARGS2) for one pid through the macOS host's own python3
@@ -217,7 +270,7 @@ function privateDir(p) {
 }
 
 /** Start `argv` with the isolated env under `dir`; returns its pid. */
-export function runScratch({ dir, argv, env = process.env, spawn = nodeSpawn, port = null }) {
+export function runScratch({ dir, argv, env = process.env, spawn = nodeSpawn, port = null, home = homedir() }) {
   if (!dir) throw new Error('give a scratch dir: scratch-env.mjs run <dir> -- <command…>');
   if (!isAbsolute(dir)) throw new Error(`the scratch dir must be an absolute path: ${dir}`);
   if (!argv.length) throw new Error('give a command after --: scratch-env.mjs run <dir> -- <command…>');
@@ -237,6 +290,9 @@ export function runScratch({ dir, argv, env = process.env, spawn = nodeSpawn, po
     writeFileSync(toml, `host = "127.0.0.1"\nport = ${port}\ntoken = "${randomBytes(16).toString('hex')}"\n`, { mode: 0o600 });
     chmodSync(toml, 0o600);
   }
+  // What the user's CLI links point at before anything runs (board #48), for check.
+  const links = join(dir, 'real-links.json');
+  if (!existsSync(links)) writeFileSync(links, JSON.stringify(snapshotLinks(home), null, 2), { mode: 0o600 });
   const child = spawn(argv[0], argv.slice(1), { env: scoped, detached: true, stdio: 'ignore' });
   child.unref?.();
   writeFileSync(join(dir, 'pid'), `${child.pid}\n`);
@@ -276,7 +332,26 @@ async function main(args) {
       console.error(`[scratch-env] pid ${pid} is not routed only to ${dir}:\n  ${found.join('\n  ')}`);
       return 1;
     }
-    console.log(`[scratch-env] pid ${pid}: TMUX_TMPDIR and the XDG roots are ${dir}'s; no TMUX, TMUX_PANE, TMUX_SOCKET, TOKEN or TMM_* inherited`);
+    console.log(`[scratch-env] pid ${pid}: TMUX_TMPDIR and the XDG roots are ${dir}'s; no TMUX, TMUX_PANE, TMUX_SOCKET, TOKEN or TMM_* inherited; every no-update switch set`);
+    // Board #48: what the panes inherit is the private SERVER's env, not this pid's.
+    const serverEnv = privateServerEnv(dir);
+    if (serverEnv !== null) {
+      const missing = leaks(serverEnv, dir).filter((l) => Object.keys(UPDATE_SWITCHES).some((k) => l.startsWith(`${k} `)));
+      if (missing.length) {
+        console.error(`[scratch-env] the private tmux server's panes would start CLIs that may update themselves:\n  ${missing.join('\n  ')}`);
+        return 1;
+      }
+      console.log('[scratch-env] the private tmux server carries every no-update switch to its panes');
+    }
+    // And whether anything already escaped: the user's own links, never changed by check.
+    let before = null;
+    try { before = JSON.parse(readFileSync(join(dir, 'real-links.json'), 'utf8')); } catch { /* none */ }
+    const escaped = escapedLinks(homedir(), dir, before);
+    if (escaped.length) {
+      console.error(`[scratch-env] the user's CLI links point into ${dir}; repair them BEFORE deleting it:\n  ${escaped.join('\n  ')}`);
+      return 1;
+    }
+    console.log(`[scratch-env] none of the user's CLI links (${linkDirs(homedir()).join(', ')}) points into ${dir}`);
     // The effective route (#14 review): what the gateway's tmux really has.
     if (rest.includes('--gateway')) {
       const mine = privateSessions(dir);

@@ -721,6 +721,7 @@ others can change, and `mkdir -m 700 -p` sets only the last one.
 D="$(mktemp -d)/gw"                                   # never /tmp itself
 node scripts/scratch-env.mjs run "$D" --port 19951 -- src-tauri/target/debug/server
 node scripts/scratch-env.mjs check "$D" --gateway     # exit 0, or says what routes elsewhere
+node scripts/scratch-env.mjs check "$D"               # AGAIN before deleting: the user's CLI links
 kill "$(cat "$D/pid")"                                # by its own pid, never pkill -f
 env -u TMUX -u TMUX_PANE -u TMUX_SOCKET TMUX_TMPDIR="$D" tmux kill-server
 ```
@@ -764,6 +765,42 @@ env -u TMUX -u TMUX_PANE -u TMUX_SOCKET TMUX_TMPDIR="$D" tmux kill-server
   empty before adoption even on the wrong tmux. Measured 2026-11-05 from an
   agent pane: the scratch gateway listed `[scratch-env-marker]` while the live
   server held five sessions.
+- **No CLI updates itself from a scratch run** (board #48). Incidents
+  2026-11-06 08:00, 08:55 and 09:11: a scratch claude ran its updater under
+  the private `XDG_DATA_HOME` and the REAL `HOME`, installed into
+  `<dir>/xdg-data/claude/versions/`, and relinked the user's real
+  `~/.local/bin/claude` there. Once the dir was deleted, every claude on the
+  host failed to start (`claude: not found`). Measured on claude 2.1.319 with
+  a fake HOME: the relink came within 10 s of its first screen, and with
+  `DISABLE_AUTOUPDATER=1` it did not come in 60 s. So `isolatedEnv` sets each
+  installed CLI's switch, over the caller's value (`UPDATE_SWITCHES` in
+  `scripts/test-rust.mjs`): claude `DISABLE_AUTOUPDATER=1` and
+  `DISABLE_UPDATES=1` (both documented; the second also blocks a typed
+  `claude update`), kimi `KIMI_CODE_NO_AUTO_UPDATE=1`, and kiro
+  `KIRO_NO_AUTO_UPDATE=1`. kiro's is read by kiro-cli-chat 2.37.1 but is not
+  documented; its documented door, the setting `app.disableAutoupdates`,
+  lives under the real HOME and so cannot be set for one scratch run. codex
+  (a manual `codex update`; the managed launch already sets
+  `check_for_update_on_startup=false` and `--no-daemon`) and omp (a manual
+  `omp update`) needed none: neither changed a link in 90 s.
+- **The switch has to reach the PANES.** A pane inherits the private tmux
+  SERVER's environment from the moment the server started, not the
+  gateway's. The 09:11 relink happened with the switch set on `run` alone,
+  because `check --gateway` had started the server first with its own
+  environment. Now every starter (`run`, `check`, `test:rust`) uses
+  `isolatedEnv`, and `check` reads the running private server's
+  `show-environment -g` and fails if a switch is missing, which is the shape
+  a hand-started `tmux` gives. Live (2026-11-06, a real managed claude
+  2.1.319 under this script): the claude process carried both claude
+  switches, and after 80 s `readlink -f ~/.local/bin/claude` was unchanged
+  and `<dir>/xdg-data/claude` did not exist.
+- **The guard.** `run` writes `<dir>/real-links.json`, every symlink in
+  `~/.local/bin` and `~/.kimi-code/bin` with its target. `check` fails on any
+  of those links that now resolves inside `<dir>`, names what it pointed at
+  before, and prints the `ln -sfn` that repairs it. Run `check` again BEFORE
+  deleting a scratch dir. A managed claude OUTSIDE scratch relinks within the
+  real install (orchestrator 09:31: builder-3's fork moved it to 2.1.318). That
+  is #50's fix at the source (claude's launch env), not this script's.
 - **Scope.** This removes INHERITED ROUTING to the live tmux server and
   gateway. `isolatedEnv` keeps `HOME` and the network, so a child that dials
   the live gateway's port on purpose still can; it is not a sandbox
@@ -772,6 +809,8 @@ env -u TMUX -u TMUX_PANE -u TMUX_SOCKET TMUX_TMPDIR="$D" tmux kill-server
   unguarded; the closest manual form is `env -u TMUX -u TMUX_PANE -u
   TMUX_SOCKET -u TMM_SOCKET TMUX_TMPDIR=<private> <command>`, but only the
   helper drops every `TMM_*` and `TOKEN`.
+
+Board #48 is pinned by `scripts/scratch-env.test.ts` (every switch is set over the caller's value, `check` reports a missing one, and the 08:00 shape is reproduced on a fake home: a relinked link and a new link into the dir are both reported, with the earlier target and its repair) and by `scripts/test-rust.test.ts` (`isolatedEnv` sets each switch).
 
 Pinned by `scripts/scratch-env.test.ts`: the macOS KERN_PROCARGS2 parser on
 bytes captured on clawdbjs (the argv copy cut, a value holding

@@ -15,7 +15,8 @@ const nul = (pairs: string[]) => pairs.join('\0') + '\0';
 
 test('a process is routed privately only when TMUX_TMPDIR and the XDG roots are THE scratch dir, and nothing live-pointing survived (#14 review)', () => {
   const dir = '/tmp/b3-x/gw';
-  const ok = ['PATH=/bin', `TMUX_TMPDIR=${dir}`, `XDG_CONFIG_HOME=${dir}/xdg-config`, `XDG_DATA_HOME=${dir}/xdg-data`, `XDG_STATE_HOME=${dir}/xdg-state`];
+  const ok = ['PATH=/bin', `TMUX_TMPDIR=${dir}`, `XDG_CONFIG_HOME=${dir}/xdg-config`, `XDG_DATA_HOME=${dir}/xdg-data`, `XDG_STATE_HOME=${dir}/xdg-state`,
+    'DISABLE_AUTOUPDATER=1', 'DISABLE_UPDATES=1', 'KIMI_CODE_NO_AUTO_UPDATE=1', 'KIRO_NO_AUTO_UPDATE=1'];
   assert.deepEqual(leaks(nul(ok), dir), [], 'the isolated env routes only to the private dir');
   // This pane's real shape on 2026-11-05: TMUX, TMUX_PANE, TMM_SOCKET (the
   // live gateway's local socket), TMM_PROJECT, TMM_AGENT.
@@ -140,7 +141,9 @@ test('the macOS process arguments yield exactly the environment: the argv copy i
 test('a TMUX_TMPDIR forged inside another value, or in argv, does not pass the check on macOS: it is unset, as on Linux (#30 round 1)', async () => {
   const { procargsEnviron } = await import('./scratch-env.mjs');
   const found = leaks(procargsEnviron(MAC_FORGED).environ, '/s/gw');
-  assert.deepEqual(found, ["TMUX_TMPDIR is unset (tmux falls back to /tmp, the live server's socket dir), not /s/gw"]);
+  // Captured before #48: the no-update switches are missing as well, and said after it.
+  assert.deepEqual(found[0], "TMUX_TMPDIR is unset (tmux falls back to /tmp, the live server's socket dir), not /s/gw");
+  assert.deepEqual(found.slice(1).map((l) => l.split(' ')[0]), ['DISABLE_AUTOUPDATER', 'DISABLE_UPDATES', 'KIMI_CODE_NO_AUTO_UPDATE', 'KIRO_NO_AUTO_UPDATE']);
   assert.deepEqual(leaks(nul(MAC_ENV), '/s/gw'), found, 'the same verdict Linux gives the same environment');
 });
 
@@ -167,4 +170,58 @@ test('on Linux, check reads the real /proc environment (#30)', { skip: process.p
   const { environOf } = await import('./scratch-env.mjs');
   assert.equal(environOf(String(process.pid)).environ, readFileSync(`/proc/${process.pid}/environ`, 'utf8'));
   assert.match(environOf('999999999').why, /\/proc\/999999999\/environ/u);
+});
+
+// Board #48 (incidents 08:00 and 08:55 on 2026-11-06): a scratch claude
+// self-updated into the scratch XDG_DATA_HOME and relinked the REAL
+// ~/.local/bin/claude there (HOME stays real); deleting the dir left every
+// claude on the host 'not found'. Measured: DISABLE_AUTOUPDATER=1 stops it.
+test('run starts the command with every CLI\'s documented no-update switch, and check reports one missing (#48)', async () => {
+  const { UPDATE_SWITCHES } = await import('./scratch-env.mjs');
+  assert.deepEqual(UPDATE_SWITCHES, { DISABLE_AUTOUPDATER: '1', DISABLE_UPDATES: '1', KIMI_CODE_NO_AUTO_UPDATE: '1', KIRO_NO_AUTO_UPDATE: '1' });
+  const root = mkdtempSync(join(tmpdir(), 'scratch-env-test-'));
+  try {
+    const dir = join(root, 'gw');
+    let env: Record<string, string | undefined> = {};
+    const spawn = (_c: string, _a: string[], opts: { env: Record<string, string | undefined> }) => { env = opts.env; return { pid: 9, unref() {} }; };
+    runScratch({ dir, argv: ['./server'], env: { PATH: '/bin', DISABLE_AUTOUPDATER: '0' }, spawn, home: join(root, 'home') });
+    for (const [k, v] of Object.entries(UPDATE_SWITCHES)) assert.equal(env[k], v, k);
+  } finally { rmSync(root, { recursive: true, force: true }); }
+  const dir = '/tmp/b3-x/gw';
+  const ok = ['PATH=/bin', `TMUX_TMPDIR=${dir}`, `XDG_CONFIG_HOME=${dir}/xdg-config`, `XDG_DATA_HOME=${dir}/xdg-data`, `XDG_STATE_HOME=${dir}/xdg-state`];
+  const all = Object.entries(UPDATE_SWITCHES).map(([k, v]) => `${k}=${v}`);
+  assert.deepEqual(leaks(nul([...ok, ...all]), dir), []);
+  assert.deepEqual(leaks(nul([...ok, ...all.filter((kv) => !kv.startsWith('DISABLE_AUTOUPDATER='))]), dir), ['DISABLE_AUTOUPDATER is unset, not 1 (the CLI may update itself and relink the real ~/.local/bin)']);
+});
+
+test('check reports a link in the real ~/.local/bin that now points into the scratch dir, with what it pointed at before (#48, the 08:00 shape)', async () => {
+  const { snapshotLinks, escapedLinks } = await import('./scratch-env.mjs');
+  const { mkdirSync, symlinkSync, writeFileSync, unlinkSync } = await import('node:fs');
+  const root = mkdtempSync(join(tmpdir(), 'scratch-env-test-'));
+  try {
+    const home = join(root, 'home');
+    const dir = join(root, 'gw');
+    mkdirSync(join(home, '.local', 'bin'), { recursive: true });
+    mkdirSync(join(home, '.local', 'share', 'claude', 'versions'), { recursive: true });
+    const real = join(home, '.local', 'share', 'claude', 'versions', '2.1.319');
+    writeFileSync(real, '');
+    symlinkSync(real, join(home, '.local', 'bin', 'claude'));
+    symlinkSync('/usr/bin/env', join(home, '.local', 'bin', 'other'));
+    mkdirSync(join(dir, 'xdg-data', 'claude', 'versions'), { recursive: true });
+    const before = snapshotLinks(home);
+    assert.equal(before[join(home, '.local', 'bin', 'claude')], real);
+    assert.deepEqual(escapedLinks(home, dir, before), [], 'nothing points into the scratch dir yet');
+    // The 08:00 shape: claude's updater installs into the scratch XDG_DATA_HOME and relinks.
+    const inside = join(dir, 'xdg-data', 'claude', 'versions', '2.1.319');
+    writeFileSync(inside, '');
+    unlinkSync(join(home, '.local', 'bin', 'claude'));
+    symlinkSync(inside, join(home, '.local', 'bin', 'claude'));
+    // And a brand-new link into the scratch dir.
+    symlinkSync(inside, join(home, '.local', 'bin', 'claude-new'));
+    assert.deepEqual(escapedLinks(home, dir, before), [
+      `${join(home, '.local', 'bin', 'claude')} -> ${inside}, inside the scratch dir (it was ${real}: ln -sfn ${real} ${join(home, '.local', 'bin', 'claude')})`,
+      `${join(home, '.local', 'bin', 'claude-new')} -> ${inside}, inside the scratch dir (it did not exist before the run)`,
+    ]);
+    assert.deepEqual(escapedLinks(home, dir, null).length, 2, 'found without a snapshot too');
+  } finally { rmSync(root, { recursive: true, force: true }); }
 });
