@@ -13,6 +13,7 @@ const MAX_INBOX_BYTES: u64 = 256 * 1024;
 /// 14 634 chars. It replaced a 6144-char cut that left the room record
 /// ending in `…` (reviewer's 03:43 reply, 6145 chars); the TYPED `[reply]`
 /// keeps that budget (`server::typed_reply`).
+#[cfg(not(any(target_os = "android", target_os = "ios")))]
 const MAX_STORED_REPLY_BYTES: usize = MAX_INBOX_BYTES as usize;
 /// How much of a tool's argument is kept. It was 80 characters, which is shorter
 /// than the paths this app's own agents work with: every row in the lane ended in
@@ -1565,6 +1566,7 @@ fn reply_targets(session: &str, prompt: &str) -> Vec<String> {
 
 /// A final reply as the room stores it: whole, or, past the one bound, cut
 /// on a char boundary with the cut SAID in words, never a bare `…`.
+#[cfg(not(any(target_os = "android", target_os = "ios")))]
 fn stored_reply(reply: &str) -> String {
     if reply.len() <= MAX_STORED_REPLY_BYTES {
         return reply.to_string();
