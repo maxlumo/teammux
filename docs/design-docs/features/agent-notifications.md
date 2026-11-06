@@ -409,7 +409,9 @@ string and its userinfo (`user:pass@`) are dropped. `sk-…`, the token after
 `Bearer` or `Basic`, the value of a SECRET KEY NAME in every assignment form
 (`k=v`, `k="v"`, a header or YAML `k: v`, JSON `"k":"v"`, with any blanks
 around the separator, and a YAML value on the next indented line; a blank
-line after the separator is no value), and any run of 32
+line after the separator is no value; a QUOTED value is masked to its
+matching closing quote, spaces included, and an unterminated one to the end
+of its line), and any run of 32
 or more key characters holding letters and digits become `<REDACTED>`. A key
 name is normalised (lowercase, `-` and `.` read as `_`) and counts when it is,
 or ends with `_` plus, one of `api_key`, `apikey`, `key`, `token`,
@@ -421,8 +423,13 @@ scheme word stays and its credential is masked. Validator's round-0 P2 was
 the JSON, colon, Basic and userinfo forms. Its round-1 P2 was `x-api-key`,
 Anthropic's own key header, which the orchestrator ruled a class to close
 rather than one more shape. Its round-2 P2 was `api_key = v` (spaced) and
-the next-line YAML value, closed in round 3 as one spacing rule. The single
-record of every masked form, and of what stays, is
+the next-line YAML value, closed in round 3 as one spacing rule. Its round-3 R1 was a
+quoted value with spaces (`password = "hunter 2 pass"` leaked `2 pass`),
+fixed in one bounded round at the cap. Two known limits are accepted, not
+fixed, because provider error text does not carry YAML: a YAML list item
+under the key (`api_key:\n- v` masks the dash, not `v`), and a value after
+a blank line (`api_key:\n\n  v` stays). The single record of every masked
+form, and of what stays, is
 `shared::tests::every_credential_form_masked_so_far_and_what_stays`. The status, the CLI's error
 kind and the provider's sentence stay, and so does a request id (a UUID's
 groups are short). The text is cut at 300 characters.

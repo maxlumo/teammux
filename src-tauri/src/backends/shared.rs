@@ -799,7 +799,14 @@ fn redact(text: &str) -> String {
                     i = start;
                     continue;
                 }
-                let end = (start..chars.len()).find(|&j| chars[j].is_whitespace() || matches!(chars[j], '&' | '"' | '\'' | ',' | ';' | ')' | '}')).unwrap_or(chars.len());
+                // A QUOTED value runs to its matching closing quote, spaces
+                // included; an unterminated one to the end of its line
+                // (validator's R1, the orchestrator's bounded round 4).
+                let quote = start.checked_sub(1).map(|q| chars[q]).filter(|q| matches!(q, '"' | '\'') && start - 1 >= name_end);
+                let end = match quote {
+                    Some(q) => (start..chars.len()).find(|&j| chars[j] == q || chars[j] == '\n').unwrap_or(chars.len()),
+                    None => (start..chars.len()).find(|&j| chars[j].is_whitespace() || matches!(chars[j], '&' | '"' | '\'' | ',' | ';' | ')' | '}')).unwrap_or(chars.len()),
+                };
                 if end > start {
                     out.push_str(REDACTED);
                 }
@@ -895,6 +902,11 @@ mod tests {
             ("JSON spaced", format!(r#"{{"api_key" : "{v}"}}"#), r#"{"api_key" : "<REDACTED>"}"#),
             ("tab =", format!("token\t=\t{v}"), "token\t=\t<REDACTED>"),
             ("YAML next line", format!("api_key:\n  {v}\nmodel: x"), "api_key:\n  <REDACTED>\nmodel: x"),
+            // round 4 (orchestrator's bounded round at the cap, validator's R1)
+            ("quoted with spaces", r#"password = "hunter 2 pass" ok"#.into(), r#"password = "<REDACTED>" ok"#),
+            ("single-quoted with spaces", "secret: 'two words' ok".into(), "secret: '<REDACTED>' ok"),
+            ("JSON value with spaces", r#"{"api_key": "ab cd ef"}"#.into(), r#"{"api_key": "<REDACTED>"}"#),
+            ("unterminated quote", "token=\"abc def\nnext line".into(), "token=\"<REDACTED>\nnext line"),
         ];
         for (form, raw, want) in masked {
             assert_eq!(provider_failure(Some(401), None, raw).unwrap(), format!("401: {want}"), "{form}");
