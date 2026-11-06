@@ -355,6 +355,13 @@ pub struct StartPermit {
     _intent: super::restore_hold::Intent,
 }
 
+/// Whether `agent` carries a Stop mark (a test's reading of what the agent list shows).
+#[cfg(test)]
+pub fn agent_is_stopped(session: &str, agent: &str) -> Result<bool, String> {
+    let Some(project) = project_for_session(session)? else { return Ok(false) };
+    Ok(with_store(|store| store.slot_stopped_version(&project.id, agent))?.is_some())
+}
+
 pub fn start_permit(session: &str, agent: &str) -> Result<StartPermit, String> {
     let stood = match project_for_session(session)? {
         Some(project) => with_store(|store| store.slot_stopped_version(&project.id, agent))?.map(|v| (project.id, agent.to_string(), v)),

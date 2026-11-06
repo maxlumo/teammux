@@ -896,6 +896,7 @@ fn dispatch_hub(req: &Request, notifications: Option<&crate::agent_notifications
             // the restart before any kill.
             let before = crate::projects::delivery::recipe_backend(session, agent);
             let launch = launch_backend(session, agent);
+            before_kill_in_test();
             let owned = match live {
                 Some(window) => Some(crate::projects::delivery::replace_cli(session, agent, launch, || kill_agent_cli(session, agent, window)).map_err(RpcError::Internal)?),
                 None => None,
@@ -1138,6 +1139,11 @@ fn kill_agent_cli(session: &str, agent: &str, window: usize) -> Result<(), Strin
     Ok(())
 }
 
+/// The step between a start picking its backend and its kill, where a concurrent definition
+/// save lands (board #46 round 3); a test runs its save here, production nothing.
+#[cfg(not(any(test, target_os = "android", target_os = "ios")))]
+fn before_kill_in_test() {}
+
 #[cfg(not(any(target_os = "android", target_os = "ios")))]
 fn start_agent(session: &str, agent: &str, permit: crate::projects::StartPermit) -> Result<bool, String> {
     start_agent_owned(session, agent, permit, None, launch_backend(session, agent))
@@ -1162,8 +1168,25 @@ fn start_agent_owned(session: &str, agent: &str, permit: crate::projects::StartP
         Some(id) => id,
         None => crate::projects::delivery::begin_start(session, agent, launch)?,
     };
-    let resumed = match start_agent_with(session, agent, permit, resume_slot, crate::projects::spawn::respawn) {
+    let resume = |p: &crate::projects::store::Project, s: &str, a: &str| resume_slot(p, s, a, launch);
+    let respawn = |s: &str, a: &str| crate::projects::spawn::respawn_for(s, a, launch);
+    let resumed = match start_agent_with(session, agent, permit, resume, respawn) {
         Ok(r) => r,
+        Err(e) if e.contains(crate::projects::spawn::DEFINITION_CHANGED) => {
+            // Board #46 round 3: refused before anything was written, but after the kill, so the
+            // pane is a shell. The agent is STOPPED by the one Stop door (its mark, then its
+            // window closed): nothing can be typed into that shell, whichever backend was picked
+            // (omp writes no hold), a line sent to it is told "stopped", lines held before stay
+            // for the next start, and the room says why.
+            let stopped = stop_agent_window(session, agent);
+            crate::projects::delivery::start_failed(session, agent, id.as_deref(), &e);
+            let line = match &stopped {
+                Ok(()) => format!("[tmm] {e}"),
+                Err(se) => format!("[tmm] {e} (and it could not be stopped: {se})"),
+            };
+            let _ = crate::projects::rooms::post(&crate::projects::rooms::session_room(session), agent, &line);
+            return Err(e);
+        }
         Err(e) => {
             // Round 2, P1-R3: a window that survived its failed launch keeps
             // the mark (it may be the managed shell).
@@ -1189,10 +1212,10 @@ fn flush_held_when_ready(session: &str, agent: &str, launch: Option<crate::backe
 /// registry def, else the hooks refresh still repairs observation), then
 /// recreate THIS slot from the declaration. `None` = no such slot yet.
 #[cfg(not(any(target_os = "android", target_os = "ios")))]
-fn resume_slot(project: &crate::projects::store::Project, session: &str, agent: &str) -> Option<crate::projects::reconcile::SlotResult> {
+fn resume_slot(project: &crate::projects::store::Project, session: &str, agent: &str, launch: Option<crate::backends::Backend>) -> Option<crate::projects::reconcile::SlotResult> {
     // A privacy or materialization failure REFUSES the start (board #448
     // P1-B): it is reported, and neither the old recipe nor a respawn runs.
-    let refreshed = crate::projects::spawn::refresh_agent(&project.path, session, agent)
+    let refreshed = crate::projects::spawn::refresh_agent_for(&project.path, session, agent, launch)
         .and_then(|done| if done { Ok(true) } else { crate::projects::spawn::refresh_hooks(&project.path, agent) });
     if let Err(e) = refreshed {
         return Some(crate::projects::reconcile::SlotResult { window_name: agent.to_string(), status: "refused", error: Some(e) });
@@ -2412,6 +2435,15 @@ fn context_noise(body: &str) -> bool {
         || body.starts_with("[tmm done]")
 }
 
+#[cfg(test)]
+pub(crate) static BEFORE_KILL_IN_TEST: std::sync::Mutex<Option<Box<dyn FnOnce() + Send>>> = std::sync::Mutex::new(None);
+#[cfg(test)]
+fn before_kill_in_test() {
+    if let Some(f) = BEFORE_KILL_IN_TEST.lock().unwrap().take() {
+        f()
+    }
+}
+
 /// Read sender → recipient edges from the room's durable `to` field. Older
 /// hook replies with no stored route fall back to the senders waiting on that
 /// agent; only legacy/test rows that lack `to` parse mentions from prose.
@@ -3051,12 +3083,12 @@ mod tests {
             last_up_at: None, last_seen_at: None, archived: false, room: String::new(),
         })).unwrap();
         let project = crate::projects::project_for_session(&session).unwrap().unwrap();
-        let r = resume_slot(&project, &session, "lg").expect("an answer");
+        let r = resume_slot(&project, &session, "lg", None).expect("an answer");
         assert_eq!(r.status, "refused");
         assert!(r.error.as_deref().unwrap().contains("not started"), "{:?}", r.error);
         let respawned = std::cell::Cell::new(false);
         let permit = crate::projects::start_permit(&session, "lg").unwrap();
-        let got = start_agent_with(&session, "lg", permit, resume_slot, |_: &str, _: &str| { respawned.set(true); Ok(serde_json::json!({})) });
+        let got = start_agent_with(&session, "lg", permit, |p: &crate::projects::store::Project, s: &str, a: &str| resume_slot(p, s, a, None), |_: &str, _: &str| { respawned.set(true); Ok(serde_json::json!({})) });
         assert!(got.as_ref().is_err_and(|e| e.contains("not started")), "{got:?}");
         assert!(!respawned.get(), "no fallback launch");
         assert!(window_of_agent(&session, "lg").is_none(), "no window");
@@ -3074,7 +3106,7 @@ mod tests {
         let profile = ws.join("outside-profile.json");
         std::fs::write(&profile, r#"{"name":"kh"}"#).unwrap();
         std::os::unix::fs::symlink(&profile, kh.join("agents/kh.json")).unwrap();
-        let r = resume_slot(&project, &session, "kh").expect("an answer");
+        let r = resume_slot(&project, &session, "kh", None).expect("an answer");
         assert_eq!(r.status, "refused", "{:?}", r.error);
         assert_eq!(std::fs::read_to_string(&profile).unwrap(), r#"{"name":"kh"}"#, "the link's target is untouched");
         crate::projects::restore_hold::with_store_for_test(|st| st.delete_project(&session)).ok();
@@ -7617,6 +7649,54 @@ while True:
         assert_eq!((b.held(), b.submitted("SHELLWORD")), (1, 0), "held, nothing typed: {}", b.screen());
     }
 
+    /// Board #46 round 3 (reviewer P1 on fe6c975e): the definition is read when the start picks
+    /// its backend and again when it renders; a save landing between them used to split the hold
+    /// and watch from the CLI launched. Now the render compares and REFUSES before writing:
+    /// loudly (a room line naming both backends, an error), and safely even though omp, picked
+    /// first, wrote no hold: the agent is STOPPED, its window closed, so nothing is typed into a
+    /// shell, and a line sent to it is not typed.
+    #[test]
+    fn a_definition_saved_between_the_two_reads_refuses_the_start_and_leaves_it_stopped() {
+        crate::projects::tests::use_test_store();
+        let name = format!("rf46{}", &uuid::Uuid::new_v4().simple().to_string()[..6]);
+        let save = |backend: &str| crate::projects::registry_save(&serde_json::json!({ "name": name, "backend": backend, "model": "", "effort": "", "system": "x", "skills": "[]", "mcp": "[]" })).unwrap();
+        save("omp");
+        let session = format!("tmm-rf46-{}", uuid::Uuid::new_v4());
+        let ws = crate::config::test_scratch("tmm-rf46-ws");
+        let home = ws.join(".tmm/agents").join(&name);
+        std::fs::create_dir_all(&home).unwrap();
+        let cmd = "exec -a omp sleep 600";
+        crate::projects::spawn::LaunchRecipe { backend: "omp", env: &[], cmd, spawned_by: "", team: None, agent_def: &name, member: "", from_member: "", input_mode: "" }.write(&home).unwrap();
+        let recipe = std::fs::read_to_string(home.join("launch.json")).unwrap();
+        let created = std::process::Command::new("tmux")
+            .args(["new-session", "-d", "-s", &session, "-n", "keep", "-c", &ws.to_string_lossy(), "sleep 600"])
+            .status().is_ok_and(|s| s.success());
+        if !created { eprintln!("no tmux server — skipping"); return; }
+        let _cleanup = KillOnDrop(session.clone(), ws.clone());
+        assert!(std::process::Command::new("tmux").args(["new-window", "-d", "-t", &session, "-n", &name, "-c", &ws.to_string_lossy(), &format!("bash -c '{cmd}'")]).status().is_ok_and(|s| s.success()));
+        crate::projects::adopt(&session, Some("rf46-test")).expect("adopt");
+        // The save lands between the backend's read and the render.
+        let n2 = name.clone();
+        *BEFORE_KILL_IN_TEST.lock().unwrap() = Some(Box::new(move || {
+            crate::projects::registry_save(&serde_json::json!({ "name": n2, "backend": "codex", "model": "", "effort": "", "system": "x", "skills": "[]", "mcp": "[]" })).unwrap();
+        }));
+        let r = handle_hub_request(&req("hub_agent_restart", serde_json::json!({ "session": session, "agent": name })), None);
+        *BEFORE_KILL_IN_TEST.lock().unwrap() = None;
+        let err = r.error.expect("refused").message;
+        assert!(err.contains("definition changed") && err.contains("omp") && err.contains("codex"), "{err}");
+        let said = rooms::history_page(&project_room(&session), None, 50)["messages"].as_array().unwrap().iter()
+            .filter(|m| m["body"].as_str().is_some_and(|b| b.contains("was not started") && b.contains("from omp to codex"))).count();
+        assert_eq!(said, 1, "one room line names both backends");
+        assert!(window_of_agent(&session, &name).is_none(), "no shell is left to type into");
+        assert!(crate::projects::projects::agent_is_stopped(&session, &name).unwrap(), "stopped by the Stop door, so no up or restore starts it on its own");
+        assert_eq!(std::fs::read_to_string(home.join("launch.json")).unwrap(), recipe, "nothing was written for the refused start");
+        let posted = handle_hub_request(&req("hub_post", serde_json::json!({ "session": session, "from": "lead", "body": format!("@{name} hello") })), None);
+        let answer = posted.result.expect("posted");
+        assert_eq!(answer["offline"], serde_json::json!([{ "name": name, "why": "stopped" }]), "shown stopped, never idle: {answer}");
+        assert!(crate::projects::telemetry::held_rows(&session, &name).is_empty() && window_of_agent(&session, &name).is_none(), "the line is not typed anywhere");
+        crate::projects::registry_delete(&name).ok();
+    }
+
     /// S3 through the REAL restart RPC (orchestrator, round 2): a CLI that never shows its
     /// ready screen ends in exactly one room line at the timeout, and nothing is typed.
     #[test]
@@ -8007,20 +8087,20 @@ while True:
         //    during the respawn; the start returns clean — v2 stands.
         crate::projects::mark_agent_stopped(&session, "dev").unwrap();
         let permit = crate::projects::start_permit(&session, "dev").unwrap();
-        assert_eq!(start_agent_with(&session, "dev", permit, resume_slot, fallback(true, true)), Ok(false), "the fallback ran");
+        assert_eq!(start_agent_with(&session, "dev", permit, |p: &crate::projects::store::Project, s: &str, a: &str| resume_slot(p, s, a, None), fallback(true, true)), Ok(false), "the fallback ran");
         assert!(stopped(), "a Stop written during the nested launch survives the verb");
         // 2. No mark when the verb began; one appears during the respawn — it stands.
         crate::projects::tests::forget_stop(&project.id, "dev");
         let permit = crate::projects::start_permit(&session, "dev").unwrap();
-        start_agent_with(&session, "dev", permit, resume_slot, fallback(true, true)).unwrap();
+        start_agent_with(&session, "dev", permit, |p: &crate::projects::store::Project, s: &str, a: &str| resume_slot(p, s, a, None), fallback(true, true)).unwrap();
         assert!(stopped(), "no mark at the start, a mark during it: it stands");
         // 3. A failed launch keeps the mark the verb read.
         let permit = crate::projects::start_permit(&session, "dev").unwrap();
-        assert!(start_agent_with(&session, "dev", permit, resume_slot, fallback(false, false)).is_err());
+        assert!(start_agent_with(&session, "dev", permit, |p: &crate::projects::store::Project, s: &str, a: &str| resume_slot(p, s, a, None), fallback(false, false)).is_err());
         assert!(stopped(), "a failed start clears nothing");
         // Control: the same verb, clean and unraced, clears exactly what it read.
         let permit = crate::projects::start_permit(&session, "dev").unwrap();
-        start_agent_with(&session, "dev", permit, resume_slot, fallback(false, true)).unwrap();
+        start_agent_with(&session, "dev", permit, |p: &crate::projects::store::Project, s: &str, a: &str| resume_slot(p, s, a, None), fallback(false, true)).unwrap();
         assert!(!stopped());
 
         // A9: a resume whose window came back but whose CLI did not launch is

@@ -420,6 +420,30 @@ fn materialize(
 /// P1-B) or when a recipe or definition that EXISTS cannot be read or parsed
 /// (board #452 (a)): the start is refused, never replayed from the old recipe.
 pub fn refresh_agent(project_path: &str, session: &str, window_name: &str) -> Result<bool, String> {
+    refresh_agent_for(project_path, session, window_name, None)
+}
+
+/// What a start refusal says when the definition changed between the start picking its backend
+/// (`launch_backend`) and its render (board #46 round 3, reviewer P1 on fe6c975e): nothing
+/// serializes a registry or team save against a start, so the two reads can disagree.
+pub const DEFINITION_CHANGED: &str = "its definition changed during the start";
+
+/// The refusal for a render about to launch `now` when the start picked `picked`.
+fn changed_during_start(window_name: &str, picked: Option<crate::backends::Backend>, now: Option<crate::backends::Backend>) -> Result<(), String> {
+    match (picked, now) {
+        (Some(p), n) if Some(p) != n => Err(format!(
+            "'{window_name}' was not started: {DEFINITION_CHANGED}, from {} to {}; it is stopped, start it again to apply the definition",
+            p.name(),
+            n.map_or("an unknown backend", |b| b.name())
+        )),
+        _ => Ok(()),
+    }
+}
+
+/// `refresh_agent` for a start that picked `expect` (board #46 round 3): the backend this render
+/// would launch is compared with it, from the SAME read the render uses, before anything is
+/// written; a mismatch refuses. `None` checks nothing.
+pub fn refresh_agent_for(project_path: &str, session: &str, window_name: &str, expect: Option<crate::backends::Backend>) -> Result<bool, String> {
     let home = agent_home(project_path, window_name);
     // The recipe's section from this read to materialize's write: the whole
     // read-modify-write, registry/team resolution and the backend's render
@@ -429,7 +453,16 @@ pub fn refresh_agent(project_path: &str, session: &str, window_name: &str) -> Re
     // #452 (a)): a recipe that exists and cannot be read or parsed used to be
     // taken for "no recipe", so the start went ahead on the old materials
     // silently, skipping the render and everything it enforces.
-    let Some((def, p)) = refresh_target(&section, project_path, window_name)? else { return Ok(false) };
+    let target = refresh_target(&section, project_path, window_name)?;
+    if expect.is_some() {
+        // Keeping the materials launches the recipe's backend; a render, the definition's.
+        let now = match &target {
+            Some((def, _)) => crate::backends::Backend::parse(&def.backend),
+            None => section.read().ok().flatten().and_then(|r| r.get("backend").and_then(Value::as_str).and_then(crate::backends::Backend::parse)),
+        };
+        changed_during_start(window_name, expect, now)?;
+    }
+    let Some((def, p)) = target else { return Ok(false) };
     let team_opt = (!p.team.is_empty()).then_some(p.team.as_str());
     materialize(&section, &def, window_name, session, project_path, "", &p.by, team_opt, &p.agent_def, &p.member, &p.from_member)
         .map(|_| true)
@@ -503,10 +536,16 @@ pub fn launch_backend(project_path: &str, window_name: &str) -> Option<crate::ba
 /// uniquified teammate and a team member are not in the registry under that
 /// name, and asking it lost the agent a restart had just killed.
 pub fn respawn(session: &str, window_name: &str) -> Result<Value, String> {
+    respawn_for(session, window_name, None)
+}
+
+/// `respawn` for a start that picked `expect` (board #46 round 3): refused, before anything is
+/// written, when the definition it resolves would launch another backend.
+pub fn respawn_for(session: &str, window_name: &str, expect: Option<crate::backends::Backend>) -> Result<Value, String> {
     let project = super::project_for_session(session)?
         .ok_or_else(|| format!("no project for session '{session}'"))?;
     let panes = panes_now(session)?;
-    let (plan, def, m) = respawn_materialize(&project.path, session, window_name, &panes)?;
+    let (plan, def, m) = respawn_materialize(&project.path, session, window_name, &panes, expect)?;
     launch_window(&plan.request(session), &project.path, &def, window_name, m)
 }
 
@@ -519,7 +558,7 @@ pub fn respawn(session: &str, window_name: &str) -> Result<Value, String> {
 /// The section is released here, before the window is opened: the lock is not held
 /// across the slow tmux launch. A recipe that EXISTS but cannot be read is not a
 /// missing one: it refuses before anything is rendered or written.
-fn respawn_materialize(workspace: &str, session: &str, window_name: &str, panes: &[tmux::TmuxPane]) -> Result<(Respawn, RegAgent, Materialized), String> {
+fn respawn_materialize(workspace: &str, session: &str, window_name: &str, panes: &[tmux::TmuxPane], expect: Option<crate::backends::Backend>) -> Result<(Respawn, RegAgent, Materialized), String> {
     check_cap(workspace, panes)?;
     let section = super::recipe::recipe_section(&agent_home(workspace, window_name));
     let recipe = section.read().map_err(|e| format!("'{window_name}' cannot be started again: {e}; nothing was changed"))?;
@@ -528,6 +567,7 @@ fn respawn_materialize(workspace: &str, session: &str, window_name: &str, panes:
         let req = plan.request(session);
         let def = resolve_def(&req)?;
         check_def(&def)?;
+        changed_during_start(window_name, expect, crate::backends::Backend::parse(&def.backend))?;
         if let Some(team) = join_of(req.team.as_deref(), req.member) {
             check_join(workspace, team)?;
         }
@@ -3957,6 +3997,28 @@ hooks = [ { type = "command", command = "/opt/guard.sh" } ]
         std::fs::remove_dir_all(&ws).ok();
     }
 
+    /// Board #46 round 3, the respawn path: a start whose slot is gone renders through
+    /// `respawn_materialize`; the definition saved to another backend since the start picked its
+    /// own is refused there too, before anything is written.
+    #[test]
+    fn a_respawn_refuses_a_definition_changed_since_its_backend_was_picked() {
+        super::super::tests::use_test_store();
+        let ws = crate::config::test_scratch("tmm-respawn-switch");
+        let ws_str = ws.to_string_lossy().to_string();
+        let name = "rsagent";
+        let save = |backend: &str| super::super::registry_save(&json!({ "name": name, "backend": backend, "model": "", "effort": "", "system": "x", "skills": "[]", "mcp": "[]" })).unwrap();
+        save("kiro");
+        let def = super::super::registry_get(name).unwrap().expect("saved def");
+        materialize(&super::super::recipe::recipe_section(&agent_home(&ws_str, name)), &def, name, "proj", &ws_str, "", "lead", None, name, "", "").unwrap();
+        let recipe = std::fs::read_to_string(agent_home(&ws_str, name).join("launch.json")).unwrap();
+        save("codex");
+        let err = respawn_materialize(&ws_str, "proj", name, &[], Some(crate::backends::Backend::Kiro)).err().expect("refused");
+        assert!(err.contains("definition changed") && err.contains("kiro") && err.contains("codex"), "{err}");
+        assert_eq!(std::fs::read_to_string(agent_home(&ws_str, name).join("launch.json")).unwrap(), recipe, "nothing written");
+        super::super::registry_delete(name).ok();
+        std::fs::remove_dir_all(&ws).ok();
+    }
+
     /// Board #46 round 2: the backend a start LAUNCHES is the current definition's when the start
     /// re-renders, read before anything is written; with the definition gone it is the recipe's.
     #[test]
@@ -5414,7 +5476,10 @@ hooks = [ { type = "command", command = "/opt/guard.sh" } ]
         assert_eq!(production.matches("resume: true").count(), 1, "one place builds a resuming request (Respawn::request)");
         let hub_src = include_str!("../server/hub_rpc.rs");
         let hub = &hub_src[..hub_src.find("#[cfg(test)]").expect("a test module")];
-        assert!(hub.contains("start_agent_with(session, agent, permit, resume_slot, crate::projects::spawn::respawn)"), "start_agent's fallback is respawn");
+        // Board #46 round 3: the fallback carries the backend the start picked, so it is
+        // respawn_for — still `spawn::respawn`'s one route, behind its `expect` check.
+        assert!(hub.contains("let respawn = |s: &str, a: &str| crate::projects::spawn::respawn_for(s, a, launch);"), "start_agent's fallback is respawn");
+        assert!(hub.contains("start_agent_with(session, agent, permit, resume, respawn)"), "start_agent's fallback is respawn");
         assert!(!hub.contains("resume: true"), "the server builds no resuming request of its own");
         // The recipe is read, planned from and written inside ONE hold of its section
         // (#389 review): no section-less reader in between, and the hold ends before tmux.
@@ -5455,7 +5520,7 @@ hooks = [ { type = "command", command = "/opt/guard.sh" } ]
         let respawn = {
             let (w, released) = (ws_str.clone(), released.clone());
             std::thread::spawn(move || {
-                let out = respawn_materialize(&w, "proj", "rbsolo-2", &[]);
+                let out = respawn_materialize(&w, "proj", "rbsolo-2", &[], None);
                 (out, released.load(std::sync::atomic::Ordering::SeqCst))
             })
         };
@@ -5518,25 +5583,25 @@ hooks = [ { type = "command", command = "/opt/guard.sh" } ]
 
         // Absent: a pre-#113 home (no recipe at all) is started by its window name, as before.
         std::fs::create_dir_all(agent_home(&ws_str, "ab1")).unwrap();
-        let (plan, def, _m) = respawn_materialize(&ws_str, "proj", "ab1", &[]).expect("a home with no recipe falls back to the window name");
+        let (plan, def, _m) = respawn_materialize(&ws_str, "proj", "ab1", &[], None).expect("a home with no recipe falls back to the window name");
         assert_eq!((plan.agent.as_str(), def.name.as_str()), ("ab1", "ab1"));
         assert!(agent_home(&ws_str, "ab1").join("launch.json").exists(), "and it now has a recipe");
         // Absent and no such definition: the plain registry refusal, nothing invented.
         std::fs::create_dir_all(agent_home(&ws_str, "ab2")).unwrap();
-        let err = respawn_materialize(&ws_str, "proj", "ab2", &[]).err().expect("no recipe and no definition");
+        let err = respawn_materialize(&ws_str, "proj", "ab2", &[], None).err().expect("no recipe and no definition");
         assert!(err.contains("no agent named 'ab2'"), "{err}");
         assert!(!agent_home(&ws_str, "ab2").join("launch.json").exists());
 
         // Unreadable: malformed JSON, with a definition of the same name on file.
         write_recipe(&ws_str, "bad1", "{ this is not json");
         let before = tree("bad1");
-        let err = respawn_materialize(&ws_str, "proj", "bad1", &[]).err().expect("a recipe that cannot be parsed is not a missing one");
+        let err = respawn_materialize(&ws_str, "proj", "bad1", &[], None).err().expect("a recipe that cannot be parsed is not a missing one");
         assert!(err.contains("cannot be started again") && err.contains("not readable") && err.contains("nothing was changed"), "{err}");
         assert_eq!(tree("bad1"), before, "the home is byte for byte as it was");
         // Unreadable: the recipe path is something that cannot be read as a file.
         std::fs::create_dir_all(agent_home(&ws_str, "bad2").join("launch.json")).unwrap();
         let before = tree("bad2");
-        let err = respawn_materialize(&ws_str, "proj", "bad2", &[]).err().expect("an I/O error is not a missing recipe");
+        let err = respawn_materialize(&ws_str, "proj", "bad2", &[], None).err().expect("an I/O error is not a missing recipe");
         assert!(err.contains("cannot be started again") && err.contains("nothing was changed"), "{err}");
         assert_eq!(tree("bad2"), before, "and so is this one");
 
