@@ -536,13 +536,15 @@ impl Backend {
 
     /// The open turn's provider failure a person must clear, from the
     /// CLI's OWN file, for a backend that sends no end hook on it (board #39
-    /// slice 2): `(identity, text)`, the text redacted. codex reads its
-    /// rollout's newest `task_complete`. kiro's managed v2 engine writes no
+    /// slice 2): `(identity, text)`, the text redacted. `open` is the CLI's
+    /// own id for the open prompt (`telemetry::cli_turn`); only that turn's
+    /// end counts (round 1). codex reads its rollout's newest
+    /// `task_complete`. kiro's managed v2 engine writes no
     /// record of a failed turn (measured on 2.37.1), so it has none.
     #[cfg(not(any(target_os = "android", target_os = "ios")))]
-    pub fn provider_end(self, home: &std::path::Path) -> Option<(String, String)> {
+    pub fn provider_end(self, home: &std::path::Path, open: &str) -> Option<(String, String)> {
         match self {
-            Backend::Codex => codex::provider_end(home),
+            Backend::Codex => codex::provider_end(home, open),
             _ => None,
         }
     }

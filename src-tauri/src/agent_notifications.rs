@@ -643,6 +643,11 @@ impl AgentNotificationHub {
                     if crate::projects::telemetry::numbered_write_failed() {
                         return Err(Consume::Retain("its prompt did not reach the log".into()));
                     }
+                    // The CLI's own id for this prompt's turn (board #39 slice 2
+                    // round 1; codex 0.166.0 sends `turn_id`): the one id a
+                    // rollout end must carry to end this turn. A prompt without
+                    // one forgets the previous prompt's.
+                    crate::projects::telemetry::note_cli_turn(&session, &window, envelope.payload.get("turn_id").and_then(Value::as_str));
                     // A person's prompt into a restored window: released once
                     // its fact is in the log, then merged and flushed (#422).
                     // Its row already marked the release pending: a release
@@ -2051,12 +2056,15 @@ mod tests {
         }));
         hub.consume_inbox();
         assert_eq!(hub.state.lock().unwrap().reply_targets.get(&window_key(&session, &pane.window_name)).map(|m| m.1.clone()), Some(vec!["claude".to_string()]));
+        // Board #39 slice 2 round 1: the prompt's own turn id is noted, the
+        // one a rollout end must carry to end this turn.
+        assert_eq!(crate::projects::telemetry::cli_turn(&session, &pane.window_name).as_deref(), Some("t1"));
 
         // The parent briefs a child: the child's UserPromptSubmit fires on the
         // same pane, with the measured discriminator fields.
         let brief = "Please adversarial-review the in-progress #164 diff";
         write("2-child.json", json!({
-            "hook_event_name": "UserPromptSubmit", "session_id": "01a08e9b-root", "turn_id": "t1",
+            "hook_event_name": "UserPromptSubmit", "session_id": "01a08e9b-root", "turn_id": "t-child",
             "agent_id": "01a08e9b-c9b0-child", "agent_type": "default",
             "prompt": brief,
         }));
@@ -2079,6 +2087,11 @@ mod tests {
         assert_eq!(inputs, vec![vec!["claude".to_string()]], "the window's one input is still that line, from claude");
         let tool = events.iter().find(|e| e.kind == "tool" && e.tool == "Subagent").expect("the brief lands in the tool lane");
         assert!(tool.text.contains("adversarial-review"), "{}", tool.text);
+        assert_eq!(crate::projects::telemetry::cli_turn(&session, &pane.window_name).as_deref(), Some("t1"), "a child's turn id is never the window's");
+        // A later prompt with no turn id forgets the earlier one.
+        write("3-plain.json", json!({ "hook_event_name": "UserPromptSubmit", "session_id": "01a08e9b-root", "prompt": "[tmm chat] claude: @codex next" }));
+        hub.consume_inbox();
+        assert_eq!(crate::projects::telemetry::cli_turn(&session, &pane.window_name), None, "no id: none stands");
 
         let _ = std::process::Command::new("tmux").args(["kill-session", "-t", &session]).status();
         let _ = std::fs::remove_dir_all(root);

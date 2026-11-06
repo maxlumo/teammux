@@ -919,9 +919,16 @@ pub fn check_once() {
             // (board #39 slice 2: codex sends no end hook on it), read before
             // the screen: a documented door over a painted one (tenet 3).
             // Only while its turn is open (orchestrator's condition 1): an
-            // ended turn has nothing left to end.
-            let open = super::telemetry::derive(&project.session, &p.window_name, 0).state == "running";
-            if let Some(found) = open.then(|| super::managed_home(&project.session, &p.window_name)).flatten().and_then(|home| crate::backends::Backend::parse(backend)?.provider_end(&home)) {
+            // ended turn has nothing left to end. And only that turn's own
+            // end, by the id the CLI's prompt hook gave it (round 1); a
+            // window with no such id (another CLI, a gateway that restarted
+            // since the prompt) reads nothing.
+            let open = (super::telemetry::derive(&project.session, &p.window_name, 0).state == "running")
+                .then(|| super::telemetry::cli_turn(&project.session, &p.window_name))
+                .flatten();
+            if let Some(found) = open.and_then(|turn| Some((super::managed_home(&project.session, &p.window_name)?, turn)))
+                .and_then(|(home, turn)| crate::backends::Backend::parse(backend)?.provider_end(&home, &turn))
+            {
                 commit_provider(&project.session, &p.window_name, found, seen);
                 continue;
             }
@@ -1522,9 +1529,11 @@ mod tests {
     /// capture tick reads the pane's own rollout (the documented door,
     /// before the screen) and ends the turn ONCE through `record_missed_end`:
     /// idle + `provider_failed` with the redacted text, and ONE notice to
-    /// the turn's requesters and the human. Nothing is typed. A newer prompt
-    /// over the same rollout is never ended by that old error, and the
-    /// next real end clears it. A real tmux window, a real managed home.
+    /// the turn's requesters and the human. Nothing is typed. An older turn's
+    /// error that was never recorded never ends a new prompt (round 1, the
+    /// end is bound to the prompt hook's turn id); a newer prompt over the
+    /// same rollout is not ended by the recorded one either, and the next
+    /// real end clears it. A real tmux window, a real managed home.
     #[test]
     fn a_codex_turn_its_rollout_ended_on_a_provider_failure_is_ended_and_said_once() {
         use super::super::telemetry as tm;
@@ -1545,7 +1554,9 @@ mod tests {
                 "error":{"message":"unexpected status 413 Payload Too Large: Failed to buffer the request body: length limit exceeded, url: https://gw.example/v1/responses?key=SECRET",
                 "codex_error_info":{"http_connection_failed":{"http_status_code":413}}}}}),
         ].iter().map(|v| v.to_string()).collect::<Vec<_>>().join("\n");
-        std::fs::write(home.join(format!("codex/sessions/2026/11/05/rollout-2026-11-05T08-55-46-{thread}.jsonl")), rollout).unwrap();
+        let rollout_file = home.join(format!("codex/sessions/2026/11/05/rollout-2026-11-05T08-55-46-{thread}.jsonl"));
+        std::fs::write(&rollout_file, rollout).unwrap();
+        let fresh = "01a1ac70-0000-7000-8000-000000000001";
         std::fs::write(home.join("launch.json"), serde_json::json!({ "backend": "codex", "cmd": "codex", "team": "" }).to_string()).unwrap();
         std::fs::write(ws.join("cx.txt"), "\u{203a} Ask Codex to do anything\n\n  GPT-6.1-Sol high \u{b7} ~/w\n  ? for shortcuts\n").unwrap();
         let show = format!("cat {}; cat", ws.join("cx.txt").display());
@@ -1567,7 +1578,26 @@ mod tests {
         let spy = std::sync::Arc::new(Spy(std::sync::Mutex::new(Vec::new())));
         let root = crate::config::test_scratch("rec-provider-hub");
         crate::agent_notifications::AgentNotificationHub::load_at(root.clone()).set_room_poster(spy.clone());
+        // Round 1 (reviewer's P1): the rollout's newest end is an OLD turn's
+        // error that was never recorded (the gateway was down), and a new
+        // prompt is open whose task_started is not on disk yet. Its id (the
+        // prompt hook's turn_id, as the hook path notes it) is not the end's:
+        // nothing is recorded, nothing said, the turn stays open.
         tm::record_prompt(&session, "cx", "[tmm chat 2026-11-05 15:57] maker: @cx review G3");
+        tm::note_cli_turn(&session, "cx", Some(fresh));
+        check_once();
+        check_once();
+        assert_eq!(tm::derive(&session, "cx", 0).state, "running", "an old error never ends the new prompt");
+        assert!(spy.0.lock().unwrap().is_empty(), "nothing said");
+        // The new prompt fails too, on its own turn: ended once, said once.
+        let own = [
+            serde_json::json!({"type":"event_msg","payload":{"type":"task_started","turn_attribution":{"turn_id":fresh}}}),
+            serde_json::json!({"type":"event_msg","payload":{"type":"task_complete","turn_id":fresh,"last_agent_message":null,
+                "error":{"message":"unexpected status 413 Payload Too Large: Failed to buffer the request body: length limit exceeded, url: https://gw.example/v1/responses?key=SECRET",
+                "codex_error_info":{"http_connection_failed":{"http_status_code":413}}}}}),
+        ].iter().map(|v| format!("\n{v}")).collect::<String>();
+        use std::io::Write as _;
+        std::fs::OpenOptions::new().append(true).open(&rollout_file).unwrap().write_all(own.as_bytes()).unwrap();
         std::thread::sleep(std::time::Duration::from_millis(300));
         let typed_before = crate::tmux::capture_pane_plain(&format!("{session}:cx"), Some(0)).unwrap_or_default();
         check_once();
@@ -1586,6 +1616,7 @@ mod tests {
         assert_eq!(crate::tmux::capture_pane_plain(&format!("{session}:cx"), Some(0)).unwrap_or_default(), typed_before, "nothing typed");
         // A newer prompt over the same rollout: the old error never ends it.
         tm::record_prompt(&session, "cx", "[tmm chat 2026-11-05 16:10] human: @cx carry on");
+        tm::note_cli_turn(&session, "cx", Some("01a1ac71-0000-7000-8000-000000000002"));
         check_once();
         assert_eq!(tm::derive(&session, "cx", 0).state, "running", "the newer turn is open");
         assert_eq!(spy.0.lock().unwrap().len(), 1, "still one notice");

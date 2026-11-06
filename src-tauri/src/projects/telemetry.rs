@@ -1083,6 +1083,33 @@ pub fn record_notification_with(session: &str, window: &str, kind: &str, quality
     notification(session, window, kind, None, quality, None)
 }
 
+/// The CLI's own id for each window's newest prompt (board #39 slice 2
+/// round 1): codex 0.166.0's `UserPromptSubmit` carries `turn_id`, the id its
+/// rollout's `task_complete` closes (measured 2026-11-06). In memory only: a
+/// gateway that restarted knows no id, and a reader bound to it then
+/// records nothing (unknown), the safe side.
+fn cli_turns() -> &'static Mutex<HashMap<(String, String), String>> {
+    static TURNS: OnceLock<Mutex<HashMap<(String, String), String>>> = OnceLock::new();
+    TURNS.get_or_init(Default::default)
+}
+
+/// Set (or, with `None`, forget) the CLI's id for the window's newest prompt.
+/// Called at each accepted prompt, so a prompt without one never leaves an
+/// older prompt's id standing.
+pub fn note_cli_turn(session: &str, window: &str, turn: Option<&str>) {
+    let key = (session.to_string(), window.to_string());
+    let mut turns = cli_turns().lock().unwrap();
+    match turn.filter(|t| !t.trim().is_empty()) {
+        Some(t) => turns.insert(key, t.to_string()),
+        None => turns.remove(&key),
+    };
+}
+
+/// The CLI's id for the window's newest prompt, if its hook carried one.
+pub fn cli_turn(session: &str, window: &str) -> Option<String> {
+    cli_turns().lock().unwrap().get(&(session.to_string(), window.to_string())).cloned()
+}
+
 /// The provider's error text on an end the capture tick recorded with
 /// `provider_failed` (board #39 slice 2): put on the window's CURRENT end
 /// only while that end still carries the detail, so a fact landing between

@@ -831,35 +831,46 @@ const ROLLOUT_TAIL_BYTES: u64 = 256 * 1024;
 /// The open turn's provider failure a person must clear (board #39 slice 2),
 /// from the pane's own rollout: `(turn_id, text)`. codex 0.166.0 sends no end
 /// hook on it (builder-2's AC1); its rollout's `task_complete` carries the
-/// error. `None` when the pane's thread or its rollout cannot be found or
-/// read: nothing is recorded, and the screen reader still applies
-/// (condition 2).
+/// error. `open` is the id codex's `UserPromptSubmit` gave the open prompt
+/// (`telemetry::cli_turn`): only that turn's end counts (round 1). `None`
+/// when the pane's thread or its rollout cannot be found or read: nothing is
+/// recorded, and the screen reader still applies (condition 2).
 #[cfg(not(any(target_os = "android", target_os = "ios")))]
-pub(crate) fn provider_end(home: &std::path::Path) -> Option<(String, String)> {
+pub(crate) fn provider_end(home: &std::path::Path, open: &str) -> Option<(String, String)> {
     let thread = pane_thread(home)?;
     let path = rollout_path(&home.join("codex").join("sessions"), &thread.id)?;
-    rollout_provider_end(&shared::read_tail(&path, ROLLOUT_TAIL_BYTES)?)
+    rollout_provider_end(&shared::read_tail(&path, ROLLOUT_TAIL_BYTES)?, open)
 }
 
-/// The rollout's NEWEST turn, when it ended on a failure only a person can
-/// clear: its `task_complete` has `error` and belongs to the newest
-/// `task_started` (a newer open turn is never ended by an older error), and
-/// the slice-1 predicate keeps it (`shared::provider_failure`, redacted).
-/// Lines that do not parse (a half-written last line, the cut first line of
-/// a tail) are skipped. No `turn_id`: no identity, `None`.
+/// The rollout's NEWEST turn record, when it is the end of the OPEN turn
+/// (`open`, the prompt hook's `turn_id`) on a failure only a person can
+/// clear: a `task_complete` whose `turn_id` is `open`, with `error`, kept by
+/// the slice-1 predicate (`shared::provider_failure`, redacted). Bound by
+/// identity, so an older turn's error is never the open prompt's, whatever
+/// codex has written of the new turn yet (reviewer's P1: an error that was
+/// never recorded, then a new prompt whose `task_started` is not on disk).
+/// A newest `task_started` means the turn runs. A line that does not parse
+/// (a half-written newest line) means UNKNOWN: the scan stops, never
+/// reading past it to an older end. Measured on codex 0.166.0: the
+/// prompt hook's `turn_id` is the `task_complete`'s.
 #[cfg(not(any(target_os = "android", target_os = "ios")))]
-fn rollout_provider_end(rollout: &str) -> Option<(String, String)> {
-    for line in rollout.lines().rev() {
-        let Ok(row) = serde_json::from_str::<Value>(line) else { continue };
+fn rollout_provider_end(rollout: &str, open: &str) -> Option<(String, String)> {
+    if open.is_empty() {
+        return None;
+    }
+    for line in rollout.lines().rev().filter(|l| !l.trim().is_empty()) {
+        let row = serde_json::from_str::<Value>(line).ok()?;
         let payload = &row["payload"];
         match payload["type"].as_str() {
             Some("task_started") => return None,
             Some("task_complete") => {
+                if payload["turn_id"].as_str() != Some(open) {
+                    return None;
+                }
                 let error = payload.get("error").filter(|e| e.is_object())?;
-                let turn = payload["turn_id"].as_str().filter(|t| !t.is_empty())?;
                 let status = error["codex_error_info"]["http_connection_failed"]["http_status_code"].as_u64().and_then(|s| u16::try_from(s).ok());
                 let text = shared::provider_failure(status, None, error["message"].as_str().unwrap_or_default())?;
-                return Some((turn.to_string(), text));
+                return Some((open.to_string(), text));
             }
             _ => {}
         }
@@ -1206,17 +1217,18 @@ mod tests {
         use std::os::unix::fs::PermissionsExt;
         let home = crate::config::test_scratch("codex-provider-end");
         let thread = "01a1aaeb-dde5-7df0-b10b-52bc2e068818";
-        assert_eq!(super::provider_end(&home), None, "no thread");
+        assert_eq!(super::provider_end(&home, "t1"), None, "no thread");
         std::fs::create_dir_all(home.join("codex/thread-writer-locks")).unwrap();
         std::fs::write(home.join(format!("codex/thread-writer-locks/{thread}.lock")), "").unwrap();
         std::fs::create_dir_all(home.join("codex/sessions/2026/11/05")).unwrap();
         let f = home.join(format!("codex/sessions/2026/11/05/rollout-x-{thread}.jsonl"));
         let end = serde_json::json!({"type":"event_msg","payload":{"type":"task_complete","turn_id":"t1","error":{"message":"unexpected status 402 Payment Required: insufficient credit"}}});
         std::fs::write(&f, end.to_string()).unwrap();
-        assert_eq!(super::provider_end(&home).map(|(t, _)| t).as_deref(), Some("t1"), "readable: read");
+        assert_eq!(super::provider_end(&home, "t1").map(|(t, _)| t).as_deref(), Some("t1"), "readable: read");
+        assert_eq!(super::provider_end(&home, "t2"), None, "readable, another turn's end: nothing");
         std::fs::set_permissions(&f, std::fs::Permissions::from_mode(0o000)).unwrap();
         if std::fs::read(&f).is_err() {
-            assert_eq!(super::provider_end(&home), None, "unreadable: nothing");
+            assert_eq!(super::provider_end(&home, "t1"), None, "unreadable: nothing");
         }
         std::fs::set_permissions(&f, std::fs::Permissions::from_mode(0o600)).unwrap();
         let _ = std::fs::remove_dir_all(&home);
@@ -1225,28 +1237,37 @@ mod tests {
     /// Board #39 slice 2: codex 0.166.0 sends no end hook on a provider error;
     /// its rollout's `task_complete` carries it. The 413 line is reviewer's
     /// real one of 2026-11-05 15:59 (url host shortened); the 401 is
-    /// builder-2's AC1 measurement on an invalid key.
+    /// builder-2's AC1 measurement on an invalid key. Round 1 (reviewer's
+    /// P1, orchestrator's rule): the end must be the OPEN prompt's own turn,
+    /// by the id codex's prompt hook carried, and a line that does not parse
+    /// means unknown, never an older line.
     #[cfg(not(any(target_os = "android", target_os = "ios")))]
     #[test]
     fn a_rollouts_newest_end_names_a_provider_failure_a_person_must_clear() {
+        let t413 = "01a1ac6d-ebed-78b2-ad24-34c670a9c990";
         let end = |turn: &str, error: serde_json::Value| serde_json::json!({"timestamp":"2026-11-05T15:59:21.324Z","type":"event_msg","payload":{"type":"task_complete","turn_id":turn,"last_agent_message":serde_json::Value::Null,"error":error}}).to_string();
-        let ok = serde_json::json!({"type":"event_msg","payload":{"type":"task_complete","turn_id":"t-ok","last_agent_message":"done"}}).to_string();
+        let ok = |turn: &str| serde_json::json!({"type":"event_msg","payload":{"type":"task_complete","turn_id":turn,"last_agent_message":"done"}}).to_string();
         let other = serde_json::json!({"type":"response_item","payload":{"type":"message","role":"assistant"}}).to_string();
-        let e413 = end("01a1ac6d-ebed-78b2-ad24-34c670a9c990", serde_json::json!({"message":"unexpected status 413 Payload Too Large: Failed to buffer the request body: length limit exceeded, url: https://gw.example/v1/responses","codex_error_info":{"http_connection_failed":{"http_status_code":413}}}));
+        let e413 = end(t413, serde_json::json!({"message":"unexpected status 413 Payload Too Large: Failed to buffer the request body: length limit exceeded, url: https://gw.example/v1/responses","codex_error_info":{"http_connection_failed":{"http_status_code":413}}}));
         let e401 = end("t-401", serde_json::json!({"message":"unexpected status 401 Unauthorized: invalid API key, url: https://gw.example/v1/responses?key=SECRET, request id: req_0a1b","codex_error_info":{"http_connection_failed":{"http_status_code":401}}}));
         let e429 = end("t-429", serde_json::json!({"message":"unexpected status 429 Too Many Requests","codex_error_info":{"http_connection_failed":{"http_status_code":429}}}));
-        let start = |turn: &str| serde_json::json!({"type":"event_msg","payload":{"type":"task_started","turn_id":turn}}).to_string();
-        let read = |lines: &[&str]| super::rollout_provider_end(&lines.join("\n"));
-        assert!(read(&[&start("01a1ac6d-ebed-78b2-ad24-34c670a9c990"), &e413]).is_some(), "the open turn's own end");
-        assert_eq!(read(&[&start("01a1ac6d-ebed-78b2-ad24-34c670a9c990"), &e413, &start("t-next")]), None, "a newer turn is open: an older error never ends it");
-        assert_eq!(read(&[&ok, &e413, &other]), Some(("01a1ac6d-ebed-78b2-ad24-34c670a9c990".to_string(),
-            "unexpected status 413 Payload Too Large: Failed to buffer the request body: length limit exceeded, url: https://gw.example/v1/responses".to_string())), "the newest end, records after it notwithstanding");
-        assert_eq!(read(&[&e401]).map(|(_, t)| t).as_deref(), Some("unexpected status 401 Unauthorized: invalid API key, url: https://gw.example/v1/responses, request id: req_0a1b"), "redacted");
-        assert_eq!(read(&[&e413, &ok]), None, "a later good end: nothing to say");
-        assert_eq!(read(&[&e429]), None, "an ordinary failure retries by itself");
-        assert_eq!(read(&[&other]), None, "no end yet");
-        assert_eq!(read(&[&format!("{}\n{{\"type\":\"event_msg\",\"payl", e413)]), Some(("01a1ac6d-ebed-78b2-ad24-34c670a9c990".into(), read(&[&e413]).unwrap().1)), "a half-written last line is skipped");
-        assert_eq!(read(&[&end("", serde_json::json!({"message":"401 Unauthorized"}))]), None, "no turn id: no identity, nothing recorded");
+        // codex 0.166.0 writes a start's id under `turn_attribution` (measured).
+        let start = |turn: &str| serde_json::json!({"type":"event_msg","payload":{"type":"task_started","turn_attribution":{"turn_id":turn,"turn_trigger":"user"}}}).to_string();
+        let read = |open: &str, lines: &[&str]| super::rollout_provider_end(&lines.join("\n"), open);
+        let text413 = "unexpected status 413 Payload Too Large: Failed to buffer the request body: length limit exceeded, url: https://gw.example/v1/responses";
+        assert_eq!(read(t413, &[&start(t413), &e413]), Some((t413.to_string(), text413.to_string())), "the open turn's own end");
+        assert_eq!(read(t413, &[&ok("t-old"), &e413, &other]).map(|(t, _)| t).as_deref(), Some(t413), "the newest end, records after it notwithstanding");
+        assert_eq!(read("t-401", &[&e401]).map(|(_, t)| t).as_deref(), Some("unexpected status 401 Unauthorized: invalid API key, url: https://gw.example/v1/responses, request id: req_0a1b"), "redacted");
+        // An older turn's error never ends the open prompt.
+        assert_eq!(read("t-next", &[&start(t413), &e413]), None, "the new prompt's start is not written yet: the old error is not its own");
+        assert_eq!(read("t-next", &[&start(t413), &e413, &start("t-next")]), None, "the new turn is open");
+        assert_eq!(read("t-next", &[&e413, &format!("{{\"type\":\"event_msg\",\"payload\":{{\"type\":\"task_sta")]), None, "a half-written newest line is unknown: never read past it");
+        assert_eq!(read(t413, &[&e413, "{\"type\":\"event_msg\",\"payl"]), None, "unknown, even when the line behind it is the open turn's own end");
+        assert_eq!(read(t413, &[&e413, "not json", &other]), None, "any line that does not parse before the newest end: unknown");
+        assert_eq!(read(t413, &[&e413, &ok(t413)]), None, "a later good end: nothing to say");
+        assert_eq!(read("t-429", &[&e429]), None, "an ordinary failure retries by itself");
+        assert_eq!(read(t413, &[&other]), None, "no end yet");
+        assert_eq!(read("", &[&end("", serde_json::json!({"message":"401 Unauthorized"}))]), None, "no turn id: no identity, nothing recorded");
     }
 
     /// Board #47, frames captured on codex-cli 0.166.0 (scratch tmux, 120x40,
