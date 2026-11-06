@@ -1680,3 +1680,14 @@ test('a given-up member is re-armed through ONE entry, by passive edges only whi
   assert.ok(sync && ids && !/tmux_disconnected/u.test(sync + ids), 'the declared set is not emptied by a Disconnect');
   assert.match(membersSource, /const mayJoin = deps\.autoJoin\?\.\(\) \?\? true;[\s\S]*?if \(!mayJoin\) continue;\s*void join\(entry\);/u, 'upkeep first, then the permission, right before the join');
 });
+
+// Board #56 (the owner's phone, 2026-11-06): the Android keyboard path sizes
+// the shell through keyboard-fit's two rules, never a remembered maximum, and
+// undoes the WebView's pan on both paths and while the keyboard is up.
+test('the Android keyboard path fits the shell to the current height and undoes the pan (board #56)', () => {
+  assert.match(source, /const fit = nativeShellHeight\(kbh, fullHeight, window\.innerHeight\);/u, 'the native height goes through the one rule');
+  assert.doesNotMatch(source, /if \(kbh === 0 && window\.innerHeight > fullHeight\) fullHeight = window\.innerHeight;/u, 'no remembered maximum on close');
+  assert.equal(source.match(/unpanShell\(/gu)?.length, 3, 'after the native height, in the browser path, and on a pan while the keyboard is up');
+  assert.match(source, /window\.addEventListener\('resize', onNativeResize\);/u, 'a size change with no keyboard is taken');
+  assert.match(source, /window\.removeEventListener\('resize', onNativeResize\);/u);
+});

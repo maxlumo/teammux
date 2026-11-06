@@ -4,6 +4,7 @@
   import { activeModal } from './lib/ui/modal.ts';
   import { createPressDrag } from './lib/ui/press-drag.ts';
   import Settings from './lib/app/Settings.svelte';
+  import { nativeShellHeight, unpanShell } from './lib/app/keyboard-fit.ts';
   import Sessions from './lib/sessions/Sessions.svelte';
   import Terminal from './lib/terminal/Terminal.svelte';
   import SplitView from './lib/sessions/SplitView.svelte';
@@ -1017,24 +1018,29 @@
   $effect(() => {
     // Android Tauri app: native event provides exact keyboard height
     let androidNativeKb = false;
+    let lastNativeKb = 0;
     let pendingNativeKb = 0;
     let pendingNativeTimer = 0;
     const hasFocusedTextInput = () => {
       const activeTag = document.activeElement?.tagName;
       return activeTag === 'TEXTAREA' || activeTag === 'INPUT';
     };
+    // Board #56: with the keyboard closed the shell is the window's CURRENT
+    // height (a remembered larger one cut the composer on the owner's phone),
+    // and once the shell fits above the keyboard, the WebView's own pan to the
+    // focused input is undone (it left the shell shifted up with a gap the
+    // same size under the composer). Both rules: lib/app/keyboard-fit.ts.
     const applyNativeKeyboardHeight = (kbh) => {
       pendingNativeKb = 0;
       clearTimeout(pendingNativeTimer);
-      if (kbh === 0 && window.innerHeight > fullHeight) fullHeight = window.innerHeight;
-      const h = kbh > 0 ? (fullHeight - kbh) + 'px' : fullHeight + 'px';
-      document.documentElement.style.setProperty('--app-height', h);
+      const fit = nativeShellHeight(kbh, fullHeight, window.innerHeight);
+      fullHeight = fit.fullHeight;
+      document.documentElement.style.setProperty('--app-height', fit.height + 'px');
       document.documentElement.classList.toggle('keyboard-open', kbh > 0);
-      // After layout updates, shift terminal and log
+      // After layout updates, shift the terminal and undo the pan.
       requestAnimationFrame(() => {
         window.dispatchEvent(new CustomEvent('keyboard-shift', { detail: { kbHeight: kbh > 0 ? kbh : 0 } }));
-        const main = document.querySelector('main');
-        const termWrap = document.querySelector('.term-wrap');
+        unpanShell(window.visualViewport, document.querySelector('main'));
       });
       // No explicit refit needed — updating --app-height changes the terminal
       // container size, which Terminal.svelte's ResizeObserver picks up.
@@ -1042,6 +1048,7 @@
     const nativeHandler = (e) => {
       androidNativeKb = true; // suppress visualViewport handler on Android
       const kbh = e.detail?.height || 0;
+      lastNativeKb = kbh;
       if (kbh > 0 && !hasFocusedTextInput()) {
         // The IME can become visible during the opening touch event,
         // one task before xterm's hidden textarea receives focus. Dropping this
@@ -1079,7 +1086,14 @@
     const isTouch = 'ontouchstart' in window || navigator.maxTouchPoints > 0;
     const vv = isTouch ? window.visualViewport : null;
     const vpHandler = () => {
-      if (!vv || androidNativeKb) return;
+      // Android sizes the shell from its native height; a pan the WebView
+      // makes afterwards (the keyboard up, the focused input revealed) is
+      // still undone here, the one place that reads the visual viewport.
+      if (vv && androidNativeKb) {
+        if (document.documentElement.classList.contains('keyboard-open')) unpanShell(vv, document.querySelector('main'));
+        return;
+      }
+      if (!vv) return;
       const h = vv.height;
       // Update full height when viewport grows (keyboard closing)
       if (h > fullHeight) fullHeight = h;
@@ -1097,11 +1111,26 @@
       // the container size change on both keyboard open and close.
       window.scrollTo(0, 0);
       document.documentElement.scrollTop = 0;
+      unpanShell(vv, document.querySelector('main'));
     };
     if (vv) {
       vv.addEventListener('resize', vpHandler);
       vv.addEventListener('scroll', vpHandler);
     }
+    // Board #56: on Android a window that changes size with no keyboard up (a
+    // rotation, split screen, fullscreen) sends no keyboard event, so its new
+    // height is taken here, never left at the old one. Settled first: a
+    // WebView that resizes for the keyboard fires this resize just before the
+    // native height arrives, and that one must not be read as "no keyboard".
+    let resizeTimer = 0;
+    const onNativeResize = () => {
+      if (!androidNativeKb) return;
+      clearTimeout(resizeTimer);
+      resizeTimer = setTimeout(() => {
+        if (lastNativeKb === 0 && pendingNativeKb === 0 && !document.documentElement.classList.contains('keyboard-open')) applyNativeKeyboardHeight(0);
+      }, 300);
+    };
+    window.addEventListener('resize', onNativeResize);
 
     // A deferred native keyboard height applies once an input takes focus.
     const onFocusIn = (e) => {
@@ -1114,7 +1143,9 @@
 
     return () => {
       clearTimeout(pendingNativeTimer);
+      clearTimeout(resizeTimer);
       window.removeEventListener('androidKeyboardHeight', nativeHandler);
+      window.removeEventListener('resize', onNativeResize);
       document.removeEventListener('focusin', onFocusIn);
       if (vv) {
         vv.removeEventListener('resize', vpHandler);
