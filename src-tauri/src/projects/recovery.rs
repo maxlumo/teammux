@@ -1578,13 +1578,15 @@ mod tests {
         let spy = std::sync::Arc::new(Spy(std::sync::Mutex::new(Vec::new())));
         let root = crate::config::test_scratch("rec-provider-hub");
         crate::agent_notifications::AgentNotificationHub::load_at(root.clone()).set_room_poster(spy.clone());
-        // Round 1 (reviewer's P1): the rollout's newest end is an OLD turn's
-        // error that was never recorded (the gateway was down), and a new
-        // prompt is open whose task_started is not on disk yet. Its id (the
-        // prompt hook's turn_id, as the hook path notes it) is not the end's:
-        // nothing is recorded, nothing said, the turn stays open.
-        tm::record_prompt(&session, "cx", "[tmm chat 2026-11-05 15:57] maker: @cx review G3");
-        tm::note_cli_turn(&session, "cx", Some(fresh));
+        // Rounds 1 and 2 (reviewer's P1s): prompt A, with the id of the turn
+        // whose 413 is the rollout's newest end, was accepted, and no tick
+        // read the error before prompt B was accepted, whose task_started is
+        // not on disk yet. B's id is written WITH B's prompt fact, so no
+        // reader sees B paired with A's id: nothing is recorded, nothing
+        // said, the turn stays open.
+        tm::record_prompt_outcome(&session, "cx", "[tmm chat 2026-11-05 15:56] maker: @cx first", None, Some(turn));
+        tm::record_prompt_outcome(&session, "cx", "[tmm chat 2026-11-05 15:57] maker: @cx review G3", None, Some(fresh));
+        assert_eq!(tm::cli_turn(&session, "cx").as_deref(), Some(fresh), "the accepted prompt carries its own id");
         check_once();
         check_once();
         assert_eq!(tm::derive(&session, "cx", 0).state, "running", "an old error never ends the new prompt");
@@ -1615,8 +1617,7 @@ mod tests {
         }
         assert_eq!(crate::tmux::capture_pane_plain(&format!("{session}:cx"), Some(0)).unwrap_or_default(), typed_before, "nothing typed");
         // A newer prompt over the same rollout: the old error never ends it.
-        tm::record_prompt(&session, "cx", "[tmm chat 2026-11-05 16:10] human: @cx carry on");
-        tm::note_cli_turn(&session, "cx", Some("01a1ac71-0000-7000-8000-000000000002"));
+        tm::record_prompt_outcome(&session, "cx", "[tmm chat 2026-11-05 16:10] human: @cx carry on", None, Some("01a1ac71-0000-7000-8000-000000000002"));
         check_once();
         assert_eq!(tm::derive(&session, "cx", 0).state, "running", "the newer turn is open");
         assert_eq!(spy.0.lock().unwrap().len(), 1, "still one notice");

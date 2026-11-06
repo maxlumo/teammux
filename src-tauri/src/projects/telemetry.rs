@@ -76,6 +76,9 @@ struct Rec {
     /// mid-turn. The order breaks only that tie; seconds stay the ordering
     /// authority. 0 = never set.
     prompt_seq: u64,
+    /// The CLI's own id for the prompt at `prompt` (board #39 slice 2 round
+    /// 2), set by the same write: `None` when its hook carried none.
+    cli_turn: Option<String>,
     end_seq: u64,
     ask_seq: u64,
     tool_seq: u64,
@@ -863,6 +866,8 @@ fn replay_turn_facts(r: &mut Rec, facts: &super::store::TurnFacts) {
     if let Some(f) = &facts.prompt {
         r.prompt = Some(f.ts / 1000);
         r.prompt_seq = recovered_arrival(f.id);
+        // The log keeps no CLI turn id (board #39 slice 2): unknown.
+        r.cli_turn = None;
     }
     if let Some(f) = &facts.tool {
         let line = if f.text.is_empty() { f.tool.clone() } else { format!("{} {}", f.tool, f.text) };
@@ -1083,31 +1088,17 @@ pub fn record_notification_with(session: &str, window: &str, kind: &str, quality
     notification(session, window, kind, None, quality, None)
 }
 
-/// The CLI's own id for each window's newest prompt (board #39 slice 2
-/// round 1): codex 0.166.0's `UserPromptSubmit` carries `turn_id`, the id its
-/// rollout's `task_complete` closes (measured 2026-11-06). In memory only: a
-/// gateway that restarted knows no id, and a reader bound to it then
+/// The CLI's own id for the window's newest accepted prompt (board #39
+/// slice 2): codex 0.166.0's `UserPromptSubmit` carries `turn_id`, the id its
+/// rollout's `task_complete` closes (measured 2026-11-06). It is part of the
+/// prompt fact (`Rec::cli_turn`), written with it under the turn-fact lock,
+/// so no reader ever pairs a newer prompt with an older prompt's id
+/// (round 2, reviewer's P1 on 4e319119). In memory only: a window recovered
+/// from the log after a gateway restart has none, and a reader bound to it
 /// records nothing (unknown), the safe side.
-fn cli_turns() -> &'static Mutex<HashMap<(String, String), String>> {
-    static TURNS: OnceLock<Mutex<HashMap<(String, String), String>>> = OnceLock::new();
-    TURNS.get_or_init(Default::default)
-}
-
-/// Set (or, with `None`, forget) the CLI's id for the window's newest prompt.
-/// Called at each accepted prompt, so a prompt without one never leaves an
-/// older prompt's id standing.
-pub fn note_cli_turn(session: &str, window: &str, turn: Option<&str>) {
-    let key = (session.to_string(), window.to_string());
-    let mut turns = cli_turns().lock().unwrap();
-    match turn.filter(|t| !t.trim().is_empty()) {
-        Some(t) => turns.insert(key, t.to_string()),
-        None => turns.remove(&key),
-    };
-}
-
-/// The CLI's id for the window's newest prompt, if its hook carried one.
 pub fn cli_turn(session: &str, window: &str) -> Option<String> {
-    cli_turns().lock().unwrap().get(&(session.to_string(), window.to_string())).cloned()
+    recovery_mark(session);
+    store().lock().unwrap().get(&(session.to_string(), window.to_string())).and_then(|r| r.cli_turn.clone())
 }
 
 /// The provider's error text on an end the capture tick recorded with
@@ -1864,7 +1855,7 @@ pub fn record_undelivered(session: &str, window: &str, line: &str, reason: &str)
 /// decoration, and an agent that is mid-task receives our line appended to
 /// whatever it was already typing.
 pub fn record_prompt(session: &str, window: &str, prompt: &str) -> bool {
-    record_prompt_outcome(session, window, prompt, None).acked
+    record_prompt_outcome(session, window, prompt, None, None).acked
 }
 
 /// What recording one prompt did (board #422 round 3): `acked` is the
@@ -1890,7 +1881,10 @@ impl PromptOutcome {
 /// `Some(shown)` for a prompt the CLI submitted by itself. It is a turn
 /// edge only — it settles no line of ours, proves nothing about a queued
 /// command, asks no one, and its row is `via: cli` with `shown` as its text.
-pub fn record_prompt_outcome(session: &str, window: &str, prompt: &str, cli_own: Option<&str>) -> PromptOutcome {
+///
+/// `cli_turn` is the CLI's own id for this prompt's turn, if its hook carried
+/// one (`cli_turn`): written in the same step as the prompt fact.
+pub fn record_prompt_outcome(session: &str, window: &str, prompt: &str, cli_own: Option<&str>, cli_turn: Option<&str>) -> PromptOutcome {
     recovery_mark(session);
     // The settlement and the prompt fact are ONE critical section under the
     // turn-fact lock (board #264): an end edge stepping the command rows
@@ -1924,7 +1918,7 @@ pub fn record_prompt_outcome(session: &str, window: &str, prompt: &str, cli_own:
     // and writes its row in ONE store transaction: retried after a failure,
     // it finds exactly the receipts it matched, never a deleted one.
     if numbered_persists(session, window) {
-        let (acked, row) = record_numbered_prompt(&order, session, window, prompt, cli_own, settled, next_command, command_hit);
+        let (acked, row) = record_numbered_prompt(&order, session, window, prompt, cli_own, cli_turn, settled, next_command, command_hit);
         return PromptOutcome { acked, row };
     }
     // A row counts only if THIS echo deleted it: two echoes racing for one
@@ -1954,6 +1948,7 @@ pub fn record_prompt_outcome(session: &str, window: &str, prompt: &str, cli_own:
     let (_, row) = turn_fact_held_row(&order, session, window, None, |_| false, Some(event), |r, ts, seq| {
         r.prompt = Some(ts);
         r.prompt_seq = seq;
+        r.cli_turn = cli_turn.filter(|t| !t.trim().is_empty()).map(str::to_string);
     }, Some(requesters));
     // Its row id is the proof it reached the log: a failed INSERT has none.
     PromptOutcome { acked, row }
@@ -2024,6 +2019,7 @@ fn record_numbered_prompt(
     window: &str,
     prompt: &str,
     cli_own: Option<&str>,
+    cli_turn: Option<&str>,
     settled: Vec<Settled>,
     next_command: Option<&super::store::DeliveryRow>,
     command_hit: bool,
@@ -2082,6 +2078,7 @@ fn record_numbered_prompt(
     turn_fact_held(order, session, window, Some(ts_ms / 1000), |_| false, None, |r, ts, seq| {
         r.prompt = Some(ts);
         r.prompt_seq = seq;
+        r.cli_turn = cli_turn.filter(|t| !t.trim().is_empty()).map(str::to_string);
     }, None);
     (!won_ids.is_empty(), Some(row_id))
 }
@@ -3042,9 +3039,9 @@ mod tests {
         let session = format!("tmm-422-outcome-{}", uuid::Uuid::new_v4().simple());
         let sql = |q: String| crate::projects::with_store(|s| s.exec_test_sql(&q)).unwrap();
         let lost = PromptOutcome { acked: false, row: None };
-        let plain = record_prompt_outcome(&session, "A", "a person typed this", None);
+        let plain = record_prompt_outcome(&session, "A", "a person typed this", None, None);
         assert!(!plain.acked && plain.persisted(), "{plain:?}");
-        let numbered = with_numbered(Some((&session, "A")), || record_prompt_outcome(&session, "A", "numbered", None));
+        let numbered = with_numbered(Some((&session, "A")), || record_prompt_outcome(&session, "A", "numbered", None, None));
         assert!(!numbered.acked && numbered.persisted(), "{numbered:?}");
         let rows = crate::projects::with_store(|s| s.activity_page(&session, 0, None, 10)).unwrap().0;
         assert_eq!(rows.iter().map(|r| Some(r.id)).collect::<Vec<_>>(), vec![plain.row, numbered.row], "each names its own durable row");
@@ -3052,8 +3049,8 @@ mod tests {
             "CREATE TEMP TRIGGER outcome422 BEFORE INSERT ON activity WHEN NEW.session = '{session}' AND NEW.kind = 'prompt'
              BEGIN SELECT RAISE(ABORT, 'disk full'); END;"
         ));
-        let plain = record_prompt_outcome(&session, "A", "lost on the plain path", None);
-        let numbered = with_numbered(Some((&session, "A")), || record_prompt_outcome(&session, "A", "lost numbered", None));
+        let plain = record_prompt_outcome(&session, "A", "lost on the plain path", None, None);
+        let numbered = with_numbered(Some((&session, "A")), || record_prompt_outcome(&session, "A", "lost numbered", None, None));
         sql("DROP TRIGGER outcome422;".into());
         assert_eq!(plain, lost, "a refused INSERT is not persisted");
         assert_eq!(numbered, lost, "nor on the numbered path");
@@ -5161,7 +5158,7 @@ mod tests {
         let session = format!("cli-own-{}", uuid::Uuid::new_v4());
         record_command_delivery(&session, "claude", "/goal do x", "m-x").unwrap();
         let xml = "<task-notification>\n<task-id>b1</task-id>\n<tool-use-id>t1</tool-use-id>\n<output-file>/tmp/o</output-file>\n<status>completed</status>\n<summary>Background command \"ls\" completed (exit code 0)</summary>\n</task-notification>";
-        let out = record_prompt_outcome(&session, "claude", xml, Some("Background command \"ls\" completed (exit code 0)"));
+        let out = record_prompt_outcome(&session, "claude", xml, Some("Background command \"ls\" completed (exit code 0)"), None);
         assert!(!out.acked, "no line of ours");
         let e = recent_events(&session, 0).into_iter().last().unwrap();
         assert_eq!((e.kind.as_str(), e.via.as_str(), e.text.as_str()), ("prompt", "cli", "Background command \"ls\" completed (exit code 0)"));

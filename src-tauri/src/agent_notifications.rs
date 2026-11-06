@@ -213,10 +213,12 @@ impl AgentNotificationHub {
     /// the turn — but asks no one, and its row shows only what the backend
     /// says it is. Everything else asks the senders its stamps name.
     #[cfg(not(any(target_os = "android", target_os = "ios")))]
-    pub(crate) fn open_prompt(&self, session: &str, window: &str, backend: Option<crate::backends::Backend>, prompt: &str) -> crate::projects::telemetry::PromptOutcome {
+    /// `cli_turn` is the CLI's own id for the turn (codex's `turn_id`, board
+    /// #39 slice 2), part of the prompt fact.
+    pub(crate) fn open_prompt(&self, session: &str, window: &str, backend: Option<crate::backends::Backend>, prompt: &str, cli_turn: Option<&str>) -> crate::projects::telemetry::PromptOutcome {
         let own = backend.and_then(|b| b.cli_own_prompt(prompt));
         self.start_turn(session, window, if own.is_some() { Vec::new() } else { reply_targets(session, prompt) });
-        crate::projects::telemetry::record_prompt_outcome(session, window, prompt, own.as_deref())
+        crate::projects::telemetry::record_prompt_outcome(session, window, prompt, own.as_deref(), cli_turn)
     }
 
     fn start_turn(&self, session: &str, window: &str, asks: Vec<String>) {
@@ -629,7 +631,12 @@ impl AgentNotificationHub {
                     // A restored window's prompt may not reach the log under its
                     // generation: its turn's reply edge is put back as it was.
                     let edge_before = envelope.restore.as_ref().and_then(|_| self.state.lock().unwrap().reply_targets.get(&window_key(&session, &window)).cloned());
-                    let outcome = self.open_prompt(&session, &window, crate::backends::Backend::parse(&envelope.backend), &prompt);
+                    // The CLI's own id for this turn (board #39 slice 2; codex
+                    // 0.166.0 sends `turn_id`) is written WITH the prompt fact:
+                    // the one id a rollout end must carry to end this turn, and
+                    // a prompt without one clears the previous prompt's.
+                    let cli_turn = envelope.payload.get("turn_id").and_then(Value::as_str);
+                    let outcome = self.open_prompt(&session, &window, crate::backends::Backend::parse(&envelope.backend), &prompt, cli_turn);
                     if crate::projects::telemetry::generation_write_failed() {
                         let mut state = self.state.lock().unwrap();
                         match edge_before {
@@ -643,11 +650,6 @@ impl AgentNotificationHub {
                     if crate::projects::telemetry::numbered_write_failed() {
                         return Err(Consume::Retain("its prompt did not reach the log".into()));
                     }
-                    // The CLI's own id for this prompt's turn (board #39 slice 2
-                    // round 1; codex 0.166.0 sends `turn_id`): the one id a
-                    // rollout end must carry to end this turn. A prompt without
-                    // one forgets the previous prompt's.
-                    crate::projects::telemetry::note_cli_turn(&session, &window, envelope.payload.get("turn_id").and_then(Value::as_str));
                     // A person's prompt into a restored window: released once
                     // its fact is in the log, then merged and flushed (#422).
                     // Its row already marked the release pending: a release
@@ -2056,8 +2058,8 @@ mod tests {
         }));
         hub.consume_inbox();
         assert_eq!(hub.state.lock().unwrap().reply_targets.get(&window_key(&session, &pane.window_name)).map(|m| m.1.clone()), Some(vec!["claude".to_string()]));
-        // Board #39 slice 2 round 1: the prompt's own turn id is noted, the
-        // one a rollout end must carry to end this turn.
+        // Board #39 slice 2: the prompt's own turn id is part of its prompt
+        // fact, the one a rollout end must carry to end this turn.
         assert_eq!(crate::projects::telemetry::cli_turn(&session, &pane.window_name).as_deref(), Some("t1"));
 
         // The parent briefs a child: the child's UserPromptSubmit fires on the
@@ -5308,24 +5310,24 @@ mod tests {
 
         // It STARTS a turn: the reply edge names no one, before and after a restart.
         let s = fresh();
-        hub.open_prompt(&s, "dev", Some(Backend::Claude), bg);
+        hub.open_prompt(&s, "dev", Some(Backend::Claude), bg, None);
         assert!(hub.holds_edge(&s, "dev"), "it opened the turn's edge");
         assert!(hub.take_reply_targets(&s, "dev").is_empty());
         let s = fresh();
-        hub.open_prompt(&s, "dev", Some(Backend::Claude), bg);
+        hub.open_prompt(&s, "dev", Some(Backend::Claude), bg, None);
         crate::projects::telemetry::forget_process_state(&s);
         assert!(AgentNotificationHub::load_at(root.clone()).take_reply_targets(&s, "dev").is_empty(), "the log names no one either");
 
         // It JOINS an open turn: the turn keeps its requesters, and adds none.
         let s = fresh();
-        hub.open_prompt(&s, "dev", Some(Backend::Claude), "[tmm chat 2026-11-05 08:30] lead: @dev run the suite");
-        hub.open_prompt(&s, "dev", Some(Backend::Claude), bg);
+        hub.open_prompt(&s, "dev", Some(Backend::Claude), "[tmm chat 2026-11-05 08:30] lead: @dev run the suite", None);
+        hub.open_prompt(&s, "dev", Some(Backend::Claude), bg, None);
         assert_eq!(hub.take_reply_targets(&s, "dev"), vec!["lead".to_string()]);
 
         // Controls: a person pasting it, and a CLI that is not Claude.
         for (backend, prompt) in [(Some(Backend::Claude), format!("what is this? {bg}")), (Some(Backend::Codex), bg.to_string()), (None, bg.to_string())] {
             let s = fresh();
-            hub.open_prompt(&s, "dev", backend, &prompt);
+            hub.open_prompt(&s, "dev", backend, &prompt, None);
             assert_eq!(hub.take_reply_targets(&s, "dev"), vec!["human".to_string()], "{backend:?}");
         }
         PERSIST_IN_TEST.with(|p| p.set(false));
