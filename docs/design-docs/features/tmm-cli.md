@@ -600,10 +600,11 @@ Tests. Pure: `notify_targets` (freezing; `all` as the declared set, read only wh
 
 - **The frontier is the list, filtered on the server's `blocked`.** The CLI has no rule of its own about what blocks: it reads `hub_board_list` and keeps `status != done && blocked == false`, so the board page, `list` and `frontier` can never disagree. It never assigns anything. `--output json` answers `{issues}` with the rows as the server shaped them.
 - **`list` and `show` name the blockers.** A list row ends `· blocked by #38` while a blocker is open, and says nothing once they are all done; `show` prints `blocked by #38` or `blockers: #40 (all done)`.
+- **The frontier refuses what it cannot know** (reviewer P2-R2 on 450dfe7d, reproduced by validator-2 against the live gateway on main ee21afb8: 'the frontier is empty: every open issue waits on another', exit 0, with 46 issues on the board). `frontier` needs the `board_blocks` cap like the writes, so an older server is refused before the call, in text and JSON alike, with a non-zero exit; and a row that is not done but does not say whether it is blocked is refused by number, never read as blocked. An empty frontier is printed only when the server said so for every open issue.
 - **Refused before writing on an older server.** `add --blocked-by`, `block` and `unblock` need the `board_blocks` cap; an older server would ignore `blocked_by` and file the issue with no edges as if it had worked. A save that needs two caps (`--assignee` and `--blocked-by`) names both, and the refusal names the first one missing (`try_rpc`'s `need` is a comma list).
 - **Numbers are checked at the door.** `38`, `#38` and `38,39` are accepted; an empty list or anything else is a usage error with nothing sent.
 
-Pinned by `tests/board_blocks_cli.rs` (one save carrying `blocked_by`; the older server refused with no write; `block`/`unblock` one edit each; malformed lists refused before any call; the frontier's rows and JSON from a mixed board; `list`/`show` naming the blockers).
+Pinned by `tests/board_blocks_cli.rs` (one save carrying `blocked_by`; the older server refused with no write, and `frontier` refused on it in text and JSON; a row without its blocking state refused; `block`/`unblock` one edit each; malformed lists refused before any call; the frontier's rows and JSON from a mixed board; `list`/`show` naming the blockers).
 
 ## Waking an agent later (`--in` / `--at`, board #275)
 

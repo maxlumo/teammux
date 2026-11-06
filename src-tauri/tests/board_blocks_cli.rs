@@ -38,6 +38,11 @@ fn board() -> serde_json::Value {
 /// `caps`: whether the login answer announces `board_blocks` (an older
 /// server announces only `board_dispatch`).
 fn fake(caps: bool) -> Fake {
+    fake_board(caps, board())
+}
+
+/// The same fake serving `served` as its board.
+fn fake_board(caps: bool, served: serde_json::Value) -> Fake {
     let calls: Arc<Mutex<Vec<(String, serde_json::Value)>>> = Arc::new(Mutex::new(Vec::new()));
     let seen = calls.clone();
     let (tx, rx) = std::sync::mpsc::channel();
@@ -49,6 +54,7 @@ fn fake(caps: bool) -> Fake {
             loop {
                 let Ok((stream, _)) = listener.accept().await else { return };
                 let seen = seen.clone();
+                let served = served.clone();
                 let Ok(mut ws) = tokio_tungstenite::accept_async(stream).await else { continue };
                 let Some(Ok(Message::Text(_))) = ws.next().await else { continue };
                 let login = if caps {
@@ -62,7 +68,7 @@ fn fake(caps: bool) -> Fake {
                 let method = call["method"].as_str().unwrap_or_default().to_string();
                 seen.lock().unwrap().push((method.clone(), call["params"].clone()));
                 let result = match method.as_str() {
-                    "hub_board_list" => board(),
+                    "hub_board_list" => served.clone(),
                     "hub_board_get" => {
                         let id = call["params"]["id"].as_i64().unwrap_or(0);
                         let mut issue = board()["issues"].as_array().unwrap().iter().find(|i| i["id"] == id).cloned().unwrap_or(serde_json::json!({}));
@@ -208,4 +214,34 @@ fn list_and_show_name_the_blockers() {
     let (ok, out, _) = f.run(&["board", "show", "39"]);
     assert!(ok);
     assert!(out.contains("blocked by #38"), "{out:?}");
+}
+
+/// P2-R2 (reviewer, 450dfe7d; validator-2 reproduced it against the live
+/// main gateway): an older server sends no `blocked`, and the frontier read
+/// as "empty, every open issue waits on another" with exit 0. It needs the
+/// cap like the writes, and refuses before the call, in text and JSON alike.
+#[test]
+fn frontier_on_an_older_server_is_refused_not_reported_empty() {
+    for args in [vec!["board", "frontier"], vec!["board", "frontier", "--output", "json"]] {
+        let f = fake(false);
+        let (ok, out, err) = f.run(&args);
+        assert!(!ok, "{args:?}: {out:?}");
+        assert!(err.contains("older") && err.contains("board_blocks"), "{args:?}: {err:?}");
+        assert!(!out.contains("frontier is empty"), "{out:?}");
+        assert!(f.methods().is_empty(), "refused before the call: {:?}", f.methods());
+    }
+}
+
+/// P2-R2: a row that does not say whether it is blocked is not "blocked".
+/// A board whose open rows lack the fact is refused, never shown as an
+/// empty or partial frontier.
+#[test]
+fn frontier_refuses_rows_without_their_blocking_state() {
+    let mut served = board();
+    served["issues"][4].as_object_mut().unwrap().remove("blocked");
+    let f = fake_board(true, served);
+    let (ok, out, err) = f.run(&["board", "frontier"]);
+    assert!(!ok, "{out:?}");
+    assert!(err.contains("#42") && err.contains("blocked"), "{err:?}");
+    assert!(out.is_empty(), "{out:?}");
 }

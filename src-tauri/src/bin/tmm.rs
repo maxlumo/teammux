@@ -948,9 +948,6 @@ async fn main() {
                     } else {
                         rpc_needing(&ctx, &need.join(","), "hub_board_save", params).await
                     };
-                    if let Some(e) = r.get("blocked_by_error").and_then(|v| v.as_str()) {
-                        eprintln!("tmm: #{} was filed, but its blockers were not set: {e}", r.get("id").and_then(|v| v.as_i64()).unwrap_or(0));
-                    }
                     let id = r.get("id").and_then(|v| v.as_i64()).unwrap_or(0);
                     if ctx.json { println!("{r}"); } else { println!("✓ #{id} on the board"); }
                     if let Some(a) = assignee { settle_dispatch(id, &a, &r); }
@@ -984,14 +981,28 @@ async fn main() {
                 // The frontier (board #43): every issue that is not done and
                 // whose blockers are all done. It is the list filtered on the
                 // server's own `blocked`, so there is one definition of it.
+                // It needs `board_blocks` like the writes (P2-R2, reviewer on
+                // 450dfe7d): an older server sends no `blocked`, and the
+                // frontier read as "empty" with exit 0 while the board held 46
+                // open issues. A row that does not say whether it is blocked
+                // is refused for the same reason, never read as blocked.
                 "frontier" => {
-                    let r = rpc(&ctx, "hub_board_list", json!({ "session": session })).await;
-                    let empty = Vec::new();
-                    let open: Vec<&Value> = r.get("issues").and_then(|v| v.as_array()).unwrap_or(&empty)
-                        .iter()
-                        .filter(|i| i.get("status").and_then(|v| v.as_str()) != Some("done") && i.get("blocked").and_then(|v| v.as_bool()) == Some(false))
-                        .collect();
-                    let mut open = open;
+                    let r = rpc_needing(&ctx, "board_blocks", "hub_board_list", json!({ "session": session })).await;
+                    let Some(rows) = r.get("issues").and_then(|v| v.as_array()) else {
+                        fail(EXIT_NOT_FOUND, "the server's board answer has no issue list, so the frontier cannot be read. Nothing is shown.");
+                    };
+                    let mut open: Vec<&Value> = Vec::new();
+                    for i in rows {
+                        if i.get("status").and_then(|v| v.as_str()) == Some("done") { continue; }
+                        match i.get("blocked").and_then(|v| v.as_bool()) {
+                            Some(false) => open.push(i),
+                            Some(true) => {}
+                            None => {
+                                let id = i.get("id").and_then(|v| v.as_i64()).map_or_else(|| "an issue".to_string(), |n| format!("#{n}"));
+                                fail(EXIT_NOT_FOUND, &format!("the server did not say whether {id} is blocked, so the frontier cannot be read. Nothing is shown."));
+                            }
+                        }
+                    }
                     open.sort_by_key(|i| i.get("id").and_then(|v| v.as_i64()).unwrap_or(0));
                     if ctx.json { println!("{}", json!({ "issues": open })); return; }
                     if open.is_empty() { println!("the frontier is empty: every open issue waits on another"); return; }
