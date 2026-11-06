@@ -55,11 +55,45 @@ pub fn command_when_idle(session: &str, window: &str, target: &str, command: &st
     Ok(if waiting { WhenIdle::Waiting(id) } else { WhenIdle::Typed })
 }
 
+/// When each typed command was typed, in nanoseconds since the epoch, by row
+/// id (board #45 round 2): a `SessionStart` is its effect only if PRODUCED
+/// strictly after this (reviewer 16:16: whole seconds let an earlier
+/// same-source hook of that second count for a later command). Taken just
+/// before the keys go in. In memory: after a gateway restart a typed command
+/// has none, so no event can be ordered after it, and its lines wait for the
+/// notice and a cancel.
+fn typed_at() -> &'static Mutex<HashMap<i64, u128>> {
+    static AT: OnceLock<Mutex<HashMap<i64, u128>>> = OnceLock::new();
+    AT.get_or_init(Default::default)
+}
+
+/// Now, in nanoseconds since the epoch: the clock the notify helper's
+/// `date +%s.%N` reads on the same host.
+fn now_ns() -> u128 {
+    std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map(|d| d.as_nanos()).unwrap_or(0)
+}
+
+/// Test seam: record a typed command's typing time, for a test that marks a
+/// row typed without `release_command` (the real-inbox test).
+#[cfg(test)]
+pub(crate) fn note_typed_at(id: i64, ns: u128) {
+    typed_at().lock().unwrap().insert(id, ns);
+}
+
+/// Test seam: a typed command's recorded typing time.
+#[cfg(test)]
+pub(crate) fn typed_at_ns(id: i64) -> Option<u128> {
+    typed_at().lock().unwrap().get(&id).copied()
+}
+
 /// The thread a window ran before its `NewThread` command was typed (board
-/// #45), by row id. In memory: after a gateway restart a typed command has
-/// none, its effect cannot be compared, and its lines wait for the notice.
-fn threads_before() -> &'static Mutex<HashMap<i64, Option<String>>> {
-    static BEFORE: OnceLock<Mutex<HashMap<i64, Option<String>>>> = OnceLock::new();
+/// #45), by row id: only a KNOWN one (reviewer 16:05: `pane_thread` answers
+/// `None` for unreadable as for absent, and an unknown baseline would let any
+/// thread readable later pass for a reset). In memory: after a gateway restart
+/// a typed command has none either. With none, its effect cannot be proven,
+/// and its lines wait for the notice and a cancel.
+fn threads_before() -> &'static Mutex<HashMap<i64, String>> {
+    static BEFORE: OnceLock<Mutex<HashMap<i64, String>>> = OnceLock::new();
     BEFORE.get_or_init(Default::default)
 }
 
@@ -98,16 +132,21 @@ pub(super) fn release_command(session: &str, window: &str, target: &str, row: &s
     let effect = backend.and_then(|b| b.command_effect(name));
     let before = (effect == Some(crate::backends::CommandEffect::NewThread))
         .then(|| backend.zip(super::super::managed_home(session, window)).and_then(|(b, home)| b.current_thread(&home)));
+    typed_at().lock().unwrap().insert(row.id, now_ns());
     if !matches!(telemetry::set_command_typed(row.id, true), Ok(true)) {
+        typed_at().lock().unwrap().remove(&row.id);
         return;
     }
     let receipt = backend.and_then(|b| b.command_echo(name, args)).and_then(|echo| telemetry::record_command_delivery_held(order, session, window, &echo, &row.msg_id));
     match type_verbatim(session, window, target, &row.line) {
         Ok(()) => {
             match effect {
-                None => telemetry::forget_delivery(row.id),
+                None => {
+                    telemetry::forget_delivery(row.id);
+                    typed_at().lock().unwrap().remove(&row.id);
+                }
                 Some(_) => {
-                    if let Some(before) = before {
+                    if let Some(before) = before.flatten() {
                         threads_before().lock().unwrap().insert(row.id, before);
                     }
                 }
@@ -122,6 +161,7 @@ pub(super) fn release_command(session: &str, window: &str, target: &str, row: &s
                 telemetry::forget_delivery(id);
             }
             let _ = telemetry::set_command_typed(row.id, false);
+            typed_at().lock().unwrap().remove(&row.id);
             if !kept_at_write(&e) {
                 telemetry::record_held_blocked(session, window, std::slice::from_ref(row), e.trim());
             }
@@ -142,7 +182,7 @@ fn say_command(session: &str, row: &super::super::store::DeliveryRow, body: &str
 /// The typed command first in `window`'s line has taken effect: its row is
 /// retired and the lines behind it are offered at once (board #45). Under
 /// the window lock; true when it retired one.
-fn command_took_effect(session: &str, window: &str, effect: crate::backends::CommandEffect, seen: impl Fn(&super::super::store::DeliveryRow) -> bool) -> bool {
+fn command_took_effect(session: &str, window: &str, seen: impl Fn(crate::backends::CommandEffect, &super::super::store::DeliveryRow) -> bool) -> bool {
     let lock = window_lock(session, window);
     let _guard = lock.lock().unwrap();
     let Some(row) = telemetry::held_rows(session, window).into_iter().next() else { return false };
@@ -150,11 +190,13 @@ fn command_took_effect(session: &str, window: &str, effect: crate::backends::Com
         return false;
     }
     let name = row.line.split_whitespace().next().unwrap_or_default();
-    if recipe_backend(session, window).and_then(|b| b.command_effect(name)) != Some(effect) || !seen(&row) {
-        return false;
+    match recipe_backend(session, window).and_then(|b| b.command_effect(name)) {
+        Some(effect) if seen(effect, &row) => {}
+        _ => return false,
     }
     telemetry::forget_delivery(row.id);
     threads_before().lock().unwrap().remove(&row.id);
+    typed_at().lock().unwrap().remove(&row.id);
     true
 }
 
@@ -162,8 +204,22 @@ fn command_took_effect(session: &str, window: &str, effect: crate::backends::Com
 /// typed `/clear` or `/compact` that declares it (claude; codex `/compact`).
 /// Called by the hook path for every `SessionStart`; a window with no typed
 /// command first in line changes nothing.
-pub fn command_session_started(session: &str, window: &str) {
-    if command_took_effect(session, window, crate::backends::CommandEffect::SessionStart, |_| true) {
+///
+/// Only THIS command's effect counts (reviewer 16:04, orchestrator's round 2
+/// rule): the source the reset produces (`startup`, `resume`, the other
+/// reset's source or none leave the gate intact), PRODUCED strictly after the
+/// command was typed, both to the nanosecond (`produced`, the helper's publish
+/// time from the inbox file name, never the time it was consumed: a new CLI's
+/// event consumed late is still old; `typed_at`). Reviewer 16:16: whole
+/// seconds let an earlier same-source hook of the same second count. An
+/// unknown time on either side (an old-format name, a gateway restarted since
+/// the typing) never counts.
+pub fn command_session_started(session: &str, window: &str, source: Option<&str>, produced: Option<u128>) {
+    let ours = |effect, row: &super::super::store::DeliveryRow| {
+        let after = produced.zip(typed_at().lock().unwrap().get(&row.id).copied()).is_some_and(|(p, t)| p > t);
+        matches!(effect, crate::backends::CommandEffect::SessionStart(want) if source == Some(want)) && after
+    };
+    if command_took_effect(session, window, ours) {
         flush(session, window);
     }
 }
@@ -182,12 +238,17 @@ pub fn check_command_effects() {
                 continue;
             }
             let backend = recipe_backend(&session, &window);
-            let changed = |row: &super::super::store::DeliveryRow| {
+            // A KNOWN thread before and a different KNOWN thread now; anything
+            // unknown proves nothing (reviewer 16:05).
+            let changed = |effect, row: &super::super::store::DeliveryRow| {
+                if effect != crate::backends::CommandEffect::NewThread {
+                    return false;
+                }
                 let Some(before) = threads_before().lock().unwrap().get(&row.id).cloned() else { return false };
                 let now = backend.zip(super::super::managed_home(&session, &window)).and_then(|(b, home)| b.current_thread(&home));
-                now.is_some() && now != before
+                now.is_some_and(|now| now != before)
             };
-            if command_took_effect(&session, &window, crate::backends::CommandEffect::NewThread, changed) {
+            if command_took_effect(&session, &window, changed) {
                 flush(&session, &window);
                 continue;
             }
@@ -238,6 +299,7 @@ pub(super) fn end_held_commands(session: &str, window: &str, ending: Ending) {
         };
         if telemetry::cancel_held_command(session, row.id, |_| Ok(())).is_ok() {
             threads_before().lock().unwrap().remove(&row.id);
+    typed_at().lock().unwrap().remove(&row.id);
             say_command(session, &row, &said);
         }
     }
@@ -260,6 +322,7 @@ pub fn cancel_command(session: &str, id: i64, from: &str) -> Result<serde_json::
         }
     })?;
     threads_before().lock().unwrap().remove(&row.id);
+    typed_at().lock().unwrap().remove(&row.id);
     let said = match row.verbatim {
         // Typed, its effect not seen yet: the lines behind it stop waiting.
         Some(super::super::store::CommandHold::Typed) => format!("[tmm] {} → {}: no longer waiting for it to take effect", row.line, row.window),
@@ -426,8 +489,24 @@ mod tests {
         assert!(crate::projects::rooms::history_page(&room, None, 100)["messages"].as_array().unwrap().iter()
             .any(|m| m["body"].as_str().is_some_and(|b| b.contains(&format!("cancel: tmm send --cancel {id}")))));
         assert_eq!(typed(), ["/clear"], "never typed on a timeout");
-        // Its SessionStart, late: the reset took effect; the brief is next.
-        command_session_started(&s, "cl");
+        // reviewer 16:04: a SessionStart of another source (a new CLI's
+        // startup consumed late, the other reset's) is no evidence of THIS
+        // reset: the gate stays.
+        let t = typed_at_ns(telemetry::held_rows(&s, "cl")[0].id).expect("its typing time is recorded");
+        command_session_started(&s, "cl", Some("startup"), Some(t + 1));
+        command_session_started(&s, "cl", Some("compact"), Some(t + 1));
+        command_session_started(&s, "cl", None, Some(t + 1));
+        assert_eq!(held_lines(&s, "cl").len(), 2, "only /clear's own source releases it");
+        // Its own source, but produced before or AT the typing (consumed late),
+        // or at an unknown time: not this command's effect. reviewer 16:16: a
+        // prior /clear's hook at S+0.1, this one typed at S+0.5, the same second.
+        command_session_started(&s, "cl", Some("clear"), Some(t - 400_000_000));
+        command_session_started(&s, "cl", Some("clear"), Some(t));
+        command_session_started(&s, "cl", Some("clear"), None);
+        assert_eq!(held_lines(&s, "cl").len(), 2, "an earlier, simultaneous or undated clear is not this one's");
+        // Its SessionStart{clear}, produced after the typing: the reset took
+        // effect; the brief is next.
+        command_session_started(&s, "cl", Some("clear"), Some(t + 300_000_000));
         assert_eq!(held_lines(&s, "cl"), [(brief.to_string(), None)]);
         flush_at(&s, "cl", "t");
         assert_eq!(typed(), ["/clear", brief]);
@@ -574,5 +653,56 @@ mod tests {
             ("lead".to_string(), "[tmm] /clear → dev cancelled before its turn ended".to_string()),
             ("human".to_string(), "[tmm] /compact → dev: no longer waiting for it to take effect".to_string()),
         ]);
+    }
+
+    /// reviewer 16:05: an UNKNOWN baseline never proves a reset. A codex
+    /// pane whose thread cannot be read when `/new` is typed (`pane_thread`
+    /// answers `None` for unreadable as for absent) keeps its gate when a
+    /// thread later becomes readable; only the notice and a cancel end it.
+    #[test]
+    fn a_codex_reset_with_no_known_thread_before_never_takes_effect() {
+        let mut scratch = crate::tmux::Scratch::new("when-idle-codex-unknown");
+        let s = scratch.session("s");
+        agent_with_recipe(&scratch, &s, "cx", "codex", "queue");
+        fake();
+        let home = std::path::Path::new(&scratch.path()).join(".tmm/agents/cx");
+        assert!(crate::backends::Backend::Codex.current_thread(&home).is_none(), "no thread can be read yet");
+        let brief = "[tmm chat 2026-11-06 16:05] lead: @cx the brief";
+        assert_eq!(command_when_idle(&s, "cx", "t", "/new", "m1"), Ok(WhenIdle::Typed));
+        assert!(deliver_as(&s, "cx", "t", brief, "m2", true));
+        let locks = home.join("codex/thread-writer-locks");
+        std::fs::create_dir_all(&locks).unwrap();
+        std::fs::create_dir_all(home.join("codex/sessions")).unwrap();
+        std::fs::write(locks.join("01a1b0c7-0000-7000-8000-00000000000a.lock"), "").unwrap();
+        assert!(crate::backends::Backend::Codex.current_thread(&home).is_some(), "a thread is readable now");
+        check_command_effects();
+        assert_eq!(held_lines(&s, "cx").len(), 2, "no known thread before: no proof of a reset");
+    }
+
+    /// reviewer 16:04's ordering (orchestrator's round 2 pin): a `/compact`
+    /// waiting across a RESTART is typed at the new CLI's idle edge; that CLI's
+    /// own `SessionStart{startup}`, published at its start but consumed only
+    /// after the release, must not retire it. Compaction's own
+    /// `SessionStart{compact}`, published after the typing, does.
+    #[test]
+    fn a_delayed_startup_after_a_restart_does_not_release_a_compact() {
+        let mut scratch = crate::tmux::Scratch::new("when-idle-restart-compact");
+        let s = scratch.session("s");
+        agent_with_recipe(&scratch, &s, "cl", "claude", "");
+        fake();
+        let brief = "[tmm chat 2026-11-06 16:10] lead: @cl the brief";
+        busy(&s, "cl");
+        waiting(command_when_idle(&s, "cl", "t", "/compact", "m1"));
+        assert!(deliver_as(&s, "cl", "t", brief, "m2", false));
+        replace_cli(&s, "cl", None, || Ok(())).unwrap();
+        let started = now_ns();
+        end(&s, "cl");
+        flush_at(&s, "cl", "t");
+        assert_eq!(typed(), ["/compact"], "typed at the new CLI's idle edge");
+        let t = typed_at_ns(telemetry::held_rows(&s, "cl")[0].id).unwrap();
+        command_session_started(&s, "cl", Some("startup"), Some(started));
+        assert_eq!(held_lines(&s, "cl").len(), 2, "the new CLI's startup is no compaction");
+        command_session_started(&s, "cl", Some("compact"), Some(t + 1));
+        assert_eq!(held_lines(&s, "cl"), [(brief.to_string(), None)], "compaction's own SessionStart releases it");
     }
 }

@@ -608,7 +608,11 @@ pub(crate) fn command_echo(name: &str, args: &str) -> Option<String> {
 /// `/clear` fires `SessionStart {source: clear}` ~0.3 s after its Enter, and
 /// `/compact` fires `SessionStart {source: compact}` when compaction ends.
 pub(crate) fn command_effect(name: &str) -> Option<super::CommandEffect> {
-    matches!(name, "/clear" | "/compact").then_some(super::CommandEffect::SessionStart)
+    match name {
+        "/clear" => Some(super::CommandEffect::SessionStart("clear")),
+        "/compact" => Some(super::CommandEffect::SessionStart("compact")),
+        _ => None,
+    }
 }
 
 #[cfg(not(any(target_os = "android", target_os = "ios")))]

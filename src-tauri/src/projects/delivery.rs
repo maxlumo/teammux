@@ -26,6 +26,8 @@ use super::telemetry;
 mod when_idle;
 pub use when_idle::{accepted_line, cancel_command, check_command_effects, command_session_started, command_when_idle, WhenIdle};
 use when_idle::{end_held_commands, release_command, Ending};
+#[cfg(test)]
+pub(crate) use when_idle::note_typed_at;
 
 /// The most characters one combined prompt carries (board #257). Held lines
 /// are packed whole, oldest first, until the next would pass it; the rest

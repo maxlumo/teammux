@@ -1093,7 +1093,7 @@ pub(crate) fn command_echo(_name: &str, _args: &str) -> Option<String> {
 pub(crate) fn command_effect(name: &str) -> Option<super::CommandEffect> {
     match name {
         "/clear" | "/new" => Some(super::CommandEffect::NewThread),
-        "/compact" => Some(super::CommandEffect::SessionStart),
+        "/compact" => Some(super::CommandEffect::SessionStart("compact")),
         _ => None,
     }
 }

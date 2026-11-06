@@ -23,8 +23,11 @@ pub(crate) mod shared;
 /// itself reports, never a pane paint or a timer.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum CommandEffect {
-    /// Its `SessionStart` hook, of any source, after the command was typed.
-    SessionStart,
+    /// Its `SessionStart` hook of exactly this `source` (the one the reset
+    /// produces), after the command was typed. Another source (a new CLI's
+    /// `startup` consumed late, the other reset's) is no evidence of it
+    /// (reviewer's 16:04 finding on #45).
+    SessionStart(&'static str),
     /// The pane's conversation thread changed from the one before it was typed.
     NewThread,
 }

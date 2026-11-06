@@ -72,6 +72,12 @@ struct InboxEnvelope {
     /// resolve of the same `%N` (the server may have been replaced in between).
     #[serde(skip)]
     resolved: Option<(String, String, usize)>,
+    /// When the helper PUBLISHED it, in nanoseconds, from its inbox file name
+    /// (`produced_ns`), set by `consume_file`: when the CLI's event happened,
+    /// not when it was consumed (board #45: a reset's effect must be produced
+    /// strictly after the reset was typed). `None` for an old-format name.
+    #[serde(skip)]
+    produced: Option<u128>,
 }
 
 impl InboxEnvelope {
@@ -392,6 +398,7 @@ impl AgentNotificationHub {
         let mut envelope: InboxEnvelope =
             serde_json::from_slice(&std::fs::read(path).map_err(|e| e.to_string())?)
                 .map_err(|e| format!("invalid envelope: {e}"))?;
+        envelope.produced = produced_ns(path);
         // Whose pane is this, and does it exist THERE? (board #425) ONE tmux response answers
         // both for this envelope alone, and its result is what every later step uses.
         #[cfg(not(any(target_os = "android", target_os = "ios")))]
@@ -550,7 +557,7 @@ impl AgentNotificationHub {
             #[cfg(not(any(target_os = "android", target_os = "ios")))]
             if crate::backends::Backend::parse(&envelope.backend).and_then(|b| b.subagent_thread(&envelope.payload)).is_none() {
                 if let Ok((session, window, _)) = envelope.pane() {
-                    crate::projects::delivery::command_session_started(&session, &window);
+                    crate::projects::delivery::command_session_started(&session, &window, envelope.payload.get("source").and_then(Value::as_str), envelope.produced);
                 }
             }
             return Ok(());
@@ -969,9 +976,22 @@ printf '{{"backend":"%s","pane_id":"%s",%s"payload":%s}}\n' "$backend" "$pane" "
 # The number also rides the file name, zero-padded, so two envelopes of one
 # pane written in the same second are consumed in the order they were made.
 # Without one the name keeps its old `<secs>-<pid>` shape.
+# Board #45: the name's time is the production time to the nanosecond
+# (`<secs>.<9 digits>`, GNU date's %N), what a reset's effect is ordered
+# against. A `date` without %N (it prints `N` literally) keeps whole seconds,
+# which the consumer reads as an unknown production time. No other program is
+# run (the network test above: tmux is the helper's one external program).
+now=$(date +%s.%N 2>/dev/null)
+case "$now" in
+  *[!0-9.]*|.*|*.|*.*.*|"") now=$(date +%s) ;;
+esac
+case "${{now#*.}}" in
+  "$now"|[0-9][0-9][0-9][0-9][0-9][0-9][0-9][0-9][0-9]) ;;
+  *) now=$(date +%s) ;;
+esac
 case "${{TMM_HOOK_SEQ:-}}" in
-  ''|*[!0-9]*) name="$(date +%s)-$$" ;;
-  *) name="$(date +%s)-$(printf '%020d' "$TMM_HOOK_SEQ")-$$" ;;
+  ''|*[!0-9]*) name="$now-$$" ;;
+  *) name="$now-$(printf '%020d' "$TMM_HOOK_SEQ")-$$" ;;
 esac
 mv "$tmp" "$inbox/$name.json" || exit $fail
 trap - EXIT
@@ -1270,9 +1290,23 @@ fn inbox_order(path: &Path) -> (u64, u64, String) {
     let name = path.file_name().and_then(|n| n.to_str()).unwrap_or("").to_string();
     let stem = name.strip_suffix(".json").unwrap_or(&name);
     let parts: Vec<&str> = stem.split('-').collect();
-    let secs = parts.first().and_then(|s| s.parse::<u64>().ok()).unwrap_or(0);
+    // `<secs>` or, since board #45, `<secs>.<nanos>`: the second orders; the
+    // name (zero-padded nanoseconds) breaks a tie within it.
+    let secs = parts.first().and_then(|s| s.split('.').next()).and_then(|s| s.parse::<u64>().ok()).unwrap_or(0);
     let seq = if parts.len() == 3 { parts[1].parse::<u64>().unwrap_or(0) } else { 0 };
     (secs, seq, name)
+}
+
+/// When the helper PUBLISHED an inbox file, in nanoseconds since the epoch
+/// (board #45), from its name's `<secs>.<9 digits>`; `None` for the older
+/// whole-second shape or anything else: an unknown production time.
+fn produced_ns(path: &Path) -> Option<u128> {
+    let name = path.file_name()?.to_str()?;
+    let (secs, frac) = name.split('-').next()?.split_once('.')?;
+    if frac.len() != 9 || !frac.bytes().all(|b| b.is_ascii_digit()) || secs.is_empty() || !secs.bytes().all(|b| b.is_ascii_digit()) {
+        return None;
+    }
+    Some(secs.parse::<u128>().ok()? * 1_000_000_000 + frac.parse::<u128>().ok()?)
 }
 
 /// PreToolUse/PostToolUse across backends → `(tool name, detail)`
@@ -1691,6 +1725,20 @@ mod tests {
             "oldest first, non-json ignored"
         );
         assert!(inbox_files(&dir.join("missing")).is_empty(), "no inbox yet is not an error");
+        // Board #45: the nanosecond name orders within its second, and is the
+        // production time; the old whole-second name is an unknown one.
+        let ns = crate::config::test_scratch("tmm-inbox-ns");
+        std::fs::create_dir_all(&ns).unwrap();
+        for name in ["1755300002.500000000-3.json", "1755300002.100000000-9.json", "1755300001-4.json"] {
+            std::fs::write(ns.join(name), "{}").unwrap();
+        }
+        let order: Vec<String> = inbox_files(&ns).iter().map(|p| p.file_name().unwrap().to_string_lossy().to_string()).collect();
+        assert_eq!(order, ["1755300001-4.json", "1755300002.100000000-9.json", "1755300002.500000000-3.json"]);
+        assert_eq!(produced_ns(std::path::Path::new("1755300002.100000000-9.json")), Some(1_755_300_002_100_000_000));
+        assert_eq!(produced_ns(std::path::Path::new("1755300002.100000000-00000000000000000004-9.json")), Some(1_755_300_002_100_000_000), "with a hook sequence");
+        assert_eq!(produced_ns(std::path::Path::new("1755300001-4.json")), None, "old format: unknown");
+        assert_eq!(produced_ns(std::path::Path::new("1755300001.N-4.json")), None, "a date without %N: unknown");
+        let _ = std::fs::remove_dir_all(&ns);
         let _ = std::fs::remove_dir_all(&dir);
     }
 
@@ -1704,6 +1752,7 @@ mod tests {
             launch: None,
             resolved: None,
             restore: None,
+            produced: None,
         };
         assert_eq!(
             normalize(&envelope(
@@ -1811,6 +1860,7 @@ mod tests {
             launch: None,
             resolved: None,
             restore: None,
+            produced: None,
         };
         for backend in ["claude", "codex"] {
             assert!(
@@ -1842,6 +1892,7 @@ mod tests {
             launch: None,
             resolved: None,
             restore: None,
+            produced: None,
         };
         assert!(is_user_prompt_submit(&envelope(
             json!({"hook_event_name":"UserPromptSubmit","prompt":"hi","session_id":"0199-abc"})
@@ -2313,7 +2364,7 @@ mod tests {
     #[test]
     fn each_measured_backends_provider_failure_normalises_with_its_text() {
         let norm = |backend: &str, payload: Value| {
-            normalize(&InboxEnvelope { backend: backend.into(), pane_id: "%1".into(), payload, tmm_tmux: None, launch: None, resolved: None, restore: None }).unwrap()
+            normalize(&InboxEnvelope { backend: backend.into(), pane_id: "%1".into(), payload, tmm_tmux: None, launch: None, resolved: None, restore: None, produced: None }).unwrap()
         };
         let fake = "sk-FAKE0123456789abcdefFAKE0123456789";
         let n = norm("claude", json!({"hook_event_name":"StopFailure","error":"authentication_failed","last_assistant_message":format!("Please run /login · API Error: 401 invalid API key {fake}")}));
@@ -2654,15 +2705,34 @@ mod tests {
             std::fs::write(root.join("inbox").join(name), serde_json::to_vec(&json!({"backend": "claude", "pane_id": pane_id, "payload": payload})).unwrap()).unwrap();
         };
         let tm = crate::projects::telemetry::held_rows;
-        put("0-start.json", json!({"hook_event_name": "SessionStart", "source": "startup", "session_id": "s0"}));
+        let now = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap().as_secs();
+        // Names as the helper writes them: `<secs>.<nanos>-…` (board #45 round 2).
+        let at = |secs: u64, frac: u32, n: u32| format!("{secs}.{frac:09}-{n}.json");
+        put(&at(now - 5, 0, 0), json!({"hook_event_name": "SessionStart", "source": "startup", "session_id": "s0"}));
         hub.consume_inbox();
         let id = crate::projects::telemetry::record_held_command(&session, "cl", "/clear", "m1").unwrap();
         crate::projects::telemetry::record_held(&session, "cl", "[tmm chat 2026-11-06 09:00] lead: @cl the brief", 0, "m2").unwrap();
-        put("1-start.json", json!({"hook_event_name": "SessionStart", "source": "startup", "session_id": "s1"}));
+        put(&at(now - 4, 0, 1), json!({"hook_event_name": "SessionStart", "source": "startup", "session_id": "s1"}));
         hub.consume_inbox();
         assert_eq!(tm(&session, "cl").len(), 2, "a command still waiting is no reset that took effect");
         assert!(crate::projects::telemetry::set_command_typed(id, true).unwrap());
-        put("2-start.json", json!({"hook_event_name": "SessionStart", "source": "clear", "session_id": "s2"}));
+        // Typed at S+0.5 (reviewer 16:16's example, S = now).
+        crate::projects::delivery::note_typed_at(id, now as u128 * 1_000_000_000 + 500_000_000);
+        // reviewer 16:04: a new CLI's startup, consumed late (published 3 s
+        // before the typing, by its file name), is not /clear's.
+        put(&at(now - 3, 0, 2), json!({"hook_event_name": "SessionStart", "source": "startup", "session_id": "s2"}));
+        hub.consume_inbox();
+        assert_eq!(tm(&session, "cl").len(), 2, "another source leaves the gate");
+        // The right source, published at S+0.1 by a PRIOR /clear, in the SAME
+        // second as this one's typing, consumed only now: not this one's.
+        put(&at(now, 100_000_000, 4), json!({"hook_event_name": "SessionStart", "source": "clear", "session_id": "s4"}));
+        hub.consume_inbox();
+        assert_eq!(tm(&session, "cl").len(), 2, "an earlier hook of the same second leaves the gate");
+        // An old-format name: its production time is unknown.
+        put(&format!("{}-5.json", now + 1), json!({"hook_event_name": "SessionStart", "source": "clear", "session_id": "s5"}));
+        hub.consume_inbox();
+        assert_eq!(tm(&session, "cl").len(), 2, "an unknown production time leaves the gate");
+        put(&at(now, 800_000_000, 3), json!({"hook_event_name": "SessionStart", "source": "clear", "session_id": "s3"}));
         hub.consume_inbox();
         let left: Vec<String> = tm(&session, "cl").into_iter().map(|r| r.line).collect();
         assert!(!left.iter().any(|l| l == "/clear"), "the typed reset took effect: {left:?}");
@@ -2959,7 +3029,7 @@ mod tests {
         let (s, w) = (format!("quality-{}", uuid::Uuid::new_v4()), "dev");
         let stop = |payload: Value| {
             record_prompt(&s, w, "[tmm chat 2026-10-15 14:00] lead: @dev go on");
-            let envelope = InboxEnvelope { backend: "kiro".into(), pane_id: "%1".into(), payload, tmm_tmux: None, launch: None, resolved: None, restore: None };
+            let envelope = InboxEnvelope { backend: "kiro".into(), pane_id: "%1".into(), payload, tmm_tmux: None, launch: None, resolved: None, restore: None, produced: None };
             let n = normalize_in(&envelope, Some(&home)).unwrap();
             record_notification_with(&s, w, &n.kind, n.quality);
             n.quality
@@ -6158,6 +6228,9 @@ mod tests {
         assert_eq!(files.len(), 1, "the envelope was published ({body:?}, {took:?}, status {status:?}): {listing:?}");
         let v: Value = serde_json::from_slice(&std::fs::read(&files[0]).unwrap()).unwrap();
         assert_eq!(v["payload"]["hook_event_name"], "stop");
+        // Board #45: the name carries its production time to the nanosecond
+        // (this host's GNU date has %N).
+        assert!(produced_ns(&files[0]).is_some(), "a nanosecond production time: {listing:?}");
         assert!(std::fs::read_dir(root.join("inbox")).unwrap().flatten().all(|e| !e.file_name().to_string_lossy().contains("probe")), "no probe file left");
         // The probe is gone and reaped. Reaped matters: signal 0 still finds a zombie. The group still holds
         // its members' id while any is alive, so a leak is killed through it and nothing else.
