@@ -68,7 +68,8 @@ ENTRYPOINT ["tmm-e2e"]
 # --- 4. the Docker LIVE rig (board #55): real agent CLIs, no host --------------
 # The ONE place a live check with a real agent CLI runs (owner, 2026-11-06 15:07: no test on this
 # host). `docker build --target live`. The CLIs are pinned to the versions measured on the host
-# (claude 2.1.319, codex-cli 0.166.0, omp 18.15.0); kiro-cli 2.37.1 and kimi 2.5.1 have no
+# (claude 2.1.319, codex-cli 0.166.0, omp 18.15.0 with the Bun 1.4.4 its package names in
+# `engines`, `bun >=1.4.4`); kiro-cli 2.37.1 and kimi 2.5.1 have no
 # public pinned install measured yet and are NOT faked here (#55 notes). No credential is baked in:
 # they arrive by NAME at `docker run` (scripts/live-docker.mjs). The marker lets scratch-env run.
 FROM node:22-trixie-slim AS live
@@ -76,7 +77,7 @@ RUN apt-get update \
     && apt-get install -y --no-install-recommends tmux zsh ca-certificates procps git python3 \
     && rm -rf /var/lib/apt/lists/*
 RUN npm install -g --no-fund --no-audit \
-      @anthropic-ai/claude-code@2.1.319 @openai/codex@0.166.0 @oh-my-pi/pi-coding-agent@18.15.0 \
+      @anthropic-ai/claude-code@2.1.319 @openai/codex@0.166.0 @oh-my-pi/pi-coding-agent@18.15.0 bun@1.4.4 \
     && npm cache clean --force
 RUN usermod -l tmm -d /home/tmm -m node && groupmod -n tmm node \
     && install -d -o tmm -g tmm /work \

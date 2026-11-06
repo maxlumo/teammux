@@ -39,7 +39,9 @@ function stateOf(p, bad) {
   }
 }
 
-const isLink = (p) => { try { return lstatSync(p).isSymbolicLink(); } catch { return false; } };
+/** Whether `p` is a link; one that cannot be lstat'ed (a listable but unsearchable dir, validator-2
+ * on e03f402a) is pushed to `bad`, never taken for "not a link" (#48: unknown is not safe). */
+const isLink = (p, bad) => { try { return lstatSync(p).isSymbolicLink(); } catch (e) { if (e.code !== 'ENOENT') bad.push(`${p}: ${e.code ?? e.message}`); return false; } };
 
 /** The names in `dir` that `keep` accepts; [] when it is absent; pushed to `bad` when unreadable. */
 function listed(dir, keep, bad) {
@@ -58,7 +60,7 @@ export function hostSnapshot(home) {
     ...listed(join(home, '.codex'), (n) => n.endsWith('.config.toml'), bad).map((n) => `.codex/${n}`),
     // Every LINK in ~/.local/bin (orchestrator 15:15): a CLI's updater relinks there; the user's
     // own regular files there are theirs to install and change.
-    ...listed(join(home, '.local', 'bin'), (n) => isLink(join(home, '.local', 'bin', n)), bad).map((n) => `.local/bin/${n}`),
+    ...listed(join(home, '.local', 'bin'), (n) => isLink(join(home, '.local', 'bin', n), bad), bad).map((n) => `.local/bin/${n}`),
   ];
   const out = {};
   for (const rel of [...new Set(paths)]) {

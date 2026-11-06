@@ -107,3 +107,17 @@ test('only the staged credential files are mounted, each read-only, never a dire
     assert.throws(() => stagedCredentials(home), /config\.toml.*not a regular file/su, 'a link is never followed into a mount');
   } finally { rmSync(root, { recursive: true, force: true }); }
 });
+
+// validator-2 on e03f402a: a listable but unsearchable ~/.local/bin (0400) let readdir succeed and
+// every lstat fail, and the failed lstat was taken for "not a link", so its links vanished from both
+// snapshots and no change could be seen.
+test('a listable but unsearchable link dir fails by path, never hides its links (#55)', { skip: process.getuid?.() === 0 ? 'root reads everything' : false }, () => {
+  const root = mkdtempSync(join(tmpdir(), 'live-docker-test-'));
+  try {
+    const home = fakeHome(root);
+    chmodSync(join(home, '.local', 'bin'), 0o400);
+    try {
+      assert.throws(() => hostSnapshot(home), (e: Error) => e.message.includes(join(home, '.local/bin/claude')) && e.message.includes('EACCES'));
+    } finally { chmodSync(join(home, '.local', 'bin'), 0o755); }
+  } finally { rmSync(root, { recursive: true, force: true }); }
+});

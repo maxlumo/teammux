@@ -715,7 +715,10 @@ pnpm run test:live:docker            # check `smoke`: one codex turn and one cla
 - **The image** is `docker/validator/Dockerfile`'s `live` target: this
   checkout's `server` and `tmm` built inside, and the CLIs pinned to the
   versions measured on this host: claude 2.1.319, codex-cli 0.166.0, omp
-  18.15.0 (npm). kiro-cli 2.37.1 and kimi 2.5.1 have no public pinned install
+  18.15.0 (npm), with Bun 1.4.4 for omp (its package's `engines` names
+  `bun >=1.4.4`; round 1, validator-2: without it `omp --version` failed with
+  `env: bun: No such file or directory`). Measured in the built image: each
+  `--version` answers its pinned version. kiro-cli 2.37.1 and kimi 2.5.1 have no public pinned install
   measured, so they are not in the image and nothing fakes them. Every CLI's
   no-update switch is set. The image carries `/etc/teammux-live-rig`, the
   only place `scripts/scratch-env.mjs` agrees to run (with `/.dockerenv`); on
@@ -736,7 +739,9 @@ pnpm run test:live:docker            # check `smoke`: one codex turn and one cla
   snapshots an ALLOW-LIST of the user's config, credential and link paths
   (the files above, `~/.claude.json`, `~/.config/teammux/config.toml` and
   every link in `~/.local/bin` by its target) and fails, naming each path, on
-  any change. An unreadable path fails too. An allow-list, because the user's
+  any change. An unreadable path fails too, and so does an entry of a dir that
+  can be listed but not searched (round 1, validator-2: its links had vanished
+  from both snapshots). An allow-list, because the user's
   own CLIs write their sessions and history meanwhile.
 - **Measured** 2026-11-06 15:3x: the managed codex and the managed claude each
   answered `ready` inside the container, and all 24 host paths were unchanged.
