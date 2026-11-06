@@ -701,7 +701,19 @@ fn secret_value_start(chars: &[char], after: usize) -> Option<usize> {
     }
     Some(j)
 }
-const SECRET_KEYS: [&str; 9] = ["key", "api_key", "apikey", "token", "access_token", "secret", "password", "sig", "signature"];
+/// The secret words a key name may END with (orchestrator, round 2): a
+/// name is normalised first (`secret_name`), so `x-api-key`, `X-Api-Key`,
+/// `OPENAI_API_KEY` and `app.secret` all end with one, while `keyboard` and
+/// `monkey` do not (the word must be the whole name or follow a `_`).
+const SECRET_WORDS: [&str; 13] = ["api_key", "apikey", "key", "token", "access_token", "refresh_token", "secret", "client_secret", "password", "passwd", "authorization", "sig", "signature"];
+
+/// Whether a key NAME (letters, digits, `_`, `-`, `.`) names a secret:
+/// lowercased, `-` and `.` read as `_`, and a secret word as the whole
+/// name or its last `_`-joined part(s).
+fn secret_name(name: &str) -> bool {
+    let n: String = name.chars().map(|c| if matches!(c, '-' | '.') { '_' } else { c.to_ascii_lowercase() }).collect();
+    SECRET_WORDS.iter().any(|w| n == *w || n.ends_with(&format!("_{w}")))
+}
 
 /// Masks what is shaped like a credential in a provider's error text
 /// (orchestrator, board #39): a URL's query string is dropped, `sk-…`, the
@@ -759,10 +771,20 @@ fn redact(text: &str) -> String {
                 continue;
             }
         }
-        if boundary {
-            // `key=v`, `key="v"`, `key: v` (YAML) and `"key":"v"` (JSON), any case.
-            if let Some(start) = SECRET_KEYS.iter().filter(|k| at(i, k)).find_map(|k| secret_value_start(&chars, i + k.len())) {
+        // A key NAME at a name boundary, followed by an assignment: `k=v`,
+        // `k="v"`, `k: v` (a header or YAML) and `"k":"v"` (JSON).
+        let name_char = |c: char| c.is_ascii_alphanumeric() || matches!(c, '_' | '-' | '.');
+        if c.is_ascii_alphabetic() && (i == 0 || !name_char(chars[i - 1])) {
+            let name_end = (i..chars.len()).find(|&j| !name_char(chars[j])).unwrap_or(chars.len());
+            let name: String = chars[i..name_end].iter().collect();
+            if let Some(start) = secret_name(&name).then(|| secret_value_start(&chars, name_end)).flatten() {
                 out.extend(&chars[i..start]);
+                // `Authorization: Bearer <t>`: the scheme stays and its
+                // credential is masked by the scheme rule next.
+                if ["bearer ", "basic "].iter().any(|w| at(start, w)) {
+                    i = start;
+                    continue;
+                }
                 let end = (start..chars.len()).find(|&j| chars[j].is_whitespace() || matches!(chars[j], '&' | '"' | '\'' | ',' | ';' | ')' | '}')).unwrap_or(chars.len());
                 if end > start {
                     out.push_str(REDACTED);
@@ -853,6 +875,31 @@ mod tests {
             r#"413 POST https://gw.example/v1/messages failed: {"error":{"message":"too large","api_key": "<REDACTED>"}} Authorization: Basic <REDACTED> Bearer <REDACTED>"#, "one combined payload");
         let got = provider_failure(Some(401), None, "401 Unauthorized: Authentication failed").unwrap();
         assert_eq!(got, "401 Unauthorized: Authentication failed", "a word after a colon is not a value");
+        // Round 2 (validator's x-api-key, orchestrator: close the class): a
+        // key name is normalised (lowercase, '-' and '.' to '_') and a secret
+        // word at the END of a compound name counts, in every form.
+        let v = "AbCd1234EfGh5678";
+        for (raw, want) in [
+            (format!("401 x-api-key: {v} rejected"), "401 x-api-key: <REDACTED> rejected".to_string()),
+            (format!("401 X-Api-Key={v} rejected"), "401 X-Api-Key=<REDACTED> rejected".to_string()),
+            (format!(r#"401 {{"x-api-key":"{v}"}}"#), r#"401 {"x-api-key":"<REDACTED>"}"#.to_string()),
+            (format!("401 headers:\n  x-api-key: {v}\n"), "401 headers:\n  x-api-key: <REDACTED>".to_string()),
+            (format!("401 x-goog-api-key: {v}"), "401 x-goog-api-key: <REDACTED>".to_string()),
+            (format!("401 OPENAI_API_KEY={v}"), "401 OPENAI_API_KEY=<REDACTED>".to_string()),
+            (format!("401 anthropic-api-key: {v}"), "401 anthropic-api-key: <REDACTED>".to_string()),
+            (format!("401 refresh_token={v} client_secret: {v} passwd={v}"), "401 refresh_token=<REDACTED> client_secret: <REDACTED> passwd=<REDACTED>".to_string()),
+            (format!("401 app.secret={v}"), "401 app.secret=<REDACTED>".to_string()),
+        ] {
+            assert_eq!(provider_failure(Some(401), None, &raw).unwrap(), want, "{raw}");
+        }
+        // The false-positive guard: a secret word inside another word is not one.
+        let got = provider_failure(Some(401), None, "401 keyboard: ok monkey=1 turnkey solution, tokens: 12").unwrap();
+        assert_eq!(got, "401 keyboard: ok monkey=1 turnkey solution, tokens: 12");
+        // The scheme after `Authorization:` is kept and its credential masked.
+        let got = provider_failure(Some(401), None, &format!("401 authorization: Bearer {v}")).unwrap();
+        assert_eq!(got, "401 authorization: Bearer <REDACTED>");
+        let got = provider_failure(Some(401), None, &format!("401 Authorization: {v}")).unwrap();
+        assert_eq!(got, "401 Authorization: <REDACTED>", "a bare credential after the header name");
         let hex = "0123456789abcdef0123456789abcdef01234567";
         let got = provider_failure(Some(401), None, &format!("401 credential {hex} expired (Request ID: 6f1c2d3e-aaaa-4bbb-8ccc-0123456789ab)")).unwrap();
         assert_eq!(got, "401 credential <REDACTED> expired (Request ID: 6f1c2d3e-aaaa-4bbb-8ccc-0123456789ab)", "a long run goes; a request id stays");

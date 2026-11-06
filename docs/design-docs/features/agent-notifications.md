@@ -406,11 +406,19 @@ sentence ("invalid API key", "insufficient credit", "request too large",
 an ordinary failed end with no notice (#354). The text is redacted before
 anything stores or sends it (orchestrator's ruling, 07:48). A URL's query
 string and its userinfo (`user:pass@`) are dropped. `sk-…`, the token after
-`Bearer` or `Basic`, the value of `key`, `token`, `api_key` and the like in
-any case and in every assignment form (`key=v`, `key="v"`, YAML `key: v`, JSON
-`"key":"v"`), and any run of 32 or more key characters holding letters and
-digits become `<REDACTED>` (the JSON, colon, Basic and userinfo forms were
-validator's round-0 P2: credential-shaped text that reached the room). The status, the CLI's error
+`Bearer` or `Basic`, the value of a SECRET KEY NAME in every assignment form
+(`k=v`, `k="v"`, a header or YAML `k: v`, JSON `"k":"v"`), and any run of 32
+or more key characters holding letters and digits become `<REDACTED>`. A key
+name is normalised (lowercase, `-` and `.` read as `_`) and counts when it is,
+or ends with `_` plus, one of `api_key`, `apikey`, `key`, `token`,
+`access_token`, `refresh_token`, `secret`, `client_secret`, `password`,
+`passwd`, `authorization`, `sig`, `signature`. So `x-api-key`, `X-Api-Key`,
+`x-goog-api-key`, `OPENAI_API_KEY` and `app.secret` count, and `keyboard`,
+`monkey` and `turnkey` do not. After `Authorization:` a `Bearer`/`Basic`
+scheme word stays and its credential is masked. Validator's round-0 P2 was
+the JSON, colon, Basic and userinfo forms. Its round-1 P2 was `x-api-key`,
+Anthropic's own key header, which the orchestrator ruled a class to close
+rather than one more shape. The status, the CLI's error
 kind and the provider's sentence stay, and so does a request id (a UUID's
 groups are short). The text is cut at 300 characters.
 
