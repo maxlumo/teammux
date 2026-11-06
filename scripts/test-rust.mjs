@@ -87,10 +87,6 @@ export function cargoArgs(extra = []) {
   ];
 }
 
-/** The environment the cargo process gets: the caller's, minus the two
- * variables that point at a real tmux, every `TMM_*` (the caller's gateway,
- * identity and state) and `TOKEN` (the credential Config::load reads), plus
- * TMUX_TMPDIR = `dir` and the three XDG roots under it. */
 /** Each installed agent CLI's switch that stops it updating itself (board #48, measured
  * 2026-11-06). A CLI started under a private XDG_DATA_HOME but the real HOME installs its
  * update into the private dir and relinks the REAL ~/.local/bin there: claude 2.1.319 did
@@ -107,6 +103,10 @@ export function cargoArgs(extra = []) {
  * had, because the caller's value is exactly what must not leak in. */
 export const UPDATE_SWITCHES = Object.freeze({ DISABLE_AUTOUPDATER: '1', DISABLE_UPDATES: '1', KIMI_CODE_NO_AUTO_UPDATE: '1', KIRO_NO_AUTO_UPDATE: '1' });
 
+/** The environment the cargo process gets: the caller's, minus the two
+ * variables that point at a real tmux, every `TMM_*` (the caller's gateway,
+ * identity and state) and `TOKEN` (the credential Config::load reads), plus
+ * TMUX_TMPDIR = `dir`, the three XDG roots under it, and every `UPDATE_SWITCHES` entry. */
 export function isolatedEnv(base, dir) {
   const env = { ...base };
   delete env.TMUX;
