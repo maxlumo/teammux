@@ -38,13 +38,15 @@ pub struct Observed {
 /// `AgentNotificationHub` (the hooks already carry `session_id`); the tests
 /// pass a stub. A trait keeps `projects` from naming the notification types.
 pub trait AgentSessions {
-    fn agent_session_for(&self, session: &str, window: &str) -> Option<String>;
+    /// The conversation `backend` last reported for the window, never another
+    /// CLI's (board #46 round 1).
+    fn agent_session_for(&self, session: &str, window: &str, backend: &str) -> Option<String>;
 }
 
 /// No hub available (tests, or a capture that does not care).
 pub struct NoSessions;
 impl AgentSessions for NoSessions {
-    fn agent_session_for(&self, _session: &str, _window: &str) -> Option<String> {
+    fn agent_session_for(&self, _session: &str, _window: &str, _backend: &str) -> Option<String> {
         None
     }
 }
@@ -72,7 +74,7 @@ pub fn observe(session: &str, project_path: &str, sessions: &dyn AgentSessions) 
         }
         let mut observed = observed_from(pane, project_path);
         if observed.kind == SlotKind::Agent {
-            observed.agent_session_id = sessions.agent_session_for(session, &pane.window_name);
+            observed.agent_session_id = observed.command.as_deref().and_then(|backend| sessions.agent_session_for(session, &pane.window_name, backend));
         }
         out.push((pane.window, observed));
     }

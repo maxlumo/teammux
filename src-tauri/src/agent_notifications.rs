@@ -89,7 +89,9 @@ struct State {
     /// carried one. In memory only: the durable copy is the project slot that
     /// the capturer stamps with it (`src-tauri/src/projects`), because that is
     /// what has to survive the reboot which loses tmux in the first place.
-    sessions: HashMap<String, String>,
+    /// The id is kept with the backend whose hook reported it (board #46
+    /// round 1): a window that now runs another CLI has no conversation here.
+    sessions: HashMap<String, (String, String)>,
     /// window key → senders of every addressed request the current turn
     /// carries, in arrival order (#256: a later input JOINS the edge, it
     /// never replaces it). Parsed from the stamped input at
@@ -276,14 +278,19 @@ impl AgentNotificationHub {
 
     /// The agent conversation id last reported by a hook in this tmux window,
     /// if any. Used by the project capturer to stamp the slot, so `up` can
-    /// resume that conversation rather than open a fresh one.
-    pub fn agent_session_for(&self, session: &str, window: &str) -> Option<String> {
+    /// resume that conversation rather than open a fresh one. Only `backend`'s
+    /// own: after a switch the window's last id is the OLD CLI's until the new
+    /// one reports, and a capture in between stamped it under the new backend,
+    /// so the next restart resumed it there (validator-2 F1 on 3ae66da7:
+    /// `omp --resume <codex id>`, a bare shell).
+    pub fn agent_session_for(&self, session: &str, window: &str, backend: &str) -> Option<String> {
         self.state
             .lock()
             .ok()?
             .sessions
             .get(&window_key(session, window))
-            .cloned()
+            .filter(|(b, _)| b == backend)
+            .map(|(_, id)| id.clone())
     }
 
     pub async fn run(self: Arc<Self>) {
@@ -529,7 +536,7 @@ impl AgentNotificationHub {
             // between must resume the NEW conversation, never the cleared one.
             if let Some(id) = envelope.payload.as_object().and_then(|p| string_field(p, &["session_id", "sessionId"])).filter(|id| !id.trim().is_empty()) {
                 let (session, window, _) = envelope.pane()?;
-                self.remember_session(&session, &window, id);
+                self.remember_session(&session, &window, &envelope.backend, id);
             }
             return Ok(());
         }
@@ -758,7 +765,7 @@ impl AgentNotificationHub {
             post,
             reply_to,
             flush: matches!(normalized.kind.as_str(), "completed" | "failed"),
-            agent_session_id: normalized.agent_session_id,
+            agent_session_id: normalized.agent_session_id.map(|id| (envelope.backend.clone(), id)),
         })
     }
 
@@ -793,16 +800,17 @@ impl AgentNotificationHub {
             crate::projects::delivery::flush(&tail.session, &tail.window);
         }
         let EndTail { session, window, agent_session_id, .. } = tail;
-        if let Some(id) = agent_session_id {
-            self.remember_session(&session, &window, id);
+        if let Some((backend, id)) = agent_session_id {
+            self.remember_session(&session, &window, &backend, id);
         }
         Ok(())
     }
 
     /// The ONE place a window's conversation id is recorded (board #28): a
     /// turn's end and a conversation's start. A restart resumes it.
-    fn remember_session(&self, session: &str, window: &str, id: String) {
-        self.state.lock().unwrap().sessions.insert(window_key(session, window), id);
+    /// Kept with the backend whose hook reported it (board #46 round 1).
+    fn remember_session(&self, session: &str, window: &str, backend: &str, id: String) {
+        self.state.lock().unwrap().sessions.insert(window_key(session, window), (backend.to_string(), id));
     }
 
     /// The body a managed agent's final reply is posted with, if any: only
@@ -1007,7 +1015,8 @@ struct EndTail {
     post: Option<String>,
     reply_to: Vec<String>,
     flush: bool,
-    agent_session_id: Option<String>,
+    /// (backend, conversation id) of the hook that ended the turn.
+    agent_session_id: Option<(String, String)>,
 }
 
 impl From<String> for Consume {
@@ -1210,8 +1219,8 @@ fn crash_at(point: &str) -> bool {
 /// names the notification types — it only knows its own trait.
 #[cfg(not(any(target_os = "android", target_os = "ios")))]
 impl crate::projects::capture::AgentSessions for AgentNotificationHub {
-    fn agent_session_for(&self, session: &str, window: &str) -> Option<String> {
-        AgentNotificationHub::agent_session_for(self, session, window)
+    fn agent_session_for(&self, session: &str, window: &str, backend: &str) -> Option<String> {
+        AgentNotificationHub::agent_session_for(self, session, window, backend)
     }
 }
 
@@ -1628,7 +1637,7 @@ mod tests {
         assert!(!root.join("unread.json").exists(), "legacy file removed at load");
         assert!(root.join("inbox").is_dir(), "the hook inbox is still provisioned");
         // The surviving surfaces still answer.
-        assert!(hub.agent_session_for("none", "w0").is_none());
+        assert!(hub.agent_session_for("none", "w0", "kiro").is_none());
         let _ = std::fs::remove_dir_all(root);
     }
 
@@ -2078,7 +2087,7 @@ mod tests {
             Some(vec!["claude".to_string()]),
             "the child's brief must not replace the parent's reply edge"
         );
-        assert!(!st.sessions.contains_key(&window_key(&session, &pane.window_name)) || st.sessions[&window_key(&session, &pane.window_name)] == "01a08e9b-root");
+        assert!(!st.sessions.contains_key(&window_key(&session, &pane.window_name)) || st.sessions[&window_key(&session, &pane.window_name)].1 == "01a08e9b-root");
         drop(st);
         let events = crate::projects::telemetry::recent_events(&session, 0);
         let prompts: Vec<_> = events.iter().filter(|e| e.kind == "prompt").collect();
@@ -2537,10 +2546,21 @@ mod tests {
         let new = "1cdd34e3-d137-41eb-af10-9fbf2fd9681a";
         put("1-stop.json", json!({"hook_event_name": "Stop", "session_id": old, "last_assistant_message": "otter"}));
         hub.consume_inbox();
-        assert_eq!(hub.agent_session_for(&session, &win).as_deref(), Some(old), "a turn's end records its conversation");
+        assert_eq!(hub.agent_session_for(&session, &win, "claude").as_deref(), Some(old), "a turn's end records its conversation");
         put("2-start.json", json!({"hook_event_name": "SessionStart", "source": "clear", "session_id": new}));
         hub.consume_inbox();
-        assert_eq!(hub.agent_session_for(&session, &win).as_deref(), Some(new), "the cleared conversation is no longer the one a restart resumes");
+        assert_eq!(hub.agent_session_for(&session, &win, "claude").as_deref(), Some(new), "the cleared conversation is no longer the one a restart resumes");
+        // Board #46 round 1 (validator-2 F1): the id is claude's. A window now
+        // running another CLI has no conversation here until that CLI reports one.
+        assert_eq!(hub.agent_session_for(&session, &win, "omp"), None, "claude's id is not omp's");
+        let put_as = |name: &str, backend: &str, payload: Value| {
+            std::fs::write(root.join("inbox").join(name), serde_json::to_vec(&json!({"backend": backend, "pane_id": pane_id, "payload": payload})).unwrap()).unwrap();
+        };
+        let omp_id = "01a1b066-0000-7000-8000-000000000001";
+        put_as("3-start.json", "omp", json!({"hook_event_name": "SessionStart", "source": "startup", "session_id": omp_id}));
+        hub.consume_inbox();
+        assert_eq!(hub.agent_session_for(&session, &win, "omp").as_deref(), Some(omp_id), "omp's own report is omp's");
+        assert_eq!(hub.agent_session_for(&session, &win, "claude"), None, "and the window's claude id is gone with claude");
         let _ = std::process::Command::new("tmux").args(["kill-session", "-t", &session]).status();
         let _ = std::fs::remove_dir_all(&ws);
         let _ = std::fs::remove_dir_all(root);
