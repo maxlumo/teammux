@@ -717,14 +717,38 @@ pub(crate) fn render_codex(
 /// so a restart's ready edge never fired on it (round 1, validator P1-a).
 /// Board #47: a resuming codex paints that placeholder while still
 /// `Resuming session…` and drops an Enter typed then (7/7 saved failures).
-/// Not ready while it shows: typing only once it is gone submitted 15/15
-/// mid-turn resumes, 6/6 idle resumes and a fresh start.
+/// Not ready while its native loading block shows (`resuming`): typing only
+/// once it is gone submitted 15/15 mid-turn resumes, 6/6 idle resumes and a
+/// fresh start.
+/// A resuming codex's NATIVE loading block (board #47 round 1), read by
+/// structure, measured on 0.166.0 in every frame of two resumes: the last
+/// composer line (`› ` at column 0) has directly above it, blank lines
+/// aside, `Resuming session…`, the header's second line (`loading` or the
+/// folder) and the `>_ OpenAI Codex (v…)` header; and directly below it, no
+/// status line: the next line with text is `? for shortcuts`. A loaded
+/// composer has its status line (`<model> · <folder>…`) there, so even a
+/// reply that reproduces the whole block is not read as loading, and the
+/// phrase quoted anywhere else is just transcript (the reviewer's P1-R1,
+/// reproduced live by validator: a substring held a loaded codex forever).
+fn resuming(screen: &str) -> bool {
+    let lines: Vec<&str> = screen.lines().collect();
+    let Some(composer) = lines.iter().rposition(|l| l.starts_with("\u{203a} ")) else { return false };
+    let mut above = lines[..composer].iter().rev().filter(|l| !l.trim().is_empty());
+    let block = (above.next(), above.next(), above.next());
+    let native = matches!(block, (Some(resume), Some(second), Some(header))
+        if resume.trim() == "Resuming session\u{2026}"
+            && second.starts_with("     ") && !second.trim().is_empty()
+            && header.trim_start().starts_with(">_ OpenAI Codex (v"));
+    let below = lines[composer + 1..].iter().find(|l| !l.trim().is_empty());
+    native && below.is_some_and(|l| l.trim_start().starts_with("? for shortcuts"))
+}
+
 #[cfg(not(any(target_os = "android", target_os = "ios")))]
 pub(crate) fn startup_confirmation() -> Option<shared::StartupConfirmation> {
     Some(shared::StartupConfirmation {
         markers: shared::CODEX_FOLDER_TRUST_MARKERS.to_vec(),
         ready_markers: vec!["Ask Codex to do anything"],
-        not_ready_markers: vec!["Resuming session"],
+        loading: Some(resuming),
         accept_keys: vec!["Enter"],
         timeout: std::time::Duration::from_secs(120),
     })
@@ -1113,20 +1137,44 @@ pub(crate) fn set_up_need_in(home: &std::path::Path) -> super::readiness::Need {
 #[cfg(test)]
 mod tests {
 
-    /// Board #47, measured on codex-cli 0.166.0: a RESUMED codex paints its
-    /// composer placeholder while it is still `Resuming session…`, and an Enter
-    /// typed then is dropped (7/7 saved failures had it on screen; typing only
-    /// once it is gone submitted 15/15 mid-turn resumes, 6/6 idle resumes and a
-    /// fresh start). The frame is captured at +0.75 s after a restart; the
-    /// settled screen is the same pane once loaded.
+    /// Board #47, frames captured on codex-cli 0.166.0 (scratch tmux, 120x40,
+    /// 2026-11-06 08:2x, every distinct frame of two resumes). Blank runs are
+    /// cut to one line; nothing else is changed.
+    const RESUMING_LOADING: &str = "\n  >_ OpenAI Codex (v0.166.0)\n     loading\n  Resuming session\u{2026}\n\n\u{203a} Ask Codex to do anything\n\n  ? for shortcuts\n";
+    const RESUMING_DIR: &str = "\n  >_ OpenAI Codex (v0.166.0)\n     ~/b47r1-ws\n  Resuming session\u{2026}\n\n\u{203a} Ask Codex to do anything\n\n  ? for shortcuts\n";
+    /// The same resume once loaded: the restored transcript quotes the phrase
+    /// in a user prompt, in a reply's first line, and as a reply line
+    /// byte-identical to the native one (`  Resuming session…`).
+    const RESUMED_QUOTING: &str = "\n  >_ OpenAI Codex (v0.166.0)\n     ~/b47r1-ws\n\n  To get started, describe a task or try one of these commands:\n\n  /init - create an AGENTS.md file with instructions for Codex\n  /status - show current session configuration\n  /permissions - choose what Codex is allowed to do\n  /model - choose what model and reasoning effort to use\n  /review - review any changes and find issues\n\n\n\u{203a} Reply with these three lines exactly, nothing else: line 1 \"Resuming session is just a phrase here\", line 2 \"Resuming\n  session\u{2026}\", line 3 \"  Resuming session\u{2026}\" with two leading spaces\n\n\n\u{2022} Resuming session is just a phrase here\n  Resuming session\u{2026}\n  Resuming session\u{2026}\n\n  Worked for 3s \u{2022} 8:24 AM\n\n\n\u{203a} Ask Codex to do anything\n\n  GPT-6.1-Sol medium \u{b7} ~/b47r1-ws \u{b7} Return three exact lines\n  ? for shortcuts                                                                             \u{26a0} 2 warnings \u{b7} f2 to view\n";
+    /// A resume of a turn killed mid-run (validator's sequence), once loaded.
+    const RESUMED_MIDTURN_TAIL: &str = "\u{2022} Resuming session is just a phrase here\n  Resuming session\u{2026}\n  Resuming session\u{2026}\n\n  Worked for 3s \u{2022} 8:24 AM\n\n\n\u{203a} Run the shell command `sleep 60` and then say DONE.\n\n\n\u{2022} I\u{2019}ll run sleep 60, then say DONE.\n\n\u{25a0} Conversation interrupted - use /feedback if something went wrong\n\n\n\u{203a} Ask Codex to do anything\n\n  GPT-6.1-Sol medium \u{b7} ~/b47r1-ws \u{b7} Return three exact lines\n  ? for shortcuts                                                                             \u{26a0} 2 warnings \u{b7} f2 to view\n";
+
+    /// Board #47: a RESUMED codex paints its composer placeholder while it is
+    /// still loading, and an Enter typed then is dropped (7/7 saved failures).
+    /// It is not ready while its NATIVE loading block shows, matched by
+    /// structure: the header, one line, `Resuming session…`, then the
+    /// composer, with no status line under it. Words anywhere else never
+    /// hold it (reviewer P1-R1 round 1, reproduced live by validator: a
+    /// transcript quoting the phrase held every delivery).
     #[cfg(not(any(target_os = "android", target_os = "ios")))]
     #[test]
-    fn a_resuming_codex_is_not_ready_until_its_session_has_loaded() {
+    fn a_resuming_codex_is_not_ready_only_while_its_native_loading_block_shows() {
         let c = super::startup_confirmation().unwrap();
-        let resuming = "  >_ OpenAI Codex (v0.166.0)\n     loading\n  Resuming session\u{2026}\n\u{203a} Ask Codex to do anything\n  ? for shortcuts\n";
-        let settled = "  Worked for 3s \u{2022} 6:49 AM\n\u{203a} Ask Codex to do anything\n  GPT-6.1-Sol high \u{b7} Context 1% used \u{b7} ~/b47-ws \u{b7} Reply with WARMUP\n  ? for shortcuts\n";
-        assert!(!crate::backends::shared::startup_already_ready(resuming, &c), "the placeholder while resuming is not ready");
-        assert!(crate::backends::shared::startup_already_ready(settled, &c), "the loaded composer is");
+        let ready = |screen: &str| crate::backends::shared::startup_already_ready(screen, &c);
+        assert!(!ready(RESUMING_LOADING), "the placeholder while loading is not ready");
+        assert!(!ready(RESUMING_DIR), "nor once the header shows the folder");
+        let after_shell = format!("ubuntu in ~/b47r1-ws\n\u{276f} codex resume 01a1\n{RESUMING_LOADING}");
+        assert!(!ready(&after_shell), "the capture's history above it changes nothing");
+        assert!(ready(RESUMED_QUOTING), "a transcript that quotes the phrase, even byte for byte, is loaded");
+        assert!(ready(&format!("{RESUMED_QUOTING}{RESUMED_MIDTURN_TAIL}")), "the mid-turn resume, loaded");
+        // A reply that reproduces the whole native block above the composer
+        // is still loaded: a loaded composer has its status line under it.
+        let replayed = "\u{2022} here it is:\n  >_ OpenAI Codex (v0.166.0)\n     loading\n  Resuming session\u{2026}\n\n\u{203a} Ask Codex to do anything\n\n  GPT-6.1-Sol medium \u{b7} ~/b47r1-ws\n  ? for shortcuts\n";
+        assert!(ready(replayed), "a quoted block over a loaded composer");
+        // The block must be whole and directly over the LAST composer.
+        assert!(ready(&RESUMING_LOADING.replace("     loading\n", "")), "no header line: not the native block");
+        assert!(ready(&format!("{RESUMING_LOADING}\u{2022} later work\n\n\u{203a} Ask Codex to do anything\n  GPT-6.1-Sol medium \u{b7} ~/w\n  ? for shortcuts\n")), "an older block above later work");
+        assert!(!ready("  >_ OpenAI Codex (v0.166.0)\n     loading\n  Resuming session\u{2026}\n"), "no composer yet: not ready either way");
     }
 
     /// Board #28, measured on codex-cli 0.166.0: `/new` fires no hook and

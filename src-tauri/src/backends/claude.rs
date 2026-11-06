@@ -389,7 +389,7 @@ pub(crate) fn startup_confirmation() -> Option<shared::StartupConfirmation> {
     Some(shared::StartupConfirmation {
         markers: shared::CLAUDE_FOLDER_TRUST_MARKERS.to_vec(),
         ready_markers: vec!["bypass permissions on"],
-        not_ready_markers: Vec::new(),
+        loading: None,
         accept_keys: vec!["Down", "Enter"],
         timeout: std::time::Duration::from_secs(120),
     })

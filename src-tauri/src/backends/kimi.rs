@@ -379,7 +379,7 @@ pub(crate) fn startup_confirmation() -> Option<shared::StartupConfirmation> {
     Some(shared::StartupConfirmation {
         markers: KIMI_FOLDER_TRUST_MARKERS.to_vec(),
         ready_markers: vec!["Welcome to Kimi Code", "No session yet"],
-        not_ready_markers: Vec::new(),
+        loading: None,
         accept_keys: vec!["Enter"],
         timeout: std::time::Duration::from_secs(120),
     })

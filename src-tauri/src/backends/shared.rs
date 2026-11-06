@@ -486,11 +486,13 @@ pub(crate) fn write_launch_script(home: &std::path::Path, name: &str, full_cmd: 
 pub(crate) struct StartupConfirmation {
     pub(crate) markers: Vec<&'static str>,
     pub(crate) ready_markers: Vec<&'static str>,
-    /// Text that means the CLI is NOT ready yet even with a ready marker on
-    /// screen (board #47: a resuming codex paints its composer placeholder
-    /// while `Resuming session…`, and drops an Enter typed then). Empty for a
-    /// backend with no such state.
-    pub(crate) not_ready_markers: Vec<&'static str>,
+    /// The backend's own reading of a screen that is still LOADING even with
+    /// a ready marker on it (board #47: a resuming codex paints its composer
+    /// placeholder while `Resuming session…`, and drops an Enter typed then).
+    /// A structural reader in the backend's file, never a substring: words a
+    /// transcript quotes must not hold a loaded CLI (#47 round 1, reviewer
+    /// P1-R1). `None` for a backend with no such state.
+    pub(crate) loading: Option<fn(&str) -> bool>,
     /// Named tmux keys used to accept the detected prompt. Claude 2.1.258
     /// defaults its folder-trust cursor to "No, exit", so Enter alone exits;
     /// Codex still defaults to the affirmative row.
@@ -520,7 +522,7 @@ pub(crate) fn startup_prompt_visible(content: &str, confirmation: &StartupConfir
 
 pub(crate) fn startup_already_ready(content: &str, confirmation: &StartupConfirmation) -> bool {
     confirmation.ready_markers.iter().any(|marker| content.contains(marker))
-        && !confirmation.not_ready_markers.iter().any(|marker| content.contains(marker))
+        && !confirmation.loading.is_some_and(|loading| loading(content))
 }
 
 /// What one pane capture tells the startup waiter to do next.
@@ -623,7 +625,7 @@ mod tests {
     fn a_waiter_that_times_out_says_so_and_never_runs_on_ready() {
         let (tx, rx) = std::sync::mpsc::channel::<&'static str>();
         let (t1, t2) = (tx.clone(), tx);
-        let c = StartupConfirmation { markers: Vec::new(), ready_markers: vec!["never"], not_ready_markers: Vec::new(), accept_keys: Vec::new(), timeout: Duration::from_millis(700) };
+        let c = StartupConfirmation { markers: Vec::new(), ready_markers: vec!["never"], loading: None, accept_keys: Vec::new(), timeout: Duration::from_millis(700) };
         confirm_startup_prompt_or("no-such-session-38:0".into(), c, Some(Box::new(move || { let _ = t1.send("ready"); })), Some(Box::new(move || { let _ = t2.send("timeout"); })));
         assert_eq!(rx.recv_timeout(Duration::from_secs(5)).ok(), Some("timeout"));
         assert!(rx.recv_timeout(Duration::from_millis(300)).is_err(), "once, and on_ready never");
@@ -648,7 +650,7 @@ mod tests {
         let c = StartupConfirmation {
             markers: vec!["Trust this folder?", "Don't trust"],
             ready_markers: vec!["Welcome to Kimi Code", "No session yet"],
-            not_ready_markers: Vec::new(),
+            loading: None,
             accept_keys: vec!["Enter"],
             timeout: Duration::from_secs(1),
         };
