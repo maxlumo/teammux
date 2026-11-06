@@ -647,10 +647,18 @@ pub(crate) fn provider_failure(status: Option<u16>, kind: Option<&str>, text: &s
         return None;
     }
     let lower = text.to_lowercase();
-    let person = kind.is_some_and(|k| PERSON_KINDS.contains(&k))
-        || status.is_some_and(|s| PERSON_STATUSES.contains(&s))
-        || PERSON_STATUSES.iter().any(|s| has_number(text, *s))
-        || PERSON_PHRASES.iter().any(|p| lower.contains(p));
+    // An EXPLICIT status from the CLI decides (orchestrator's final round):
+    // a retryable 429 or 5xx is never overridden by a number or a phrase in
+    // the text. With none, claude's kind enum, then a number in a STATUS
+    // POSITION, then the measured sentences.
+    let person = match status {
+        Some(s) => PERSON_STATUSES.contains(&s),
+        None => kind.is_some_and(|k| PERSON_KINDS.contains(&k))
+            || match status_in_text(&lower) {
+                Some(s) => PERSON_STATUSES.contains(&s),
+                None => PERSON_PHRASES.iter().any(|p| lower.contains(p)),
+            },
+    };
     if !person {
         return None;
     }
@@ -668,14 +676,50 @@ pub(crate) fn provider_failure(status: Option<u16>, kind: Option<&str>, text: &s
     Some(out)
 }
 
-/// `n` as a whole number in `text`, not part of a longer one.
-fn has_number(text: &str, n: u16) -> bool {
-    let n = n.to_string();
-    text.match_indices(&n).any(|(i, _)| {
-        let before = text[..i].chars().next_back();
-        let after = text[i + n.len()..].chars().next();
-        !before.is_some_and(|c| c.is_ascii_digit()) && !after.is_some_and(|c| c.is_ascii_digit())
-    })
+/// The words a status follows in the measured error texts: claude's
+/// `API Error: 402`, codex's `unexpected status 413`, kimi's `Error code:
+/// 500`, and the common `HTTP 401` / `status 401`.
+const STATUS_PREFIXES: [&str; 5] = ["api error:", "error code:", "status", "http", "error"];
+
+/// A status number in a STATUS POSITION of a lowercased error text: at its
+/// start (`413 Payload Too Large`, omp's `401 {…}`), or right after one of
+/// `STATUS_PREFIXES`, an optional `:` and blanks; three digits standing alone, so a request id
+/// (`req_413abc`), a line number (`line 402`) or a duration (`4013 ms`) is
+/// never one. The FIRST such status counts.
+fn status_in_text(lower: &str) -> Option<u16> {
+    let chars: Vec<char> = lower.chars().collect();
+    let three = |i: usize| -> Option<u16> {
+        let digits: String = chars.get(i..i + 3)?.iter().collect();
+        let alone = chars.get(i + 3).is_none_or(|c| !c.is_alphanumeric() && *c != '_');
+        (digits.chars().all(|c| c.is_ascii_digit()) && alone).then(|| digits.parse().ok()).flatten()
+    };
+    if let Some(s) = three(0) {
+        return Some(s);
+    }
+    for i in 0..chars.len() {
+        if i > 0 && (chars[i - 1].is_alphanumeric() || chars[i - 1] == '_') {
+            continue;
+        }
+        for prefix in STATUS_PREFIXES {
+            let p: Vec<char> = prefix.chars().collect();
+            if chars.get(i..i + p.len()) != Some(&p[..]) {
+                continue;
+            }
+            let mut j = i + p.len();
+            if !prefix.ends_with(':') && chars.get(j) == Some(&':') {
+                j += 1;
+            }
+            while chars.get(j).is_some_and(|c| *c == ' ') {
+                j += 1;
+            }
+            if j > i + p.len() {
+                if let Some(s) = three(j) {
+                    return Some(s);
+                }
+            }
+        }
+    }
+    None
 }
 
 const REDACTED: &str = "<REDACTED>";
@@ -793,20 +837,11 @@ fn redact(text: &str) -> String {
             let name: String = chars[i..name_end].iter().collect();
             if let Some(start) = secret_name(&name).then(|| secret_value_start(&chars, name_end)).flatten() {
                 out.extend(&chars[i..start]);
-                // `Authorization: Bearer <t>`: the scheme stays and its
-                // credential is masked by the scheme rule next.
-                if ["bearer ", "basic "].iter().any(|w| at(start, w)) {
-                    i = start;
-                    continue;
-                }
-                // A QUOTED value runs to its matching closing quote, spaces
-                // included; an unterminated one to the end of its line
-                // (validator's R1, the orchestrator's bounded round 4).
-                let quote = start.checked_sub(1).map(|q| chars[q]).filter(|q| matches!(q, '"' | '\'') && start - 1 >= name_end);
-                let end = match quote {
-                    Some(q) => (start..chars.len()).find(|&j| chars[j] == q || chars[j] == '\n').unwrap_or(chars.len()),
-                    None => (start..chars.len()).find(|&j| chars[j].is_whitespace() || matches!(chars[j], '&' | '"' | '\'' | ',' | ';' | ')' | '}')).unwrap_or(chars.len()),
-                };
+                // FAIL CLOSED (orchestrator's final round, past the cap): the
+                // value is never parsed. Everything to the end of its line
+                // goes, quotes, escapes and spaces included; over-masking a
+                // line's tail is accepted, leaking any part of a secret is not.
+                let end = (start..chars.len()).find(|&j| chars[j] == '\n').unwrap_or(chars.len());
                 if end > start {
                     out.push_str(REDACTED);
                 }
@@ -862,6 +897,20 @@ mod tests {
         assert_eq!(provider_failure(Some(529), None, "overloaded"), None);
         assert_eq!(provider_failure(None, Some("APIStatusError"), "Error code: 500"), None);
         assert_eq!(provider_failure(None, None, "took 4013 ms"), None, "a status is a whole number");
+        // Final round (orchestrator, past the cap): an EXPLICIT status decides,
+        // and with none a number counts only in a status position. These are
+        // validator's four false positives, now ordinary.
+        assert_eq!(provider_failure(Some(429), None, "429 rate limited; retry after 401 ms"), None);
+        assert_eq!(provider_failure(Some(503), None, "503 overloaded, request id req_413abc"), None);
+        assert_eq!(provider_failure(Some(500), None, "internal error at line 402"), None);
+        assert_eq!(provider_failure(None, None, "error 503, retry after 401 ms"), None);
+        assert_eq!(provider_failure(None, None, "failed at line 401 of the log"), None, "not a status position");
+        assert_eq!(provider_failure(None, None, "request id req_413abc failed"), None, "inside an id");
+        // Status positions with no explicit status: still person.
+        for text in ["unexpected status 401 Unauthorized: invalid API key", "HTTP 403 Forbidden", "413 Payload Too Large", "API Error: 402 insufficient credit", "Error code: 401 - bad key", "Error: 401 bad key", "status: 413"] {
+            assert!(provider_failure(None, None, text).is_some(), "{text}");
+        }
+        assert_eq!(provider_failure(Some(429), None, "invalid API key"), None, "an explicit retryable status wins over a phrase");
         assert_eq!(provider_failure(None, None, ""), None);
     }
 
@@ -876,37 +925,43 @@ mod tests {
             // round 0
             ("sk- key", "x-api-key sk-ant-api03-FAKEfakeFAKEfake0123456789abcdefABCDEF".into(), "x-api-key <REDACTED>"),
             ("Bearer", format!("Authorization Bearer {v}.x-y_z"), "Authorization Bearer <REDACTED>"),
-            ("key=", format!("key={v}&x=1"), "key=<REDACTED>&x=1"),
+            ("key=", format!("key={v}&x=1"), "key=<REDACTED>"),
             ("token=", format!("token={v}"), "token=<REDACTED>"),
             ("url query", "url: https://gw.example/v1/responses?key=Q&x=1, done".into(), "url: https://gw.example/v1/responses, done"),
             ("long run", "credential 0123456789abcdef0123456789abcdef01234567 expired".into(), "credential <REDACTED> expired"),
             // round 1
-            ("JSON api_key", format!(r#"{{"api_key":"{v}"}}"#), r#"{"api_key":"<REDACTED>"}"#),
-            ("api_key:", format!("api_key: {v} for"), "api_key: <REDACTED> for"),
+            ("JSON api_key", format!(r#"{{"api_key":"{v}"}}"#), r#"{"api_key":"<REDACTED>"#),
+            ("api_key:", format!("api_key: {v} for"), "api_key: <REDACTED>"),
             ("Basic", "Basic dXNlcjpwYXNzd29yZA== refused".into(), "Basic <REDACTED> refused"),
             ("userinfo", "https://user:hunter2pass@api.example.com/v1".into(), "https://api.example.com/v1"),
-            ("quoted =", format!("api_key=\"{v}\" denied"), "api_key=\"<REDACTED>\" denied"),
+            ("quoted =", format!("api_key=\"{v}\" denied"), "api_key=\"<REDACTED>"),
             // round 2
             ("x-api-key:", format!("x-api-key: {v}"), "x-api-key: <REDACTED>"),
             ("X-Api-Key=", format!("X-Api-Key={v}"), "X-Api-Key=<REDACTED>"),
-            ("JSON x-api-key", format!(r#"{{"x-api-key":"{v}"}}"#), r#"{"x-api-key":"<REDACTED>"}"#),
+            ("JSON x-api-key", format!(r#"{{"x-api-key":"{v}"}}"#), r#"{"x-api-key":"<REDACTED>"#),
             ("x-goog-api-key", format!("x-goog-api-key: {v}"), "x-goog-api-key: <REDACTED>"),
             ("OPENAI_API_KEY", format!("OPENAI_API_KEY={v}"), "OPENAI_API_KEY=<REDACTED>"),
             ("client.secret", format!("client.secret: {v}"), "client.secret: <REDACTED>"),
             ("authorization bare", format!("Authorization: {v}"), "Authorization: <REDACTED>"),
-            ("authorization scheme", format!("authorization: Bearer {v}"), "authorization: Bearer <REDACTED>"),
+            ("authorization scheme", format!("authorization: Bearer {v}"), "authorization: <REDACTED>"),
             // round 3
-            ("spaced =", format!("api_key = {v} set"), "api_key = <REDACTED> set"),
+            ("spaced =", format!("api_key = {v} set"), "api_key = <REDACTED>"),
             ("= then space", format!("api_key= {v}"), "api_key= <REDACTED>"),
             ("space then :", format!("api_key :{v}"), "api_key :<REDACTED>"),
-            ("JSON spaced", format!(r#"{{"api_key" : "{v}"}}"#), r#"{"api_key" : "<REDACTED>"}"#),
+            ("JSON spaced", format!(r#"{{"api_key" : "{v}"}}"#), r#"{"api_key" : "<REDACTED>"#),
             ("tab =", format!("token\t=\t{v}"), "token\t=\t<REDACTED>"),
             ("YAML next line", format!("api_key:\n  {v}\nmodel: x"), "api_key:\n  <REDACTED>\nmodel: x"),
-            // round 4 (orchestrator's bounded round at the cap, validator's R1)
-            ("quoted with spaces", r#"password = "hunter 2 pass" ok"#.into(), r#"password = "<REDACTED>" ok"#),
-            ("single-quoted with spaces", "secret: 'two words' ok".into(), "secret: '<REDACTED>' ok"),
-            ("JSON value with spaces", r#"{"api_key": "ab cd ef"}"#.into(), r#"{"api_key": "<REDACTED>"}"#),
+            // round 4 (validator's R1) and the final round, which FAILS CLOSED:
+            // after a secret key and its separator the rest of the line goes.
+            ("quoted with spaces", r#"password = "hunter 2 pass" ok"#.into(), r#"password = "<REDACTED>"#),
+            ("single-quoted with spaces", "secret: 'two words' ok".into(), "secret: '<REDACTED>"),
+            ("JSON value with spaces", r#"{"api_key": "ab cd ef"}"#.into(), r#"{"api_key": "<REDACTED>"#),
             ("unterminated quote", "token=\"abc def\nnext line".into(), "token=\"<REDACTED>\nnext line"),
+            ("escaped quote, JSON", r#"{"password":"ab\"cd ef"}"#.into(), r#"{"password":"<REDACTED>"#),
+            ("escaped quote", r#"password = "p\"ss word""#.into(), r#"password = "<REDACTED>"#),
+            ("escaped single quote", r"client_secret='it\'s secret'".into(), "client_secret='<REDACTED>"),
+            ("doubled single quote", "client_secret='it''s secret'".into(), "client_secret='<REDACTED>"),
+            ("next line kept", "api_key=abc\nmodel: claude".into(), "api_key=<REDACTED>\nmodel: claude"),
         ];
         for (form, raw, want) in masked {
             assert_eq!(provider_failure(Some(401), None, raw).unwrap(), format!("401: {want}"), "{form}");
@@ -926,26 +981,26 @@ mod tests {
         let got = provider_failure(None, Some("authentication_failed"), &format!("API Error: 401 invalid x-api-key {fake}")).unwrap();
         assert_eq!(got, "authentication_failed: API Error: 401 invalid x-api-key <REDACTED>");
         let got = provider_failure(Some(401), None, "401 Authorization: Bearer abc.DEF-ghi_123 rejected").unwrap();
-        assert_eq!(got, "401 Authorization: Bearer <REDACTED> rejected");
+        assert_eq!(got, "401 Authorization: <REDACTED>", "fail closed: the rest of the line after a secret key");
         let got = provider_failure(Some(401), None, "unexpected status 401 Unauthorized, url: https://gw.example/v1/responses?key=SECRET&x=1, request id: req_0a1b2c").unwrap();
         assert_eq!(got, "unexpected status 401 Unauthorized, url: https://gw.example/v1/responses, request id: req_0a1b2c");
         let got = provider_failure(Some(402), None, "402 token=abc123 api_key=\"zz9\" denied").unwrap();
-        assert_eq!(got, "402 token=<REDACTED> api_key=\"<REDACTED>\" denied", "a quoted value keeps its quotes");
+        assert_eq!(got, "402 token=<REDACTED>");
         // validator's round-0 P2: the JSON, colon, Basic-auth and userinfo
         // forms of the same shapes.
         let got = provider_failure(Some(401), None, r#"401 {"error":"bad key","api_key":"AbCd1234EfGh5678"}"#).unwrap();
-        assert_eq!(got, r#"401 {"error":"bad key","api_key":"<REDACTED>"}"#);
+        assert_eq!(got, r#"401 {"error":"bad key","api_key":"<REDACTED>"#);
         let got = provider_failure(Some(401), None, "401 rejected api_key: AbCd1234EfGh5678 for this org").unwrap();
-        assert_eq!(got, "401 rejected api_key: <REDACTED> for this org");
+        assert_eq!(got, "401 rejected api_key: <REDACTED>");
         let got = provider_failure(Some(401), None, "401 Authorization: Basic dXNlcjpwYXNzd29yZA== refused").unwrap();
-        assert_eq!(got, "401 Authorization: Basic <REDACTED> refused");
+        assert_eq!(got, "401 Authorization: <REDACTED>");
         let got = provider_failure(Some(401), None, "401 url: https://user:hunter2pass@api.example.com/v1/messages").unwrap();
         assert_eq!(got, "401 url: https://api.example.com/v1/messages");
         let got = provider_failure(Some(401), None, "401 Unauthorized: API_KEY: AbCd1234EfGh5678 TOKEN=zz9").unwrap();
-        assert_eq!(got, "401 Unauthorized: API_KEY: <REDACTED> TOKEN=<REDACTED>", "any case");
+        assert_eq!(got, "401 Unauthorized: API_KEY: <REDACTED>", "any case");
         let combined = r#"413 POST https://alice:s3cret@gw.example/v1/messages?key=Q1 failed: {"error":{"message":"too large","api_key": "AbCd1234EfGh5678"}} Authorization: Basic dXNlcjpwYXNzd29yZA== Bearer eyJ.abc"#;
         assert_eq!(provider_failure(Some(413), None, combined).unwrap(),
-            r#"413 POST https://gw.example/v1/messages failed: {"error":{"message":"too large","api_key": "<REDACTED>"}} Authorization: Basic <REDACTED> Bearer <REDACTED>"#, "one combined payload");
+            r#"413 POST https://gw.example/v1/messages failed: {"error":{"message":"too large","api_key": "<REDACTED>"#, "one combined payload");
         let got = provider_failure(Some(401), None, "401 Unauthorized: Authentication failed").unwrap();
         assert_eq!(got, "401 Unauthorized: Authentication failed", "a word after a colon is not a value");
         // Round 2 (validator's x-api-key, orchestrator: close the class): a
@@ -953,14 +1008,14 @@ mod tests {
         // word at the END of a compound name counts, in every form.
         let v = "AbCd1234EfGh5678";
         for (raw, want) in [
-            (format!("401 x-api-key: {v} rejected"), "401 x-api-key: <REDACTED> rejected".to_string()),
-            (format!("401 X-Api-Key={v} rejected"), "401 X-Api-Key=<REDACTED> rejected".to_string()),
-            (format!(r#"401 {{"x-api-key":"{v}"}}"#), r#"401 {"x-api-key":"<REDACTED>"}"#.to_string()),
+            (format!("401 x-api-key: {v} rejected"), "401 x-api-key: <REDACTED>".to_string()),
+            (format!("401 X-Api-Key={v} rejected"), "401 X-Api-Key=<REDACTED>".to_string()),
+            (format!(r#"401 {{"x-api-key":"{v}"}}"#), r#"401 {"x-api-key":"<REDACTED>"#.to_string()),
             (format!("401 headers:\n  x-api-key: {v}\n"), "401 headers:\n  x-api-key: <REDACTED>".to_string()),
             (format!("401 x-goog-api-key: {v}"), "401 x-goog-api-key: <REDACTED>".to_string()),
             (format!("401 OPENAI_API_KEY={v}"), "401 OPENAI_API_KEY=<REDACTED>".to_string()),
             (format!("401 anthropic-api-key: {v}"), "401 anthropic-api-key: <REDACTED>".to_string()),
-            (format!("401 refresh_token={v} client_secret: {v} passwd={v}"), "401 refresh_token=<REDACTED> client_secret: <REDACTED> passwd=<REDACTED>".to_string()),
+            (format!("401 refresh_token={v} client_secret: {v} passwd={v}"), "401 refresh_token=<REDACTED>".to_string()),
             (format!("401 app.secret={v}"), "401 app.secret=<REDACTED>".to_string()),
         ] {
             assert_eq!(provider_failure(Some(401), None, &raw).unwrap(), want, "{raw}");
@@ -970,7 +1025,7 @@ mod tests {
         assert_eq!(got, "401 keyboard: ok monkey=1 turnkey solution, tokens: 12");
         // The scheme after `Authorization:` is kept and its credential masked.
         let got = provider_failure(Some(401), None, &format!("401 authorization: Bearer {v}")).unwrap();
-        assert_eq!(got, "401 authorization: Bearer <REDACTED>");
+        assert_eq!(got, "401 authorization: <REDACTED>");
         let got = provider_failure(Some(401), None, &format!("401 Authorization: {v}")).unwrap();
         assert_eq!(got, "401 Authorization: <REDACTED>", "a bare credential after the header name");
         let hex = "0123456789abcdef0123456789abcdef01234567";

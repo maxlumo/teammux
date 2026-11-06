@@ -397,38 +397,46 @@ scratch homes with an invalid key (the table is on board #39):
 
 Each backend's file reads its own payload (`provider_failure`, through
 `Backend::provider_failure`). ONE predicate decides whether only a person can
-clear it (`backends::shared::provider_failure`): a status of 401, 402, 403 or
-413 (given, or as a whole number in the text), claude's
-`authentication_failed`, `billing_error` or `invalid_request`, or a measured
-sentence ("invalid API key", "insufficient credit", "request too large",
-"payload too large", "Please run /login"). `rate_limit`, `server_error`,
-`max_output_tokens` and every other failure retry by themselves, so they stay
-an ordinary failed end with no notice (#354). The text is redacted before
+clear it (`backends::shared::provider_failure`). An EXPLICIT status from the
+CLI decides alone: 401, 402, 403 and 413 are a person's, and a 429 or 5xx is
+never overridden by a number or a phrase in the text (the final round past
+the cap: omp's `429 … retry after 401 ms` and a 503 whose request id held
+`413` used to be told to the human). With no status: claude's
+`authentication_failed`, `billing_error` or `invalid_request`; else a status
+number in a STATUS POSITION (at the start, or after `API Error:`, `Error
+code:`, `status`, `HTTP` or `Error`, three digits standing alone, so never a
+request id, a line number or a duration); else a measured sentence ("invalid
+API key", "insufficient credit", "request too large", "payload too large",
+"Please run /login"). `rate_limit`, `server_error`, `max_output_tokens` and
+every other failure retry by themselves, so they stay an ordinary failed end
+with no notice (#354). The text is redacted before
 anything stores or sends it (orchestrator's ruling, 07:48). A URL's query
 string and its userinfo (`user:pass@`) are dropped. `sk-…`, the token after
-`Bearer` or `Basic`, the value of a SECRET KEY NAME in every assignment form
-(`k=v`, `k="v"`, a header or YAML `k: v`, JSON `"k":"v"`, with any blanks
-around the separator, and a YAML value on the next indented line; a blank
-line after the separator is no value; a QUOTED value is masked to its
-matching closing quote, spaces included, and an unterminated one to the end
-of its line), and any run of 32
+`Bearer` or `Basic`, everything after a SECRET KEY NAME and its separator to the end of that
+line (`k=v`, `k="v"`, a header or YAML `k: v`, JSON `"k":"v"`, with any
+blanks around the separator, or a YAML value on the next indented line; a
+blank line after the separator is no value). The redaction FAILS CLOSED
+there: the value is never parsed, so quotes, escapes and spaces cannot end
+it early, and the rest of the line is over-masked by design, and any run of 32
 or more key characters holding letters and digits become `<REDACTED>`. A key
 name is normalised (lowercase, `-` and `.` read as `_`) and counts when it is,
 or ends with `_` plus, one of `api_key`, `apikey`, `key`, `token`,
 `access_token`, `refresh_token`, `secret`, `client_secret`, `password`,
 `passwd`, `authorization`, `sig`, `signature`. So `x-api-key`, `X-Api-Key`,
 `x-goog-api-key`, `OPENAI_API_KEY` and `app.secret` count, and `keyboard`,
-`monkey` and `turnkey` do not. After `Authorization:` a `Bearer`/`Basic`
-scheme word stays and its credential is masked. Validator's round-0 P2 was
+`monkey` and `turnkey` do not. Validator's round-0 P2 was
 the JSON, colon, Basic and userinfo forms. Its round-1 P2 was `x-api-key`,
 Anthropic's own key header, which the orchestrator ruled a class to close
 rather than one more shape. Its round-2 P2 was `api_key = v` (spaced) and
 the next-line YAML value, closed in round 3 as one spacing rule. Its round-3 R1 was a
-quoted value with spaces (`password = "hunter 2 pass"` leaked `2 pass`),
-fixed in one bounded round at the cap. Two known limits are accepted, not
-fixed, because provider error text does not carry YAML: a YAML list item
-under the key (`api_key:\n- v` masks the dash, not `v`), and a value after
-a blank line (`api_key:\n\n  v` stays). The single record of every masked
+quoted value with spaces (`password = "hunter 2 pass"` leaked `2 pass`), and
+then an escaped quote inside one (reviewer, round 4). Every round had missed
+a shape, so the final round, the orchestrator's call past the cap, changed
+the approach to masking to the end of the line instead of adding another
+shape. Two known limits are accepted, not fixed, because provider error
+text does not carry YAML: a YAML list item under the key (`api_key:\n- v`
+masks the dash, not `v`), and a value after a blank line (`api_key:\n\n  v`
+stays). The single record of every masked
 form, and of what stays, is
 `shared::tests::every_credential_form_masked_so_far_and_what_stays`. The status, the CLI's error
 kind and the provider's sentence stay, and so does a request id (a UUID's
