@@ -918,9 +918,12 @@ mkdir -p -- $_tmm_state
 # every CLI). A dsh that is missing or cannot run leaves the prompt at its
 # not-ready form and writes no ready file: the start's hold stays, nothing is
 # typed, and its timeout says so in the room.
-typeset -g _tmm_dsh_ok=0 _tmm_dsh_v=
-_tmm_dsh_v=$(command dsh --version 2>&1) && [[ -n $_tmm_dsh_v ]] && _tmm_dsh_ok=1
-(( _tmm_dsh_ok )) || print -r -- "teammux: dsh cannot run here (${{${{_tmm_dsh_v%%$'\n'*}}:-no answer to dsh --version}}); this agent is not started"
+# Its output is never echoed: a failing dsh can print the ready marker itself (round 1,
+# validator on ff1eae4a), so the line says only the exit status.
+typeset -g _tmm_dsh_ok=0 _tmm_dsh_v= _tmm_dsh_rc=0
+_tmm_dsh_v=$(command dsh --version 2>/dev/null) || _tmm_dsh_rc=$?
+(( _tmm_dsh_rc == 0 )) && [[ -n $_tmm_dsh_v ]] && _tmm_dsh_ok=1
+(( _tmm_dsh_ok )) || print -r -- "teammux: dsh cannot run here (dsh --version exit $_tmm_dsh_rc); this agent is not started"
 case ${{TMM_DSH_SESSION-}} in
   '') rm -f -- $_tmm_state/session ;;
   recent) ;;
@@ -2315,7 +2318,8 @@ if (at < 0) {
     #[test]
     fn a_shell_whose_dsh_cannot_run_never_shows_the_ready_prompt_and_says_why() {
         let Some(zsh) = which("zsh") else { return };
-        for (tag, fake) in [("absent", None), ("broken", Some("#!/bin/sh\nexit 127\n"))] {
+        // Round 1 (validator on ff1eae4a): a failing dsh that prints the ready marker itself.
+        for (tag, fake) in [("absent", None), ("broken", Some("#!/bin/sh\nexit 127\n")), ("marker", Some("#!/bin/sh\nprintf 'dsh \\342\\200\\272 '\nexit 127\n"))] {
             let dir = crate::config::test_scratch(&format!("tmm-dsh-cannot-{tag}"));
             let (bin, zdot, dsh_home) = (dir.join("bin"), dir.join("zsh"), dir.join("dsh"));
             for d in [&bin, &zdot, &dsh_home] {
