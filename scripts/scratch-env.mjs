@@ -29,8 +29,8 @@
 // tmux server" holds the rule and its reason.
 import { spawn as nodeSpawn, spawnSync } from 'node:child_process';
 import { randomBytes } from 'node:crypto';
-import { chmodSync, existsSync, lstatSync, mkdirSync, readdirSync, readFileSync, readlinkSync, statSync, writeFileSync } from 'node:fs';
-import { dirname, isAbsolute, join, resolve, sep } from 'node:path';
+import { chmodSync, existsSync, lstatSync, mkdirSync, readdirSync, readFileSync, readlinkSync, realpathSync, statSync, writeFileSync } from 'node:fs';
+import { basename, dirname, isAbsolute, join, resolve, sep } from 'node:path';
 import { homedir, tmpdir } from 'node:os';
 import { fileURLToPath } from 'node:url';
 import { isolatedEnv, UPDATE_SWITCHES } from './test-rust.mjs';
@@ -78,44 +78,95 @@ export function linkDirs(home) {
   return [join(home, '.local', 'bin'), join(home, '.kimi-code', 'bin')];
 }
 
-/** Every symlink in the user's link dirs and its absolute target, as {path: target}. A dir
- * that does not exist has none. */
-export function snapshotLinks(home) {
-  const out = {};
+/** Every symlink in the user's link dirs with its absolute target ({path: target}), and every
+ * dir or entry that could not be read (#48 round 1, #29's rule: "could not look" is never
+ * "nothing there"). Only a dir that does not exist (ENOENT) is confirmed empty. */
+export function readLinks(home) {
+  const links = {};
+  const unreadable = [];
   for (const d of linkDirs(home)) {
-    let names = [];
-    try { names = readdirSync(d); } catch { continue; }
+    let names;
+    try { names = readdirSync(d); } catch (e) {
+      if (e.code !== 'ENOENT') unreadable.push(`${d} could not be read (${e.code ?? e.message})`);
+      continue;
+    }
     for (const n of names.sort()) {
       const p = join(d, n);
       try {
-        if (lstatSync(p).isSymbolicLink()) out[p] = resolve(dirname(p), readlinkSync(p));
-      } catch { /* gone meanwhile */ }
+        if (lstatSync(p).isSymbolicLink()) links[p] = resolve(dirname(p), readlinkSync(p));
+      } catch (e) {
+        if (e.code !== 'ENOENT') unreadable.push(`${p} could not be read (${e.code ?? e.message})`); // ENOENT: gone meanwhile
+      }
     }
   }
-  return out;
+  return { links, unreadable };
 }
 
-/** The user's links that now point INTO the scratch dir (board #48, the 08:00 shape), each
- * with what it pointed at before the run (`before`, run's snapshot; null when there is none)
- * and the one command that repairs it. Empty = none escaped. */
+/** run's snapshot: the links alone. */
+export function snapshotLinks(home) {
+  return readLinks(home).links;
+}
+
+/** `p` with every symlink in it resolved (#48 round 1: an alias of the scratch dir, or
+ * macOS's /var -> /private/var, must not hide a link into it). The part that does not exist
+ * (a dangling link into a deleted dir) is kept as written below its nearest real ancestor,
+ * and a dangling symlink on the way is followed by its own text. `depth` stops a loop. */
+function canonical(p, depth = 0) {
+  const rest = [];
+  let at = resolve(p);
+  for (;;) {
+    try { return join(realpathSync(at), ...rest.reverse()); } catch { /* not all there */ }
+    if (depth < 40) {
+      try {
+        if (lstatSync(at).isSymbolicLink()) return canonical(join(resolve(dirname(at), readlinkSync(at)), ...rest.reverse()), depth + 1);
+      } catch { /* not there at all */ }
+    }
+    const up = dirname(at);
+    if (up === at) return resolve(p);
+    rest.push(basename(at));
+    at = up;
+  }
+}
+
+/** A word a POSIX shell reads back as exactly `s`. */
+function shellQuote(s) {
+  return /^[A-Za-z0-9_\/.,:@%+=-]+$/u.test(s) ? s : `'${s.replaceAll("'", "'\\''")}'`;
+}
+
+/** What the guard reports (board #48): the user's links that now point INTO the scratch dir,
+ * each with what it pointed at before the run (`before`, run's snapshot; null when there is
+ * none) and the one command that repairs it, plus every dir or link it could not read. Empty
+ * = nothing escaped, as observed. */
 export function escapedLinks(home, dir, before) {
-  const inside = (t) => t === resolve(dir) || t.startsWith(resolve(dir) + sep);
-  return Object.entries(snapshotLinks(home))
+  const { links, unreadable } = readLinks(home);
+  const root = canonical(dir);
+  const inside = (t) => { const c = canonical(t); return c === root || c.startsWith(root + sep); };
+  const escaped = Object.entries(links)
     .filter(([, target]) => inside(target))
     .map(([path, target]) => {
       const was = before?.[path];
-      const why = before == null ? 'no snapshot from run' : was === undefined ? 'it did not exist before the run' : inside(was) ? `it was ${was}` : `it was ${was}: ln -sfn ${was} ${path}`;
+      const why = before == null ? 'no snapshot from run' : was === undefined ? 'it did not exist before the run' : inside(was) ? `it was ${was}` : `it was ${was}: ln -sfn ${shellQuote(was)} ${shellQuote(path)}`;
       return `${path} -> ${target}, inside the scratch dir (${why})`;
     });
+  return [...unreadable, ...escaped];
+}
+
+/** The verdict on `tmux show-environment -g` for the private server (#48 round 1): {environ}
+ * (NUL-separated), {none} when tmux CONFIRMS there is no server (its own two wordings, measured
+ * on this host's tmux), or {why} for anything else, which fails the check. */
+export function serverEnvVerdict(r) {
+  if (r.error) return { why: `tmux could not be asked: ${r.error.message}` };
+  if (r.status === 0) return { environ: r.stdout.split('\n').filter((l) => l && !l.startsWith('-')).join('\0') + '\0' };
+  const err = String(r.stderr).trim();
+  if (/^no server running on /u.test(err) || /^error connecting to .* \(No such file or directory\)$/u.test(err)) return { none: true };
+  return { why: `tmux could not be asked: ${err || `exit ${r.status}`}` };
 }
 
 /** The private tmux server's global environment, which every pane and so every managed
- * agent inherits (board #48: run's own env does not reach a pane when another client
- * started the server). null when no server is running. */
+ * agent inherits (board #48: run's own env does not reach a pane when another client started
+ * the server): `serverEnvVerdict` of one `show-environment -g`. */
 function privateServerEnv(dir) {
-  const r = spawnSync('tmux', ['show-environment', '-g'], { env: isolatedEnv(process.env, dir), encoding: 'utf8' });
-  if (r.status !== 0) return null;
-  return r.stdout.split('\n').filter((l) => l && !l.startsWith('-')).join('\0') + '\0';
+  return serverEnvVerdict(spawnSync('tmux', ['show-environment', '-g'], { env: isolatedEnv(process.env, dir), encoding: 'utf8' }));
 }
 
 /** sysctl(KERN_PROCARGS2) for one pid through the macOS host's own python3
@@ -334,9 +385,13 @@ async function main(args) {
     }
     console.log(`[scratch-env] pid ${pid}: TMUX_TMPDIR and the XDG roots are ${dir}'s; no TMUX, TMUX_PANE, TMUX_SOCKET, TOKEN or TMM_* inherited; every no-update switch set`);
     // Board #48: what the panes inherit is the private SERVER's env, not this pid's.
-    const serverEnv = privateServerEnv(dir);
-    if (serverEnv !== null) {
-      const missing = leaks(serverEnv, dir).filter((l) => Object.keys(UPDATE_SWITCHES).some((k) => l.startsWith(`${k} `)));
+    const server = privateServerEnv(dir);
+    if (server.why) {
+      console.error(`[scratch-env] the private tmux server's environment is not known, so its panes are not proven safe: ${server.why}`);
+      return 1;
+    }
+    if (server.environ) {
+      const missing = leaks(server.environ, dir).filter((l) => Object.keys(UPDATE_SWITCHES).some((k) => l.startsWith(`${k} `)));
       if (missing.length) {
         console.error(`[scratch-env] the private tmux server's panes would start CLIs that may update themselves:\n  ${missing.join('\n  ')}`);
         return 1;

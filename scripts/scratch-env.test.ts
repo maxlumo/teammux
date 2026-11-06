@@ -225,3 +225,102 @@ test('check reports a link in the real ~/.local/bin that now points into the scr
     assert.deepEqual(escapedLinks(home, dir, null).length, 2, 'found without a snapshot too');
   } finally { rmSync(root, { recursive: true, force: true }); }
 });
+
+// #48 round 1 (reviewer 10:04, validator's probes): the guard must never report clean on an
+// observation it could not make (#29's rule), must see through a symlinked path, and must
+// print a repair a shell runs as written.
+test('a link dir that cannot be read is a failed check, never "none escaped" (#48 round 1)', { skip: process.getuid?.() === 0 }, async () => {
+  const { escapedLinks } = await import('./scratch-env.mjs');
+  const { mkdirSync, symlinkSync } = await import('node:fs');
+  const root = mkdtempSync(join(tmpdir(), 'scratch-env-test-'));
+  const bin = join(root, 'home', '.local', 'bin');
+  try {
+    mkdirSync(bin, { recursive: true });
+    mkdirSync(join(root, 'gw'));
+    symlinkSync(join(root, 'gw', 'v', 'claude'), join(bin, 'claude'));
+    chmodSync(bin, 0o000);
+    const found = escapedLinks(join(root, 'home'), join(root, 'gw'), {});
+    assert.equal(found.length, 1, JSON.stringify(found));
+    assert.match(found[0]!, new RegExp(`^${bin} could not be read \\(EACCES`), 'its reason, so nothing reads as clean');
+  } finally { chmodSync(bin, 0o755); rmSync(root, { recursive: true, force: true }); }
+});
+
+test('a link that reaches the scratch dir through another symlink is caught, and its repair is quoted (#48 round 1)', async () => {
+  const { escapedLinks } = await import('./scratch-env.mjs');
+  const { mkdirSync, symlinkSync, writeFileSync } = await import('node:fs');
+  const root = mkdtempSync(join(tmpdir(), 'scratch-env-test-'));
+  try {
+    const home = join(root, 'home');
+    const bin = join(home, '.local', 'bin');
+    const dir = join(root, 'gw');
+    mkdirSync(bin, { recursive: true });
+    mkdirSync(join(dir, 'v'), { recursive: true });
+    writeFileSync(join(dir, 'v', 'claude'), '');
+    symlinkSync(dir, join(root, 'alias')); // alias -> the scratch dir
+    symlinkSync(join(root, 'alias', 'v', 'claude'), join(bin, 'codex'));
+    const was = join(root, 'real dir', "it's", 'claude');
+    const found = escapedLinks(home, dir, { [join(bin, 'codex')]: was });
+    assert.equal(found.length, 1, JSON.stringify(found));
+    assert.ok(found[0]!.includes(`ln -sfn '${join(root, 'real dir')}/it'\\''s/claude' ${join(bin, 'codex')}`), found[0]);
+    // A dangling link into a scratch dir that is already gone is still caught.
+    rmSync(dir, { recursive: true, force: true });
+    symlinkSync(join(dir, 'gone', 'claude'), join(bin, 'claude'));
+    assert.equal(escapedLinks(home, dir, null).length, 2, 'both, the dir deleted or not');
+  } finally { rmSync(root, { recursive: true, force: true }); }
+});
+
+test('the private server env: confirmed absent is no server; any other tmux error fails the check (#48 round 1)', async () => {
+  const { serverEnvVerdict } = await import('./scratch-env.mjs');
+  assert.deepEqual(serverEnvVerdict({ status: 1, stdout: '', stderr: 'no server running on /s/gw/tmux-1000/default\n' }), { none: true });
+  assert.deepEqual(serverEnvVerdict({ status: 1, stdout: '', stderr: 'error connecting to /s/gw/tmux-1000/default (No such file or directory)\n' }), { none: true });
+  assert.deepEqual(serverEnvVerdict({ status: 1, stdout: '', stderr: 'error connecting to /s/gw/tmux-1000/default (Permission denied)\n' }),
+    { why: 'tmux could not be asked: error connecting to /s/gw/tmux-1000/default (Permission denied)' });
+  assert.deepEqual(serverEnvVerdict({ error: new Error('spawn tmux ENOENT') }), { why: 'tmux could not be asked: spawn tmux ENOENT' });
+  assert.deepEqual(serverEnvVerdict({ status: 0, stdout: 'A=1\n-B\nC=2\n', stderr: '' }), { environ: 'A=1\0C=2\0' });
+});
+
+test('check, the command: an unreadable link dir fails it with the reason and never prints the all-clear line (#48 round 1)', { skip: process.platform !== 'linux' || process.getuid?.() === 0 }, async () => {
+  const { spawnSync } = await import('node:child_process');
+  const { mkdirSync } = await import('node:fs');
+  const root = mkdtempSync(join(tmpdir(), 'scratch-env-test-'));
+  const home = join(root, 'home');
+  const bin = join(home, '.local', 'bin');
+  const dir = join(root, 'gw');
+  const script = join(import.meta.dirname, 'scratch-env.mjs');
+  const env = { ...process.env, HOME: home };
+  try {
+    mkdirSync(bin, { recursive: true });
+    assert.equal(spawnSync(process.execPath, [script, 'run', dir, '--', '/bin/sleep', '20'], { env }).status, 0);
+    const clean = spawnSync(process.execPath, [script, 'check', dir], { env, encoding: 'utf8' });
+    assert.equal(clean.status, 0, clean.stderr);
+    assert.match(clean.stdout, /none of the user's CLI links/u);
+    chmodSync(bin, 0o000);
+    const r = spawnSync(process.execPath, [script, 'check', dir], { env, encoding: 'utf8' });
+    assert.equal(r.status, 1, r.stdout + r.stderr);
+    assert.match(r.stderr, new RegExp(`${bin} could not be read \\(EACCES\\)`, 'u'));
+    assert.doesNotMatch(r.stdout, /none of the user's CLI links/u, 'no all-clear on a failed observation');
+  } finally {
+    chmodSync(bin, 0o755);
+    try { process.kill(Number(readFileSync(join(dir, 'pid'), 'utf8')), 'SIGTERM'); } catch { /* gone */ }
+    rmSync(root, { recursive: true, force: true });
+  }
+});
+
+test('the scratch root is compared as the filesystem resolves it, however it is spelt (#48 round 1)', async () => {
+  const { escapedLinks } = await import('./scratch-env.mjs');
+  const { mkdirSync, symlinkSync, writeFileSync } = await import('node:fs');
+  const root = mkdtempSync(join(tmpdir(), 'scratch-env-test-'));
+  try {
+    const home = join(root, 'home');
+    const bin = join(home, '.local', 'bin');
+    mkdirSync(bin, { recursive: true });
+    mkdirSync(join(root, 'gw', 'v'), { recursive: true });
+    mkdirSync(join(root, 'x'));
+    writeFileSync(join(root, 'gw', 'v', 'claude'), '');
+    symlinkSync(join(root, 'gw', 'v', 'claude'), join(bin, 'claude')); // the direct 08:00 case
+    symlinkSync(join(root, 'gw'), join(root, 'gw-alias'));
+    for (const spelt of [join(root, 'gw'), `${root}/x/../gw`, join(root, 'gw-alias'), `${root}/gw/`]) {
+      assert.equal(escapedLinks(home, spelt, null).length, 1, spelt);
+    }
+  } finally { rmSync(root, { recursive: true, force: true }); }
+});
