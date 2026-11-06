@@ -118,6 +118,23 @@ pub fn board_note(session: &str, id: i64, author: &str, body: &str) -> Result<()
     with_store(|store| store.issue_note(session, id, author, body, now))
 }
 
+/// Board #43 P1-R1: file a NEW issue with its initial blockers in one
+/// transaction: the issue and every edge, or nothing.
+#[allow(clippy::too_many_arguments)]
+pub fn board_create_blocked(
+    session: &str,
+    title: Option<&str>,
+    body: Option<&str>,
+    status: Option<&str>,
+    assignee: Option<&str>,
+    who: &str,
+    blocked_by: &[i64],
+) -> Result<i64, String> {
+    board_status_ok(status)?;
+    let now = chrono::Utc::now().timestamp();
+    with_store(|store| store.issue_create_blocked(session, title, body, status, assignee, who, now, blocked_by))
+}
+
 /// Board #43: add and remove blocking edges of issue `id`; answers the
 /// edges that really changed (added, removed).
 pub fn board_block(session: &str, id: i64, add: &[i64], remove: &[i64]) -> Result<(Vec<i64>, Vec<i64>), String> {

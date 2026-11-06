@@ -1579,27 +1579,23 @@ fn board_save(session: &str, room: &str, p: &serde_json::Value, hand: &HandOff) 
     // 2026-08-29: the ideal loop is 人填 issue → lead 派 → 子 agent
     // 完成交 review → 通过标 done). Reporter "human" reads the board
     // itself; the actor is never notified of its own move.
-    // Board #43: `blocked_by` files a NEW issue with its blockers. Every
-    // number is checked on this board BEFORE the create, so a wrong number
-    // files nothing; a patch never carries it (the edit verb is
-    // `hub_board_block`, which records the change in the room).
+    // Board #43: `blocked_by` files a NEW issue with its blockers, in ONE
+    // store transaction (P1-R1, reviewer on 450dfe7d): the issue and every
+    // edge are published together or nothing is, so no read ever sees the
+    // issue without its declared blockers, and a refused edge is an error
+    // with nothing filed and, below, nothing recorded or handed over. A
+    // patch never carries it (the edit verb is `hub_board_block`).
     let blocked_by = issue_numbers(p, "blocked_by")?;
     if issue_id.is_some() && p.get("blocked_by").is_some() {
         return Err(RpcError::InvalidParams("blocked_by is set when an issue is filed; edit it with hub_board_block".into()));
     }
-    for &n in &blocked_by {
-        crate::projects::board_get(session, n).map_err(RpcError::InvalidParams)?;
-    }
     let prev = issue_id.and_then(|iid| crate::projects::board_get(session, iid).ok());
-    let saved = crate::projects::board_save(session, issue_id, s("title"), s("body"), s("status"), assignee, who).map_err(RpcError::InvalidParams)?;
-    // The edges of a new issue cannot make a cycle (nothing points at it yet)
-    // and every number was found above, so this fails only if a blocker was
-    // deleted in between: the issue is saved, and the answer says so.
-    let blocked_by_error = if blocked_by.is_empty() {
-        None
+    let saved = if blocked_by.is_empty() {
+        crate::projects::board_save(session, issue_id, s("title"), s("body"), s("status"), assignee, who)
     } else {
-        crate::projects::board_block(session, saved, &blocked_by, &[]).err()
-    };
+        crate::projects::board_create_blocked(session, s("title"), s("body"), s("status"), assignee, who, &blocked_by)
+    }
+    .map_err(RpcError::InvalidParams)?;
     // EVERYTHING from here on is the "saved" branch (board #377 review, P1-A
     // residual): the write has committed, so no step below may leave through
     // `?` and turn a saved issue into an RPC error — a page that kept its
@@ -1637,9 +1633,6 @@ fn board_save(session: &str, room: &str, p: &serde_json::Value, hand: &HandOff) 
     // the ANSWER, never an error: a failed post must not read as a failed
     // save (a form kept open for a retry would file the issue twice).
     let mut answer = serde_json::json!({ "ok": true, "id": saved });
-    if let Some(error) = blocked_by_error {
-        answer["blocked_by_error"] = serde_json::json!(error);
-    }
     let wants = p.get("dispatch").and_then(|v| v.as_bool()) == Some(true);
     if let (true, Some(name)) = (wants, board_assign_target(assignee, who)) {
         let outcome = board_dispatch(name, (hand.managed)(name), || {
@@ -3115,10 +3108,19 @@ mod tests {
         let id = issue_id(&made);
         assert_eq!(stored(&session, id).unwrap()["blocked_by"], serde_json::json!([a]));
 
+        // P1-R1: a create whose blockers cannot all be written files nothing
+        // and hands nothing over, even with a live blocker beside the bad one
+        // and an assignee asking for dispatch.
         let before = issue_count(&session);
-        let r = handle_hub_request(&req("hub_board_save", serde_json::json!({ "session": session, "title": "x", "blocked_by": [999] })), None);
+        let posts = told(&session).len();
+        let recorded = records(&session).len();
+        let r = handle_hub_request(&req("hub_board_save", serde_json::json!({
+            "session": session, "title": "x", "blocked_by": [a, 999], "assignee": "builder", "dispatch": true
+        })), None);
         assert_eq!(r.error.unwrap().message, "no issue #999 on this board");
         assert_eq!(issue_count(&session), before, "nothing filed");
+        assert_eq!(told(&session).len(), posts, "nothing handed over");
+        assert_eq!(records(&session).len(), recorded, "no assignment record for an issue that does not exist");
 
         let r = handle_hub_request(&req("hub_board_save", serde_json::json!({ "session": session, "id": id, "status": "doing", "blocked_by": [] })), None);
         assert!(r.error.unwrap().message.contains("hub_board_block"));

@@ -64,6 +64,59 @@ fn blocker_path(conn: &rusqlite::Connection, from: i64, to: i64) -> Result<Optio
     Ok(None)
 }
 
+/// The one edge writer (board #43): resolve every number on `session`'s
+/// board, refuse a self-edge and a cycle, add and remove, and answer the
+/// edges that really changed. It runs inside the caller's transaction, so an
+/// edit and a create-with-blockers share one set of rules and are each all or
+/// nothing.
+fn write_blocks(conn: &rusqlite::Connection, session: &str, id: i64, add: &[i64], remove: &[i64]) -> Result<(Vec<i64>, Vec<i64>), String> {
+    let row = |n: i64| -> Result<i64, String> {
+        conn.query_row(
+            "SELECT id FROM issues WHERE session = ?1 AND project_number = ?2",
+            rusqlite::params![session, n],
+            |r| r.get(0),
+        )
+        .optional()
+        .map_err(|e| e.to_string())?
+        .ok_or_else(|| format!("no issue #{n} on this board"))
+    };
+    let issue = row(id)?;
+    let (mut added, mut removed) = (Vec::new(), Vec::new());
+    for &n in add {
+        let blocker = row(n)?;
+        if blocker == issue {
+            return Err(format!("#{n} cannot block itself"));
+        }
+        if let Some(path) = blocker_path(conn, blocker, issue)? {
+            let chain: Vec<String> = std::iter::once(id).chain(path).map(|k| format!("#{k}")).collect();
+            return Err(format!("#{n} cannot block #{id}: that makes a cycle {}", chain.join(" → ")));
+        }
+        let inserted = conn
+            .execute(
+                "INSERT OR IGNORE INTO issue_blocks (issue_id, blocker_id) VALUES (?1, ?2)",
+                rusqlite::params![issue, blocker],
+            )
+            .map_err(|e| e.to_string())?;
+        if inserted > 0 {
+            added.push(n);
+        }
+    }
+    for &n in remove {
+        let blocker = row(n)?;
+        let deleted = conn
+            .execute(
+                "DELETE FROM issue_blocks WHERE issue_id = ?1 AND blocker_id = ?2",
+                rusqlite::params![issue, blocker],
+            )
+            .map_err(|e| e.to_string())?;
+        if deleted > 0 {
+            removed.push(n);
+        }
+    }
+    Ok((added, removed))
+}
+
+
 impl Store {
     /// Every additive Board shape, as the heal floor sees it: the v15 edit
     /// lock, the v16 numbering and the v34 blocking edges (board #43). One
@@ -96,51 +149,37 @@ impl Store {
     /// added or an absent one removed is a no-op.
     pub fn issue_blocks_set(&self, session: &str, id: i64, add: &[i64], remove: &[i64]) -> Result<(Vec<i64>, Vec<i64>), String> {
         let tx = self.conn.unchecked_transaction().map_err(|e| e.to_string())?;
-        let row = |n: i64| -> Result<i64, String> {
-            tx.query_row(
-                "SELECT id FROM issues WHERE session = ?1 AND project_number = ?2",
-                rusqlite::params![session, n],
-                |r| r.get(0),
-            )
-            .optional()
-            .map_err(|e| e.to_string())?
-            .ok_or_else(|| format!("no issue #{n} on this board"))
-        };
-        let issue = row(id)?;
-        let (mut added, mut removed) = (Vec::new(), Vec::new());
-        for &n in add {
-            let blocker = row(n)?;
-            if blocker == issue {
-                return Err(format!("#{n} cannot block itself"));
-            }
-            if let Some(path) = blocker_path(&tx, blocker, issue)? {
-                let chain: Vec<String> = std::iter::once(id).chain(path).map(|k| format!("#{k}")).collect();
-                return Err(format!("#{n} cannot block #{id}: that makes a cycle {}", chain.join(" → ")));
-            }
-            let inserted = tx
-                .execute(
-                    "INSERT OR IGNORE INTO issue_blocks (issue_id, blocker_id) VALUES (?1, ?2)",
-                    rusqlite::params![issue, blocker],
-                )
-                .map_err(|e| e.to_string())?;
-            if inserted > 0 {
-                added.push(n);
-            }
-        }
-        for &n in remove {
-            let blocker = row(n)?;
-            let deleted = tx
-                .execute(
-                    "DELETE FROM issue_blocks WHERE issue_id = ?1 AND blocker_id = ?2",
-                    rusqlite::params![issue, blocker],
-                )
-                .map_err(|e| e.to_string())?;
-            if deleted > 0 {
-                removed.push(n);
-            }
-        }
+        let changed = write_blocks(&tx, session, id, add, remove)?;
         tx.commit().map_err(|e| e.to_string())?;
-        Ok((added, removed))
+        Ok(changed)
+    }
+
+    /// File a NEW issue together with its initial blockers, in ONE
+    /// transaction (board #43 P1-R1, reviewer on 450dfe7d): the issue and
+    /// every edge are published together or nothing is. The edges go through
+    /// the same `write_blocks` as every edit (missing, another board, self,
+    /// cycle), so a blocker deleted after the caller looked fails the whole
+    /// create after its INSERT and it rolls back, the number with it (nobody
+    /// was ever told that number). Before this the create committed first
+    /// and the edges followed in a second transaction, so a frontier read
+    /// between them, or a failed edge write, showed the issue unblocked.
+    #[allow(clippy::too_many_arguments)]
+    pub fn issue_create_blocked(
+        &self,
+        session: &str,
+        title: Option<&str>,
+        body: Option<&str>,
+        status: Option<&str>,
+        assignee: Option<&str>,
+        who: &str,
+        now: i64,
+        blocked_by: &[i64],
+    ) -> Result<i64, String> {
+        let tx = self.conn.unchecked_transaction().map_err(|e| e.to_string())?;
+        let id = self.issue_save(session, None, title, body, status, assignee, who, now)?;
+        write_blocks(&tx, session, id, blocked_by, &[])?;
+        tx.commit().map_err(|e| e.to_string())?;
+        Ok(id)
     }
 
     /// Allocate one visible number atomically for a session. The sequence is
@@ -646,6 +685,33 @@ mod tests {
         // All or nothing: a valid edge in the same call as a refused one is not kept.
         assert!(store.issue_blocks_set("p", 3, &[1, 3], &[]).is_err());
         assert_eq!(by(3), serde_json::json!([2]));
+    }
+
+    /// Board #43 P1-R1 (reviewer, 450dfe7d): an issue filed with blockers is
+    /// published WITH every edge or not at all. A blocker that is missing
+    /// when the edges are written (deleted after the caller looked) fails
+    /// after the issue INSERT, and the whole create rolls back: no issue, no
+    /// partial edge, and its number is not consumed.
+    #[test]
+    fn an_issue_filed_with_blockers_is_published_whole_or_not_at_all() {
+        let store = Store::open_memory().unwrap();
+        let a = store.issue_save("p", None, Some("a"), None, None, None, "human", 10).unwrap();
+        let b = store.issue_save("p", None, Some("b"), None, None, None, "human", 10).unwrap();
+        // The caller saw #b; it is deleted before the create runs.
+        assert!(store.issue_delete("p", b).unwrap());
+        let e = store.issue_create_blocked("p", Some("waits"), None, None, None, "human", 20, &[a, b]).unwrap_err();
+        assert_eq!(e, format!("no issue #{b} on this board"));
+        assert_eq!(store.issues_list("p").unwrap().len(), 1, "nothing was filed");
+        let edges: i64 = store.conn.query_row("SELECT COUNT(*) FROM issue_blocks", [], |r| r.get(0)).unwrap();
+        assert_eq!(edges, 0, "the surviving blocker's edge did not land either");
+        // The number the failed create took is released with it.
+        let next = store.issue_create_blocked("p", Some("waits"), None, None, None, "human", 30, &[a]).unwrap();
+        assert_eq!(next, b + 1, "#{b} stays a gap (deleted), the failed create used none");
+        let got = store.issue_get("p", next).unwrap().unwrap();
+        assert_eq!(got["blocked_by"], serde_json::json!([a]));
+        assert_eq!(got["blocked"], true);
+        // The contentless rule still holds on this path.
+        assert!(store.issue_create_blocked("p", Some(" "), None, None, None, "human", 40, &[a]).is_err());
     }
 
     /// Board #43 AC3: deleting an issue takes every edge it is in, on either
