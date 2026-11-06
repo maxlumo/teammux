@@ -913,6 +913,14 @@ setopt INC_APPEND_HISTORY
 bindkey '^I' self-insert
 typeset -g _tmm_state=$DSH_HOME/tmm _tmm_notify={notify} _tmm_status=0
 mkdir -p -- $_tmm_state
+# Board #53: this shell's ready prompt is dsh's ready marker, so it is shown only
+# once the binary has answered for itself (`dsh --version`, what readiness asks
+# every CLI). A dsh that is missing or cannot run leaves the prompt at its
+# not-ready form and writes no ready file: the start's hold stays, nothing is
+# typed, and its timeout says so in the room.
+typeset -g _tmm_dsh_ok=0 _tmm_dsh_v=
+_tmm_dsh_v=$(command dsh --version 2>&1) && [[ -n $_tmm_dsh_v ]] && _tmm_dsh_ok=1
+(( _tmm_dsh_ok )) || print -r -- "teammux: dsh cannot run here (${{${{_tmm_dsh_v%%$'\n'*}}:-no answer to dsh --version}}); this agent is not started"
 case ${{TMM_DSH_SESSION-}} in
   '') rm -f -- $_tmm_state/session ;;
   recent) ;;
@@ -1060,6 +1068,9 @@ precmd_functions=(_tmm_status_of_run $precmd_functions)
 # the ready work runs from a one-shot fd handler, which ZLE calls once it is
 # waiting for input — paste on, the TTY its own.
 _tmm_init() {{
+  # Board #53: no ready prompt, no hand-off run and no ready file for a dsh
+  # that cannot run.
+  (( _tmm_dsh_ok )) || return 0
   # 1) The previous run's Stop comes first when a handed-off line runs now;
   # 2) the hand-off is consumed: a clean record's lines run one per prompt,
   # each through this shell's own accept-line (an fd handler cannot end a
@@ -2296,6 +2307,52 @@ if (at < 0) {
         hooks.iter().map(|h| h["hook_event_name"].as_str().unwrap_or_default().to_string()).collect()
     }
 
+    /// Board #53 (builder-3 12:57, validator-2 13:16 on #46): the managed shell's own prompt
+    /// is dsh's ready marker, so a pane whose `dsh` cannot run read as READY: #38's hold
+    /// cleared and every line went in as a dsh command that failed. Now the shell proves the
+    /// binary runs (`dsh --version`, the binary's own answer) before it shows the ready prompt.
+    /// dsh is not installed on this host, so a missing one and a fake one stand in.
+    #[test]
+    fn a_shell_whose_dsh_cannot_run_never_shows_the_ready_prompt_and_says_why() {
+        let Some(zsh) = which("zsh") else { return };
+        for (tag, fake) in [("absent", None), ("broken", Some("#!/bin/sh\nexit 127\n"))] {
+            let dir = crate::config::test_scratch(&format!("tmm-dsh-cannot-{tag}"));
+            let (bin, zdot, dsh_home) = (dir.join("bin"), dir.join("zsh"), dir.join("dsh"));
+            for d in [&bin, &zdot, &dsh_home] {
+                std::fs::create_dir_all(d).unwrap();
+            }
+            std::fs::write(zdot.join(".zshenv"), zshenv()).unwrap();
+            std::fs::write(zdot.join(".zshrc"), zshrc(&seq_sink(&dir.join("hooks")))).unwrap();
+            if let Some(f) = fake {
+                std::fs::write(bin.join("dsh"), f).unwrap();
+                use std::os::unix::fs::PermissionsExt;
+                std::fs::set_permissions(bin.join("dsh"), std::fs::Permissions::from_mode(0o755)).unwrap();
+            }
+            let q = |p: &std::path::Path| crate::shell::quote_always(&p.to_string_lossy());
+            let session = format!("tmm-dsh-cannot-{}", &uuid::Uuid::new_v4().to_string()[..8]);
+            let cmd = format!(
+                "env -i HOME={} TERM=xterm-256color LANG=C.UTF-8 PATH={}:/usr/bin:/bin ZDOTDIR={} DSH_HOME={} DSH_TELEMETRY_DISABLED=1 {} -i",
+                q(&dir), q(&bin), q(&zdot), q(&dsh_home), q(&zsh)
+            );
+            if crate::tmux::run_tmux(&["new-session", "-d", "-s", &session, "-x", "200", "-y", "50", "-c", &dir.to_string_lossy(), &cmd]).is_err() {
+                return;
+            }
+            let target = pane_id(&session);
+            let screen = || crate::tmux::capture_pane_plain(&target, Some(50)).unwrap_or_default();
+            wait_for("the failure line", 15, || screen().contains("dsh cannot run here"));
+            std::thread::sleep(std::time::Duration::from_millis(800));
+            let shown = screen();
+            assert!(!shown.contains(READY_MARKER), "{tag}: never the ready prompt: {shown}");
+            assert!(!dsh_home.join("tmm").join("ready").exists(), "{tag}: no ready file");
+            // dsh has no trust dialog to answer (no markers), so the waiter's only question is
+            // ready-or-not: not, so #38's hold stays and #46's timeout line fires.
+            assert!(!crate::backends::shared::startup_already_ready(&shown, &startup_confirmation().unwrap()), "{tag}: not ready");
+            assert_eq!(crate::backends::shared::startup_step(&shown, &startup_confirmation().unwrap(), true), crate::backends::shared::StartupStep::Wait, "{tag}");
+            let _ = crate::tmux::run_tmux(&["kill-session", "-t", &session]);
+            let _ = std::fs::remove_dir_all(&dir);
+        }
+    }
+
     /// A managed dsh pane for real: the rendered `.zshrc` in an interactive
     /// zsh inside a scratch tmux session, with a FAKE `dsh` on PATH that
     /// records its argv (NUL-separated, one file per run) and plays the
@@ -2320,7 +2377,10 @@ if (at < 0) {
             }
             std::fs::write(zdot.join(".zshenv"), zshenv()).unwrap();
             std::fs::write(zdot.join(".zshrc"), zshrc(&seq_sink(&dir.join("hooks")))).unwrap();
+            // The shell asks `dsh --version` before its ready prompt (board #53): answered
+            // first, and not counted as a run.
             let fake = "#!/bin/sh\n\
+                [ \"$1\" = --version ] && { echo 'dsh 0.2.0-fake'; exit 0; }\n\
                 n=$(ls \"$FAKE_D\" | grep -c '^argv-'); n=$((n+1))\n\
                 [ -f \"$DSH_HOME/profiles/tmm/cordis.patch.yml\" ] && cp \"$DSH_HOME/profiles/tmm/cordis.patch.yml\" \"$FAKE_D/patch-$n\"\n\
                 : > \"$FAKE_D/argv-$n.part\"\n\
@@ -2882,6 +2942,12 @@ if (at < 0) {
         }
         std::fs::write(zdot.join(".zshenv"), zshenv()).unwrap();
         std::fs::write(zdot.join(".zshrc"), zshrc(&seq_sink(&dir.join("hooks")))).unwrap();
+        // A dsh that answers for itself: the shell shows its ready prompt only then (board #53).
+        std::fs::write(bin.join("dsh"), "#!/bin/sh\n[ \"$1\" = --version ] && echo 'dsh 0.2.0-fake'\n").unwrap();
+        {
+            use std::os::unix::fs::PermissionsExt;
+            std::fs::set_permissions(bin.join("dsh"), std::fs::Permissions::from_mode(0o755)).unwrap();
+        }
         let q = |p: &Path| crate::shell::quote_always(&p.to_string_lossy());
         let zsh_dir = zsh.parent().unwrap().to_path_buf();
         let prefix = format!(

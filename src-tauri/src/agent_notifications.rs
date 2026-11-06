@@ -3604,7 +3604,8 @@ mod tests {
                 ),
             )
             .unwrap();
-            std::fs::write(bin.join("dsh"), format!("#!/bin/sh\nexec {} {} \"$@\"\n", q(&node), q(&ws.join("driver.mjs")))).unwrap();
+            // `dsh --version` is the shell's proof the binary runs (board #53): answered, not a turn.
+            std::fs::write(bin.join("dsh"), format!("#!/bin/sh\n[ \"$1\" = --version ] && {{ echo 'dsh 0.2.0-fake'; exit 0; }}\nexec {} {} \"$@\"\n", q(&node), q(&ws.join("driver.mjs")))).unwrap();
             use std::os::unix::fs::PermissionsExt;
             std::fs::set_permissions(bin.join("dsh"), std::fs::Permissions::from_mode(0o755)).unwrap();
             Some(RigParts { ws, root, hub, spy, zsh, bin, zdot, dsh_home })
