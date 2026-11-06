@@ -555,6 +555,26 @@ mod tests {
         assert!(store.issue_get("beta", issue).unwrap().is_some());
     }
 
+    /// Board #43: blocking edges key the hidden row ids, so a rename carries
+    /// them and a permanent delete leaves none behind.
+    #[test]
+    fn a_project_rename_carries_blocking_edges_and_a_delete_drops_them() {
+        let mut store = Store::open_memory().unwrap();
+        store.insert_project(&project("alpha")).unwrap();
+        let a = store.issue_save("alpha", None, Some("blocker"), None, None, None, "human", 10).unwrap();
+        let b = store.issue_save("alpha", None, Some("waits"), None, None, None, "human", 10).unwrap();
+        store.issue_blocks_set("alpha", b, &[a], &[]).unwrap();
+
+        assert!(store.set_session("alpha", "beta", "alpha").unwrap());
+        let moved = store.issue_get("beta", b).unwrap().unwrap();
+        assert_eq!(moved["blocked_by"], serde_json::json!([a]));
+        assert_eq!(moved["blocked"], true);
+
+        assert!(store.delete_project("alpha").unwrap());
+        let edges: i64 = store.conn.query_row("SELECT COUNT(*) FROM issue_blocks", [], |r| r.get(0)).unwrap();
+        assert_eq!(edges, 0);
+    }
+
     #[test]
     fn session_conflicts_are_detectable() {
         let mut store = Store::open_memory().unwrap();

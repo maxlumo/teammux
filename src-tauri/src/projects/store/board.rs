@@ -5,7 +5,135 @@
 
 use super::*;
 
+/// Board #43: the ONE definition of an issue's blocking state, as SQL over
+/// the issue aliased `i`. `blocked_by` is its blockers' project numbers in
+/// order (a JSON array); `blocked` is true while ANY blocker is not done.
+/// Both are derived on every read: nothing stores "ready", so moving a
+/// blocker out of done blocks its dependants again on the next read.
+const BLOCKED_BY_SQL: &str = "(SELECT json_group_array(n) FROM (
+        SELECT b.project_number AS n FROM issue_blocks e JOIN issues b ON b.id = e.blocker_id
+         WHERE e.issue_id = i.id ORDER BY n))";
+const BLOCKED_SQL: &str = "EXISTS (SELECT 1 FROM issue_blocks e JOIN issues b ON b.id = e.blocker_id
+         WHERE e.issue_id = i.id AND b.status <> 'done')";
+
+fn blocked_by_json(text: String) -> serde_json::Value {
+    serde_json::from_str(&text).unwrap_or_else(|_| serde_json::json!([]))
+}
+
+/// The chain of project numbers from `from` to `to` following blocked-by
+/// edges (`from`, its blocker, that one's blocker, …, `to`), or None when
+/// `to` is not reachable. A breadth-first walk, so the chain is a shortest
+/// one; the board is small and the walk visits each issue once.
+fn blocker_path(conn: &rusqlite::Connection, from: i64, to: i64) -> Result<Option<Vec<i64>>, String> {
+    let mut next = conn
+        .prepare("SELECT blocker_id FROM issue_blocks WHERE issue_id = ?1 ORDER BY blocker_id")
+        .map_err(|e| e.to_string())?;
+    let mut parent: std::collections::HashMap<i64, i64> = std::collections::HashMap::new();
+    let mut queue = std::collections::VecDeque::from([from]);
+    let mut seen = std::collections::HashSet::from([from]);
+    while let Some(at) = queue.pop_front() {
+        if at == to {
+            let mut rows = vec![at];
+            let mut cur = at;
+            while let Some(&p) = parent.get(&cur) {
+                rows.push(p);
+                cur = p;
+            }
+            rows.reverse();
+            let mut number = conn
+                .prepare("SELECT project_number FROM issues WHERE id = ?1")
+                .map_err(|e| e.to_string())?;
+            return rows
+                .into_iter()
+                .map(|r| number.query_row([r], |x| x.get(0)).map_err(|e| e.to_string()))
+                .collect::<Result<Vec<i64>, String>>()
+                .map(Some);
+        }
+        let blockers = next
+            .query_map([at], |r| r.get::<_, i64>(0))
+            .map_err(|e| e.to_string())?
+            .collect::<Result<Vec<_>, _>>()
+            .map_err(|e| e.to_string())?;
+        for b in blockers {
+            if seen.insert(b) {
+                parent.insert(b, at);
+                queue.push_back(b);
+            }
+        }
+    }
+    Ok(None)
+}
+
 impl Store {
+    /// The v34 shape (also a heal floor): blocking edges between issues of
+    /// one board, keyed by the hidden row ids so a project rename carries
+    /// them and deleting either issue drops the edge.
+    pub(super) fn ensure_issue_blocks(&self) -> Result<(), String> {
+        self.conn
+            .execute_batch(
+                "CREATE TABLE IF NOT EXISTS issue_blocks (
+                   issue_id   INTEGER NOT NULL REFERENCES issues(id) ON DELETE CASCADE,
+                   blocker_id INTEGER NOT NULL REFERENCES issues(id) ON DELETE CASCADE,
+                   PRIMARY KEY (issue_id, blocker_id)
+                 );
+                 CREATE INDEX IF NOT EXISTS issue_blocks_blocker ON issue_blocks(blocker_id);",
+            )
+            .map_err(|e| format!("ensure issue blocks: {e}"))
+    }
+
+    /// Add and remove blocking edges of issue `id` on `session`'s board, in
+    /// one transaction. Returns the edges that really changed (added,
+    /// removed), so a caller records only real changes; an existing edge
+    /// added or an absent one removed is a no-op.
+    pub fn issue_blocks_set(&self, session: &str, id: i64, add: &[i64], remove: &[i64]) -> Result<(Vec<i64>, Vec<i64>), String> {
+        let tx = self.conn.unchecked_transaction().map_err(|e| e.to_string())?;
+        let row = |n: i64| -> Result<i64, String> {
+            tx.query_row(
+                "SELECT id FROM issues WHERE session = ?1 AND project_number = ?2",
+                rusqlite::params![session, n],
+                |r| r.get(0),
+            )
+            .optional()
+            .map_err(|e| e.to_string())?
+            .ok_or_else(|| format!("no issue #{n} on this board"))
+        };
+        let issue = row(id)?;
+        let (mut added, mut removed) = (Vec::new(), Vec::new());
+        for &n in add {
+            let blocker = row(n)?;
+            if blocker == issue {
+                return Err(format!("#{n} cannot block itself"));
+            }
+            if let Some(path) = blocker_path(&tx, blocker, issue)? {
+                let chain: Vec<String> = std::iter::once(id).chain(path).map(|k| format!("#{k}")).collect();
+                return Err(format!("#{n} cannot block #{id}: that makes a cycle {}", chain.join(" → ")));
+            }
+            let inserted = tx
+                .execute(
+                    "INSERT OR IGNORE INTO issue_blocks (issue_id, blocker_id) VALUES (?1, ?2)",
+                    rusqlite::params![issue, blocker],
+                )
+                .map_err(|e| e.to_string())?;
+            if inserted > 0 {
+                added.push(n);
+            }
+        }
+        for &n in remove {
+            let blocker = row(n)?;
+            let deleted = tx
+                .execute(
+                    "DELETE FROM issue_blocks WHERE issue_id = ?1 AND blocker_id = ?2",
+                    rusqlite::params![issue, blocker],
+                )
+                .map_err(|e| e.to_string())?;
+            if deleted > 0 {
+                removed.push(n);
+            }
+        }
+        tx.commit().map_err(|e| e.to_string())?;
+        Ok((added, removed))
+    }
+
     /// Allocate one visible number atomically for a session. The sequence is
     /// advanced before the issue INSERT; a failed insert may leave a gap (like
     /// AUTOINCREMENT) but can never reuse a number that was already observed.
@@ -27,13 +155,14 @@ impl Store {
     pub fn issues_list(&self, session: &str) -> Result<Vec<serde_json::Value>, String> {
         let mut stmt = self
             .conn
-            .prepare(
+            .prepare(&format!(
                 "SELECT i.project_number, i.title, i.body, i.status, i.assignee, i.created_by,
                         i.created_at, i.updated_at, i.agent_touched,
-                        (SELECT COUNT(*) FROM issue_notes n WHERE n.issue_id = i.id)
+                        (SELECT COUNT(*) FROM issue_notes n WHERE n.issue_id = i.id),
+                        {BLOCKED_BY_SQL}, {BLOCKED_SQL}
                    FROM issues i WHERE i.session = ?1
-                  ORDER BY i.updated_at DESC",
-            )
+                  ORDER BY i.updated_at DESC"
+            ))
             .map_err(|e| e.to_string())?;
         let rows = stmt
             .query_map([session], |r| {
@@ -50,6 +179,8 @@ impl Store {
                     "updated_at": r.get::<_, i64>(7)?,
                     "editable": assignee.is_empty() && !agent_touched,
                     "notes": r.get::<_, i64>(9)?,
+                    "blocked_by": blocked_by_json(r.get::<_, String>(10)?),
+                    "blocked": r.get::<_, i64>(11)? != 0,
                 }))
             })
             .map_err(|e| e.to_string())?
@@ -82,9 +213,11 @@ impl Store {
         let issue = self
             .conn
             .query_row(
-                "SELECT id, project_number, title, body, status, assignee, created_by,
-                        created_at, updated_at, agent_touched
-                   FROM issues WHERE session = ?1 AND project_number = ?2",
+                &format!(
+                    "SELECT i.id, i.project_number, i.title, i.body, i.status, i.assignee, i.created_by,
+                            i.created_at, i.updated_at, i.agent_touched, {BLOCKED_BY_SQL}, {BLOCKED_SQL}
+                       FROM issues i WHERE i.session = ?1 AND i.project_number = ?2"
+                ),
                 rusqlite::params![session, id],
                 |r| {
                     let assignee = r.get::<_, String>(5)?;
@@ -99,6 +232,8 @@ impl Store {
                         "created_at": r.get::<_, i64>(7)?,
                         "updated_at": r.get::<_, i64>(8)?,
                         "editable": assignee.is_empty() && !agent_touched,
+                        "blocked_by": blocked_by_json(r.get::<_, String>(10)?),
+                        "blocked": r.get::<_, i64>(11)? != 0,
                     })))
                 },
             )
@@ -416,5 +551,109 @@ mod tests {
         assert_eq!(n("proj-b", "todo"), None);
         // A session with no issues at all appears nowhere.
         assert!(!rows.iter().any(|(s, _, _)| s == "proj-empty"));
+    }
+
+    /// Board #43: an issue is blocked while ANY blocker is not done. It is
+    /// derived on every read, never stored, so a reopened blocker blocks again.
+    #[test]
+    fn an_issue_is_blocked_while_a_blocker_is_not_done() {
+        let store = Store::open_memory().unwrap();
+        let a = store.issue_save("p", None, Some("blocker a"), None, None, None, "human", 10).unwrap();
+        let b = store.issue_save("p", None, Some("blocker b"), None, None, None, "human", 11).unwrap();
+        let c = store.issue_save("p", None, Some("waits"), None, None, None, "human", 12).unwrap();
+        let get = |id: i64| store.issue_get("p", id).unwrap().unwrap();
+        let listed = |id: i64| store.issues_list("p").unwrap().into_iter().find(|i| i["id"] == id).unwrap();
+
+        // No edge: not blocked, an empty list.
+        assert_eq!(get(c)["blocked"], false);
+        assert_eq!(get(c)["blocked_by"], serde_json::json!([]));
+
+        let changed = store.issue_blocks_set("p", c, &[a, b], &[]).unwrap();
+        assert_eq!(changed, (vec![a, b], vec![]), "both edges are new");
+        for row in [get(c), listed(c)] {
+            assert_eq!(row["blocked_by"], serde_json::json!([1, 2]));
+            assert_eq!(row["blocked"], true);
+        }
+        // A blocker is not itself blocked by being one.
+        assert_eq!(get(a)["blocked"], false);
+
+        // One blocker done is not enough; both done unblocks.
+        store.issue_save("p", Some(a), None, None, Some("done"), None, "human", 20).unwrap();
+        assert_eq!(get(c)["blocked"], true);
+        store.issue_save("p", Some(b), None, None, Some("done"), None, "human", 21).unwrap();
+        assert_eq!(get(c)["blocked"], false);
+        assert_eq!(listed(c)["blocked"], false);
+        assert_eq!(get(c)["blocked_by"], serde_json::json!([1, 2]), "the edges stay after the blockers are done");
+
+        // Reopen: a blocker moved out of done blocks again.
+        store.issue_save("p", Some(b), None, None, Some("review"), None, "human", 22).unwrap();
+        assert_eq!(get(c)["blocked"], true);
+
+        // Adding an edge that exists, or removing one that does not, is a no-op.
+        assert_eq!(store.issue_blocks_set("p", c, &[a], &[]).unwrap(), (vec![], vec![]));
+        assert_eq!(store.issue_blocks_set("p", a, &[], &[b]).unwrap(), (vec![], vec![]));
+        // Removing b leaves only the done a: unblocked.
+        assert_eq!(store.issue_blocks_set("p", c, &[], &[b]).unwrap(), (vec![], vec![b]));
+        assert_eq!(get(c)["blocked_by"], serde_json::json!([1]));
+        assert_eq!(get(c)["blocked"], false);
+
+        // A blocked issue may still be moved to done: a blocker informs, it never forbids.
+        store.issue_blocks_set("p", c, &[b], &[]).unwrap();
+        store.issue_save("p", Some(c), None, None, Some("done"), None, "human", 30).unwrap();
+        assert_eq!(get(c)["status"], "done");
+    }
+
+    /// Board #43 AC2: a self-edge, a cycle, or a number from another board is
+    /// refused, and a refused call writes nothing (one transaction).
+    #[test]
+    fn a_blocking_edge_refuses_a_self_edge_a_cycle_and_another_board() {
+        let store = Store::open_memory().unwrap();
+        for t in ["one", "two", "three"] {
+            store.issue_save("p", None, Some(t), None, None, None, "human", 10).unwrap();
+        }
+        store.issue_save("q", None, Some("other board"), None, None, None, "human", 10).unwrap();
+        store.issue_save("q", None, Some("other board 2"), None, None, None, "human", 10).unwrap();
+        store.issue_save("q", None, Some("other board 3"), None, None, None, "human", 10).unwrap();
+        store.issue_save("q", None, Some("other board 4"), None, None, None, "human", 10).unwrap();
+        let by = |id: i64| store.issue_get("p", id).unwrap().unwrap()["blocked_by"].clone();
+
+        let e = store.issue_blocks_set("p", 1, &[1], &[]).unwrap_err();
+        assert_eq!(e, "#1 cannot block itself");
+
+        // 2 blocked by 1, 3 blocked by 2: 1 blocked by 3 closes 1 → 3 → 2 → 1.
+        store.issue_blocks_set("p", 2, &[1], &[]).unwrap();
+        store.issue_blocks_set("p", 3, &[2], &[]).unwrap();
+        let e = store.issue_blocks_set("p", 1, &[3], &[]).unwrap_err();
+        assert_eq!(e, "#3 cannot block #1: that makes a cycle #1 → #3 → #2 → #1");
+        // The direct two-issue cycle too.
+        let e = store.issue_blocks_set("p", 1, &[2], &[]).unwrap_err();
+        assert_eq!(e, "#2 cannot block #1: that makes a cycle #1 → #2 → #1");
+        assert_eq!(by(1), serde_json::json!([]));
+
+        // #4 exists only on board q: on p it is not found.
+        let e = store.issue_blocks_set("p", 1, &[4], &[]).unwrap_err();
+        assert_eq!(e, "no issue #4 on this board");
+
+        // All or nothing: a valid edge in the same call as a refused one is not kept.
+        assert!(store.issue_blocks_set("p", 3, &[1, 3], &[]).is_err());
+        assert_eq!(by(3), serde_json::json!([2]));
+    }
+
+    /// Board #43 AC3: deleting an issue takes every edge it is in, on either
+    /// side; the dependant stays, no longer blocked by a number that is gone.
+    #[test]
+    fn deleting_an_issue_drops_its_blocking_edges() {
+        let store = Store::open_memory().unwrap();
+        for t in ["blocker", "middle", "dependant"] {
+            store.issue_save("p", None, Some(t), None, None, None, "human", 10).unwrap();
+        }
+        store.issue_blocks_set("p", 2, &[1], &[]).unwrap();
+        store.issue_blocks_set("p", 3, &[2], &[]).unwrap();
+        assert!(store.issue_delete("p", 2).unwrap());
+        let edges: i64 = store.conn.query_row("SELECT COUNT(*) FROM issue_blocks", [], |r| r.get(0)).unwrap();
+        assert_eq!(edges, 0, "both edges of #2 went with it");
+        let dep = store.issue_get("p", 3).unwrap().unwrap();
+        assert_eq!(dep["blocked_by"], serde_json::json!([]));
+        assert_eq!(dep["blocked"], false);
     }
 }

@@ -34,6 +34,17 @@ Hub's `.title-stack`/`.name-line` from app.css, and the width ghost is priced
 by the rendered rows. See websocket-client.md § The Board and the phone's
 Terminal list.
 
+### An issue declares what blocks it; the frontier is derived (board #43, 2026-11-06)
+
+Retro (orchestrator and reviewer, 03:43): blocking edges lived only in issue bodies ("Blocked by #38"), and the orchestrator worked out by hand which tickets could start. Now an issue declares its blockers, and the board derives the **frontier**: every issue that is not done and whose blockers are all done. The frontier informs assignment; it never assigns anything by itself.
+
+- **One table, keyed by the hidden row ids** (schema v34, `issue_blocks(issue_id, blocker_id)`, both `REFERENCES issues(id) ON DELETE CASCADE`). A project rename moves `issues.session` and the edges follow with no rewrite; deleting an issue, or permanently deleting its project, drops every edge it is in, on either side. A dependant whose blocker was deleted is simply no longer blocked by it. The step is additive (no existing row changes), runs inside the ladder with foreign keys off like every step (non-negotiable 9), and `heal` recreates the table if a stamp ran ahead of it. Measured on a copy of this host's v33 store (2026-11-06): v33 → v34, 85 issues and 971 notes kept, `integrity_check` ok, `foreign_key_check` empty.
+- **Blocked is derived, never stored** (tenet 8). One SQL definition in `store/board.rs` (`BLOCKED_SQL`, `BLOCKED_BY_SQL`) feeds both the list and the single read: `blocked_by` is the blockers' `#N` in order and `blocked` is true while ANY blocker is not done. Nothing records "ready". So a **reopened** blocker (moved out of done) blocks its dependants again on the next read, and a blocker that reaches done unblocks them on the next read. No event and no stored flag can disagree.
+- **A blocker informs, it never forbids** (orchestrator, plan approval). A blocked issue may still be moved to any column, done included; the board does not second-guess the person or agent who closed it.
+- **Edges are written in one transaction, all or nothing** (`issue_blocks_set(session, id, add, remove)`). Every number is resolved on THIS board, so a number from another project is "no issue #N on this board". An issue cannot block itself, and an edge that would close a cycle is refused with the shortest path it would make (`#3 cannot block #1: that makes a cycle #1 → #3 → #2 → #1`). One refused edge refuses the whole call. Adding an existing edge or removing an absent one is a no-op, and the answer names only the edges that really changed.
+
+Pinned by `store/board.rs` tests (blocked while any blocker is open, reopen blocks again, done stays allowed while blocked, no-op edges; self, cycle, other board, all-or-nothing; delete drops both sides), `store/projects.rs` (rename carries the edges, permanent delete leaves none) and `store/schema.rs` (`v33_boards_gain_blocking_edges_and_keep_their_issues`, with the heal floor).
+
 ### A card shows WHO is on it with the agent's own face; the dot only in doing (board #293, 2026-10-01; #327, 2026-10-09)
 
 Owner, 14:38 on 10-01, after the promo: "board 里不同的 agent 分别在处理哪个，视频里那个可视化比我们当前的看起来更好一些" — the card's `· @assignee` text became a picture and the name, with a dot while that agent runs. Owner, 10-09 (#327): "你用的 logo 好像又是自己发明的一个字母头像…就用他的头像就好…不要去发明新的头像" and "在那个done的页面里…还显示了一个『正在工作』的状态，这让我感觉他好像还在处理这个已经完成的档的任务". So, amending #293's lettered `agentHue` tile:

@@ -9,7 +9,7 @@ use super::registry::{DEFAULT_DSH_SYSTEM, DEFAULT_KIMI_SYSTEM, DEFAULT_OMP_SYSTE
 
 /// Bumped when the schema changes; `migrate` is the only place that knows the
 /// steps. Stored in SQLite's own `user_version` pragma.
-const SCHEMA_VERSION: i64 = 33;
+const SCHEMA_VERSION: i64 = 34;
 
 impl Store {
     /// Ensure the durable half of Board editability exists, then
@@ -732,6 +732,12 @@ impl Store {
             // physical one. A new table; no existing row changes.
             self.ensure_agent_names()?;
         }
+        if version < 34 {
+            // v34 (board #43): blocking edges between issues. A new table;
+            // no existing row changes. Runs inside the ladder, foreign keys
+            // off like every step (non-negotiable 9).
+            self.ensure_issue_blocks()?;
+        }
         Ok(())
     }
 
@@ -1050,6 +1056,36 @@ mod tests {
         drop(store);
         let store = Store::open(&path).unwrap();
         assert_eq!(store.hub_read_mark("proj:old").unwrap(), None, "healed on open, empty");
+    }
+
+    /// v33 -> v34 (board #43): the blocking-edge table appears, every
+    /// existing issue keeps its number and reads unblocked, and the heal
+    /// floor recreates the table if a stamp ran ahead of it.
+    #[test]
+    fn v33_boards_gain_blocking_edges_and_keep_their_issues() {
+        let scratch = crate::tmux::Scratch::new("store-v34");
+        let path = std::path::Path::new(&scratch.path()).join("state.db");
+        {
+            let store = Store::open(&path).unwrap();
+            store.issue_save("proj", None, Some("old one"), None, None, None, "human", 10).unwrap();
+            store.issue_save("proj", None, Some("old two"), None, Some("doing"), None, "human", 11).unwrap();
+            store.conn.execute_batch("DROP TABLE issue_blocks; PRAGMA user_version = 33;").unwrap();
+        }
+        let store = Store::open(&path).unwrap();
+        let v: i64 = store.conn.query_row("PRAGMA user_version", [], |r| r.get(0)).unwrap();
+        assert_eq!(v, 34);
+        let list = store.issues_list("proj").unwrap();
+        assert_eq!(list.len(), 2);
+        for i in &list {
+            assert_eq!(i["blocked"], false);
+            assert_eq!(i["blocked_by"], serde_json::json!([]));
+        }
+        store.issue_blocks_set("proj", 2, &[1], &[]).unwrap();
+        assert_eq!(store.issue_get("proj", 2).unwrap().unwrap()["blocked"], true);
+        store.conn.execute_batch("DROP TABLE issue_blocks;").unwrap();
+        drop(store);
+        let store = Store::open(&path).unwrap();
+        assert_eq!(store.issue_get("proj", 2).unwrap().unwrap()["blocked_by"], serde_json::json!([]), "healed on open, empty");
     }
 
     /// The heal step, which is not hypothetical: a dev binary built in the
