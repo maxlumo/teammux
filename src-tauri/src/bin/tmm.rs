@@ -3015,7 +3015,7 @@ fn cap_refusal(need: &str) -> String {
             "this server cannot move an agent between teams (its login answer lacks `{need}`) — update the server. Nothing was changed."
         ),
         "board_blocks" => format!(
-            "this server is older than blocking edges (its login answer lacks `{need}`; an older server would file the issue with no edges) — update the server. Nothing was saved."
+            "this server is older than blocking edges (its login answer lacks `{need}`): it neither keeps blockers nor says which issues are blocked — update the server. Nothing was read or saved."
         ),
         "spawn_join" => format!(
             "this server cannot start an agent inside a team (its login answer lacks `{need}`; an older server would start it standalone) — update the server to join. Nothing was spawned."
