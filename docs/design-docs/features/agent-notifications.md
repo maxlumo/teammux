@@ -407,7 +407,9 @@ an ordinary failed end with no notice (#354). The text is redacted before
 anything stores or sends it (orchestrator's ruling, 07:48). A URL's query
 string and its userinfo (`user:pass@`) are dropped. `sk-…`, the token after
 `Bearer` or `Basic`, the value of a SECRET KEY NAME in every assignment form
-(`k=v`, `k="v"`, a header or YAML `k: v`, JSON `"k":"v"`), and any run of 32
+(`k=v`, `k="v"`, a header or YAML `k: v`, JSON `"k":"v"`, with any blanks
+around the separator, and a YAML value on the next indented line; a blank
+line after the separator is no value), and any run of 32
 or more key characters holding letters and digits become `<REDACTED>`. A key
 name is normalised (lowercase, `-` and `.` read as `_`) and counts when it is,
 or ends with `_` plus, one of `api_key`, `apikey`, `key`, `token`,
@@ -418,7 +420,10 @@ or ends with `_` plus, one of `api_key`, `apikey`, `key`, `token`,
 scheme word stays and its credential is masked. Validator's round-0 P2 was
 the JSON, colon, Basic and userinfo forms. Its round-1 P2 was `x-api-key`,
 Anthropic's own key header, which the orchestrator ruled a class to close
-rather than one more shape. The status, the CLI's error
+rather than one more shape. Its round-2 P2 was `api_key = v` (spaced) and
+the next-line YAML value, closed in round 3 as one spacing rule. The single
+record of every masked form, and of what stays, is
+`shared::tests::every_credential_form_masked_so_far_and_what_stays`. The status, the CLI's error
 kind and the provider's sentence stay, and so does a request id (a UUID's
 groups are short). The text is cut at 300 characters.
 

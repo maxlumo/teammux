@@ -681,26 +681,40 @@ fn has_number(text: &str, n: u16) -> bool {
 const REDACTED: &str = "<REDACTED>";
 
 /// Where a secret key's value starts, when `chars[after..]` is what follows a
-/// key name: `=`, or `:` (a JSON key's closing quote first), then optional
-/// spaces and an opening quote. `None` when no assignment follows, so a key
-/// word in prose is left alone.
+/// key name (orchestrator, round 3: one rule for every spacing): a JSON
+/// key's closing quote, any blanks, the separator `=` or `:`, then any
+/// blanks INCLUDING at most one line break and its indentation (YAML's block
+/// form), then an optional opening quote. `None` when no separator follows,
+/// so a key word in prose is left alone; a blank line after the separator is
+/// no value.
 fn secret_value_start(chars: &[char], after: usize) -> Option<usize> {
+    let blank = |c: Option<&char>| matches!(c, Some(' ') | Some('\t'));
     let mut j = after;
     if chars.get(j) == Some(&'"') {
+        j += 1;
+    }
+    while blank(chars.get(j)) {
         j += 1;
     }
     if !matches!(chars.get(j), Some('=') | Some(':')) {
         return None;
     }
     j += 1;
-    while chars.get(j) == Some(&' ') {
+    while blank(chars.get(j)) {
         j += 1;
+    }
+    if chars.get(j) == Some(&'\n') {
+        j += 1;
+        while blank(chars.get(j)) {
+            j += 1;
+        }
     }
     if matches!(chars.get(j), Some('"') | Some('\'')) {
         j += 1;
     }
     Some(j)
 }
+
 /// The secret words a key name may END with (orchestrator, round 2): a
 /// name is normalised first (`secret_name`), so `x-api-key`, `X-Api-Key`,
 /// `OPENAI_API_KEY` and `app.secret` all end with one, while `keyboard` and
@@ -842,6 +856,53 @@ mod tests {
         assert_eq!(provider_failure(None, Some("APIStatusError"), "Error code: 500"), None);
         assert_eq!(provider_failure(None, None, "took 4013 ms"), None, "a status is a whole number");
         assert_eq!(provider_failure(None, None, ""), None);
+    }
+
+    /// Board #39, the ONE record of every credential form the redaction masks
+    /// (orchestrator, round 3): rounds 0 to 3 of slice 1, each row an input
+    /// and the exact text that reaches the room. And the forms it must leave
+    /// alone.
+    #[test]
+    fn every_credential_form_masked_so_far_and_what_stays() {
+        let v = "AbCd1234EfGh5678";
+        let masked: &[(&str, String, &str)] = &[
+            // round 0
+            ("sk- key", "x-api-key sk-ant-api03-FAKEfakeFAKEfake0123456789abcdefABCDEF".into(), "x-api-key <REDACTED>"),
+            ("Bearer", format!("Authorization Bearer {v}.x-y_z"), "Authorization Bearer <REDACTED>"),
+            ("key=", format!("key={v}&x=1"), "key=<REDACTED>&x=1"),
+            ("token=", format!("token={v}"), "token=<REDACTED>"),
+            ("url query", "url: https://gw.example/v1/responses?key=Q&x=1, done".into(), "url: https://gw.example/v1/responses, done"),
+            ("long run", "credential 0123456789abcdef0123456789abcdef01234567 expired".into(), "credential <REDACTED> expired"),
+            // round 1
+            ("JSON api_key", format!(r#"{{"api_key":"{v}"}}"#), r#"{"api_key":"<REDACTED>"}"#),
+            ("api_key:", format!("api_key: {v} for"), "api_key: <REDACTED> for"),
+            ("Basic", "Basic dXNlcjpwYXNzd29yZA== refused".into(), "Basic <REDACTED> refused"),
+            ("userinfo", "https://user:hunter2pass@api.example.com/v1".into(), "https://api.example.com/v1"),
+            ("quoted =", format!("api_key=\"{v}\" denied"), "api_key=\"<REDACTED>\" denied"),
+            // round 2
+            ("x-api-key:", format!("x-api-key: {v}"), "x-api-key: <REDACTED>"),
+            ("X-Api-Key=", format!("X-Api-Key={v}"), "X-Api-Key=<REDACTED>"),
+            ("JSON x-api-key", format!(r#"{{"x-api-key":"{v}"}}"#), r#"{"x-api-key":"<REDACTED>"}"#),
+            ("x-goog-api-key", format!("x-goog-api-key: {v}"), "x-goog-api-key: <REDACTED>"),
+            ("OPENAI_API_KEY", format!("OPENAI_API_KEY={v}"), "OPENAI_API_KEY=<REDACTED>"),
+            ("client.secret", format!("client.secret: {v}"), "client.secret: <REDACTED>"),
+            ("authorization bare", format!("Authorization: {v}"), "Authorization: <REDACTED>"),
+            ("authorization scheme", format!("authorization: Bearer {v}"), "authorization: Bearer <REDACTED>"),
+            // round 3
+            ("spaced =", format!("api_key = {v} set"), "api_key = <REDACTED> set"),
+            ("= then space", format!("api_key= {v}"), "api_key= <REDACTED>"),
+            ("space then :", format!("api_key :{v}"), "api_key :<REDACTED>"),
+            ("JSON spaced", format!(r#"{{"api_key" : "{v}"}}"#), r#"{"api_key" : "<REDACTED>"}"#),
+            ("tab =", format!("token\t=\t{v}"), "token\t=\t<REDACTED>"),
+            ("YAML next line", format!("api_key:\n  {v}\nmodel: x"), "api_key:\n  <REDACTED>\nmodel: x"),
+        ];
+        for (form, raw, want) in masked {
+            assert_eq!(provider_failure(Some(401), None, raw).unwrap(), format!("401: {want}"), "{form}");
+        }
+        for kept in ["keyboard: ok, monkey=1, turnkey", "tokens: 1234", "secretary: Bob", "api_key_id: 42",
+            "request id: req_011CUv8n3XJkZz9Yq7Wm2aBc", "Please run /login · API Error: 401 invalid API key", "key:\n\n  later"] {
+            assert_eq!(provider_failure(Some(401), None, kept).unwrap().trim_start_matches("401: "), kept, "{kept}");
+        }
     }
 
     /// Board #39 (orchestrator, 07:48): the text goes to the room, panes and
