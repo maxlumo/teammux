@@ -898,8 +898,9 @@ fn dispatch_hub(req: &Request, notifications: Option<&crate::agent_notifications
                 Some(window) => Some(crate::projects::delivery::replace_cli(session, agent, || kill_agent_cli(session, agent, window)).map_err(RpcError::Internal)?),
                 None => None,
             };
+            let before = crate::projects::delivery::recipe_backend(session, agent);
             let resumed = start_agent_owned(session, agent, permit, owned).map_err(|e| RpcError::Internal(format!("restart failed: {e}")))?;
-            let _ = rooms::post(&room, agent, &format!("[tmm] restarted {agent}"));
+            let _ = rooms::post(&room, agent, &restart_line(agent, before, crate::projects::delivery::recipe_backend(session, agent)));
             Ok(serde_json::json!({ "restarted": agent, "resumed": resumed }))
         }
 
@@ -965,9 +966,10 @@ fn dispatch_hub(req: &Request, notifications: Option<&crate::agent_notifications
                         }
                     }
                 }
+                let before = crate::projects::delivery::recipe_backend(session, w);
                 match start_agent_owned(session, w, permit, owned) {
                     Ok(_) => {
-                        let _ = rooms::post(&room, w, &format!("[tmm] restarted {w}"));
+                        let _ = rooms::post(&room, w, &restart_line(w, before, crate::projects::delivery::recipe_backend(session, w)));
                         restarted.push(w.clone());
                     }
                     Err(e) => errors.push(serde_json::json!({ "name": w, "error": format!("restart failed: {e}") })),
@@ -1072,6 +1074,16 @@ pub(super) fn handle_hub_request(req: &Request, _notifications: Option<&crate::a
 /// name (projects `up` renames by slot); adopted agents match by window name
 /// too, which is the best identity tmux offers.
 #[cfg(not(any(target_os = "android", target_os = "ios")))]
+/// A restart's room line (board #46 S3): the recipe's backend before the
+/// start and after its re-render. A changed one starts FRESH (a conversation
+/// id never crosses backends), and the room says so; otherwise as before.
+fn restart_line(agent: &str, before: Option<crate::backends::Backend>, after: Option<crate::backends::Backend>) -> String {
+    match (before, after) {
+        (Some(b), Some(a)) if b != a => format!("[tmm] restarted {agent} on {}, fresh conversation", a.name()),
+        _ => format!("[tmm] restarted {agent}"),
+    }
+}
+
 /// The backend of a managed agent's live pane, from its processes (#260).
 fn agent_backend(session: &str, agent: &str) -> Option<crate::backends::Backend> {
     let panes = crate::tmux::list_panes(session).ok()?;
@@ -2991,6 +3003,17 @@ mod tests {
     use super::*;
     use crate::projects::rooms;
     use crate::projects::telemetry;
+
+    /// Board #46 S3: a restart that applied a new backend says so, because
+    /// the conversation it had is not resumed (non-negotiable: an id never
+    /// crosses backends); the same backend reads as before.
+    #[test]
+    fn a_restart_onto_another_backend_says_it_starts_a_fresh_conversation() {
+        use crate::backends::Backend;
+        assert_eq!(restart_line("val", Some(Backend::Omp), Some(Backend::Codex)), "[tmm] restarted val on codex, fresh conversation");
+        assert_eq!(restart_line("val", Some(Backend::Codex), Some(Backend::Codex)), "[tmm] restarted val");
+        assert_eq!(restart_line("val", None, Some(Backend::Codex)), "[tmm] restarted val", "no recipe before: nothing to compare");
+    }
 
     /// Board #448 P1-B, the full start door: an agent whose saved recipe is an
     /// older build's codex line WITH an MCP secret, and whose re-materialize

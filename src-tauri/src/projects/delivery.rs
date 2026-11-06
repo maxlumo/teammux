@@ -259,13 +259,24 @@ pub(crate) fn watch_start(session: &str, window: &str) {
         format!("{session}:{window}"),
         confirmation,
         Some(Box::new(move || start_ready(&s, &w))),
-        Some(Box::new(move || {
-            let rows = telemetry::held_rows(&s2, &w2);
-            if !rows.is_empty() {
-                telemetry::record_held_blocked(&s2, &w2, &rows, &format!("{w2} has not become ready after {secs} s"));
-            }
-        })),
+        Some(Box::new(move || not_ready_after(&s2, &w2, secs))),
     );
+}
+
+/// A start whose screen never proved ready within the backend's timeout: held
+/// lines get their warn, as before, and the room is told once whether or not
+/// any line was held (board #46 S3). Before, a CLI that fell to a bare shell
+/// with nothing queued was said by nothing; the timeout is the one existing
+/// fact that it never came up.
+fn not_ready_after(session: &str, window: &str, secs: u64) {
+    let why = format!("{window} has not become ready after {secs} s");
+    let rows = telemetry::held_rows(session, window);
+    if !rows.is_empty() {
+        telemetry::record_held_blocked(session, window, &rows, &why);
+    }
+    if let Err(e) = super::rooms::post(&super::rooms::session_room(session), "tmm", &format!("[tmm] {why}")) {
+        eprintln!("delivery: {why}, and the room line was not written: {e}");
+    }
 }
 
 /// A start whose launch failed (round 2, P1-R3): the mark is retired only
@@ -1427,6 +1438,25 @@ fn type_text(session: &str, window: &str, target: &str, text: &str) -> Result<()
 mod tests {
     use super::*;
     use crate::projects::telemetry::{record_notification, record_prompt};
+
+    /// Board #46 S3, measured on f7ec95ae: a switched codex that fell to a
+    /// bare shell was said by nothing (tmm exit 0, `[tmm] restarted`, the list
+    /// idle, the room silent past the 120 s ready timeout), because the
+    /// timeout told only senders of held lines. It now says so once in the
+    /// room, held lines or not; held lines keep their own warn.
+    #[test]
+    fn a_start_that_never_becomes_ready_is_said_once_in_the_room() {
+        crate::projects::tests::use_test_store();
+        let session = format!("tmm-notready-{}", std::process::id());
+        let room = crate::projects::rooms::session_room(&session);
+        let before = crate::projects::rooms::history_page(&room, None, 100)["messages"].as_array().unwrap().len();
+        not_ready_after(&session, "val", 120);
+        let page = crate::projects::rooms::history_page(&room, None, 100);
+        let msgs = page["messages"].as_array().unwrap();
+        assert_eq!(msgs.len(), before + 1, "{page}");
+        assert_eq!(msgs.last().unwrap()["body"], "[tmm] val has not become ready after 120 s");
+        assert_eq!(msgs.last().unwrap()["from"], "tmm");
+    }
 
     fn fake() {
         TYPED.with(|t| *t.borrow_mut() = Some(Vec::new()));
