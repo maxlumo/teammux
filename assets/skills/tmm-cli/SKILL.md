@@ -102,9 +102,16 @@ tmm board take <id>             # claim it: assignee = you, status = doing
 tmm board move <id> review      # done working — hand it to review
 tmm board move <id> done        # accepted
 tmm board note <id> "found the root cause in store.rs; fix is one COALESCE"
+tmm board add "title" --blocked-by 38,39   # filed with the issues that block it
+tmm board block <id> 38          # #38 blocks <id>; `unblock` removes the edge
+tmm board frontier               # open issues whose blockers are all done (with status)
 ```
 
 Conventions that keep the board honest:
+- Declare a dependency as an edge (`--blocked-by`, `block`), not as prose in
+  the body: the frontier is derived from edges and status, and a blocker
+  reaching done is what puts an issue on it. A blocker informs; it never
+  stops you moving an issue.
 - `take` before you start — two agents editing one issue's territory is the
   conflict the board exists to prevent.
 - `note` decisions and findings ON the issue (not only in chat): the issue

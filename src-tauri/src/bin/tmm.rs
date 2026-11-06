@@ -68,6 +68,9 @@ USAGE (agent):
   tmm spawn --team <team> [--brief <text>]  start a configured agent team (all members)
   tmm board [list]                    the project task board (kanban)
   tmm board add "title" [--body <text>] [--image <path|url>] [--assignee <name>]
+                    [--blocked-by <id>[,<id>]]  …filed with the issues that block it
+  tmm board block <id> <id>[,<id>]    those issues block <id>; `unblock` removes the edges
+  tmm board frontier                  open issues whose blockers are all done, with their status
   tmm board show <id>                 one issue with its note thread
   tmm board take <id>                 claim it: assignee = you, status = doing
   tmm board assign <id> <name|->      hand it to someone else; `-` clears the assignee
@@ -872,10 +875,11 @@ async fn main() {
                             let notes = i.get("notes").and_then(|v| v.as_i64()).unwrap_or(0);
                             let assignee = if g("assignee").is_empty() { String::new() } else { format!(" @{}", names.shown(g("assignee"))) };
                             let n = if notes > 0 { format!(" [{notes} notes]") } else { String::new() };
+                            let blocked = blocked_note(i);
                             // A titleless issue is still NAMED (board #31):
                             // the same title → body → #id fallback every
                             // notice speaks.
-                            println!("  #{id} {}{assignee}{n}", tmux_mobile::projects::issue_ref(g("title"), g("body"), id));
+                            println!("  #{id} {}{assignee}{n}{blocked}", tmux_mobile::projects::issue_ref(g("title"), g("body"), id));
                         }
                     }
                 }
@@ -890,6 +894,11 @@ async fn main() {
                     println!("#{} [{}] {}", id, g("status"), tmux_mobile::projects::issue_ref(g("title"), g("body"), id));
                     if !g("assignee").is_empty() { println!("assignee: {}", names.shown(g("assignee"))); }
                     if !g("created_by").is_empty() { println!("opened by: {}", names.shown(g("created_by"))); }
+                    if let Some(all) = r.get("blocked_by").and_then(|v| v.as_array()).filter(|a| !a.is_empty()) {
+                        let list = all.iter().filter_map(|n| n.as_i64()).map(|n| format!("#{n}")).collect::<Vec<_>>().join(", ");
+                        let still = r.get("blocked").and_then(|v| v.as_bool()).unwrap_or(false);
+                        println!("{}", if still { format!("blocked by {list}") } else { format!("blockers: {list} (all done)") });
+                    }
                     if !g("body").is_empty() { println!("\n{}\n", g("body")); }
                     let empty = Vec::new();
                     for n in r.get("notes").and_then(|v| v.as_array()).unwrap_or(&empty) {
@@ -918,16 +927,81 @@ async fn main() {
                     // asks the server to tell the agent, and refuses before
                     // writing when this server cannot.
                     let assignee = match flags.get("assignee") { Some(Some(a)) => Some(assign_target(a).to_string()), _ => None };
-                    let r = if let Some(a) = &assignee {
+                    // Blockers ride the same create (board #43); a server
+                    // that cannot keep them is refused before the write.
+                    let blocked_by = match flags.get("blocked-by") {
+                        Some(raw) => Some(issue_numbers(raw.as_deref().unwrap_or(""), "board add --blocked-by")),
+                        None => None,
+                    };
+                    let mut need: Vec<&str> = Vec::new();
+                    if let Some(a) = &assignee {
                         params["assignee"] = json!(a);
                         params["dispatch"] = json!(true);
-                        rpc_needing(&ctx, "board_dispatch", "hub_board_save", params).await
-                    } else {
+                        need.push("board_dispatch");
+                    }
+                    if let Some(b) = &blocked_by {
+                        params["blocked_by"] = json!(b);
+                        need.push("board_blocks");
+                    }
+                    let r = if need.is_empty() {
                         rpc(&ctx, "hub_board_save", params).await
+                    } else {
+                        rpc_needing(&ctx, &need.join(","), "hub_board_save", params).await
                     };
+                    if let Some(e) = r.get("blocked_by_error").and_then(|v| v.as_str()) {
+                        eprintln!("tmm: #{} was filed, but its blockers were not set: {e}", r.get("id").and_then(|v| v.as_i64()).unwrap_or(0));
+                    }
                     let id = r.get("id").and_then(|v| v.as_i64()).unwrap_or(0);
                     if ctx.json { println!("{r}"); } else { println!("✓ #{id} on the board"); }
                     if let Some(a) = assignee { settle_dispatch(id, &a, &r); }
+                }
+                // Board #43: the edit verbs for blocking edges. One request
+                // each; the server refuses a cycle, a self-edge or a number
+                // from another board with nothing written.
+                "block" | "unblock" => {
+                    let usage = format!("board {sub} needs an issue and the issue numbers that block it: tmm board {sub} 39 38[,41]");
+                    let Some(id) = rest.get(1).and_then(|s| s.trim_start_matches('#').parse::<i64>().ok()) else {
+                        fail(EXIT_USAGE, &usage);
+                    };
+                    let Some(raw) = rest.get(2) else { fail(EXIT_USAGE, &usage) };
+                    if rest.len() > 3 { fail(EXIT_USAGE, &usage); }
+                    let numbers = issue_numbers(raw, &format!("board {sub}"));
+                    let key = if sub == "block" { "add" } else { "remove" };
+                    let r = rpc_needing(&ctx, "board_blocks", "hub_board_block", json!({ "session": session, "id": id, key: numbers, "who": who })).await;
+                    if ctx.json { println!("{r}"); return; }
+                    let list = |k: &str| r.get(k).and_then(|v| v.as_array()).map(|a| a.iter().filter_map(|n| n.as_i64()).map(|n| format!("#{n}")).collect::<Vec<_>>().join(", ")).unwrap_or_default();
+                    let changed = if key == "add" { list("added") } else { list("removed") };
+                    let blocked = r.pointer("/issue/blocked").and_then(|v| v.as_bool()).unwrap_or(false);
+                    let state = if blocked { "blocked" } else { "not blocked" };
+                    if changed.is_empty() {
+                        println!("✓ #{id} unchanged ({state})");
+                    } else if sub == "block" {
+                        println!("✓ #{id} blocked by {changed} (now {state})");
+                    } else {
+                        println!("✓ #{id} no longer blocked by {changed} (now {state})");
+                    }
+                }
+                // The frontier (board #43): every issue that is not done and
+                // whose blockers are all done. It is the list filtered on the
+                // server's own `blocked`, so there is one definition of it.
+                "frontier" => {
+                    let r = rpc(&ctx, "hub_board_list", json!({ "session": session })).await;
+                    let empty = Vec::new();
+                    let open: Vec<&Value> = r.get("issues").and_then(|v| v.as_array()).unwrap_or(&empty)
+                        .iter()
+                        .filter(|i| i.get("status").and_then(|v| v.as_str()) != Some("done") && i.get("blocked").and_then(|v| v.as_bool()) == Some(false))
+                        .collect();
+                    let mut open = open;
+                    open.sort_by_key(|i| i.get("id").and_then(|v| v.as_i64()).unwrap_or(0));
+                    if ctx.json { println!("{}", json!({ "issues": open })); return; }
+                    if open.is_empty() { println!("the frontier is empty: every open issue waits on another"); return; }
+                    let names = tmux_mobile::address::Names::from_json(r.get("labels").unwrap_or(&Value::Null));
+                    for i in open {
+                        let g = |k: &str| i.get(k).and_then(|v| v.as_str()).unwrap_or("");
+                        let id = i.get("id").and_then(|v| v.as_i64()).unwrap_or(0);
+                        let assignee = if g("assignee").is_empty() { String::new() } else { format!(" @{}", names.shown(g("assignee"))) };
+                        println!("#{id} [{}] {}{assignee}", g("status"), tmux_mobile::projects::issue_ref(g("title"), g("body"), id));
+                    }
                 }
                 "delete" => {
                     let Some(id) = rest.get(1).and_then(|s| s.trim_start_matches('#').parse::<i64>().ok()) else {
@@ -2506,7 +2580,7 @@ const VALUED: &[&str] = &["project", "agent", "server", "output", "since", "limi
                           "name", "session", "with-agent", "backend", "model", "effort", "input-mode", "system", "skills", "mcp",
                           "ref", "source", "description", "def", "grep", "image", "notify", "body", "assignee", "team", "join", "file",
                           "in", "at", "to", "code", "signal", "re", "as", "from", "before", "lines", "cols", "note", "args-json", "test",
-                          "expect", "message-file"];
+                          "expect", "message-file", "blocked-by"];
 
 /// An argument is a flag only if it has a flag's SHAPE: `-x`, `--name`, `--name=value`, a letter
 /// first and then letters, digits, `_` or `-` (board #456). Anything else that begins with `-`
@@ -2630,7 +2704,10 @@ const VERB_FLAGS: &[VerbFlags] = &[
     VerbFlags { key: "board", ctx: true, flags: &[] },
     VerbFlags { key: "board list", ctx: true, flags: &[] },
     VerbFlags { key: "board show", ctx: true, flags: &[] },
-    VerbFlags { key: "board add", ctx: true, flags: &["body", "image", "assignee"] },
+    VerbFlags { key: "board add", ctx: true, flags: &["body", "image", "assignee", "blocked-by"] },
+    VerbFlags { key: "board block", ctx: true, flags: &[] },
+    VerbFlags { key: "board unblock", ctx: true, flags: &[] },
+    VerbFlags { key: "board frontier", ctx: true, flags: &[] },
     VerbFlags { key: "board delete", ctx: true, flags: &[] },
     VerbFlags { key: "board assign", ctx: true, flags: &[] },
     VerbFlags { key: "board take", ctx: true, flags: &[] },
@@ -2891,6 +2968,29 @@ const MCP_MASKED: &str = "mcp_masked";
 /// What a write needing `need` says when the server's login lacks it (board
 /// #377; #382 for `spawn_join`): what it cannot do, how to get it, and that
 /// nothing was written.
+/// The list row's tail for an issue that is still blocked (board #43):
+/// ` · blocked by #38`. An issue whose blockers are all done says nothing.
+fn blocked_note(issue: &Value) -> String {
+    if issue.get("blocked").and_then(|v| v.as_bool()) != Some(true) {
+        return String::new();
+    }
+    let list = issue.get("blocked_by").and_then(|v| v.as_array()).map(|a| a.iter().filter_map(|n| n.as_i64()).map(|n| format!("#{n}")).collect::<Vec<_>>().join(", ")).unwrap_or_default();
+    format!(" · blocked by {list}")
+}
+
+/// A list of issue numbers as typed: `38`, `#38`, `38,39` (board #43).
+/// Anything else, or nothing, is a usage error naming the expected shape.
+fn issue_numbers(raw: &str, verb: &str) -> Vec<i64> {
+    let parsed: Option<Vec<i64>> = raw
+        .split(',')
+        .map(|t| t.trim().trim_start_matches('#').parse::<i64>().ok().filter(|n| *n > 0))
+        .collect();
+    match parsed {
+        Some(v) if !v.is_empty() => v,
+        _ => fail(EXIT_USAGE, &format!("{verb} needs issue numbers like 38 or 38,39 — got {raw:?}")),
+    }
+}
+
 fn cap_refusal(need: &str) -> String {
     match need {
         MCP_MASKED => format!(
@@ -2902,6 +3002,9 @@ fn cap_refusal(need: &str) -> String {
         ),
         "agent_team" => format!(
             "this server cannot move an agent between teams (its login answer lacks `{need}`) — update the server. Nothing was changed."
+        ),
+        "board_blocks" => format!(
+            "this server is older than blocking edges (its login answer lacks `{need}`; an older server would file the issue with no edges) — update the server. Nothing was saved."
         ),
         "spawn_join" => format!(
             "this server cannot start an agent inside a team (its login answer lacks `{need}`; an older server would start it standalone) — update the server to join. Nothing was spawned."
@@ -2995,14 +3098,17 @@ where
             )));
         }
     }
+    // `need` may name several caps, comma-separated (board #43: an issue
+    // filed with an assignee AND blockers needs both); every one must be
+    // announced, and the refusal names the first that is not.
     if let Some(need) = need {
-        let has = auth_reply
-            .pointer("/result/caps")
-            .and_then(|c| c.as_array())
-            .is_some_and(|caps| caps.iter().any(|c| c.as_str() == Some(need)));
-        if !has {
+        let caps = auth_reply.pointer("/result/caps").and_then(|c| c.as_array());
+        let missing = need
+            .split(',')
+            .find(|n| !caps.is_some_and(|caps| caps.iter().any(|c| c.as_str() == Some(*n))));
+        if let Some(missing) = missing {
             let _ = ws.close(None).await;
-            return Err((EXIT_NOT_FOUND, cap_refusal(need)));
+            return Err((EXIT_NOT_FOUND, cap_refusal(missing)));
         }
     }
 

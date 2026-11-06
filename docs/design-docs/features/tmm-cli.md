@@ -58,7 +58,9 @@ tmm log --files [--grep <word>…] [--from <name>] [--global] [--limit N] [--bef
 
 # the task board
 tmm board [list] | show <id>         the kanban; one issue + its note thread
-tmm board add "title" [--body <t>] [--image <path|url>] [--assignee <n>]
+tmm board add "title" [--body <t>] [--image <path|url>] [--assignee <n>] [--blocked-by <id>[,<id>]]
+tmm board block|unblock <id> <id>[,<id>]   add / remove blocking edges (#43)
+tmm board frontier                   open issues whose blockers are all done, with status (#43)
 tmm board take <id>                  claim: assignee = you, status = doing
 tmm board assign <id> <name|->        hand it to someone else; `-` clears it (#367)
 tmm board move <id> <todo|doing|review|done>
@@ -591,6 +593,17 @@ Why it exists: `tmm merge` removed the merge-value slip, and what survived it wa
 - **Compatibility.** The flag needs the `board_notify` login capability. `tmm` checks it on the connection that would carry the flag, so an older gateway refuses before anything is written instead of storing a note and announcing nothing. The Hub sends no `notify` today; any client that does must check the same cap.
 
 Tests. Pure: `notify_targets` (freezing; `all` as the declared set, read only when written and once; dedupe; author-only; stopped teammate; explicit names with an unreadable agents list; every refusal) and `notify_line` (pointer, escaping, cut, image-only). The handler with its I/O scripted (`NoteIo`, the `HandOff` pattern): a bad `notify` value, an unreadable issue and an unreadable agents list write nothing; the order is read → store → post → notice; `attempted` is what was found; a failed room write restores the unsuppressed notice. Real tmux (`a_notified_note_announces_once_and_leaves_the_flagless_note_alone`): the flagless answer gains no field; a live agent, `human` and a stopped declared teammate in one request — attempted is the live one, the stopped one is `offline`; the assignee gets the announcement INSTEAD of a second reply notice; a pane in copy mode is attempted and not offline. Real CLI against a fake gateway (`tests/board_notify_cli.rs`), in text and JSON: recorded, room failed (the server's exact line as text, and no command to paste), lost and five malformed answers (unknown), an older gateway, shape refusals, a server refusal, and the unchanged flagless note. Round 3 adds: `managed_names_in` against marker-carrying sentinels (`dev @all`, `all`, `Human`, a dot, a leading dash); the read-back door refusing a widening expansion with nothing written. Not staged for real: a busy queue-mode hold (#257) — the attempt is the delivery path's `found`, which a hold does not change. Negative controls, run 2026-11-04 one at a time and restored byte-identical: room failure exiting 0, a malformed answer read as success, `all` read eagerly, non-string items dropped, the notice suppressed after a failed room write, and `attempted` set to the request — each turns its test red (a sixth, on the recovery command's context, was removed with the command). Round 3, run 2026-11-04 the same way: the enumeration without the name check, without the routing-word exclusion, the read-back door removed, a zero seq counted as recorded, and "no live pane" — each red (its recovery-command controls went with the command).
+
+## Blocking edges and the frontier (board #43, 2026-11-06)
+
+`tmm board add … --blocked-by 38,39` files an issue with its blockers in the one save; `tmm board block <id> 38[,41]` and `tmm board unblock <id> 38` are the edit verbs (one `hub_board_block` each); `tmm board frontier` prints every issue that is not done and whose blockers are all done, as `#N [status] title @assignee`, oldest number first. The design and the store rules (derived, never stored; self, cycle and another board refused; reopen and delete) are in board.md § An issue declares what blocks it.
+
+- **The frontier is the list, filtered on the server's `blocked`.** The CLI has no rule of its own about what blocks: it reads `hub_board_list` and keeps `status != done && blocked == false`, so the board page, `list` and `frontier` can never disagree. It never assigns anything. `--output json` answers `{issues}` with the rows as the server shaped them.
+- **`list` and `show` name the blockers.** A list row ends `· blocked by #38` while a blocker is open, and says nothing once they are all done; `show` prints `blocked by #38` or `blockers: #40 (all done)`.
+- **Refused before writing on an older server.** `add --blocked-by`, `block` and `unblock` need the `board_blocks` cap; an older server would ignore `blocked_by` and file the issue with no edges as if it had worked. A save that needs two caps (`--assignee` and `--blocked-by`) names both, and the refusal names the first one missing (`try_rpc`'s `need` is a comma list).
+- **Numbers are checked at the door.** `38`, `#38` and `38,39` are accepted; an empty list or anything else is a usage error with nothing sent.
+
+Pinned by `tests/board_blocks_cli.rs` (one save carrying `blocked_by`; the older server refused with no write; `block`/`unblock` one edit each; malformed lists refused before any call; the frontier's rows and JSON from a mixed board; `list`/`show` naming the blockers).
 
 ## Waking an agent later (`--in` / `--at`, board #275)
 
