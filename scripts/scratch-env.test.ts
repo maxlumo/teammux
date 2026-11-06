@@ -6,7 +6,7 @@
 // running process for any name that survived.
 import assert from 'node:assert/strict';
 import { createHash } from 'node:crypto';
-import { mkdtempSync, rmSync, statSync, readFileSync, chmodSync, realpathSync, mkdirSync, writeFileSync, lstatSync, existsSync, symlinkSync } from 'node:fs';
+import { mkdtempSync, rmSync, statSync, readFileSync, chmodSync, realpathSync, mkdirSync, writeFileSync, lstatSync, existsSync, symlinkSync, linkSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import test from 'node:test';
@@ -485,5 +485,64 @@ test("a link to a named CLI's own executable passes, a config link out still fai
       `${join(arg0, 'config.toml')} → ${join(realpathSync(home), '.codex', 'config.toml')}`,
       `${join(arg0, 'other')} → ${realpathSync(join(bin, 'notacli'))}`,
     ], 'a config link and an unnamed executable still fail');
+  } finally { rmSync(root, { recursive: true, force: true }); }
+});
+
+// Round 2 (reviewer P1-A, P1-B on 40ed7067). A: run reuses an existing dir, and the copy followed a
+// link already standing at <dir>/codex-user or at a file in it, so run itself wrote outside. B: an
+// unreadable subtree or file read as absent or clean, against #48's "unknown is not safe".
+test('run refuses a link at the copy dir, replaces a symlink or hard link at a file in it, and writes nothing outside (#54 round 2)', () => {
+  const root = mkdtempSync(join(tmpdir(), 'scratch-env-test-'));
+  try {
+    const home = fakeUser(root);
+    const victim = join(root, 'victim');
+    mkdirSync(victim);
+    writeFileSync(join(victim, 'config.toml'), 'mine\n', { mode: 0o644 });
+    const spawn = () => ({ pid: 7, unref() {} });
+    const dir = join(root, 'gw');
+    mkdirSync(dir, { mode: 0o700 });
+    symlinkSync(victim, join(dir, 'codex-user'));
+    assert.throws(() => runScratch({ dir, argv: ['./server'], env: { PATH: '/bin', HOME: home }, spawn, home }), /codex-user/);
+    const dir2 = join(root, 'gw2');
+    mkdirSync(join(dir2, 'codex-user'), { recursive: true, mode: 0o700 });
+    symlinkSync(join(victim, 'config.toml'), join(dir2, 'codex-user', 'config.toml'));
+    writeFileSync(join(victim, 'auth.json'), 'theirs\n', { mode: 0o644 });
+    linkSync(join(victim, 'auth.json'), join(dir2, 'codex-user', 'auth.json')); // a HARD link (reviewer 14:51)
+    const inodes = ['config.toml', 'auth.json'].map((n) => statSync(join(victim, n)).ino);
+    runScratch({ dir: dir2, argv: ['./server'], env: { PATH: '/bin', HOME: home }, spawn, home });
+    for (const name of ['config.toml', 'auth.json']) {
+      const st = lstatSync(join(dir2, 'codex-user', name));
+      assert.ok(st.isFile() && !st.isSymbolicLink() && st.nlink === 1, `${name}: a fresh file of its own`);
+      assert.equal(readFileSync(join(dir2, 'codex-user', name), 'utf8'), readFileSync(join(home, '.codex', name), 'utf8'));
+    }
+    assert.equal(readFileSync(join(victim, 'auth.json'), 'utf8'), 'theirs\n', 'nothing written through the hard link');
+    assert.equal(statSync(join(victim, 'auth.json')).mode & 0o777, 0o644, 'nor chmodded');
+    assert.equal(readFileSync(join(victim, 'config.toml'), 'utf8'), 'mine\n', 'nothing written through either link');
+    assert.deepEqual(['config.toml', 'auth.json'].map((n) => statSync(join(victim, n)).ino), inodes, 'the same inodes');
+    assert.equal(statSync(join(victim, 'config.toml')).mode & 0o777, 0o644, 'nothing chmodded through it');
+  } finally { rmSync(root, { recursive: true, force: true }); }
+});
+
+test('an unreadable scratch subtree or real config file is a failure by path, never absent or clean (#54 round 2)', { skip: process.getuid?.() === 0 ? 'root reads everything' : false }, () => {
+  const root = mkdtempSync(join(tmpdir(), 'scratch-env-test-'));
+  try {
+    const home = fakeUser(root);
+    const agents = join(root, 'ws', '.tmm', 'agents');
+    const shut = join(agents, 'cx', 'codex');
+    mkdirSync(shut, { recursive: true });
+    symlinkSync(join(home, '.codex', 'config.toml'), join(shut, 'config.toml'));
+    chmodSync(shut, 0o000);
+    try {
+      assert.deepEqual(outsideLinks([agents], [join(root, 'gw'), join(root, 'ws')]), [`${shut} → cannot be read (EACCES)`]);
+    } finally { chmodSync(shut, 0o755); }
+    const before = realConfigHashes(home, {});
+    chmodSync(join(home, '.codex', 'auth.json'), 0o000);
+    try {
+      assert.deepEqual(configChanges(before, realConfigHashes(home, {})), [`${join(home, '.codex', 'auth.json')} cannot be read (EACCES)`]);
+    } finally { chmodSync(join(home, '.codex', 'auth.json'), 0o600); }
+    chmodSync(join(home, '.codex'), 0o000);
+    try {
+      assert.ok(configChanges(before, realConfigHashes(home, {})).some((l) => l.includes(join(home, '.codex')) && l.includes('EACCES')), 'an unreadable codex home is not an empty one');
+    } finally { chmodSync(join(home, '.codex'), 0o755); }
   } finally { rmSync(root, { recursive: true, force: true }); }
 });

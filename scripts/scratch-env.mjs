@@ -29,7 +29,7 @@
 // tmux server" holds the rule and its reason.
 import { spawn as nodeSpawn, spawnSync } from 'node:child_process';
 import { createHash, randomBytes } from 'node:crypto';
-import { chmodSync, existsSync, lstatSync, mkdirSync, readdirSync, readFileSync, readlinkSync, realpathSync, statSync, writeFileSync } from 'node:fs';
+import { chmodSync, closeSync, constants as fsc, existsSync, lstatSync, mkdirSync, openSync, readdirSync, readFileSync, readlinkSync, realpathSync, renameSync, statSync, writeFileSync, writeSync } from 'node:fs';
 import { basename, dirname, isAbsolute, join, resolve, sep } from 'node:path';
 import { DatabaseSync } from 'node:sqlite';
 import { homedir, tmpdir } from 'node:os';
@@ -148,8 +148,13 @@ const realCodexHome = (home, env) => (env.CODEX_HOME ? env.CODEX_HOME : join(hom
  * home (shared.rs): config.toml, .env, auth.json and the profile layers `*.config.toml`. */
 function codexLinkedNames(codexHome) {
   let profiles = [];
-  try { profiles = readdirSync(codexHome).filter((n) => n.endsWith('.config.toml')).sort(); } catch { /* none */ }
-  return ['config.toml', '.env', 'auth.json', ...profiles];
+  try {
+    profiles = readdirSync(codexHome).filter((n) => n.endsWith('.config.toml')).sort();
+  } catch (e) {
+    // Round 2 (reviewer P1-B): only absence is "none"; a home that cannot be listed is unknown.
+    if (e.code !== 'ENOENT') return { names: ['config.toml', '.env', 'auth.json'], why: e.code ?? e.message };
+  }
+  return { names: ['config.toml', '.env', 'auth.json', ...profiles] };
 }
 
 /** Board #54: fill `dest` with COPIES (0600) of the user's codex files a render links, so the
@@ -157,14 +162,33 @@ function codexLinkedNames(codexHome) {
  * never reach the user's file. Measured on main 05a548c7: codex is the only backend whose render
  * links outside the agent home (kiro's link points into it; claude and kimi copy). */
 export function copyCodexHome(realHome, dest) {
-  privateDir(dest);
-  for (const name of codexLinkedNames(realHome)) {
+  // Round 2 (reviewer P1-A): run reuses an existing dir, so whatever stands at `dest` is never
+  // followed. It must be a real directory of ours (a link there is refused), and each copy is a
+  // FRESH 0600 file written beside it (O_EXCL|O_NOFOLLOW) and renamed over the name: a symlink or a
+  // hard link already at that name is replaced, never written through, so the copy has its own
+  // storage and nothing outside changes.
+  let st = null;
+  try { st = lstatSync(dest); } catch (e) { if (e.code !== 'ENOENT') throw new Error(`${dest}: ${e.code ?? e.message}`); }
+  if (st === null) mkdirSync(dest, { mode: 0o700 });
+  else if (st.isSymbolicLink() || !st.isDirectory()) throw new Error(`${dest} exists and is not a directory of its own (a link or a file); refusing to copy the codex config through it`);
+  else if (st.uid !== process.getuid?.()) throw new Error(`${dest} is not ours; refusing to copy the codex config into it`);
+  else if (st.mode & 0o077) throw new Error(`${dest} is open to others (mode ${(st.mode & 0o777).toString(8)}); refusing to copy the codex config into it`);
+  const { names, why } = codexLinkedNames(realHome);
+  if (why) throw new Error(`${realHome} cannot be listed (${why}), so its config cannot be copied`);
+  for (const name of names) {
     const from = join(realHome, name);
-    let st;
-    try { st = statSync(from); } catch { continue; }
-    if (!st.isFile()) continue;
-    writeFileSync(join(dest, name), readFileSync(from), { mode: 0o600 });
-    chmodSync(join(dest, name), 0o600);
+    let body;
+    try {
+      if (!statSync(from).isFile()) continue;
+      body = readFileSync(from);
+    } catch (e) {
+      if (e.code === 'ENOENT') continue;
+      throw new Error(`${from} cannot be read (${e.code ?? e.message}), so it cannot be copied`);
+    }
+    const tmp = join(dest, `.${name}.${randomBytes(6).toString('hex')}`);
+    const fd = openSync(tmp, fsc.O_WRONLY | fsc.O_CREAT | fsc.O_EXCL | fsc.O_NOFOLLOW, 0o600);
+    try { writeSync(fd, body); } finally { closeSync(fd); }
+    renameSync(tmp, join(dest, name));
   }
 }
 
@@ -173,10 +197,14 @@ export function copyCodexHome(realHome, dest) {
 export function realConfigHashes(home, env) {
   const codex = realCodexHome(home, env);
   const kimi = env.KIMI_CODE_HOME ? env.KIMI_CODE_HOME : join(home, '.kimi-code');
-  const files = [...codexLinkedNames(codex).map((n) => join(codex, n)), join(home, '.claude', 'settings.json'), join(kimi, 'config.toml')];
+  const { names, why } = codexLinkedNames(codex);
+  const files = [...names.map((n) => join(codex, n)), join(home, '.claude', 'settings.json'), join(kimi, 'config.toml')];
   const out = {};
+  // Round 2 (reviewer P1-B): null is ABSENT only; a file or home that cannot be read is
+  // `unreadable: <code>`, and configChanges reports it.
+  if (why) out[codex] = `unreadable: ${why}`;
   for (const f of files) {
-    try { out[f] = createHash('sha256').update(readFileSync(f)).digest('hex'); } catch { out[f] = null; }
+    try { out[f] = createHash('sha256').update(readFileSync(f)).digest('hex'); } catch (e) { out[f] = e.code === 'ENOENT' ? null : `unreadable: ${e.code ?? e.message}`; }
   }
   return out;
 }
@@ -184,12 +212,17 @@ export function realConfigHashes(home, env) {
 /** What changed between two `realConfigHashes`, one line per file, in the first's order. */
 export function configChanges(before, after) {
   const out = [];
+  const unread = (v) => typeof v === 'string' && v.startsWith('unreadable: ');
   for (const [f, h] of Object.entries(before)) {
     const now = Object.hasOwn(after, f) ? after[f] : null;
+    if (unread(now)) { out.push(`${f} cannot be read (${now.slice('unreadable: '.length)})`); continue; }
     if (h === now) continue;
     out.push(h === null ? `${f} appeared` : now === null ? `${f} was removed` : `${f} changed`);
   }
-  for (const f of Object.keys(after)) if (!Object.hasOwn(before, f) && after[f] !== null) out.push(`${f} appeared`);
+  for (const f of Object.keys(after)) {
+    if (Object.hasOwn(before, f) || after[f] === null) continue;
+    out.push(unread(after[f]) ? `${f} cannot be read (${after[f].slice('unreadable: '.length)})` : `${f} appeared`);
+  }
   return out;
 }
 
@@ -203,11 +236,12 @@ export function outsideLinks(dirs, roots, executables = []) {
   const out = [];
   const walk = (d) => {
     let names;
-    try { names = readdirSync(d); } catch { return; }
+    // Round 2 (reviewer P1-B): a subtree that cannot be listed is unknown, not clean.
+    try { names = readdirSync(d); } catch (e) { if (e.code !== 'ENOENT') out.push(`${d} → cannot be read (${e.code ?? e.message})`); return; }
     for (const n of names.sort()) {
       const p = join(d, n);
       let st;
-      try { st = lstatSync(p); } catch { continue; }
+      try { st = lstatSync(p); } catch (e) { if (e.code !== 'ENOENT') out.push(`${p} → cannot be read (${e.code ?? e.message})`); continue; }
       if (st.isSymbolicLink()) {
         const r = resolveOnDisk(p);
         if (r.why) out.push(`${p} → cannot be resolved (${r.why})`);

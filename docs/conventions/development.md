@@ -848,7 +848,16 @@ env -u TMUX -u TMUX_PANE -u TMUX_SOCKET TMUX_TMPDIR="$D" tmux kill-server
   run. A link whose real target is the executable of a NAMED agent CLI
   (`CLI_PROGRAMS`: claude, codex, dsh, grok, kimi, kiro-cli, omp, found on the
   gateway's PATH and the user CLI bins a managed pane adds) passes; a link to
-  any config, credential or data file, or to any other executable, still fails. Still the rule outside a script: **never edit an agent
+  any config, credential or data file, or to any other executable, still fails.
+  Round 2 (reviewer P1-A/B on `40ed7067`, both reproduced by validator-2 with
+  fake homes): `run` reuses an existing dir, and the copy followed a link
+  already standing at `<dir>/codex-user` or at a file in it. Now the copy dir
+  must be a real 0700 directory of ours (a link, a file or an open mode is
+  refused), and each copy is a FRESH 0600 file written beside it with
+  `O_EXCL|O_NOFOLLOW` and renamed over the name, so a symlink or a hard link
+  already there is replaced and never written through or chmodded. And, as
+  #48's rule: a scratch subtree or a real config that cannot be read (anything
+  but ENOENT) fails `check` by path, never reads as absent or clean. Still the rule outside a script: **never edit an agent
   home's config in place**; `readlink -f` it first, and change a scratch CLI's
   settings with a launch-line override (`-c key=value`) or a copy.
 - **Scope.** This removes INHERITED ROUTING to the live tmux server and
