@@ -30,6 +30,7 @@
   import { sessionRef, refKey, type SessionRef } from '../app/refs.ts';
   import Icon from '../ui/Icon.svelte';
   import Select from '../ui/Select.svelte';
+  import Switch from '../ui/Switch.svelte';
   import SideHandle from '../ui/SideHandle.svelte';
   import { moveTrack, pinTrack } from './reveal.ts';
   import ConfirmDialog from '../ui/ConfirmDialog.svelte';
@@ -37,7 +38,7 @@
   import { feedbackPosition } from '../ui/feedback-position.ts';
   import { copyText } from '../core/clipboard.ts';
   import { scheduleCompletion } from '../ui/feedback-lifetime.ts';
-  import { BOARD_BLOCKS, BOARD_DISPATCH, lacksCap } from '../core/login-caps.ts';
+  import { BOARD_AGREEMENT, BOARD_BLOCKS, BOARD_DISPATCH, lacksCap } from '../core/login-caps.ts';
   import { draftOf, draftDirty, draftValid, draftPatch, isSubmitChord, rebaseDraft, issueRef, countsOf, applyCounts, visibleBoards, boardTitle, chipCols, assigneeView, rememberBackends } from './board.ts';
   import { messageActsSet, messageActsCopyLanded, messageActsCopyFailed, messageActsExpired, MESSAGE_ACTS_IDLE, type MessageActsState } from './message-actions.ts';
   import { scrollFade } from '../core/scrollFade.ts';
@@ -80,6 +81,9 @@
   /** Board #43: is this server KNOWN to be too old to edit blocking edges?
    * Shown only (disabled controls and why); `ws-api.boardBlock` refuses. */
   const blocksLocked = () => lacksCap(loginCaps, BOARD_BLOCKS);
+  /** Board #44: is this server KNOWN to be too old to keep an agreement note?
+   * Then the toggle is absent; `ws-api.boardNote` refuses on its own. */
+  const agreementLocked = () => lacksCap(loginCaps, BOARD_AGREEMENT);
   /** `#1, #2`: an issue's blockers as the card and the room say them. */
   const blockList = (i: BoardIssue) => (i.blocked_by ?? []).map((n) => `#${n}`).join(', ');
   /** Why a write did not go, in this page's words: the two gate refusals
@@ -452,7 +456,7 @@
     if (id === stagedFor) return;
     stagedFor = id;
     // The note text and its images have ONE owner, the issue: they go together.
-    untrack(() => { opGen++; closeShot(); bodyStage.clear(); noteStage.clear(); noteText = ''; });
+    untrack(() => { opGen++; closeShot(); bodyStage.clear(); noteStage.clear(); noteText = ''; noteAgreement = false; });
   });
   let wasDrilled = false;
   $effect(() => { if (drilled !== wasDrilled) { drillAnim = drilled ? 'fwd' : 'back'; wasDrilled = drilled; } });
@@ -465,6 +469,10 @@
   let nBody = $state('');
   let nAssignee = $state('');
   let noteText = $state('');
+  /** Board #44: the note box's "as the current agreement" toggle. Part of the
+   * note draft: it clears with the text (a successful note, a discard, the
+   * issue changing), so a later note is plain unless asked again. */
+  let noteAgreement = $state(false);
   let busy = $state(false);
   /** A save, create or note request is running: its editors are locked and
    * nothing navigates under it (board #329 review). Delete keeps #167's rule
@@ -651,7 +659,7 @@
   $effect(() => {
     void cur;
     viewGeneration++;
-    sel = null; creating = false; ready = false; issues = []; noteText = ''; nTitle = ''; nBody = ''; nAssignee = ''; pendingDiscard = null; pendingDelete = null;
+    sel = null; creating = false; ready = false; issues = []; noteText = ''; noteAgreement = false; nTitle = ''; nBody = ''; nAssignee = ''; pendingDiscard = null; pendingDelete = null;
     closeShot(); opGen++;
     err = ''; resend = null; // the old board's error line and its Reassign belong to it
     untrack(() => { createStage.clear(); bodyStage.clear(); noteStage.clear(); });
@@ -874,11 +882,13 @@
     const ctx = freeze();
     const id = sel.id;
     const body = noteStage.body(noteText).trim(); // frozen before the await
+    const agreement = noteAgreement; // board #44: frozen with the text it belongs to
     busy = true; submitting = true;
     try {
-      await boardNote(ctx.session, id, body);
+      if (agreement) await boardNote(ctx.session, id, body, { agreement: true });
+      else await boardNote(ctx.session, id, body);
       if (!owns(ctx)) return; // the note is saved; another issue's box is not ours to clear
-      noteText = ''; noteStage.clear(); // persisted
+      noteAgreement = false; noteText = ''; noteStage.clear(); // persisted
       await refetchSel(ctx);
     } catch (e) { if (owns(ctx)) err = String((e as Error)?.message ?? e); }
     finally { busy = false; submitting = false; }
@@ -1329,12 +1339,26 @@
       <!-- The note thread as a TIMELINE (reopened #11): a header line — author
            in the accent ink, time right-aligned — and the content in its own
            box below, so ragged name lengths stop pushing the text around. -->
+      <!-- The current agreement (board #44) comes FIRST, before the thread:
+           the newest note declared as one, derived by the server. It is a
+           note, so it wears the note atoms; the thread below keeps every
+           earlier agreement, labelled. -->
+      {#if sel.agreement}
+        <div class="note d-agreement">
+          <div class="n-head">
+            <span class="meta-bit">{t('boardAgreementCurrent')} · {t('boardAgreementNote').replace('{n}', String(sel.agreement.n))}</span>
+            <span class="n-author">{names.shown(sel.agreement.author)}</span>
+          </div>
+          <div class="n-wrap"><div class="n-text" lang={hanLang(sel.agreement.body)}>{withImages(sel.agreement.body.trim()).text}</div></div>
+        </div>
+      {/if}
       <div class="notes" bind:this={notesEl}>
         {#if Array.isArray(sel.notes)}
           {#each sel.notes as n, i (`${i}:${n.at}`)}
             <div class="note" class:appear={i >= notesBase}>
               <div class="n-head">
                 <span class="n-author">{names.shown(n.author)}</span>
+                {#if n.agreement}<span class="meta-bit">{n.superseded_by ? t('boardAgreementSuperseded').replace('{n}', String(n.superseded_by)) : t('boardAgreement')}</span>{/if}
                 <!-- The accessible route to the action row (board #46): the
                      note text stays TEXT to assistive tech — like the Chat
                      bubble — so the time is a real borderless button, Chat's
@@ -1360,6 +1384,17 @@
         {/if}
       </div>
       <AttachStrip pending={noteStage.pending} onremove={(i) => { if (!submitting) noteStage.remove(i); }} onpreview={(u) => showShot(viewerOpen(u))} />
+      <!-- Board #44: post the note AS the current agreement. One shared
+           Switch, part of the note draft. ABSENT on a server known not to
+           keep agreements (the backends_check precedent: offered only when
+           announced), because such a server sends none either; an unanswered
+           login is not a no, and the write path's gate decides then. -->
+      {#if !agreementLocked()}
+        <div class="note-opts">
+          <Switch checked={noteAgreement} label={t('boardPostAgreement')} disabled={submitting}
+            onchange={(on: boolean) => { if (!submitting) noteAgreement = on; }} />
+        </div>
+      {/if}
       <div class="note-add">
         <CommandButton variant="icon" icon="plus" label={t('hubAttach')} disabled={submitting || noteStage.attaching}
           pending={noteStage.attaching} onclick={() => pickFor(noteStage)} />
@@ -1522,7 +1557,7 @@
       // 0b50b8c7). Other parked actions (leave walks, Back) are not the
       // landing's and keep their legitimate Discard.
       if (go && go === landingParked && landingParkedOk && !landingParkedOk()) { voidLanding(); return; }
-      pendingDiscard = null; draft = { ...draftBase }; nTitle = ''; nBody = ''; nAssignee = ''; noteText = ''; createStage.clear(); bodyStage.clear(); noteStage.clear(); go?.(); }}
+      pendingDiscard = null; draft = { ...draftBase }; nTitle = ''; nBody = ''; nAssignee = ''; noteText = ''; noteAgreement = false; createStage.clear(); bodyStage.clear(); noteStage.clear(); go?.(); }}
     oncancel={cancelDiscard} />
   <!-- Deleting is the DANGER confirmation (board #29): the dialog names the
        captured issue, nothing reaches boardDelete before the confirm, and
@@ -1736,7 +1771,7 @@
   .d-id { font-family: var(--font-mono); font-size: var(--fs-meta); color: var(--text3); }
   .d-title { font-size: var(--fs-ui); font-weight: 600; color: var(--text); overflow-wrap: anywhere; }
   .spacer { flex: 1; }
-  .d-meta { display: flex; align-items: center; gap: 10px; flex-wrap: wrap; }
+  .d-meta, .note-opts { display: flex; align-items: center; gap: 10px; flex-wrap: wrap; }
   /* The status slider (board #15): one bordered track in the control dialect,
      equal stops; the chosen stop wears the segmented control's SELECTED look
      from design-language.md §3 — accent outline + accent wash + accent ink,

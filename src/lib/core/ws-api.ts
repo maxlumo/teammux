@@ -15,7 +15,7 @@ import type { ProjectRow } from '../projects/projects.ts';
 import type { BackendInfo } from './agents.ts';
 import type { SystemStatus as SystemStatusReading } from '../system/system.ts';
 import type { Connection, TeamMessage } from './connection.ts';
-import { AGENT_TEAM, BOARD_BLOCKS, BOARD_DISPATCH, CapError, HUB_FILES, MCP_MASKED, SPAWN_JOIN, holdForLogin, requireCap } from './login-caps.ts';
+import { AGENT_TEAM, BOARD_AGREEMENT, BOARD_BLOCKS, BOARD_DISPATCH, CapError, HUB_FILES, MCP_MASKED, SPAWN_JOIN, holdForLogin, requireCap } from './login-caps.ts';
 
 // ─── Protocol types ──────────────────────────────────────────────────────
 
@@ -149,7 +149,13 @@ export interface BoardIssue {
   updated_at: number;
   /** Original title/body may change only while unassigned and before any Agent activity. */
   editable: boolean;
-  notes: number | { author: string; body: string; at: number }[];
+  /** A count in the list; the thread in `hub_board_get` (board #44: in row-id
+   * order, `n` its position, `agreement` declared at write, `superseded_by`
+   * the next agreement's `n` for an earlier one). */
+  notes: number | { author: string; body: string; at: number; n?: number; agreement?: boolean; superseded_by?: number | null }[];
+  /** Board #44: the newest agreement note, derived by the server; null when
+   * there is none. Absent on an older server. */
+  agreement?: { n: number; author: string; body: string; at: number } | null;
   /** Board #43: the blockers' numbers, in order, and whether ANY is not done
    * (derived by the server on every read). Absent on an older server. */
   blocked_by?: number[];
@@ -472,8 +478,20 @@ export function createWsApi(connection: Connection) {
         fields.dispatch ? holdForLogin(connection) : undefined,
     },
   );
-  const boardNote = (session: string, id: number, body: string) =>
-    call<{ ok: boolean }>('hub_board_note', { session, id, body, who: 'human' });
+  /** A note, or (board #44) one DECLARED the issue's current agreement as it is
+   * written. That needs `board_agreement` on the current socket's login (the
+   * #377 gate: the runtime waits for an unanswered login, the check is
+   * synchronous in the block that sends); a plain note needs nothing. */
+  const boardNote = Object.assign(
+    async (session: string, id: number, body: string, opts?: { agreement?: boolean }) => {
+      if (opts?.agreement) requireCap(connection, BOARD_AGREEMENT);
+      return call<{ ok: boolean }>('hub_board_note', { session, id, body, who: 'human', ...(opts?.agreement ? { agreement: true } : {}) });
+    },
+    {
+      hold: (_session: string, _id: number, _body: string, opts?: { agreement?: boolean }): Promise<void> | undefined =>
+        opts?.agreement ? holdForLogin(connection) : undefined,
+    },
+  );
   const boardDelete = (session: string, id: number) =>
     call<{ ok: boolean }>('hub_board_delete', { session, id });
   /** Add or remove blocking edges of one issue (board #43). Needs

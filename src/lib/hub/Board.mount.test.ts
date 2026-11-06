@@ -631,3 +631,88 @@ test('a refused blocker leaves the picker on its placeholder and says why once (
     assert.equal(app.document.querySelector('.d-blocks .chip-btn')?.textContent?.replace(/\s+/g, ''), '#1', 'the edges are as they were');
   } finally { await app.close(); }
 });
+
+// ── Board #44: the current agreement. The detail shows it ABOVE the thread,
+// the thread labels every agreement note, and the note box can post one. ──
+const agreed = {
+  ...issue, id: 7, title: 'Agreed issue', blocked_by: [], blocked: false,
+  agreement: { n: 3, author: 'orchestrator', body: 'agreed: only a proven rollout', at: 300 },
+  notes: [
+    { n: 1, author: 'builder-2', body: 'plan', at: 100, agreement: false, superseded_by: null },
+    { n: 2, author: 'orchestrator', body: 'agreed: the newest thread', at: 200, agreement: true, superseded_by: 3 },
+    { n: 3, author: 'orchestrator', body: 'agreed: only a proven rollout', at: 300, agreement: true, superseded_by: null },
+  ],
+};
+const agreedCounts = { todo: 1, doing: 0, review: 0, done: 0, total: 1 };
+
+test('the current agreement is shown above the thread, and the thread labels each agreement (#44)', async context => {
+  const app = await (await compiled).mount(context, {
+    props: { session: 'fixture', visible: true },
+    setup(window) { window.Element.prototype.getAnimations = () => []; },
+    modules: [rpc({ getCaps: () => ['board_dispatch', 'board_agreement'], boardCounts: async () => ({ counts: { fixture: agreedCounts } }), boardList: async () => ({ issues: [agreed] }), boardGet: async () => agreed })],
+  });
+  try {
+    await flush(app);
+    app.document.querySelector<HTMLButtonElement>('.card')!.click(); await flush(app);
+    const block = app.document.querySelector('.d-agreement')!;
+    assert.ok(block, 'the agreement block renders');
+    const text = (el: Element) => el.textContent!.replace(/\s+/g, ' ');
+    assert.match(text(block), /Current agreement/);
+    assert.match(text(block), /note 3/);
+    assert.match(text(block), /agreed: only a proven rollout/);
+    const notes = app.document.querySelector('.notes')!;
+    assert.ok(block.compareDocumentPosition(notes) & app.window.Node.DOCUMENT_POSITION_FOLLOWING, 'the agreement comes before the thread');
+    const heads = [...notes.querySelectorAll('.note .n-head')].map(text);
+    assert.doesNotMatch(heads[0]!, /agreement/i);
+    assert.match(heads[1]!, /superseded by note 3/);
+    assert.match(heads[2]!, /agreement/i);
+    assert.doesNotMatch(heads[2]!, /superseded/);
+  } finally { await app.close(); }
+});
+
+test('the note box posts an agreement only when asked, then resets (#44)', async context => {
+  const sent: unknown[] = [];
+  const app = await (await compiled).mount(context, {
+    props: { session: 'fixture', visible: true },
+    setup(window) { window.Element.prototype.getAnimations = () => []; },
+    modules: [rpc({
+      getCaps: () => ['board_dispatch', 'board_agreement'],
+      boardCounts: async () => ({ counts: { fixture: agreedCounts } }),
+      boardList: async () => ({ issues: [agreed] }),
+      boardGet: async () => agreed,
+      boardNote: async (...args: unknown[]) => { sent.push(JSON.parse(JSON.stringify(args))); return { ok: true }; },
+    })],
+  });
+  try {
+    await flush(app);
+    app.document.querySelector<HTMLButtonElement>('.card')!.click(); await flush(app);
+    const box = app.document.querySelector<HTMLTextAreaElement>('.note-input')!;
+    const toggle = () => app.document.querySelector<HTMLButtonElement>('.note-opts [role=switch]')!;
+    const post = async (body: string) => {
+      box.value = body; box.dispatchEvent(new app.window.Event('input', { bubbles: true })); await app.flush();
+      app.document.querySelector<HTMLButtonElement>('.note-add .icon-btn.go')!.click(); await flush(app);
+    };
+    assert.equal(toggle().getAttribute('aria-checked'), 'false');
+    await post('plain words');
+    toggle().click(); await app.flush();
+    assert.equal(toggle().getAttribute('aria-checked'), 'true');
+    await post('agreed: only a proven rollout');
+    assert.deepEqual(sent, [['fixture', 7, 'plain words'], ['fixture', 7, 'agreed: only a proven rollout', { agreement: true }]]);
+    assert.equal(toggle().getAttribute('aria-checked'), 'false', 'the next note is plain unless asked again');
+  } finally { await app.close(); }
+});
+
+test('a server without board_agreement shows the agreement but offers no toggle (#44)', async context => {
+  const app = await (await compiled).mount(context, {
+    props: { session: 'fixture', visible: true },
+    setup(window) { window.Element.prototype.getAnimations = () => []; },
+    modules: [rpc({ getCaps: () => ['board_dispatch'], boardCounts: async () => ({ counts: { fixture: agreedCounts } }), boardList: async () => ({ issues: [agreed] }), boardGet: async () => agreed })],
+  });
+  try {
+    await flush(app);
+    app.document.querySelector<HTMLButtonElement>('.card')!.click(); await flush(app);
+    assert.ok(app.document.querySelector('.d-agreement'), 'an agreement the server sent is still shown');
+    assert.equal(app.document.querySelector('.note-opts'), null, 'no toggle a server known not to keep it would ignore');
+    assert.ok(app.document.querySelector('.note-input'), 'a plain note still goes');
+  } finally { await app.close(); }
+});
