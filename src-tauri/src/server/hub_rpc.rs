@@ -6859,6 +6859,8 @@ while True:
             let _ = std::fs::remove_dir_all(&ws);
             return;
         }
+        // Torn down on drop, also when an assertion fails part-way.
+        let _teardown = KillOnDrop(session.clone(), ws.clone());
         crate::projects::adopt(&session, Some("note-ref-test")).expect("adopt test project");
         let id = crate::projects::board_save(&session, None, Some("Ref"), Some("b"), None, Some("dev"), "orchestrator").unwrap();
         for (who, body) in [("validator", "SHIP at abc123"), ("reviewer", "P1: the cap is silent")] {
@@ -6881,9 +6883,6 @@ while True:
             let note = issue["notes"].as_array().unwrap().iter().find(|x| x["n"] == n).expect("that note exists");
             assert_eq!(note["body"], want, "{line}");
         }
-
-        let _ = std::process::Command::new("tmux").args(["kill-session", "-t", &session]).status();
-        let _ = std::fs::remove_dir_all(&ws);
     }
 
     /// Board #42 AC3 (the transition): a SHIP is TWO events, a note and then
@@ -6916,6 +6915,8 @@ while True:
             .args(["new-window", "-d", "-t", &session, "-n", "lead", "-c", &ws.to_string_lossy(), "cat"])
             .status()
             .unwrap();
+        // Torn down on drop, also when an assertion fails part-way.
+        let _teardown = KillOnDrop(session.clone(), ws.clone());
         crate::projects::adopt(&session, Some("ship-once-test")).expect("adopt test project");
         let call = |method: &str, params: serde_json::Value| {
             let r = handle_hub_request(&req(method, params), None);
@@ -6956,9 +6957,6 @@ while True:
         assert_eq!(dev.iter().filter(|l| l.contains("SHIP at def456")).count(), 1, "{dev:?}");
         assert_eq!(dev.iter().filter(|l| l.contains(&format!("[board #{own} review]"))).count(), 1, "{dev:?}");
         assert_eq!(dev.len(), 2, "one note line and one handoff, no second line for the same move: {dev:?}");
-
-        let _ = std::process::Command::new("tmux").args(["kill-session", "-t", &session]).status();
-        let _ = std::fs::remove_dir_all(&ws);
     }
 
     /// `--notify` (board #507) records the note and announces it in ONE call,
