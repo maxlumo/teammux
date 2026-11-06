@@ -34,6 +34,17 @@ Hub's `.title-stack`/`.name-line` from app.css, and the width ghost is priced
 by the rendered rows. See websocket-client.md § The Board and the phone's
 Terminal list.
 
+### An issue points to its current agreement, and the history stays (board #44, 2026-11-06)
+
+Retro (orchestrator and reviewer, 03:43): #29's rules were spread over more than ten notes across three rounds, so the next agent had to read the whole thread to learn what was currently agreed. An issue's own text cannot carry it: under § "The original issue text becomes history after dispatch/work" (below), title and body are locked once an issue is assigned or touched by an agent, and only "status/assignee/new notes remain writable". So the current agreement is a NOTE.
+
+- **Declared when written, never re-marked** (orchestrator, plan approval). A note is posted either as an agreement or as a plain note (`issue_notes.agreement`, schema v35), and that never changes afterwards. The thread stays append-only and keeps the order in which agreements were made. To bring an older agreement back, post a new agreement note that cites it ("as note 9").
+- **The current agreement is derived, never stored** (tenet 8). On every read, `issue_get` takes the newest agreement note as `agreement: {n, author, body, at}` (null when there is none), and gives every earlier agreement note `superseded_by: <n of the next one>`. A plain note supersedes nothing. Nothing is updated or deleted, so the full history of agreements is the thread itself.
+- **A note's number is its position by row id** (orchestrator, plan approval). `n` is 1-based within the issue and follows `issue_notes.id`, which only grows; `at` can step back (a clock step, an import), and numbering by it would shift the numbers. The thread is listed in the same order, so `n` always rises down the thread; before #44 it was ordered by `(at, id)`, which differs only when a clock stepped back. #42's exact note references ("#38 note 17") reuse this `n`.
+- **The migration is additive.** One column with a default, added only when absent, inside the ladder with foreign keys off (non-negotiable 9); the heal floor re-adds it. Measured on a copy of this host's v34 store (2026-11-06): v34 → v35, 87 issues, 1038 notes and 9 blocking edges kept, `integrity_check` ok, `foreign_key_check` empty, no note marked.
+
+Pinned by `store/board.rs` (`the_newest_agreement_note_is_current_and_the_earlier_ones_stay_superseded`: numbering by row id under a clock that stepped back, the newest is current, the earlier one superseded by it, a plain note neither, nothing rewritten, a note's empty and board-gate rules) and `store/schema.rs` (`v34_notes_gain_the_agreement_flag_and_stay_plain`, with the heal floor).
+
 ### An issue declares what blocks it; the frontier is derived (board #43, 2026-11-06)
 
 Retro (orchestrator and reviewer, 03:43): blocking edges lived only in issue bodies ("Blocked by #38"), and the orchestrator worked out by hand which tickets could start. Now an issue declares its blockers, and the board derives the **frontier**: every issue that is not done and whose blockers are all done. The frontier informs assignment; it never assigns anything by itself.

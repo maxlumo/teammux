@@ -9,7 +9,7 @@ use super::registry::{DEFAULT_DSH_SYSTEM, DEFAULT_KIMI_SYSTEM, DEFAULT_OMP_SYSTE
 
 /// Bumped when the schema changes; `migrate` is the only place that knows the
 /// steps. Stored in SQLite's own `user_version` pragma.
-const SCHEMA_VERSION: i64 = 34;
+const SCHEMA_VERSION: i64 = 35;
 
 impl Store {
     /// Ensure the durable half of Board editability exists, then
@@ -738,6 +738,12 @@ impl Store {
             // off like every step (non-negotiable 9).
             self.ensure_issue_blocks()?;
         }
+        if version < 35 {
+            // v35 (board #44): a note may be declared the issue's current
+            // agreement. One column, added only when absent; existing notes
+            // stay plain. Inside the ladder, foreign keys off (non-negotiable 9).
+            self.ensure_issue_agreement()?;
+        }
         Ok(())
     }
 
@@ -1073,7 +1079,7 @@ mod tests {
         }
         let store = Store::open(&path).unwrap();
         let v: i64 = store.conn.query_row("PRAGMA user_version", [], |r| r.get(0)).unwrap();
-        assert_eq!(v, 34);
+        assert_eq!(v, SCHEMA_VERSION);
         let list = store.issues_list("proj").unwrap();
         assert_eq!(list.len(), 2);
         for i in &list {
@@ -1086,6 +1092,37 @@ mod tests {
         drop(store);
         let store = Store::open(&path).unwrap();
         assert_eq!(store.issue_get("proj", 2).unwrap().unwrap()["blocked_by"], serde_json::json!([]), "healed on open, empty");
+    }
+
+    /// v34 -> v35 (board #44): the agreement flag appears on issue_notes,
+    /// every existing note stays a plain note with its number, and the heal
+    /// floor re-adds the column if a stamp ran ahead of it.
+    #[test]
+    fn v34_notes_gain_the_agreement_flag_and_stay_plain() {
+        let scratch = crate::tmux::Scratch::new("store-v35");
+        let path = std::path::Path::new(&scratch.path()).join("state.db");
+        {
+            let store = Store::open(&path).unwrap();
+            let id = store.issue_save("proj", None, Some("old"), None, None, None, "human", 10).unwrap();
+            store.issue_note("proj", id, "builder", "first", 11).unwrap();
+            store.issue_note("proj", id, "reviewer", "second", 12).unwrap();
+            store.conn.execute_batch("ALTER TABLE issue_notes DROP COLUMN agreement; PRAGMA user_version = 34;").unwrap();
+        }
+        let store = Store::open(&path).unwrap();
+        let v: i64 = store.conn.query_row("PRAGMA user_version", [], |r| r.get(0)).unwrap();
+        assert_eq!(v, SCHEMA_VERSION);
+        let got = store.issue_get("proj", 1).unwrap().unwrap();
+        let notes = got["notes"].as_array().unwrap();
+        assert_eq!(notes.len(), 2);
+        assert!(notes.iter().all(|n| n["agreement"] == false));
+        assert_eq!((notes[0]["n"].clone(), notes[1]["n"].clone()), (serde_json::json!(1), serde_json::json!(2)));
+        assert_eq!(got["agreement"], serde_json::Value::Null);
+        store.issue_note_as("proj", 1, "orchestrator", "agreed", 13, true).unwrap();
+        assert_eq!(store.issue_get("proj", 1).unwrap().unwrap()["agreement"]["n"], 3);
+        store.conn.execute_batch("ALTER TABLE issue_notes DROP COLUMN agreement;").unwrap();
+        drop(store);
+        let store = Store::open(&path).unwrap();
+        assert_eq!(store.issue_get("proj", 1).unwrap().unwrap()["agreement"], serde_json::Value::Null, "healed on open, plain");
     }
 
     /// The heal step, which is not hypothetical: a dev binary built in the

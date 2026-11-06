@@ -119,12 +119,33 @@ fn write_blocks(conn: &rusqlite::Connection, session: &str, id: i64, add: &[i64]
 
 impl Store {
     /// Every additive Board shape, as the heal floor sees it: the v15 edit
-    /// lock, the v16 numbering and the v34 blocking edges (board #43). One
+    /// lock, the v16 numbering, the v34 blocking edges (board #43) and the
+    /// v35 agreement flag (board #44). One
     /// family call, so `heal` in mod.rs stays the connection's.
     pub(super) fn ensure_board_shape(&self) -> Result<(), String> {
         self.ensure_issue_edit_lock()?;
         self.ensure_issue_numbering()?;
-        self.ensure_issue_blocks()
+        self.ensure_issue_blocks()?;
+        self.ensure_issue_agreement()
+    }
+
+    /// The v35 shape (board #44; also a heal floor): `issue_notes.agreement`,
+    /// added only when absent. Existing notes stay plain notes.
+    pub(super) fn ensure_issue_agreement(&self) -> Result<(), String> {
+        let has_column: bool = self
+            .conn
+            .query_row(
+                "SELECT EXISTS(SELECT 1 FROM pragma_table_info('issue_notes') WHERE name = 'agreement')",
+                [],
+                |r| r.get(0),
+            )
+            .map_err(|e| format!("inspect Board agreement: {e}"))?;
+        if !has_column {
+            self.conn
+                .execute_batch("ALTER TABLE issue_notes ADD COLUMN agreement INTEGER NOT NULL DEFAULT 0;")
+                .map_err(|e| format!("add Board agreement: {e}"))?;
+        }
+        Ok(())
     }
 
     /// The v34 shape (also a heal floor): blocking edges between issues of
@@ -288,21 +309,47 @@ impl Store {
             .optional()
             .map_err(|e| e.to_string())?;
         let Some((row_id, mut issue)) = issue else { return Ok(None) };
+        // Board #44: the thread in row-id order, the order notes were written
+        // (an `at` can step back with the clock; the id cannot). Each note's
+        // `n` is its position in that order, and the agreement state is
+        // derived here, on every read: the newest agreement note is current
+        // and each earlier one is superseded by the next. Nothing is stored
+        // as a pointer, and no note is ever updated.
         let mut stmt = self
             .conn
-            .prepare("SELECT author, body, at FROM issue_notes WHERE issue_id = ?1 ORDER BY at, id")
+            .prepare("SELECT author, body, at, agreement FROM issue_notes WHERE issue_id = ?1 ORDER BY id")
             .map_err(|e| e.to_string())?;
-        let notes = stmt
+        let mut notes = stmt
             .query_map([row_id], |r| {
                 Ok(serde_json::json!({
                     "author": r.get::<_, String>(0)?,
                     "body": r.get::<_, String>(1)?,
                     "at": r.get::<_, i64>(2)?,
+                    "agreement": r.get::<_, i64>(3)? != 0,
                 }))
             })
             .map_err(|e| e.to_string())?
             .collect::<Result<Vec<_>, _>>()
             .map_err(|e| e.to_string())?;
+        let mut later: Option<i64> = None;
+        for (i, note) in notes.iter_mut().enumerate().rev() {
+            let n = i as i64 + 1;
+            note["n"] = serde_json::json!(n);
+            let is_agreement = note["agreement"] == true;
+            note["superseded_by"] = match (is_agreement, later) {
+                (true, Some(next)) => serde_json::json!(next),
+                _ => serde_json::Value::Null,
+            };
+            if is_agreement {
+                later = Some(n);
+            }
+        }
+        issue["agreement"] = notes
+            .iter()
+            .rev()
+            .find(|n| n["agreement"] == true)
+            .map(|n| serde_json::json!({ "n": n["n"], "author": n["author"], "body": n["body"], "at": n["at"] }))
+            .unwrap_or(serde_json::Value::Null);
         issue["notes"] = serde_json::Value::Array(notes);
         Ok(Some(issue))
     }
@@ -407,6 +454,14 @@ impl Store {
     }
 
     pub fn issue_note(&self, session: &str, id: i64, author: &str, body: &str, now: i64) -> Result<(), String> {
+        self.issue_note_as(session, id, author, body, now, false)
+    }
+
+    /// A note, or (board #44) a note DECLARED as the issue's current
+    /// agreement. Declared at write only: an existing note is never re-marked,
+    /// so the thread stays append-only and keeps the order agreements were
+    /// made in (orchestrator, plan approval). Everything else is a note's.
+    pub fn issue_note_as(&self, session: &str, id: i64, author: &str, body: &str, now: i64, agreement: bool) -> Result<(), String> {
         let body = body.trim();
         if body.is_empty() {
             return Err("an empty note says nothing".into());
@@ -431,8 +486,8 @@ impl Store {
         };
         self.conn
             .execute(
-                "INSERT INTO issue_notes (issue_id, author, body, at) VALUES (?1, ?2, ?3, ?4)",
-                rusqlite::params![row_id, author, body, now],
+                "INSERT INTO issue_notes (issue_id, author, body, at, agreement) VALUES (?1, ?2, ?3, ?4, ?5)",
+                rusqlite::params![row_id, author, body, now, agreement as i64],
             )
             .map(|_| ())
             .map_err(|e| e.to_string())
@@ -712,6 +767,46 @@ mod tests {
         assert_eq!(got["blocked"], true);
         // The contentless rule still holds on this path.
         assert!(store.issue_create_blocked("p", Some(" "), None, None, None, "human", 40, &[a]).is_err());
+    }
+
+    /// Board #44: an agreement is a note DECLARED when written; the current
+    /// one is the newest such note by row id, every earlier one reads as
+    /// superseded by the next, and nothing is ever rewritten. Each note's
+    /// number `n` is its position by row id within the issue, so a clock that
+    /// steps back cannot shift it.
+    #[test]
+    fn the_newest_agreement_note_is_current_and_the_earlier_ones_stay_superseded() {
+        let store = Store::open_memory().unwrap();
+        let id = store.issue_save("p", None, Some("scope"), Some("the original brief"), None, None, "human", 10).unwrap();
+        let get = || store.issue_get("p", id).unwrap().unwrap();
+        assert_eq!(get()["agreement"], serde_json::Value::Null, "no agreement yet");
+
+        store.issue_note("p", id, "builder", "plan: one table", 20).unwrap();
+        store.issue_note_as("p", id, "orchestrator", "agreed: one table, v35", 30, true).unwrap();
+        store.issue_note("p", id, "reviewer", "P1 found", 40).unwrap();
+        // A clock that stepped back: this note is written later but stamped earlier.
+        store.issue_note_as("p", id, "orchestrator", "agreed: one table, v35, plus the cap", 25, true).unwrap();
+
+        let got = get();
+        let notes = got["notes"].as_array().unwrap();
+        let ns: Vec<i64> = notes.iter().map(|n| n["n"].as_i64().unwrap()).collect();
+        assert_eq!(ns, vec![1, 2, 3, 4], "numbered and listed by row id, whatever the clock said");
+        assert_eq!(notes[3]["body"], "agreed: one table, v35, plus the cap");
+        let flags: Vec<bool> = notes.iter().map(|n| n["agreement"].as_bool().unwrap()).collect();
+        assert_eq!(flags, vec![false, true, false, true]);
+        assert_eq!(notes[1]["superseded_by"], 4, "the earlier agreement points at the one that replaced it");
+        assert_eq!(notes[3]["superseded_by"], serde_json::Value::Null);
+        assert_eq!(notes[0]["superseded_by"], serde_json::Value::Null, "a plain note supersedes nothing and is not superseded");
+        assert_eq!(
+            got["agreement"],
+            serde_json::json!({ "n": 4, "author": "orchestrator", "body": "agreed: one table, v35, plus the cap", "at": 25 })
+        );
+        // Nothing was rewritten: the original text and the first agreement are as written.
+        assert_eq!(got["body"], "the original brief");
+        assert_eq!(notes[1]["body"], "agreed: one table, v35");
+        // An agreement note is a note: the empty rule and the board gate hold.
+        assert!(store.issue_note_as("p", id, "x", "  ", 50, true).is_err());
+        assert!(store.issue_note_as("other", id, "x", "sneak", 50, true).is_err());
     }
 
     /// Board #43 AC3: deleting an issue takes every edge it is in, on either
