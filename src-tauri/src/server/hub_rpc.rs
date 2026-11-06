@@ -7241,6 +7241,110 @@ while True:
         assert!(!crate::projects::delivery::is_starting(&b.session, "dev"), "its own failure, with no window, retires it");
     }
 
+    /// Round 3, validator's P2: the writers that do NOT take the window lock
+    /// (a verbatim `/command`, and `send_into` as stall recovery calls it) are
+    /// guarded only by the final write's re-check. Into a window marked
+    /// starting both are refused and type nothing; once THIS start's CLI is
+    /// proven ready, the same command goes in. (A `/command` is not queued: its
+    /// caller is told, as validator saw live: "held: the window is restarting".)
+    #[test]
+    fn a_lock_free_writer_types_nothing_into_a_restarting_window() {
+        let Some(b) = Booting::new("lockfree-writer") else { return };
+        b.ready(true);
+        b.window();
+        std::thread::sleep(std::time::Duration::from_millis(300));
+        crate::projects::delivery::begin_start(&b.session, "dev").unwrap();
+        b.ready(false);
+        b.window(); // the replacement, booting
+        std::thread::sleep(std::time::Duration::from_millis(300));
+        let r = handle_hub_request(&req("hub_command", serde_json::json!({ "session": b.session, "from": "lead", "agent": "dev", "text": "/status" })), None);
+        let refused = r.error.map(|e| e.message).or_else(|| r.result.map(|v| v.to_string())).unwrap_or_default();
+        assert!(refused.contains("restarting"), "the command is refused: {refused}");
+        let target = format!("{}:dev", b.session);
+        let e = crate::projects::delivery::send_into(&b.session, "dev", &target, "continue").unwrap_err();
+        assert!(e.starts_with(crate::projects::delivery::RESTARTING), "{e}");
+        std::thread::sleep(std::time::Duration::from_millis(300));
+        assert!(!b.screen().contains("SUBMIT:"), "nothing typed into the replacement: {:?}", b.screen());
+        assert!(crate::projects::delivery::is_starting(&b.session, "dev"), "and its hold is untouched");
+        // Proven ready: the same command goes in.
+        b.ready(true);
+        assert!(b.wait(&|| { crate::projects::delivery::start_ready(&b.session, "dev"); !crate::projects::delivery::is_starting(&b.session, "dev") }), "the start's own ready check clears it");
+        let r = handle_hub_request(&req("hub_command", serde_json::json!({ "session": b.session, "from": "lead", "agent": "dev", "text": "/status" })), None);
+        assert!(r.error.is_none(), "{:?}", r.error.map(|e| e.message));
+        assert!(b.wait(&|| b.screen().lines().any(|l| l.starts_with("SUBMIT:/status"))), "{:?}", b.screen());
+    }
+
+    /// Round 4 (@human approved, 05:28): validator's ordering at the text-send
+    /// boundary, through both lock-free writers: a verbatim `/command`
+    /// (`hub_command`) and stall recovery's continue line (`send_into`, as
+    /// `recovery::tick` calls it). Each reads no hold, pauses before its pane
+    /// is resolved, and a restart asks to replace the window meanwhile. The
+    /// restart waits for the window lock, so the write lands in the OLD CLI;
+    /// the replacement receives nothing. Red when `send_into` does not take
+    /// the window lock (round 3's door).
+    #[test]
+    fn a_lock_free_writer_paused_after_its_hold_check_never_reaches_the_replacement() {
+        for entry in ["command", "recovery"] {
+            let Some(b) = Booting::new(&format!("lockfree-{entry}")) else { return };
+            b.ready(true);
+            b.window();
+            std::thread::sleep(std::time::Duration::from_millis(300));
+            let old_pane = crate::tmux::find_window_by_name(&b.session, "dev").unwrap();
+            let (at_tx, at_rx) = std::sync::mpsc::channel::<()>();
+            let (go_tx, go_rx) = std::sync::mpsc::channel::<()>();
+            let first = std::sync::atomic::AtomicBool::new(true);
+            let go_rx = std::sync::Mutex::new(go_rx);
+            *crate::projects::delivery::BEFORE_FINAL.lock().unwrap() = Some(Box::new(move || {
+                if first.swap(false, std::sync::atomic::Ordering::Relaxed) {
+                    let _ = at_tx.send(());
+                    let _ = go_rx.lock().unwrap().recv();
+                }
+            }));
+            let s = b.session.clone();
+            let writer = std::thread::spawn(move || match entry {
+                "command" => handle_hub_request(&req("hub_command", serde_json::json!({ "session": s, "from": "lead", "agent": "dev", "text": "/status" })), None).error.map(|e| e.message),
+                _ => crate::projects::delivery::send_into(&s, "dev", &format!("{s}:dev"), "continue-line").err(),
+            });
+            at_rx.recv().unwrap(); // it read no hold and waits before resolving its pane
+            b.ready(false);
+            let s = b.session.clone();
+            let restart = std::thread::spawn(move || handle_hub_request(&req("hub_agent_restart", serde_json::json!({ "session": s, "agent": "dev" })), None));
+            std::thread::sleep(std::time::Duration::from_millis(400));
+            assert_eq!(crate::tmux::find_window_by_name(&b.session, "dev").as_deref(), Some(old_pane.as_str()), "{entry}: the restart waits for the write");
+            go_tx.send(()).unwrap();
+            let wrote = writer.join().unwrap();
+            let r = restart.join().unwrap();
+            *crate::projects::delivery::BEFORE_FINAL.lock().unwrap() = None;
+            assert!(wrote.is_none(), "{entry}: written into the old CLI: {wrote:?}");
+            assert!(r.error.is_none(), "{:?}", r.error.map(|e| e.message));
+            assert_ne!(crate::tmux::find_window_by_name(&b.session, "dev").as_deref(), Some(old_pane.as_str()), "replaced");
+            std::thread::sleep(std::time::Duration::from_millis(400));
+            assert!(!b.screen().contains("SUBMIT:"), "{entry}: zero input to the replacement: {:?}", b.screen());
+            assert!(crate::projects::delivery::is_starting(&b.session, "dev"), "its hold is set");
+        }
+    }
+
+    /// Round 4: an identity that cannot be established refuses, with no
+    /// fallback to a reusable address, and nothing is typed.
+    #[test]
+    fn a_write_whose_pane_cannot_be_identified_is_refused() {
+        let Some(b) = Booting::new("unidentified") else { return };
+        b.ready(true);
+        b.window();
+        std::thread::sleep(std::time::Duration::from_millis(300));
+        // A target that resolves to no pane.
+        // (tmux may resolve an unknown window name to another pane; either way
+        // it is not THIS window's pane, and nothing is written.)
+        let e = crate::projects::delivery::send_into(&b.session, "dev", &format!("{}:no-such-window", b.session), "x").unwrap_err();
+        assert!(crate::projects::delivery::barred(&e), "{e}");
+        // A window name that is not listed, through a real pane's address.
+        let e = crate::projects::delivery::send_into(&b.session, "ghost", &format!("{}:dev", b.session), "y").unwrap_err();
+        assert!(e.starts_with(crate::projects::delivery::UNIDENTIFIED), "{e}");
+        assert!(crate::projects::delivery::barred(&e), "recovery takes its attempt back: nothing was written");
+        std::thread::sleep(std::time::Duration::from_millis(300));
+        assert!(!b.screen().contains("SUBMIT:"), "{:?}", b.screen());
+    }
+
     /// Round 3, P1-R5: a restart whose hold cannot be written is REFUSED
     /// before any kill: the old CLI, its turn and its held line are untouched.
     #[test]

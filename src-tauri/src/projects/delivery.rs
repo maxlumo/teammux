@@ -939,7 +939,7 @@ fn deliver_gated(
 /// turn. The event records it, so the report of that row can name the lines that followed it.
 fn type_steered(session: &str, window: &str, target: &str, line: &str, ask_at: usize, msg_id: &str, behind: i64) -> bool {
     match type_text(session, window, target, line) {
-        Err(e) if e.starts_with(RESTARTING) => telemetry::record_held(session, window, line, ask_at, msg_id).is_ok(),
+        Err(e) if kept_at_write(&e) => telemetry::record_held(session, window, line, ask_at, msg_id).is_ok(),
         Ok(()) => {
             telemetry::record_steered(session, window, &crate::address::shown(line, ask_at), &[msg_id], behind);
             super::vitals::sniff_window_soon(session, window);
@@ -961,7 +961,7 @@ fn overdue(held: &[super::store::DeliveryRow]) -> bool {
 /// settle; a refusal is said at once and records nothing (#250).
 fn type_now(session: &str, window: &str, target: &str, line: &str, ask_at: usize, msg_id: &str) -> bool {
     match type_text(session, window, target, line) {
-        Err(e) if e.starts_with(RESTARTING) => telemetry::record_held(session, window, line, ask_at, msg_id).is_ok(),
+        Err(e) if kept_at_write(&e) => telemetry::record_held(session, window, line, ask_at, msg_id).is_ok(),
         Ok(()) => {
             telemetry::record_typed(session, window, line, ask_at, msg_id);
             // A line just landed in this pane: sniff its vitals once the TUI
@@ -1142,7 +1142,7 @@ fn first_prompt(lines: &[&str], max: usize) -> usize {
 
 #[cfg(not(test))]
 fn type_text(session: &str, window: &str, target: &str, text: &str) -> Result<(), String> {
-    send_into(session, window, target, &typed_form(session, window, text))
+    send_into_locked(session, window, target, &typed_form(session, window, text))
 }
 
 /// The text a DELIVERY types into `window`: the line itself, or, for a CLI
@@ -1169,6 +1169,21 @@ fn typed_form<'a>(session: &str, window: &str, text: &'a str) -> std::borrow::Co
 /// or whose holds cannot be read, gets nothing (`restore_hold::send_gate`,
 /// read here, at the write). Every other window is typed as always.
 pub(crate) fn send_into(session: &str, window: &str, target: &str, text: &str) -> Result<(), String> {
+    // The door for a writer that does not hold the window lock (round 4,
+    // reviewer's P1-R1 at the text-send boundary, validator's run: a verbatim
+    // `/command` read no hold, a restart replaced the window, and the lookups
+    // then approved the NEW booting pane). It takes the same per-window lock a
+    // delivery holds and a restart takes (`replace_cli`), so the hold check,
+    // the pane resolution and the write are one step against any restart.
+    let lock = window_lock(session, window);
+    let _guard = lock.lock().unwrap();
+    send_into_locked(session, window, target, text)
+}
+
+/// `send_into` for a caller that already holds the window lock (every
+/// delivery, flush and steer: `type_text`). The lock is not reentrant, so a
+/// locked caller never takes it twice.
+fn send_into_locked(session: &str, window: &str, target: &str, text: &str) -> Result<(), String> {
     // The final write (round 3, P1-R1): re-checked here, under the window lock
     // a delivery holds and a restart takes. A starting window is not typed
     // into, and the write goes to the stable pane id (%N) the window has NOW,
@@ -1203,21 +1218,35 @@ pub(crate) fn send_into(session: &str, window: &str, target: &str, text: &str) -
 /// written, and the line is kept held.
 pub(crate) const RESTARTING: &str = "held: the window is restarting: ";
 
+/// What a write refused because its pane's identity could not be established
+/// says (round 4): nothing was written, and the line is kept held.
+pub(crate) const UNIDENTIFIED: &str = "held: the pane cannot be identified: ";
+
+/// Was this write refused at the final write (nothing was written; a
+/// delivery keeps its line held)?
+fn kept_at_write(e: &str) -> bool {
+    e.starts_with(RESTARTING) || e.starts_with(UNIDENTIFIED)
+}
+
 /// The pane the final write may go to: the window's stable pane id, and only
 /// when `target` still resolves to it and no start mark is set.
 fn final_pane(session: &str, window: &str, target: &str) -> Result<String, String> {
+    if is_starting(session, window) {
+        return Err(format!("{RESTARTING}its new CLI has not shown it is ready"));
+    }
+    // Test seam: after the no-hold read, before the pane is resolved
+    // (validator's round-3 ordering).
     #[cfg(test)]
     if let Some(hook) = BEFORE_FINAL.lock().unwrap().as_ref() {
         hook();
     }
-    if is_starting(session, window) {
-        return Err(format!("{RESTARTING}its new CLI has not shown it is ready"));
-    }
-    let Some(pane) = crate::tmux::pane_id_of(target) else { return Ok(target.to_string()) };
+    // An identity that cannot be established refuses (round 4): an unknown
+    // pane is never permission to type through a reusable address.
+    let Some(pane) = crate::tmux::pane_id_of(target) else { return Err(format!("{UNIDENTIFIED}'{target}' does not resolve to a pane")) };
     match crate::tmux::find_window_by_name(session, window) {
         Some(now) if now == pane => Ok(pane),
         Some(_) => Err(format!("{RESTARTING}its pane changed since the check")),
-        None => Ok(target.to_string()),
+        None => Err(format!("{UNIDENTIFIED}no window '{window}' is listed")),
     }
 }
 
@@ -1240,7 +1269,9 @@ pub(crate) const BARRED: &str = "barred by a restore: ";
 
 /// Was this send refused by the restore barrier (nothing was written)?
 pub(crate) fn barred(e: &str) -> bool {
-    e.starts_with(BARRED) || e == crate::tmux::BOUND_REFUSED
+    // A write refused at the final write for a restarting or unidentifiable
+    // pane wrote nothing too (round 4): recovery takes its attempt back.
+    e.starts_with(BARRED) || e == crate::tmux::BOUND_REFUSED || kept_at_write(e)
 }
 
 /// ONE read decides, at the write itself: ordinary, bound, or nothing.
@@ -1270,7 +1301,7 @@ fn type_text(session: &str, window: &str, target: &str, text: &str) -> Result<()
     let text = &typed_form(session, window, text);
     let faked = TYPED.with(|t| t.borrow().is_some());
     if !faked {
-        return send_into(session, window, target, text);
+        return send_into_locked(session, window, target, text);
     }
     if let Some(e) = REFUSE.with(|r| r.borrow().clone()) {
         return Err(e);
