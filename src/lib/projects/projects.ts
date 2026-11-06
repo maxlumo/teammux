@@ -132,30 +132,6 @@ export function projectAgeLabel(
 }
 
 /**
- * Order projects: OPEN ones first, then by activity, newest first (owner,
- * 2026-09-23: "已打开的优先排在前面，没有打开的排在后面…然后分别按照时间由近到远").
- * Activity is the newest of the room's last message (`talk`: room id → ms,
- * from `hub_rooms`) and when the project last came up or was created — so a
- * project created a moment ago, still empty, heads its group instead of
- * falling to the bottom for having no conversation yet (the owner's report).
- *
- * Not `last_seen_at`: the capturer rewrites it on every tick, so for a live
- * project it always means "just now" and orders nothing (2026-08-19). Rows
- * are seconds, the bus is milliseconds: normalise before comparing, or a
- * creation time looks like 1970 next to a message.
- *
- * The `talk` argument stays optional for project-only servers without Hub
- * support; production Chat, Terminal and Board all pass the same grouped map.
- *
- * `compareRowsWithClock` is the rule itself, exported because a union over
- * several servers has to INTERLEAVE already-ordered lists with the same
- * comparator this sorts by (board #335 ②a-5) — and has to measure each row by
- * its OWN server's clock, since `proj:app` on two machines is two rooms.
- * Anything that re-derives the clock — `projectUpdatedMs`, for instance, which
- * falls back to `last_seen_at` and is right for the AGE LABEL and wrong for
- * ordering — can reorder a single server's list.
- */
-/**
  * A row together with the activity clock of the SERVER it came from.
  *
  * One list may hold rows from several servers (board #335 ②a-5), and a room
@@ -194,6 +170,30 @@ export function compareRows(talk: Record<string, number> = {}): (a: ProjectRow, 
   return (a, b) => compareRowsWithClock({ row: a, talk }, { row: b, talk });
 }
 
+/**
+ * Order projects: OPEN ones first, then by activity, newest first (owner,
+ * 2026-09-23: "已打开的优先排在前面，没有打开的排在后面…然后分别按照时间由近到远").
+ * Activity is the newest of the room's last message (`talk`: room id → ms,
+ * from `hub_rooms`) and when the project last came up or was created — so a
+ * project created a moment ago, still empty, heads its group instead of
+ * falling to the bottom for having no conversation yet (the owner's report).
+ *
+ * Not `last_seen_at`: the capturer rewrites it on every tick, so for a live
+ * project it always means "just now" and orders nothing (2026-08-19). Rows
+ * are seconds, the bus is milliseconds: normalise before comparing, or a
+ * creation time looks like 1970 next to a message.
+ *
+ * The `talk` argument stays optional for project-only servers without Hub
+ * support; production Chat, Terminal and Board all pass the same grouped map.
+ *
+ * `compareRowsWithClock` is the rule itself, exported because a union over
+ * several servers has to INTERLEAVE already-ordered lists with the same
+ * comparator this sorts by (board #335 ②a-5) — and has to measure each row by
+ * its OWN server's clock, since `proj:app` on two machines is two rooms.
+ * Anything that re-derives the clock — `projectUpdatedMs`, for instance, which
+ * falls back to `last_seen_at` and is right for the AGE LABEL and wrong for
+ * ordering — can reorder a single server's list.
+ */
 export function sortRows(rows: ProjectRow[], talk: Record<string, number> = {}): ProjectRow[] {
   return rows.slice().sort(compareRows(talk));
 }

@@ -121,8 +121,6 @@ export interface RoomUnread { count: number; first_seq: number; last_seq: number
 export type ReadMark = { seq: number } | { ts: number };
 /** The server's PERSISTED read mark of a room (board #334). */
 export interface ServerMark { seq: number; ts: number }
-/** The project task board: session-scoped issues in four fixed columns.
- * Humans write issues here; agents read and update them via `tmm board`. */
 /** What `hub_board_save` answers (board #377). `dispatch` is absent unless the
  * request asked for a hand-off AND there was somebody to tell: `sent` (typed
  * into a pane), `offline` (saved, nothing typed to anyone) or `failed` (saved,
@@ -137,6 +135,8 @@ export interface BoardSaveAnswer {
   offline?: { name: string; why: string }[];
 }
 
+/** The project task board: session-scoped issues in four fixed columns.
+ * Humans write issues here; agents read and update them via `tmm board`. */
 export interface BoardIssue {
   /** Session-local durable number: every project starts at 1; the DB row key is hidden. */
   id: number;
@@ -561,9 +561,6 @@ export function createWsApi(connection: Connection) {
    * the CLI and the UI share one implementation). */
   const hubAgentInterrupt = (session: string, agent: string) =>
     call<{ interrupted: string }>('hub_agent_interrupt', { session, agent });
-  /** Switch a running agent's queue|steer mode for THIS session (board #271):
-   * its CLI's own live toggle; a restart returns to the configured mode.
-   * `changed` is false when it already ran `mode`. */
   /** Move a running agent's RUNTIME team (board #384): `team` = a team of
    * this project, '' to leave. Needs `agent_team` on the current socket's
    * login (the #377 gate: the runtime waits for an unanswered login, the
@@ -576,6 +573,9 @@ export function createWsApi(connection: Connection) {
     },
     { hold: (): Promise<void> | undefined => holdForLogin(connection) },
   );
+  /** Switch a running agent's queue|steer mode for THIS session (board #271):
+   * its CLI's own live toggle; a restart returns to the configured mode.
+   * `changed` is false when it already ran `mode`. */
   const hubAgentInputMode = (session: string, agent: string, mode: 'queue' | 'steer') =>
     call<{ agent: string; mode: 'queue' | 'steer'; changed: boolean }>('hub_agent_input_mode', { session, agent, mode });
   /** Kill and bring back. `resumed` is false when the agent had to start a fresh

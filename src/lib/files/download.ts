@@ -266,10 +266,10 @@ export function memorySink() {
 
 export type NativeInvoke = (cmd: string, args: Record<string, unknown>) => Promise<unknown>;
 
-/** Android / macOS: one buffered piece at most, each sent as base64. */
 /** What a part is of, kept beside it for the Downloads view (board #308). */
 export interface PartAbout { name: string; path: string; server: string }
 
+/** Android / macOS: one buffered piece at most, each sent as base64. */
 export function nativeSink(invoke: NativeInvoke, id: string, piece = PIECE_BYTES, about: PartAbout | null = null) {
   let pending: Uint8Array[] = [];
   let held = 0;
