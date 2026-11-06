@@ -6,9 +6,14 @@ use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex};
 
 const MAX_INBOX_BYTES: u64 = 256 * 1024;
-/// Chat-path budget for hook-sourced auto-replies: a final reply carries full
-/// content.
-const MAX_REPLY_CHARS: usize = 6 * 1024;
+/// The ONE bound on a stored final reply (board #42 AC2): 256 KiB, the bound
+/// every hook payload already has (`MAX_INBOX_BYTES`), so a hook-sourced
+/// reply never meets it and only a runaway fallback read can. The largest
+/// real reply measured on 2026-11-06 (4 772 claude and codex replies) was
+/// 14 634 chars. It replaced a 6144-char cut that left the room record
+/// ending in `…` (reviewer's 03:43 reply, 6145 chars); the TYPED `[reply]`
+/// keeps that budget (`server::typed_reply`).
+const MAX_STORED_REPLY_BYTES: usize = MAX_INBOX_BYTES as usize;
 /// How much of a tool's argument is kept. It was 80 characters, which is shorter
 /// than the paths this app's own agents work with: every row in the lane ended in
 /// `…` after a third of a line, with the rest of a wide screen blank next to it —
@@ -816,7 +821,7 @@ impl AgentNotificationHub {
     /// The body a managed agent's final reply is posted with, if any: only
     /// managed windows (constraint 3: a .tmm/agents/<name> dir must exist,
     /// so direct or adopted agents never auto-post) and a reply worth
-    /// posting, truncated at the chat-path budget.
+    /// posting, whole up to `MAX_STORED_REPLY_BYTES` (board #42).
     #[cfg(not(any(target_os = "android", target_os = "ios")))]
     fn auto_post_body(&self, session: &str, window: &str, normalized: &Normalized) -> Option<String> {
         // Nothing to post — skip.
@@ -831,7 +836,7 @@ impl AgentNotificationHub {
         // index → list_panes → name round-trip (which lost the post when a
         // rename landed between hook fire and consume) is gone.
         crate::projects::managed_home(session, window)?;
-        Some(truncate(reply, MAX_REPLY_CHARS))
+        Some(stored_reply(reply))
     }
 
     /// The ONE notice of a turn that ended on a provider error only a person
@@ -1306,7 +1311,7 @@ struct Normalized {
     agent_session_id: Option<String>,
     /// The full reply text from a stop event, before any truncation. `None`
     /// for non-stop events. Used by the auto-post path, which applies the
-    /// larger `MAX_REPLY_CHARS` budget instead of the notification summary cap.
+    /// `stored_reply` bound instead of the notification summary cap.
     full_reply: Option<String>,
     /// How a completion ended (board #355): its whole reply was the CLI's own
     /// placeholder (`Empty`), real text (`Said`), or nothing usable (`Unknown`:
@@ -1387,7 +1392,7 @@ fn normalize_in(envelope: &InboxEnvelope, home: Option<&Path>) -> Result<Normali
     let backend = crate::backends::Backend::parse(&envelope.backend)
         .ok_or_else(|| String::from("unsupported backend"))?;
     let kind = backend.normalize_kind(payload)?;
-    // The raw reply text for the auto-post path (truncated to MAX_REPLY_CHARS
+    // The raw reply text for the auto-post path (bounded by `stored_reply`
     // at the call site). A completion without text asks the backend for its
     // other source (kiro --v3 reads the session file, board #207).
     let raw_reply = string_field(
@@ -1556,6 +1561,19 @@ fn join_targets(targets: &mut Vec<String>, more: Vec<String>) {
 #[cfg(not(any(target_os = "android", target_os = "ios")))]
 fn reply_targets(session: &str, prompt: &str) -> Vec<String> {
     crate::projects::telemetry::requesters_in(session, prompt)
+}
+
+/// A final reply as the room stores it: whole, or, past the one bound, cut
+/// on a char boundary with the cut SAID in words, never a bare `…`.
+fn stored_reply(reply: &str) -> String {
+    if reply.len() <= MAX_STORED_REPLY_BYTES {
+        return reply.to_string();
+    }
+    let mut at = MAX_STORED_REPLY_BYTES;
+    while !reply.is_char_boundary(at) {
+        at -= 1;
+    }
+    format!("{}\n\n[reply cut at {} KiB]", &reply[..at], MAX_STORED_REPLY_BYTES / 1024)
 }
 
 fn truncate(input: &str, max: usize) -> String {
@@ -2304,6 +2322,97 @@ mod tests {
         }
         let n = norm("claude", json!({"hook_event_name":"Stop","last_assistant_message":"401 tests pass"}));
         assert_eq!((n.kind.as_str(), n.provider_error), ("completed", None));
+    }
+
+    /// Board #42 AC2: a final reply is stored WHOLE up to one bound, 256 KiB
+    /// (the same bound every hook payload already has, `MAX_INBOX_BYTES`;
+    /// the largest real reply measured on 2026-11-06 was 14 634 chars).
+    /// Past it the row says so in words, never with a bare `…`, and the cut
+    /// falls on a char boundary.
+    #[test]
+    fn a_stored_reply_is_whole_up_to_its_bound_and_says_where_it_was_cut() {
+        let fits = format!("{}END", "a".repeat(10_000));
+        assert_eq!(stored_reply(&fits), fits, "a long reply is stored whole");
+        let edge = "b".repeat(MAX_STORED_REPLY_BYTES);
+        assert_eq!(stored_reply(&edge), edge, "exactly at the bound: whole");
+        let runaway = "é".repeat(200_000); // 400 000 bytes, two per char
+        let cut = stored_reply(&runaway);
+        let marker = "\n\n[reply cut at 256 KiB]";
+        assert!(cut.ends_with(marker), "{}", &cut[cut.len() - 40..]);
+        let kept = &cut[..cut.len() - marker.len()];
+        assert_eq!(kept.len(), MAX_STORED_REPLY_BYTES, "cut at the bound, on a char boundary");
+        assert!(runaway.starts_with(kept));
+    }
+
+    /// Board #42 AC2, the reviewer's case end to end: a final reply past the
+    /// old 6144 cap goes through the REAL hook ingestion (an inbox envelope,
+    /// `consume_inbox`) and the real room write. The room row keeps its
+    /// distinctive tail; the typed `[reply]` keeps its budget and points at
+    /// that row.
+    #[test]
+    fn a_final_reply_past_the_old_cap_reaches_the_room_whole_through_the_hook() {
+        crate::projects::tests::use_test_store();
+        let session = format!("tmm-whole-{}", uuid::Uuid::new_v4());
+        let ws = crate::config::test_scratch("tmm-whole-ws");
+        struct Teardown(String, Vec<std::path::PathBuf>);
+        impl Drop for Teardown {
+            fn drop(&mut self) {
+                let _ = std::process::Command::new("tmux").args(["kill-session", "-t", &format!("={}", self.0)]).stderr(std::process::Stdio::null()).status();
+                for d in &self.1 {
+                    let _ = std::fs::remove_dir_all(d);
+                }
+            }
+        }
+        std::fs::create_dir_all(ws.join(".tmm/agents/dev")).unwrap();
+        std::fs::write(ws.join(".tmm/agents/dev/launch.json"), "{}").unwrap();
+        let created = std::process::Command::new("tmux")
+            .args(["new-session", "-d", "-s", &session, "-n", "dev", "-c", &ws.to_string_lossy(), "sleep 60"])
+            .status()
+            .map(|s| s.success())
+            .unwrap_or(false);
+        if !created {
+            eprintln!("no tmux server — skipping");
+            let _ = std::fs::remove_dir_all(&ws);
+            return;
+        }
+        let root = crate::config::test_scratch("tmm-whole-hub");
+        let _teardown = Teardown(session.clone(), vec![ws.clone(), root.clone()]);
+        assert!(crate::projects::adopt(&session, Some("whole-test")).is_ok(), "the project is adopted");
+        let pane_id = String::from_utf8(
+            std::process::Command::new("tmux").args(["display-message", "-p", "-t", &session, "#{pane_id}"]).output().unwrap().stdout,
+        ).unwrap().trim().to_string();
+        struct Real(std::sync::Mutex<Vec<String>>);
+        impl RoomPoster for Real {
+            fn post_final(&self, session: &str, agent: &str, body: &str, reply_to: &[String]) -> Result<(), String> {
+                crate::server::post_final_for_test(session, agent, body, reply_to, |_, line| self.0.lock().unwrap().push(line.to_string()))
+            }
+        }
+        let real = std::sync::Arc::new(Real(std::sync::Mutex::new(Vec::new())));
+        let hub = AgentNotificationHub::load_at(root.clone());
+        hub.set_room_poster(real.clone());
+        let (_, win, _) = crate::tmux::resolve_pane_id(&pane_id).expect("pane resolves");
+        std::fs::create_dir_all(root.join("inbox")).unwrap();
+        let mut n = 0;
+        let mut feed = |payload: Value| {
+            n += 1;
+            std::fs::write(root.join("inbox").join(format!("{n}-ev.json")), serde_json::to_vec(&json!({"backend": "claude", "pane_id": pane_id, "payload": payload})).unwrap()).unwrap();
+            hub.consume_inbox();
+        };
+        let asked = "[tmm chat 2026-11-06 14:40] lead: @dev review it";
+        hub.start_turn(&session, &win, reply_targets("", asked));
+        feed(json!({"hook_event_name": "UserPromptSubmit", "prompt": asked, "session_id": "c1"}));
+        let reply = format!("{} #40 shows the value of independent integration. LANGUAGE-AND-PENTESTER-VERDICTS", "Reviewer retro. ".repeat(600));
+        assert!(reply.chars().count() > 9000);
+        feed(json!({"hook_event_name": "Stop", "last_assistant_message": reply, "session_id": "c1"}));
+
+        let room = crate::projects::rooms::session_room(&session);
+        let page = crate::projects::rooms::history_page(&room, None, 10);
+        let row = page["messages"].as_array().unwrap().iter().find(|m| m["from"] == "dev").expect("the reply is in the room");
+        assert_eq!(row["body"].as_str().unwrap(), reply, "stored whole, tail included");
+        let typed = real.0.lock().unwrap();
+        assert_eq!(typed.len(), 1, "{typed:?}");
+        assert!(typed[0].ends_with(&format!("(whole reply: tmm log --seq {})", row["seq"])), "{}", &typed[0][typed[0].len() - 60..]);
+        assert!(!typed[0].contains("PENTESTER-VERDICTS"), "the typed line keeps its budget");
     }
 
     /// Board #39, the incident: builder-2's claude ended on "API Error: 402

@@ -131,7 +131,7 @@
   <line x1="816" y1="1028" x2="1040" y2="1028" stroke="#059669" stroke-width="2" stroke-dasharray="5,3" marker-end="url(#a_green)"/>
   <text class="t ln" x="928.0" y="1019" text-anchor="middle" fill="#059669">stop { assistant_response }</text>
   <path d="M 1040,1046 L 1084,1046 L 1084,1066 L 1046,1066" fill="none" stroke="#ea580c" stroke-width="1.8" marker-end="url(#a_orange)"/>
-  <text class="t ln" x="1092" y="1051" fill="#ea580c" text-anchor="start">三道门禁 · 截断 6144</text>
+  <text class="t ln" x="1092" y="1051" fill="#ea580c" text-anchor="start">三道门禁 · 完整存储</text>
   <text class="t sm" x="1092" y="1068" text-anchor="start">maybe_auto_post</text>
   <line x1="1040" y1="1092" x2="1224" y2="1092" stroke="#7c3aed" stroke-width="2" stroke-dasharray="5,3" marker-end="url(#a_purple)"/>
   <text class="t ln" x="1132.0" y="1083" text-anchor="middle" fill="#7c3aed">最终回答进房间（record_only）</text>

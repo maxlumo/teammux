@@ -132,7 +132,7 @@
   <line x1="764" y1="998" x2="976" y2="998" stroke="#059669" stroke-width="2" stroke-dasharray="5,3" marker-end="url(#a_green)"/>
   <text class="t ln" x="870.0" y="990" text-anchor="middle" fill="#059669">stop { assistant_response }</text>
   <path d="M 976,1016 L 1020,1016 L 1020,1036 L 982,1036" fill="none" stroke="#ea580c" stroke-width="1.8" marker-end="url(#a_orange)"/>
-  <text class="t ln" x="1028" y="1021" fill="#ea580c">managed? · already sent? · cap 6144</text>
+  <text class="t ln" x="1028" y="1021" fill="#ea580c">managed? · already sent? · stored whole</text>
   <text class="t sm mono" x="1028" y="1037">maybe_auto_post</text>
   <line x1="976" y1="1064" x2="1160" y2="1064" stroke="#7c3aed" stroke-width="2" stroke-dasharray="5,3" marker-end="url(#a_purple)"/>
   <text class="t ln" x="1068.0" y="1056" text-anchor="middle" fill="#7c3aed">post the final answer, record_only</text>

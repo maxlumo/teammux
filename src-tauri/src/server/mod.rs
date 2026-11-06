@@ -82,16 +82,38 @@ impl crate::agent_notifications::RoomPoster for HubRoomPoster {
 #[cfg(not(any(target_os = "android", target_os = "ios")))]
 fn post_final_with(session: &str, agent: &str, body: &str, reply_to: &[String], mut deliver: impl FnMut(&str, &str)) -> Result<(), String> {
     let room = hub_rpc::project_room(session);
-    crate::projects::rooms::post_routed(&room, agent, body, reply_to)?;
+    let row = crate::projects::rooms::post_routed(&room, agent, body, reply_to)?;
     // Typed under the replying agent's label (board #20), like every typed
     // line; the row above keeps the physical sender and recipients.
     let names = crate::projects::names::names(session);
-    let (shown, shown_body) = (names.shown(agent), names.show_body(body));
+    let (shown, shown_body) = (names.shown(agent), typed_reply(&names.show_body(body), row.get("seq").and_then(|v| v.as_i64())));
     for target in crate::address::pane_targets(reply_to) {
         let line = format!("[tmm chat {}] {shown}: [reply] {shown_body}", hub_rpc::stamp_now());
         deliver(target, &line);
     }
     Ok(())
+}
+
+/// How much of a final reply is TYPED into a requester's pane: 6144 chars,
+/// the budget the room row itself had until board #42 (exec-plans
+/// 2026-08-16, constraint 4: "a ceiling in the 4–8 KB range"). Typing costs
+/// the reader's context; the room row keeps the whole reply.
+#[cfg(not(any(target_os = "android", target_os = "ios")))]
+const TYPED_REPLY_CHARS: usize = 6 * 1024;
+
+/// The reply as typed (board #42 AC2): whole within the budget; otherwise
+/// cut on a char boundary and pointing at the one command that prints the
+/// stored row whole.
+#[cfg(not(any(target_os = "android", target_os = "ios")))]
+fn typed_reply(body: &str, seq: Option<i64>) -> String {
+    if body.chars().count() <= TYPED_REPLY_CHARS {
+        return body.to_string();
+    }
+    let cut: String = body.chars().take(TYPED_REPLY_CHARS).collect();
+    match seq {
+        Some(seq) => format!("{cut}… (whole reply: tmm log --seq {seq})"),
+        None => format!("{cut}… (whole reply: in the room)"),
+    }
 }
 
 /// `post_final_with` for tests outside this module (board #20).
@@ -116,6 +138,37 @@ mod reply_edge_tests {
         let room = super::hub_rpc::project_room(&session);
         let page = crate::projects::rooms::history_page(&room, None, 5);
         assert_eq!(page["messages"][0]["to"], serde_json::json!(["lead", "human"]), "recorded to both");
+    }
+
+    /// Board #42 AC2: the room row holds the WHOLE reply, and only the line
+    /// typed into a requester's pane keeps the 6144-char budget. A cut line
+    /// ends with the command that prints that exact row. A reply within the
+    /// budget is typed whole, with no pointer.
+    #[test]
+    fn a_long_reply_is_stored_whole_and_its_typed_line_points_at_the_row() {
+        crate::projects::tests::use_test_store();
+        let session = format!("tmm-reply-whole-{}", uuid::Uuid::new_v4());
+        let room = super::hub_rpc::project_room(&session);
+        let long = format!("{}TAIL-SURVIVES", "y".repeat(10_000));
+        let mut typed = Vec::new();
+        let edge = vec!["lead".to_string()];
+        super::post_final_with(&session, "dev", &long, &edge, |_, line| typed.push(line.to_string())).unwrap();
+        let page = crate::projects::rooms::history_page(&room, None, 5);
+        let row = &page["messages"][0];
+        assert_eq!(row["body"].as_str().unwrap(), long, "stored whole");
+        let seq = row["seq"].as_i64().unwrap();
+        assert_eq!(typed.len(), 1);
+        let line = &typed[0];
+        assert!(line.ends_with(&format!("… (whole reply: tmm log --seq {seq})")), "{}", &line[line.len() - 60..]);
+        let body = line.split("dev: [reply] ").nth(1).unwrap().split('…').next().unwrap();
+        assert_eq!(body, "y".repeat(6144), "the typed budget is unchanged");
+        assert!(!line.contains("TAIL-SURVIVES"));
+
+        // Exactly at the budget: typed whole, no pointer.
+        let mut typed = Vec::new();
+        let fits = "z".repeat(6144);
+        super::post_final_with(&session, "dev", &fits, &edge, |_, line| typed.push(line.to_string())).unwrap();
+        assert!(typed[0].ends_with(&format!("dev: [reply] {fits}")), "a reply within the budget is typed whole");
     }
 
     /// Board #404 round 6: the room row IS the posting outcome. When it

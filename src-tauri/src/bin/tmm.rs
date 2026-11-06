@@ -54,6 +54,7 @@ USAGE (agent):
   tmm wake list [--all]               pending wakes (this project, or every project)
   tmm wake cancel <id>                cancel one you set (the human may cancel any)
   tmm log [--since <ts>] [--limit N] [-f]   read chat; --since is exclusive, -f follows
+  tmm log --seq <N>                   exactly room message N, whole: what a cut [reply] points at
                     [--grep <text>]   search the FULL history instead (repeatable = any-match)
                     [--all]           …every --grep term must match (default: any)
                     [--from <name>]   …only messages SENT by that name
@@ -572,7 +573,26 @@ async fn main() {
                 .map(|(_, v)| v.clone())
                 .collect();
             let global = flags.contains_key("global");
-            if flags.contains_key("files") {
+            if flags.contains_key("seq") {
+                // `--seq N` (board #42): exactly room row N, whole — what a cut
+                // `[reply]` points at. `seq` is the room's gapless log
+                // position, so the one row below N+1 is N, unless N is hidden
+                // (archived) or not written: then the row is a NEIGHBOUR and
+                // is refused, never printed in N's place.
+                let Some(n) = flags.get("seq").cloned().flatten().and_then(|s| s.parse::<i64>().ok()).filter(|n| *n >= 1) else {
+                    fail(EXIT_USAGE, "--seq needs a message number, the one a cut reply names: tmm log --seq 3934");
+                };
+                if !terms.is_empty() || flags.contains_key("files") || flags.contains_key("f") || flags.contains_key("follow") {
+                    fail(EXIT_USAGE, "--seq reads one message; it does not combine with --grep, --files or -f");
+                }
+                let mut r = rpc(&ctx, "hub_log", json!({ "session": session, "before_seq": n + 1, "limit": 1 })).await;
+                let found = r.get("messages").and_then(|m| m.as_array()).and_then(|m| m.first()).filter(|m| m.get("seq").and_then(|v| v.as_i64()) == Some(n)).cloned();
+                let Some(row) = found else {
+                    fail(EXIT_ERR, &format!("this room has no message {n} to show (not written yet, or archived)"));
+                };
+                r["messages"] = json!([row]);
+                print_log(&ctx, &r);
+            } else if flags.contains_key("files") {
                 // `--files`: the files the room's messages mention, newest first (board #432). The
                 // words narrow the PATHS and are optional; the server pages whole messages and the
                 // loop follows its cursor until `--limit` files or the history is read.
@@ -2676,7 +2696,7 @@ const VALUED: &[&str] = &["project", "agent", "server", "output", "since", "limi
                           "name", "session", "with-agent", "backend", "model", "effort", "input-mode", "system", "skills", "mcp",
                           "ref", "source", "description", "def", "grep", "image", "notify", "body", "assignee", "team", "join", "file",
                           "in", "at", "to", "code", "signal", "re", "as", "from", "before", "lines", "cols", "note", "args-json", "test",
-                          "expect", "message-file", "blocked-by", "only"];
+                          "expect", "message-file", "blocked-by", "only", "seq"];
 
 /// An argument is a flag only if it has a flag's SHAPE: `-x`, `--name`, `--name=value`, a letter
 /// first and then letters, digits, `_` or `-` (board #456). Anything else that begins with `-`
@@ -2786,7 +2806,7 @@ const CTX_FLAGS: &[&str] = &["project", "agent", "server", "output"];
 const VERB_FLAGS: &[VerbFlags] = &[
     VerbFlags { key: "send", ctx: true, flags: &["status", "image", "at", "in", "re"] },
     VerbFlags { key: "scratch", ctx: true, flags: &["kill"] },
-    VerbFlags { key: "log", ctx: true, flags: &["since", "limit", "f", "follow", "grep", "all", "from", "global", "files", "before"] },
+    VerbFlags { key: "log", ctx: true, flags: &["since", "limit", "f", "follow", "grep", "all", "from", "global", "files", "before", "seq"] },
     VerbFlags { key: "wake", ctx: true, flags: &["all"] },
     VerbFlags { key: "wake list", ctx: true, flags: &["all"] },
     VerbFlags { key: "wake cancel", ctx: true, flags: &[] },

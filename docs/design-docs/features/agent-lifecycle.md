@@ -123,9 +123,10 @@ establishes this turn's reply edge, and a later input in the same open turn
 adds its senders to it (#256). Human senders need no pane delivery;
 automatic `[reply]` and legacy `[done]` envelopes establish no edge.
 
-`maybe_auto_post` gates on `managed_home`, caps the answer at 6144 characters
-and records it in the room. `TeamRoomPoster` then types
-`[tmm chat <ts>] <agent>: [reply] <answer>` into each stored sender's pane
+`maybe_auto_post` gates on `managed_home`, records the answer in the room whole (up to
+256 KiB, board #42). `TeamRoomPoster` then types
+`[tmm chat <ts>] <agent>: [reply] <answer>` (at most 6144 characters of it,
+then a pointer `tmm log --seq N` to the whole row) into each stored sender's pane
 using the ordinary delivery receipt path. Consuming `[reply]` cannot create a
 reverse edge, so the result travels exactly one hop and cannot ping-pong.
 

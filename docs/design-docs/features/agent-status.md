@@ -263,7 +263,7 @@ because the answer would be typed back into the same pane
 (`an_agent_is_never_its_own_reply_target`).
 
 The managed-home gate excludes hand-started agents, final text is capped at
-`MAX_REPLY_CHARS = 6144`, and reply targets are removed when used. If the
+a final reply is stored whole up to 256 KiB, while the typed `[reply]` keeps 6144 chars with a pointer to the row (board #42, hub-feed.md § A final reply is stored whole), and reply targets are removed when used. If the
 server restarts mid-turn, the edge is rebuilt by STREAMING every prompt newer
 than the previous turn end and keeping only the distinct senders: a newest-N
 page dropped the turn's first requester once it held more than N inputs (#256
@@ -282,7 +282,7 @@ when a managed kiro window's stop hook fires, `consume_file` in `agent_notificat
 
 **(3) Managed-only gate** — `maybe_auto_post` checks that `<project_path>/.tmm/agents/<window_name>/` exists before posting; the global `kiro_default.json` (used by direct and adopted windows) also carries the stop hook, so without this gate any kiro the user starts by hand would start posting into project rooms.
 
-**(4) Reply budget** — `MAX_REPLY_CHARS = 6144` is the chat-path ceiling (the old 240-char `MAX_SUMMARY_CHARS` retired with the unread-notification UI, 2026-09-01 — the room is the one notification surface). Wiring: `RoomPoster` trait in `agent_notifications.rs`, implemented by `TeamRoomPoster` in `server/mod.rs`, injected once at server startup via `notifications.set_room_poster(...)`. `None` on mobile (degrades silently — no auto-post).
+**(4) Reply budget** — `MAX_REPLY_CHARS = 6144` was the chat-path ceiling until board #42 (the room row is now whole up to 256 KiB; the typed line keeps 6144) (the old 240-char `MAX_SUMMARY_CHARS` retired with the unread-notification UI, 2026-09-01 — the room is the one notification surface). Wiring: `RoomPoster` trait in `agent_notifications.rs`, implemented by `TeamRoomPoster` in `server/mod.rs`, injected once at server startup via `notifications.set_room_poster(...)`. `None` on mobile (degrades silently — no auto-post).
 
 ### Historical done feedback edge (superseded 2026-09-08)
 

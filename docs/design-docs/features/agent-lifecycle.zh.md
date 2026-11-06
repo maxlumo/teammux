@@ -108,7 +108,7 @@ hook final 会把真实回复目标写进房间消息的 `to` 字段，但不改
 `maybe_auto_post` 只处理托管 agent，把 final response 记录进房间，并由
 `TeamRoomPoster` 以 `[tmm chat <ts>] <agent>: [reply] <answer>` 投递给本轮
 发送者。`[reply]` 不再产生反向回复边，因此结果只走一跳，不会 ping-pong。
-最终回复上限仍是 6144 字符。
+最终回复完整存进房间(上限 256 KiB,#42);输入到窗格的 `[reply]` 最多 6144 字符，超出时附上 `tmm log --seq N` 指向完整那一行。
 
 不再有显式 done 状态。stop hook 同时结束回合、记录最终消息并把它返回请求者。
 主动 `tmm send` 是新的提问或交接，不会抑制 final response。
