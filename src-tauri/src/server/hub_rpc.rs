@@ -1119,7 +1119,9 @@ fn start_agent(session: &str, agent: &str, permit: crate::projects::StartPermit)
     let resumed = match start_agent_with(session, agent, permit, resume_slot, crate::projects::spawn::respawn) {
         Ok(r) => r,
         Err(e) => {
-            crate::projects::delivery::abandon_start(session, agent);
+            // Round 2, P1-R3: a window that survived its failed launch keeps
+            // the mark (it may be the managed shell).
+            crate::projects::delivery::start_failed(session, agent, &e);
             return Err(e);
         }
     };
@@ -1127,37 +1129,11 @@ fn start_agent(session: &str, agent: &str, permit: crate::projects::StartPermit)
     Ok(resumed)
 }
 
-/// The new CLI's ready edge (board #38): the start's waiter
-/// (`shared::confirm_startup_prompt_or` on the backend's own ready
-/// furniture) is the FIRST of the checks every trigger makes while the
-/// window is starting (`delivery::starting`). On ready it flushes through the
-/// one flush door, which re-reads the screen, clears the mark and types what
-/// is held, once, in order, under the window lock. A line typed before the
-/// composer was up was measured to sit unsent (codex 0.166.0 at +0 s), and
-/// one typed before the launch line strands the agent at its shell (round 1,
-/// validator). On a timeout NOTHING is typed (orchestrator's rule): the mark
-/// stays, the lines stay held, and the senders are told once by the held
-/// warn; a later trigger releases them when the screen proves ready. A
-/// backend with no measured ready screen (grok, omp; neither queues lines)
-/// has no mark and keeps the existing triggers.
+/// The new CLI's ready edge (board #38): `delivery::watch_start`, the first
+/// of the checks every trigger makes while the window is starting.
 #[cfg(not(any(target_os = "android", target_os = "ios")))]
 fn flush_held_when_ready(session: &str, agent: &str) {
-    let Some(confirmation) = crate::projects::delivery::recipe_backend(session, agent).and_then(|b| b.startup_confirmation()) else { return };
-    let Some(window) = window_of_agent(session, agent) else { return };
-    let secs = confirmation.timeout.as_secs();
-    let (s, a) = (session.to_string(), agent.to_string());
-    let (s2, a2) = (s.clone(), a.clone());
-    crate::backends::shared::confirm_startup_prompt_or(
-        format!("{session}:{window}"),
-        confirmation,
-        Some(Box::new(move || crate::projects::delivery::start_ready(&s, &a))),
-        Some(Box::new(move || {
-            let rows = crate::projects::telemetry::held_rows(&s2, &a2);
-            if !rows.is_empty() {
-                crate::projects::telemetry::record_held_blocked(&s2, &a2, &rows, &format!("{a2} has not become ready after {secs} s"));
-            }
-        })),
-    );
+    crate::projects::delivery::watch_start(session, agent);
 }
 
 /// The resume half of a start: bring the agent's materials up to date with
@@ -7062,6 +7038,183 @@ while True:
         assert_eq!((typed("ZETAWORD"), typed("ETAWORD")), (1, 1), "{:?}", screen());
         let order = screen();
         assert!(order.find("only ZETAWORD").unwrap() < order.find("only ETAWORD").unwrap(), "in order: {order:?}");
+    }
+
+    /// Board #38 round 2: the readiness lifecycle under the three paths
+    /// reviewer consolidated (03:30). One fixture: a managed "codex" window
+    /// whose fake CLI paints the ready placeholder only once a gate file
+    /// exists, and prints SUBMIT:<line> per Enter; one line held behind it.
+    struct Booting {
+        session: String,
+        ws: std::path::PathBuf,
+        gate: std::path::PathBuf,
+        _cleanup: KillOnDrop,
+    }
+    impl Booting {
+        fn new(tag: &str) -> Option<Booting> {
+            crate::projects::tests::use_test_store();
+            let session = format!("tmm-{tag}-{}", uuid::Uuid::new_v4());
+            let ws = crate::config::test_scratch(&format!("tmm-{tag}-ws"));
+            let home = ws.join(".tmm/agents/dev");
+            std::fs::create_dir_all(&home).unwrap();
+            let gate = ws.join("ready");
+            std::fs::write(ws.join("cli.py"), format!("\
+import os, sys, time, tty
+tty.setraw(0)
+while not os.path.exists({g:?}):
+    time.sleep(0.05)
+sys.stdout.write('\\u203a Ask Codex to do anything\\r\\n'); sys.stdout.flush()
+buf = b''
+while True:
+    c = os.read(0, 1)
+    if c == b'\\r':
+        sys.stdout.write('SUBMIT:' + buf.decode('utf-8', 'replace') + '\\r\\n'); sys.stdout.flush()
+        buf = b''
+    else:
+        buf += c
+", g = gate.to_string_lossy())).unwrap();
+            crate::projects::spawn::LaunchRecipe {
+                backend: "codex", env: &[], cmd: &Self::cmd(&ws), spawned_by: "", team: None, agent_def: "", member: "", from_member: "", input_mode: "queue",
+            }.write(&home).unwrap();
+            let created = std::process::Command::new("tmux")
+                .args(["new-session", "-d", "-x", "200", "-y", "50", "-s", &session, "-n", "keep", "-c", &ws.to_string_lossy(), "sleep 600"])
+                .status().is_ok_and(|s| s.success());
+            if !created {
+                eprintln!("no tmux server — skipping");
+                return None;
+            }
+            let b = Booting { session: session.clone(), ws: ws.clone(), gate, _cleanup: KillOnDrop(session.clone(), ws.clone()) };
+            crate::projects::adopt(&session, Some(tag)).expect("adopt project");
+            Some(b)
+        }
+        fn cmd(ws: &std::path::Path) -> String { format!("exec -a codex python3 {}", ws.join("cli.py").display()) }
+        /// A fresh window `dev` running the fake (a new pane).
+        fn window(&self) {
+            let _ = std::process::Command::new("tmux").args(["kill-window", "-t", &format!("{}:dev", self.session)]).status();
+            assert!(std::process::Command::new("tmux")
+                .args(["new-window", "-d", "-t", &self.session, "-n", "dev", "-c", &self.ws.to_string_lossy(), &format!("bash -c '{}'", Self::cmd(&self.ws))])
+                .status().is_ok_and(|s| s.success()));
+        }
+        fn ready(&self, on: bool) { if on { std::fs::write(&self.gate, "").unwrap() } else { let _ = std::fs::remove_file(&self.gate); } }
+        fn screen(&self) -> String { crate::tmux::capture_pane_plain(&format!("{}:dev", self.session), Some(200)).unwrap_or_default() }
+        fn submitted(&self, w: &str) -> usize { self.screen().lines().filter(|l| l.starts_with("SUBMIT:") && l.trim_end().ends_with(&format!("only {w}"))).count() }
+        fn hold(&self, word: &str) {
+            crate::projects::telemetry::record_prompt(&self.session, "dev", "[tmm chat 2026-11-06 03:40] human: @dev a long task");
+            let r = handle_hub_request(&req("hub_post", serde_json::json!({ "session": self.session, "from": "lead", "body": format!("@dev reply only {word}") })), None);
+            assert!(r.error.is_none(), "{:?}", r.error.map(|e| e.message));
+            crate::projects::telemetry::record_interrupt(&self.session, "dev"); // the kill's end
+        }
+        fn held(&self) -> usize { crate::projects::telemetry::held_rows(&self.session, "dev").len() }
+        fn wait(&self, ok: &dyn Fn() -> bool) -> bool { (0..100).any(|_| ok() || { std::thread::sleep(std::time::Duration::from_millis(50)); false }) }
+    }
+
+    /// P1-R1, both orderings: a ready answer about an OLDER start, or a capture
+    /// of the OLD pane, neither clears THIS start's hold nor types anything.
+    #[test]
+    fn a_stale_ready_answer_neither_clears_the_new_hold_nor_types() {
+        let Some(b) = Booting::new("stale-ready") else { return };
+        b.ready(true);
+        b.window(); // the OLD CLI's pane, showing ready furniture
+        std::thread::sleep(std::time::Duration::from_millis(300));
+        b.hold("THETAWORD");
+        // (a) the old pane captured as ready: rejected outright.
+        crate::projects::delivery::begin_start(&b.session, "dev");
+        crate::projects::delivery::flush(&b.session, "dev");
+        assert!(crate::projects::delivery::is_starting(&b.session, "dev"), "the old pane proves nothing");
+        assert_eq!((b.held(), b.submitted("THETAWORD")), (1, 0));
+        // (b) a check that read start N, held at its capture while start N+1
+        // marks the window, then answers "ready" for a NEW pane id.
+        let (go_tx, go_rx) = std::sync::mpsc::channel::<()>();
+        let (at_tx, at_rx) = std::sync::mpsc::channel::<()>();
+        let go_rx = std::sync::Mutex::new(go_rx);
+        *crate::projects::delivery::CAPTURE_HOOK.lock().unwrap() = Some(Box::new(move |_s, _w| {
+            let _ = at_tx.send(());
+            let _ = go_rx.lock().unwrap().recv();
+            Some(("%stale-new-pane".to_string(), "\u{203a} Ask Codex to do anything".to_string()))
+        }));
+        let s = b.session.clone();
+        let late = std::thread::spawn(move || crate::projects::delivery::flush(&s, "dev"));
+        at_rx.recv().unwrap();
+        crate::projects::delivery::begin_start(&b.session, "dev"); // start N+1
+        go_tx.send(()).unwrap();
+        late.join().unwrap();
+        *crate::projects::delivery::CAPTURE_HOOK.lock().unwrap() = None;
+        assert!(crate::projects::delivery::is_starting(&b.session, "dev"), "the newer start's hold is kept");
+        std::thread::sleep(std::time::Duration::from_millis(300));
+        assert_eq!((b.held(), b.submitted("THETAWORD")), (1, 0), "and the stale answer typed nothing: {:?}", b.screen());
+        // THIS start's own proof: its new pane, ready.
+        b.window();
+        assert!(b.wait(&|| { crate::projects::delivery::flush(&b.session, "dev"); b.submitted("THETAWORD") == 1 }), "{:?}", b.screen());
+        assert!(!crate::projects::delivery::is_starting(&b.session, "dev"));
+    }
+
+    /// P1-R2: a gateway that restarts during the boot. The hold is on disk;
+    /// the server-start flush types nothing into a pane not proven ready, and
+    /// once it is, the line goes out with no Hub read (the re-armed watcher).
+    #[test]
+    fn a_gateway_restart_during_the_boot_keeps_the_hold_and_releases_on_ready() {
+        let Some(b) = Booting::new("boot-recover") else { return };
+        b.ready(true);
+        b.window();
+        std::thread::sleep(std::time::Duration::from_millis(300));
+        b.hold("IOTAWORD");
+        crate::projects::delivery::begin_start(&b.session, "dev"); // written before the kill
+        b.ready(false);
+        b.window(); // the new CLI, booting
+        // The new gateway: nothing in memory, only what is on disk.
+        crate::projects::delivery::flush_on_start();
+        for _ in 0..10 {
+            crate::projects::delivery::flush_idle(&b.session);
+            std::thread::sleep(std::time::Duration::from_millis(100));
+        }
+        assert_eq!((b.held(), b.submitted("IOTAWORD")), (1, 0), "{:?}", b.screen());
+        b.ready(true);
+        assert!(b.wait(&|| b.submitted("IOTAWORD") == 1), "typed once on ready, with no further trigger: {:?}", b.screen());
+        // An unreadable hold file is a hold (orchestrator, #29's rule).
+        let mark = b.ws.join(".tmm/agents/dev/starting");
+        std::fs::write(&mark, "{not json").unwrap();
+        assert!(crate::projects::delivery::is_starting(&b.session, "dev"));
+        b.hold("KAPPAWORD");
+        crate::projects::delivery::flush(&b.session, "dev");
+        assert_eq!(b.submitted("KAPPAWORD"), 0, "an unreadable hold releases nothing");
+    }
+
+    /// P1-R3: a launch that failed with its window still there keeps the hold;
+    /// a flush and a new delivery type nothing into it; a later good start
+    /// releases once. Only a CONFIRMED-absent window retires the hold.
+    #[test]
+    fn a_failed_launch_that_left_its_window_keeps_the_hold() {
+        let Some(b) = Booting::new("failed-launch") else { return };
+        b.ready(true);
+        b.window();
+        std::thread::sleep(std::time::Duration::from_millis(300));
+        b.hold("LAMBDAWORD");
+        crate::projects::delivery::begin_start(&b.session, "dev");
+        b.ready(false);
+        b.window(); // the window came back; its CLI never shows ready (a shell, in life)
+        crate::projects::delivery::start_failed(&b.session, "dev", "its CLI did not launch");
+        assert!(crate::projects::delivery::is_starting(&b.session, "dev"), "the window exists: the hold stays");
+        let r = handle_hub_request(&req("hub_post", serde_json::json!({ "session": b.session, "from": "lead", "body": "@dev reply only MUWORD" })), None);
+        assert!(r.error.is_none());
+        for _ in 0..10 {
+            crate::projects::delivery::flush_idle(&b.session);
+            std::thread::sleep(std::time::Duration::from_millis(100));
+        }
+        assert_eq!((b.held(), b.submitted("LAMBDAWORD"), b.submitted("MUWORD")), (2, 0, 0), "{:?}", b.screen());
+        let warned = crate::projects::telemetry::recent_events(&b.session, 0).into_iter().any(|e| e.kind == "warn" && e.text.contains("start failed"));
+        assert!(warned, "the senders are told the start failed and the lines are held");
+        // A later start that succeeds: a new pane, ready. Both go, once, in order.
+        crate::projects::delivery::begin_start(&b.session, "dev");
+        b.ready(true);
+        b.window();
+        crate::projects::delivery::watch_start(&b.session, "dev");
+        assert!(b.wait(&|| b.submitted("MUWORD") == 1), "{:?}", b.screen());
+        assert_eq!(b.submitted("LAMBDAWORD"), 1);
+        // A failed start with NO window retires the hold.
+        crate::projects::delivery::begin_start(&b.session, "dev");
+        let _ = std::process::Command::new("tmux").args(["kill-window", "-t", &format!("{}:dev", b.session)]).status();
+        crate::projects::delivery::start_failed(&b.session, "dev", "no window");
+        assert!(!crate::projects::delivery::is_starting(&b.session, "dev"));
     }
 
     /// Board #38, orchestrator's condition (1): every queue-mode backend (kiro,

@@ -70,41 +70,159 @@ fn recipe_mode(session: &str, window: &str) -> Option<(crate::backends::Backend,
 /// BEFORE the old CLI is killed, cleared only when the window's screen
 /// proves the new CLI ready (`Backend::startup_confirmation`'s ready
 /// furniture), by whichever trigger looks first: the start's waiter, a
-/// delivery, a flush. Never cleared on a timeout. In memory: a gateway that
-/// dies mid-start loses it (the restart's own waiter dies with it).
-fn starting_set() -> &'static Mutex<std::collections::HashSet<(String, String)>> {
-    static SET: OnceLock<Mutex<std::collections::HashSet<(String, String)>>> = OnceLock::new();
-    SET.get_or_init(|| Mutex::new(std::collections::HashSet::new()))
+/// delivery, a flush. Never cleared on a timeout.
+///
+/// Each mark belongs to ONE start (round 2, reviewer P1-R1, validator's
+/// probe): its start id and the pane the old CLI ran in. A ready check reads
+/// both before it captures, captures the window's CURRENT pane, rejects the
+/// old pane, and removes the mark only if it still holds the id it read, in
+/// one compare-and-remove under `marks_lock`. An answer about an older
+/// start, or a capture of the old pane, changes nothing.
+///
+/// The mark is DURABLE (round 2, reviewer 03:20, validator: confirmed by code
+/// read): a file `starting` in the agent's own home (`<ws>/.tmm/agents/<n>/`,
+/// one of the two stores, tenet 7), because the old turn's end is durable
+/// too. A gateway that restarts during the boot reads it again, and its
+/// `flush_on_start` asks the screen before it types.
+#[derive(Clone, PartialEq, serde::Serialize, serde::Deserialize)]
+struct StartMark {
+    id: String,
+    old_pane: Option<String>,
+}
+
+/// The one writer's lock around every read-compare-write of a mark file.
+fn marks_lock() -> &'static Mutex<()> {
+    static LOCK: OnceLock<Mutex<()>> = OnceLock::new();
+    LOCK.get_or_init(|| Mutex::new(()))
+}
+
+fn mark_path(session: &str, window: &str) -> Option<std::path::PathBuf> {
+    let ws = super::project_for_session(session).ok().flatten()?.path;
+    Some(super::agents::home_dir(&ws, window)?.join("starting"))
+}
+
+/// The window's mark, or `None`. A file that exists but cannot be read is a
+/// mark with no known pane (never "no mark"): the window stays held.
+fn read_mark(path: &std::path::Path) -> Option<StartMark> {
+    match std::fs::read_to_string(path) {
+        Ok(t) => Some(serde_json::from_str(&t).unwrap_or(StartMark { id: String::new(), old_pane: None })),
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => None,
+        Err(_) => Some(StartMark { id: String::new(), old_pane: None }),
+    }
 }
 
 /// Mark `window` as starting, for a backend with a ready screen to prove it
-/// by (grok and omp have none, and queue nothing).
+/// by (grok and omp have none, and queue nothing). A fresh start id every
+/// time; the old pane is the window's pane NOW (the CLI about to be killed),
+/// or the one an earlier mark of this same restart already recorded. A mark
+/// that cannot be written is said; the start goes on.
 pub(crate) fn begin_start(session: &str, window: &str) {
-    if recipe_backend(session, window).and_then(|b| b.startup_confirmation()).is_some() {
-        starting_set().lock().unwrap().insert((session.to_string(), window.to_string()));
+    if recipe_backend(session, window).and_then(|b| b.startup_confirmation()).is_none() {
+        return;
+    }
+    let Some(path) = mark_path(session, window) else { return };
+    let _g = marks_lock().lock().unwrap();
+    let pane_now = crate::tmux::find_window_by_name(session, window);
+    let old_pane = read_mark(&path).and_then(|m| m.old_pane).or(pane_now);
+    let mark = StartMark { id: uuid::Uuid::new_v4().to_string(), old_pane };
+    if let Err(e) = crate::backends::shared::write_atomic(&path, &serde_json::to_string(&mark).unwrap_or_default()) {
+        eprintln!("delivery: {session}:{window}: its starting mark could not be written ({e})");
     }
 }
 
-/// Forget the mark: the start did not happen (its launch failed).
+/// Forget the mark: the start made no window, so nothing can be typed into.
 pub(crate) fn abandon_start(session: &str, window: &str) {
-    starting_set().lock().unwrap().remove(&(session.to_string(), window.to_string()));
+    let _g = marks_lock().lock().unwrap();
+    if let Some(path) = mark_path(session, window) {
+        let _ = std::fs::remove_file(path);
+    }
 }
+
+/// The window's current pane and its screen, the one read a ready check
+/// makes. A test replaces it to force an interleaving (validator's probe).
+fn capture_current(session: &str, window: &str) -> Option<(String, String)> {
+    #[cfg(test)]
+    if let Some(hook) = CAPTURE_HOOK.lock().unwrap().as_ref() {
+        return hook(session, window);
+    }
+    let pane = crate::tmux::find_window_by_name(session, window)?;
+    let screen = crate::tmux::capture_pane_plain(&pane, Some(80)).ok()?;
+    Some((pane, screen))
+}
+
+#[cfg(test)]
+pub(crate) static CAPTURE_HOOK: Mutex<Option<Box<dyn Fn(&str, &str) -> Option<(String, String)> + Send>>> = Mutex::new(None);
 
 /// Is `window` still starting? Asked by every trigger before it types: the
-/// screen is read once, and ready furniture on it clears the mark.
+/// screen is read once, and ready furniture on the NEW pane clears THIS
+/// start's mark.
 fn starting(session: &str, window: &str) -> bool {
-    let key = (session.to_string(), window.to_string());
-    if !starting_set().lock().unwrap().contains(&key) {
-        return false;
-    }
+    let Some(path) = mark_path(session, window) else { return false };
+    let Some(mark) = ({ let _g = marks_lock().lock().unwrap(); read_mark(&path) }) else { return false };
     let ready = recipe_backend(session, window)
         .and_then(|b| b.startup_confirmation())
-        .zip(crate::tmux::capture_pane_plain(&format!("{session}:{window}"), Some(80)).ok())
-        .is_some_and(|(c, screen)| crate::backends::shared::startup_already_ready(&screen, &c));
-    if ready {
-        starting_set().lock().unwrap().remove(&key);
+        .zip(capture_current(session, window))
+        .is_some_and(|(c, (pane, screen))| Some(&pane) != mark.old_pane.as_ref() && crate::backends::shared::startup_already_ready(&screen, &c));
+    if !ready {
+        return true;
     }
-    !ready
+    let _g = marks_lock().lock().unwrap();
+    match read_mark(&path) {
+        // Still THIS start's mark: clear it, and the trigger may go on. A
+        // mark that cannot be removed keeps the window held.
+        Some(now) if now == mark && !mark.id.is_empty() => std::fs::remove_file(&path).is_err(),
+        // A newer start marked the window while this one looked (or the
+        // mark is unreadable): its own check decides.
+        Some(_) => true,
+        None => false,
+    }
+}
+
+/// Is `window` marked as starting (its file exists, whatever it says)?
+pub(crate) fn is_starting(session: &str, window: &str) -> bool {
+    let _g = marks_lock().lock().unwrap();
+    mark_path(session, window).and_then(|p| read_mark(&p)).is_some()
+}
+
+/// Watch a starting window until its screen proves ready (board #38): the
+/// spawn's waiter (`shared::confirm_startup_prompt_or` on the backend's own
+/// ready furniture), whose `on_ready` is `start_ready`, the same check every
+/// trigger makes. On a timeout NOTHING is typed (orchestrator's rule): the
+/// mark and the lines stay, and the held warn tells the senders once. Run by
+/// the start, and again by a gateway that restarts while a mark is on disk
+/// (round 2, P1-R2), so the lines go out without waiting for a Hub read.
+pub(crate) fn watch_start(session: &str, window: &str) {
+    let Some(confirmation) = recipe_backend(session, window).and_then(|b| b.startup_confirmation()) else { return };
+    let secs = confirmation.timeout.as_secs();
+    let (s, w) = (session.to_string(), window.to_string());
+    let (s2, w2) = (s.clone(), w.clone());
+    crate::backends::shared::confirm_startup_prompt_or(
+        format!("{session}:{window}"),
+        confirmation,
+        Some(Box::new(move || start_ready(&s, &w))),
+        Some(Box::new(move || {
+            let rows = telemetry::held_rows(&s2, &w2);
+            if !rows.is_empty() {
+                telemetry::record_held_blocked(&s2, &w2, &rows, &format!("{w2} has not become ready after {secs} s"));
+            }
+        })),
+    );
+}
+
+/// A start whose launch failed (round 2, P1-R3): the mark is retired only
+/// when the window is CONFIRMED absent (nothing can be typed into it). A
+/// window that survived, or a lookup that failed, keeps the mark: its pane
+/// may be the managed shell, and the held lines stay held, said once.
+pub(crate) fn start_failed(session: &str, window: &str, why: &str) {
+    match crate::tmux::list_panes(session) {
+        Ok(panes) if !panes.iter().any(|p| p.window_name == window) => abandon_start(session, window),
+        _ => {
+            let rows = telemetry::held_rows(session, window);
+            if !rows.is_empty() {
+                telemetry::record_held_blocked(session, window, &rows, &format!("{window}'s start failed: {why}"));
+            }
+        }
+    }
 }
 
 /// A starting window's ready check, then the flush (board #38): what the
@@ -845,6 +963,14 @@ pub fn flush_idle(session: &str) {
 /// running keeps its lines for its stop.
 pub fn flush_on_start() {
     for session in telemetry::held_sessions() {
+        // A window whose start was under way when the gateway stopped (board
+        // #38 round 2, P1-R2): its mark is on disk, so the flush below holds
+        // it, and its ready edge is watched again here.
+        for window in telemetry::held_windows(&session) {
+            if is_starting(&session, &window) {
+                watch_start(&session, &window);
+            }
+        }
         flush_idle(&session);
     }
 }
