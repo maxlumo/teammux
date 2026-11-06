@@ -784,6 +784,9 @@ pub(crate) fn resume_command(cmd: &str, id: Option<&str>, home: Option<&std::pat
 /// The thread a killed codex pane was in, read from codex's own files.
 struct PaneThread {
     id: String,
+    /// PROVEN to have a rollout; `false` is proven to have none. A rollout
+    /// that cannot be checked makes `pane_thread` answer `None` (review
+    /// round 1: "cannot tell" must never resume a specific id).
     has_rollout: bool,
 }
 
@@ -816,32 +819,46 @@ fn pane_thread(home: &std::path::Path) -> Option<PaneThread> {
             let when = e.metadata().ok()?.modified().ok()?;
             Some((when, name))
         })
-        .filter(|(_, id)| super::shared::exact_id_ok(id) && !children.lines().any(|c| c == id))
+        .filter(|(_, id)| is_thread_id(id) && !children.lines().any(|c| c == id))
         .max()?;
-    let has_rollout = has_rollout(&codex.join("sessions"), &id);
+    let has_rollout = has_rollout(&codex.join("sessions"), &id)?;
     Some(PaneThread { id, has_rollout })
 }
 
-/// Whether `sessions/YYYY/MM/DD/` holds the rollout of thread `id`. A tree
-/// that cannot be read counts as holding it: the rule then keeps today's
-/// resume rather than starting fresh on a guess.
-fn has_rollout(sessions: &std::path::Path, id: &str) -> bool {
+/// codex's thread ids are UUIDs (measured: `01a1acf2-ff8a-7071-8a17-
+/// 722f5c7fa5ed`, UUIDv7). Its own `.coordination.lock` shares the
+/// directory, with the same mtime as the thread lock at start (validator,
+/// round 1), and is no thread.
+fn is_thread_id(id: &str) -> bool {
+    let parts: Vec<&str> = id.split('-').collect();
+    parts.len() == 5
+        && [8, 4, 4, 4, 12].iter().zip(&parts).all(|(n, p)| p.len() == *n && p.chars().all(|c| c.is_ascii_hexdigit()))
+}
+
+/// Whether `sessions/YYYY/MM/DD/` holds the rollout of thread `id`:
+/// `Some(true)` proven, `Some(false)` proven absent (a `sessions/` that does
+/// not exist yet, as before a fresh agent's first turn, holds none), `None`
+/// when a directory cannot be read: cannot tell.
+fn has_rollout(sessions: &std::path::Path, id: &str) -> Option<bool> {
     let suffix = format!("-{id}.jsonl");
-    let dirs = |p: &std::path::Path| std::fs::read_dir(p).map(|d| d.flatten().map(|e| e.path()).filter(|p| p.is_dir()).collect::<Vec<_>>());
-    let Ok(years) = dirs(sessions) else { return true };
-    for y in years {
-        let Ok(months) = dirs(&y) else { return true };
-        for m in months {
-            let Ok(days) = dirs(&m) else { return true };
-            for d in days {
-                let Ok(files) = std::fs::read_dir(&d) else { return true };
+    let dirs = |p: &std::path::Path| -> Option<Vec<std::path::PathBuf>> {
+        match std::fs::read_dir(p) {
+            Ok(d) => Some(d.flatten().map(|e| e.path()).filter(|p| p.is_dir()).collect()),
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => Some(Vec::new()),
+            Err(_) => None,
+        }
+    };
+    for y in dirs(sessions)? {
+        for m in dirs(&y)? {
+            for d in dirs(&m)? {
+                let files = std::fs::read_dir(&d).ok()?;
                 if files.flatten().any(|f| f.file_name().to_str().is_some_and(|n| n.starts_with("rollout-") && n.ends_with(&suffix))) {
-                    return true;
+                    return Some(true);
                 }
             }
         }
     }
-    false
+    Some(false)
 }
 
 /// The codex version the thread-lock reading of `/new` was measured on.

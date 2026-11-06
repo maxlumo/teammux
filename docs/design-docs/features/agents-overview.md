@@ -750,10 +750,10 @@ What each CLI sends, measured in scratch homes:
 
 **codex `/new`, then a restart before any prompt** (board #29, measured on codex-cli 0.166.0). No hook, session-index entry or database row changes at `/new`. Codex does create `thread-writer-locks/<new thread id>.lock` at once, and the new thread's rollout only at its first prompt. A window kill leaves the locks, and the next codex start removes those of threads it does not run.
 
-So the NEWEST lock (by mtime) names the thread the pane was in, and `codex::resume_command`, given the home, reads it:
-- **No rollout** under `sessions/**/rollout-*-<id>.jsonl`: an empty new conversation, so the restart starts fresh, whatever id was recorded.
+So the NEWEST lock (by mtime) names the thread the pane was in, and `codex::resume_command`, given the home, reads it. Only a lock named like a codex thread id (a UUID, measured: `01a1acf2-ff8a-7071-8a17-722f5c7fa5ed`) counts: codex's own `.coordination.lock` lies in the same directory with the same mtime at start, and `resume .coordination` printed "No saved session found" (round 1 P2).
+- **No rollout** under `sessions/**/rollout-*-<id>.jsonl`: an empty new conversation, so the restart starts fresh, whatever id was recorded. A `sessions/` that does not exist yet (spawned, no turn) holds none.
 - **A rollout, but not the recorded id:** the pane's current conversation, so `resume <that id>`. The slot's recorded id lags a capture tick behind a new thread's first turn. Validator measured 43 s, 18 s and under 2 s. In that lag, `resume <recorded>` revived the cleared conversation and dropped the newest one (round 1).
-- **Otherwise** (it is the recorded thread, or no lock qualifies): as before.
+- **Otherwise** (it is the recorded thread, no lock qualifies, or a sessions directory cannot be read): as before. "Cannot tell" never resumes a lock's id: round 1 read it as "has a rollout", so a restart before the first turn ran `resume <lock id>` with no rollout and left the pane at the shell (round 1 P1, the #22 class).
 A `/new` typed in the pane by hand is covered, with no delivery marker.
 
 Because the locks are codex's internal concurrency state, not a documented door, two guards apply:

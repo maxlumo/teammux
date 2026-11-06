@@ -1904,10 +1904,25 @@ mod relaunch_tests {
         let home = agent_home(wss, "cx");
         let codex = home.join("codex");
         std::fs::create_dir_all(codex.join("thread-writer-locks")).unwrap();
-        std::fs::create_dir_all(codex.join("sessions/2026/11/05")).unwrap();
         let cmd = "command codex -c a=b --dangerously-bypass-approvals-and-sandbox";
         LaunchRecipe { backend: "codex", env: &[], cmd, spawned_by: "", team: None, agent_def: "", member: "", from_member: "", input_mode: "" }.write(&home).unwrap();
         let line = |id: Option<&str>| relaunch_line(wss, "cx", id).unwrap().unwrap();
+        // Review round 1 P1: spawned, no turn yet. codex has a thread lock but
+        // no sessions/ directory at all, and nothing was recorded: a fresh
+        // start (`resume <lock id>` printed "No saved session found" and left
+        // the pane at the shell). P2: codex's own `.coordination.lock`, with
+        // a NEWER mtime, is not a thread.
+        crate::backends::codex::set_test_version(Some("0.166.0"));
+        {
+            let f = std::fs::File::create(codex.join("thread-writer-locks").join("01a1ad4c-9661-7372-ac91-636b8633a192.lock")).unwrap();
+            f.set_modified(std::time::UNIX_EPOCH + std::time::Duration::from_secs(1_793_900_000)).unwrap();
+            let c = std::fs::File::create(codex.join("thread-writer-locks").join(".coordination.lock")).unwrap();
+            c.set_modified(std::time::UNIX_EPOCH + std::time::Duration::from_secs(1_793_900_001)).unwrap();
+        }
+        assert_eq!(line(None), cmd, "a lock with no sessions dir and nothing recorded: fresh");
+        std::fs::remove_file(codex.join("thread-writer-locks").join("01a1ad4c-9661-7372-ac91-636b8633a192.lock")).unwrap();
+        assert_eq!(line(None), format!("command codex resume --last -c a=b --dangerously-bypass-approvals-and-sandbox"), "only .coordination.lock: no thread, today's line");
+        std::fs::create_dir_all(codex.join("sessions/2026/11/05")).unwrap();
         let resume = |id: &str| format!("command codex resume {id} -c a=b --dangerously-bypass-approvals-and-sandbox");
         let old = "01a1acf2-ff8a-7071-8a17-722f5c7fa5ed";
         let new = "01a1acf3-7971-7ac0-857c-8fa459c56ba1";
@@ -1943,6 +1958,16 @@ mod relaunch_tests {
         assert_eq!(line(Some(new)), resume(new));
         assert_eq!(line(Some(old)), resume(new), "a stale recorded id does not revive the cleared conversation");
         assert_eq!(line(None), resume(new));
+        // Review round 1: a rollout that cannot be CHECKED never resumes a
+        // specific lock id; today's line (the recorded id) stands.
+        {
+            use std::os::unix::fs::PermissionsExt;
+            let sessions = codex.join("sessions");
+            std::fs::set_permissions(&sessions, std::fs::Permissions::from_mode(0o000)).unwrap();
+            let unreadable = line(Some(old));
+            std::fs::set_permissions(&sessions, std::fs::Permissions::from_mode(0o755)).unwrap();
+            assert_eq!(unreadable, resume(old), "cannot tell: never `resume <lock id>`");
+        }
         crate::backends::codex::set_test_version(Some("0.167.0"));
         assert_eq!(line(Some(old)), resume(old), "an unmeasured version keeps the recorded id");
         crate::backends::codex::set_test_version(Some("0.166.0"));
