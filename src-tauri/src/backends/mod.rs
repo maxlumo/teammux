@@ -514,6 +514,13 @@ impl Backend {
         matches!(self, Backend::Pi)
     }
 
+    /// Whether `text` typed into this CLI may leave a picker open before its
+    /// Enter: an `@` where `@` opens one (#436), or a `/command` where `/`
+    /// arguments do (#71). Then `delivery::send_into` reads the screen once.
+    pub fn picker_guard(self, text: &str) -> bool {
+        (text.contains('@') && self.at_opens_picker()) || (text.starts_with('/') && self.slash_opens_picker())
+    }
+
     /// For a backend that loses typed text (`loses_busy_input`): is its pane
     /// ready for a typed line now, by the CLI side's own fact (dsh: the managed
     /// shell's ready file, written once ZLE owns the TTY and removed when a
@@ -1097,6 +1104,19 @@ pub fn newer_than_measured(running: &[u64], m: &Measured) -> bool {
 
 #[cfg(test)]
 mod tests {
+    /// Board #71: a verbatim `/command` into pi gets the picker guard (its
+    /// argument menu takes the Enter, measured on pi 1.5.0); an `@` still
+    /// does wherever `@` opens a picker; prose and other CLIs' commands don't.
+    #[test]
+    fn a_pi_command_and_an_at_get_the_picker_guard() {
+        use crate::backends::Backend;
+        assert!(Backend::Pi.picker_guard("/thinking high"));
+        assert!(Backend::Pi.picker_guard("/model ust/claude-sonnet-5-5"));
+        assert!(!Backend::Codex.picker_guard("/compact"), "codex's slash menu was not measured to take the Enter");
+        assert!(Backend::Kiro.picker_guard("/goal see @src/x.ts"));
+        assert!(!Backend::Pi.picker_guard("hello"));
+    }
+
     /// Board #422 review P1-C: the strict exact resume is built by each
     /// backend's own construction and fails closed; the manual
     /// `resume_command` keeps every one of its old branches.
