@@ -559,7 +559,7 @@ pub fn events_page(
                     tool: r.tool,
                     via: r.via,
                     state: r.state,
-                    deliveries: serde_json::from_str(&r.deliveries).unwrap_or_default(),
+                    deliveries: delivery_refs(&r.deliveries).unwrap_or_default(),
                     requesters: None,
                 })
                 .collect();
@@ -1872,7 +1872,7 @@ pub fn take_in_flight(
             continue;
         }
         newest_unknown = *id;
-        let refs: Vec<DeliveryRef> = serde_json::from_str(json).map_err(|e| format!("activity {id} does not decode: {e}"))?;
+        let refs = delivery_refs(json).map_err(|e| format!("activity {id} does not decode: {e}"))?;
         msgs.extend(refs.into_iter().map(|r| r.msg).filter(|m| !m.is_empty()));
     }
     let mut seen = std::collections::HashSet::new();
@@ -2434,6 +2434,18 @@ pub struct ReportItem {
     pub when: String,
 }
 
+/// An activity row's delivery refs, from its stored `deliveries` column: the ONE reading, for
+/// every reader (board #57). Empty (or blank) is "no refs", which is how every writer stores
+/// none (`deliveries: if empty { String::new() }`); anything else must be the JSON array, and
+/// JSON that does not decode is an `Err`, so a reader still fails safe (#41). Before, the kill
+/// path parsed '' as JSON and refused every restart of a turn holding such a row.
+pub(crate) fn delivery_refs(json: &str) -> Result<Vec<DeliveryRef>, serde_json::Error> {
+    if json.trim().is_empty() {
+        return Ok(Vec::new());
+    }
+    serde_json::from_str(json)
+}
+
 /// The messages steered BEHIND one in-flight row (board #442), in the order they were steered.
 /// The group is read WHOLE from the durable log (state.db), never from the in-memory feed: a
 /// restart must not shrink it, and a page cap must not either. A `steered` event is a member
@@ -2447,10 +2459,7 @@ pub fn steered_behind(session: &str, row: &super::store::DeliveryRow) -> Result<
     let events = queue(|s| s.steered_events(session, &row.window))?;
     let mut msgs: Vec<String> = Vec::new();
     for (id, json) in events {
-        if json.trim().is_empty() {
-            continue;
-        }
-        let refs: Vec<DeliveryRef> = serde_json::from_str(&json).map_err(|e| format!("steered event {id} does not decode: {e}"))?;
+        let refs = delivery_refs(&json).map_err(|e| format!("steered event {id} does not decode: {e}"))?;
         for r in refs {
             if r.behind == row.id && !r.msg.is_empty() && !msgs.contains(&r.msg) {
                 msgs.push(r.msg);

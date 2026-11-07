@@ -3093,4 +3093,29 @@ mod tests {
         assert!(unconfirmed_line_without_source("dev", &[("bob".into(), "08:41".into())]).contains("an earlier line typed to it; 1 later message followed it into the same prompt: bob 08:41;"));
     }
 
+    /// Board #57 (token-porta's reviewer, 2026-11-07 01:57: "'reviewer' was not
+    /// restarted: … activity 41764 does not decode: EOF while parsing a value"):
+    /// a steered row with no delivery refs is stored with deliveries '' (the
+    /// writer's "no refs"), and the in-flight read on a kill (#41) parsed it as
+    /// JSON and refused the restart. Empty means no refs: the restart proceeds.
+    /// Malformed non-empty JSON still refuses.
+    #[test]
+    fn a_turn_with_a_steered_row_of_no_refs_is_restarted_and_a_malformed_one_still_refuses() {
+        let s = setup("empty-refs");
+        telemetry::PERSIST_IN_TEST.with(|p| p.set(true));
+        record_prompt(&s, "dev", "[tmm chat 2026-11-07 01:50] lead: @dev a task");
+        telemetry::record_steered(&s, "dev", "a line with no message of ours", &[""], 0);
+        let stored: String = crate::projects::with_store(|st| st.conn_for_test().query_row(
+            "SELECT deliveries FROM activity WHERE session = ?1 AND kind = 'steered'", rusqlite::params![s], |r| r.get(0)).map_err(|e| e.to_string())).unwrap();
+        assert_eq!(stored, "", "the writer stores no refs as ''");
+        replace_cli(&s, "dev", None, || Ok(())).expect("a turn holding a steered row with no refs is restarted");
+        // A row whose refs are not JSON at all is still a refusal (#41's fail-safe).
+        record_prompt(&s, "dev", "[tmm chat 2026-11-07 01:55] lead: @dev again");
+        telemetry::record_steered(&s, "dev", "another line", &["m9"], 0);
+        crate::projects::with_store(|st| st.conn_for_test().execute(
+            "UPDATE activity SET deliveries = '{not json' WHERE id = (SELECT MAX(id) FROM activity WHERE session = ?1 AND kind = 'steered')",
+            rusqlite::params![s]).map(|_| ()).map_err(|e| e.to_string())).unwrap();
+        let err = replace_cli(&s, "dev", None, || Ok(())).expect_err("malformed refs refuse");
+        assert!(err.contains("does not decode"), "{err}");
+    }
 }
