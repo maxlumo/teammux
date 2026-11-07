@@ -935,7 +935,9 @@ flaky wall-clock assertions in the test.
     line, and four `tmm-note-*` sessions were killed by hand on 2026-11-06
     (board #61; measured with a forced panic in
     `a_notified_note_announces_once_and_leaves_the_flagless_note_alone`: one
-    session left before the guard, none after).
+    session left before the guard, none after; the three other unguarded
+    `hub_rpc` tests, board-reply, stop and clean-start, left three before
+    and none after). No `hub_rpc` test ends with a trailing `kill-session`.
   - A directory held for the whole process (the test store, the config
     dir, the kimi/codex homes, the integration crate's config dir, the symlink
     fixtures):

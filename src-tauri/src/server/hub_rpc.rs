@@ -5463,8 +5463,6 @@ mod tests {
         std::thread::sleep(std::time::Duration::from_millis(600));
         let lead = crate::tmux::capture_pane_plain(&format!("{session}:lead"), Some(0)).unwrap_or_default();
         let solo = crate::tmux::capture_pane_plain(&format!("{session}:solo"), Some(0)).unwrap_or_default();
-        let _ = std::process::Command::new("tmux").args(["kill-session", "-t", &session]).status();
-        let _ = std::fs::remove_dir_all(&ws);
         assert!(lead.contains("first line for lead") && lead.contains("second line for lead"), "lead: {lead:?}");
         assert!(solo.contains("first line for solo") && solo.contains("second line for solo"), "solo: {solo:?}");
         assert!(!lead.contains("for solo") && !solo.contains("for lead"), "no cross-pane text: {lead:?} / {solo:?}");
@@ -5815,8 +5813,6 @@ while True:
         std::thread::sleep(std::time::Duration::from_millis(200));
         let lead_text = crate::tmux::capture_pane_plain(&lead, Some(0)).unwrap_or_default();
         let solo_text = crate::tmux::capture_pane_plain(&format!("{session}:solo"), Some(0)).unwrap_or_default();
-        let _ = std::process::Command::new("tmux").args(["kill-session", "-t", &session]).status();
-        let _ = std::fs::remove_dir_all(&ws);
         assert!(still, "copy-mode is never cancelled for a delivery");
         assert!(!lead_text.contains("read this"), "nothing typed into the reading pane: {lead_text:?}");
         assert!(solo_text.contains("read this"), "the other recipient still gets it: {solo_text:?}");
@@ -6731,8 +6727,6 @@ while True:
         std::thread::sleep(std::time::Duration::from_millis(200));
         let lead_text = crate::tmux::capture_pane_plain(&lead, Some(0)).unwrap_or_default();
         let solo_text = crate::tmux::capture_pane_plain(&format!("{session}:solo"), Some(0)).unwrap_or_default();
-        let _ = std::process::Command::new("tmux").args(["kill-session", "-t", &session]).status();
-        let _ = std::fs::remove_dir_all(&ws);
         // all: the taker is the success, the refused one is a warn.
         assert!(all.error.is_none(), "{:?}", all.error.map(|e| e.message));
         assert_eq!(all.result.as_ref().and_then(|v| v.get("sent")).cloned(), Some(serde_json::json!(["solo"])));
@@ -6915,6 +6909,8 @@ while True:
             let _ = std::fs::remove_dir_all(&ws);
             return;
         }
+        // Torn down on drop, also when an assertion fails part-way (board #61).
+        let _teardown = KillOnDrop(session.clone(), ws.clone());
         crate::projects::adopt(&session, Some("board-reply-test")).expect("adopt test project");
         let issue_id = crate::projects::board_save(
             &session,
@@ -6943,8 +6939,6 @@ while True:
         assert!(pane.contains(&format!("[board #{issue_id} reply] Retry edge")), "pane: {pane:?}");
         assert!(pane.contains("Please cover the restart case"), "pane: {pane:?}");
 
-        let _ = std::process::Command::new("tmux").args(["kill-session", "-t", &session]).status();
-        let _ = std::fs::remove_dir_all(&ws);
     }
 
     /// Board #42 AC1 (the transition): two notes land before the assignee
@@ -7209,6 +7203,8 @@ while True:
             eprintln!("no tmux server — skipping");
             return;
         }
+        // Torn down on drop, also when an assertion fails part-way (board #61).
+        let _teardown = KillOnDrop(session.clone(), ws.clone());
         // A project must claim the session for managed_home to resolve.
         let created_project = crate::projects::adopt(&session, Some("stop-test")).is_ok();
 
@@ -7238,8 +7234,6 @@ while True:
             assert!(r.error.is_some(), "the start failed");
             assert!(crate::projects::tests::restore_intents().stopped.contains(&(project.id, "dev".to_string())), "a failed start keeps the mark");
         }
-        let _ = std::process::Command::new("tmux").args(["kill-session", "-t", &session]).status();
-        let _ = std::fs::remove_dir_all(&ws);
     }
 
     /// Board #38 (validator 01:43, on #29; reproduced on main 2ebb04d6 with
@@ -8328,6 +8322,8 @@ while True:
             .status()
             .is_ok_and(|s| s.success());
         assert!(created, "the isolated test tmux starts a session");
+        // Torn down on drop, also when an assertion fails part-way (board #61).
+        let _teardown = KillOnDrop(session.clone(), ws.clone());
         // A second window keeps the session alive while dev is stopped.
         crate::tmux::new_named_window(&session, "keep", &ws.to_string_lossy()).unwrap();
         crate::projects::adopt(&session, Some("start-test")).unwrap();
@@ -8394,8 +8390,6 @@ while True:
         assert_eq!(start_agent_with(&session, "dev", permit, clean_cli, fallback(false, false)), Ok(true));
         assert!(!stopped());
 
-        let _ = std::process::Command::new("tmux").args(["kill-session", "-t", &session]).status();
-        let _ = std::fs::remove_dir_all(&ws);
     }
 
     /// Board #422 (validator I9): a team restart that drops a member STOPS it
