@@ -120,3 +120,28 @@ test('Select starts ArrowUp at the last option and scrolls keyboard Home/End int
     assert.deepEqual(changes, ['c']);
   } finally { await app.close(); }
 });
+
+test('a Select wrapped in a label closes once on a mouse pick, and Escape stays with its menu (#75)', async context => {
+  const fixture = await compileMount(new URL('./SelectInLabel.test.svelte', import.meta.url), []);
+  const app = await fixture.mount(context, { modules: [] });
+  try {
+    const trigger = app.document.querySelector<HTMLButtonElement>('.sel-trigger')!;
+    trigger.click(); await app.flush();
+    const pick = new app.window.MouseEvent('click', { bubbles: true, cancelable: true });
+    assert.equal(app.document.querySelectorAll('[role=option]')[1]!.dispatchEvent(pick), false,
+      'a click in the menu is cancelled, so the label around the field never forwards it to the trigger');
+    await app.flush();
+    assert.equal(app.document.querySelector('output')?.textContent, 'codex/0');
+    assert.equal(trigger.getAttribute('aria-expanded'), 'false', 'the pick closes the menu');
+    assert.equal(app.document.querySelector('[role=listbox]'), null);
+    trigger.click(); await app.flush();
+    assert.equal(trigger.getAttribute('aria-expanded'), 'true', 'the trigger opens it again');
+    trigger.click(); await app.flush();
+    assert.equal(trigger.getAttribute('aria-expanded'), 'false', 'and closes it again');
+    trigger.click(); await app.flush();
+    trigger.dispatchEvent(new app.window.KeyboardEvent('keydown', { key: 'Escape', bubbles: true, cancelable: true }));
+    await app.flush();
+    assert.equal(trigger.getAttribute('aria-expanded'), 'false');
+    assert.equal(app.document.querySelector('output')?.textContent, 'codex/0', 'the page never sees that Escape');
+  } finally { await app.close(); }
+});

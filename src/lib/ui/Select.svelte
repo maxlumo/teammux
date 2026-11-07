@@ -232,7 +232,14 @@
 {/if}
 
 {#if open && shown.length}
-  <div class="sel-menu menu-surface menu-list pop-layer" class:ready={menuH > 0} role="listbox" tabindex="-1" id={listId}
+  <!-- The menu renders where the Select is, so inside a configuration field's
+       <label>. A pick removes the menu before the click's default action, and
+       Chromium 141 (Playwright's chromium-1194) then treats the detached
+       option as plain label content and forwards the click to the label's
+       control, this trigger, which reopened the menu (#75). Cancelling every
+       click inside the menu removes that default action; picking needs none. -->
+  <!-- svelte-ignore a11y_click_events_have_key_events -->
+  <div onclick={(e) => e.preventDefault()} class="sel-menu menu-surface menu-list pop-layer" class:ready={menuH > 0} role="listbox" tabindex="-1" id={listId}
     style:left="{pos.x}px" style:top="{pos.y}px" style:width="{fieldW}px"
     style:--pop-origin={anchor ? popOrigin(anchor, pos) : undefined}
     bind:this={menuEl} bind:offsetHeight={menuH}>
