@@ -165,3 +165,17 @@ test('the phone Back peels the shell’s dialog before any page layer (#317)', a
   assert.match(chain, /if \(addServer\) \{ addServer = null; navPush\(\); return; \}/u,
     'and it spends the entry it consumed, like every other peel');
 });
+
+// Board #59 (the owner's phone, 2026-11-07: the rename box under the keyboard):
+// the phone sheet rests on the shell's bottom edge, #56's one keyboard state,
+// not on the layout viewport's, which a WebView from M139 does not shrink for
+// the keyboard. Measured in Chromium (Docker) in both keyboard modes: the
+// sheet's bottom equals --app-height (565 of a 844 layout; 544 of a resized
+// 544), and 844 with the keyboard closed.
+test('the phone sheet rests on the shell, above the keyboard (board #59)', async () => {
+  const text = await readFile(new URL('./Dialog.svelte', import.meta.url), 'utf8');
+  assert.match(text, /\.dlg\.sheet \{\n    left: 0; top: auto; bottom: max\(0px, calc\(100% - var\(--app-height, 100%\) \/ var\(--ui-zoom, 1\)\)\); transform: none;/u);
+  assert.match(text, /max-height: calc\(var\(--app-height, 100dvh\) \/ var\(--ui-zoom, 1\) - 48px\);/u, 'and never taller than the shell above the keyboard');
+  assert.match(text, /:global\(html\.keyboard-open\) \.dlg\.sheet \{ padding-bottom: 16px; \}/u, 'on the keyboard, no safe-area padding');
+  assert.doesNotMatch(text, /left: 0; top: auto; bottom: 0;/u, 'no longer pinned to the layout viewport');
+});

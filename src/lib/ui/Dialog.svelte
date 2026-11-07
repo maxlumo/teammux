@@ -165,13 +165,23 @@
      (design-language §1): the Android System WebView drops the compositor
      layer when the rise ends and blinks a blank frame while it re-rasterizes,
      and opacity promotes a layer without becoming a containing block. */
+  /* The sheet rests on the SHELL's bottom edge, not the layout viewport's
+     (board #59, the owner's phone: the rename box under the keyboard). The
+     shell height is #56's one keyboard state (--app-height); a fixed box's
+     100% is the layout viewport, which a WebView from M139 does not shrink
+     for the keyboard, so the difference is exactly the part the keyboard
+     covers (0 with no keyboard, and 0 where the layout viewport itself
+     shrinks: index.html's resizes-content). With the keyboard up the sheet
+     sits on it, so it drops the safe-area padding the keyboard covers. */
   .dlg.sheet {
-    left: 0; top: auto; bottom: 0; transform: none;
+    left: 0; top: auto; bottom: max(0px, calc(100% - var(--app-height, 100%) / var(--ui-zoom, 1))); transform: none;
+    max-height: calc(var(--app-height, 100dvh) / var(--ui-zoom, 1) - 48px);
     width: 100%; max-width: none; border-radius: var(--control-dialog-radius) var(--control-dialog-radius) 0 0;
     border-left: none; border-right: none; border-bottom: none;
     padding: 16px 14px calc(16px + var(--sab, 0px)); /* var(--sab): env() is 0 in the APK */
     animation: sheet-up var(--t-move) ease-out;
     will-change: opacity;
   }
+  :global(html.keyboard-open) .dlg.sheet { padding-bottom: 16px; }
   @media (prefers-reduced-motion: reduce) { .dlg-backdrop, .dlg, .dlg.sheet { animation: none; } }
 </style>

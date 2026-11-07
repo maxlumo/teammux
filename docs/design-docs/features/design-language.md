@@ -943,6 +943,13 @@ by the contract above, not extended by new page-local overrides.
   scrim, desktop = a centred card that fades. The content dialect (`.dlg h2`,
   `.dlg-note`, `.dlg-error`, `.dlg-actions`) lives in app.css because the
   children belong to the caller. Solid red confirm per above.
+  The phone sheet rests on the SHELL's bottom edge, `bottom: 100% - --app-height`
+  (#56's one keyboard state), not on the layout viewport's (board #59, the
+  owner's phone: the agent-rename box under the keyboard). A WebView from M139
+  shrinks only the visual viewport for the keyboard, so a fixed `bottom: 0`
+  sat under it. With the keyboard up the sheet drops its safe-area padding and
+  is never taller than the shell. Measured in Chromium (Docker) in both
+  keyboard modes; `dialog.source.test.ts` pins the rule.
 - The `Select` trigger's chevron is a `.flip` that turns 180° while the list
   is open (both the button and the combobox mode — the combobox puts the
   rotation on an inner wrapper so its own centring transform stays put); the
