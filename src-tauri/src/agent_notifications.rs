@@ -897,6 +897,21 @@ impl AgentNotificationHub {
             r#"#!/bin/sh
 umask 077
 exec 2>/dev/null
+# Board #45: the production time, to the nanosecond (`<secs>.<9 digits>`, GNU
+# date's %N), taken FIRST: it is what a reset's effect is ordered against, and
+# the bounded tmux probe below can hold the helper for a second or more, so a
+# stamp taken after it made an older hook look newer than a command typed
+# meanwhile (validator's round-2 P1). A `date` without %N (it prints `N`
+# literally) keeps whole seconds, which the consumer reads as an unknown
+# production time. No other program is run (tmux stays the one external one).
+now=$(date +%s.%N 2>/dev/null)
+case "$now" in
+  *[!0-9.]*|.*|*.|*.*.*|"") now=$(date +%s) ;;
+esac
+case "${{now#*.}}" in
+  "$now"|[0-9][0-9][0-9][0-9][0-9][0-9][0-9][0-9][0-9]) ;;
+  *) now=$(date +%s) ;;
+esac
 # A producer that numbers its envelopes (board #404: TMM_HOOK_SEQ, digits)
 # gets a RECEIPT: exit 0 only once the envelope is in the inbox, 1 if it is
 # not, so it can keep and resend it. Every other caller keeps the fail-soft
@@ -976,19 +991,6 @@ printf '{{"backend":"%s","pane_id":"%s",%s"payload":%s}}\n' "$backend" "$pane" "
 # The number also rides the file name, zero-padded, so two envelopes of one
 # pane written in the same second are consumed in the order they were made.
 # Without one the name keeps its old `<secs>-<pid>` shape.
-# Board #45: the name's time is the production time to the nanosecond
-# (`<secs>.<9 digits>`, GNU date's %N), what a reset's effect is ordered
-# against. A `date` without %N (it prints `N` literally) keeps whole seconds,
-# which the consumer reads as an unknown production time. No other program is
-# run (the network test above: tmux is the helper's one external program).
-now=$(date +%s.%N 2>/dev/null)
-case "$now" in
-  *[!0-9.]*|.*|*.|*.*.*|"") now=$(date +%s) ;;
-esac
-case "${{now#*.}}" in
-  "$now"|[0-9][0-9][0-9][0-9][0-9][0-9][0-9][0-9][0-9]) ;;
-  *) now=$(date +%s) ;;
-esac
 case "${{TMM_HOOK_SEQ:-}}" in
   ''|*[!0-9]*) name="$now-$$" ;;
   *) name="$now-$(printf '%020d' "$TMM_HOOK_SEQ")-$$" ;;
@@ -6182,7 +6184,7 @@ mod tests {
     /// is its own process group, so everything it starts is ours and nothing else is touched: a leak is
     /// cleaned by that group and found by the probe's own pid, which the fake writes down before anything
     /// else. Returns the published envelope, how long the helper took, and the probe's pid.
-    fn helper_against_fake_tmux(body: &str) -> (Value, std::time::Duration, i32) {
+    fn helper_against_fake_tmux(body: &str) -> (Value, std::time::Duration, i32, Option<u128>) {
         use std::os::unix::fs::PermissionsExt;
         use std::os::unix::process::CommandExt;
         let root = crate::config::test_scratch("tmm-hang-hub");
@@ -6202,6 +6204,7 @@ mod tests {
             .stdin(std::process::Stdio::piped())
             .process_group(0);
         let started = std::time::Instant::now();
+        let started_ns = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap().as_nanos();
         let mut child = cmd.spawn().unwrap();
         let group = child.id() as i32;
         {
@@ -6230,7 +6233,9 @@ mod tests {
         assert_eq!(v["payload"]["hook_event_name"], "stop");
         // Board #45: the name carries its production time to the nanosecond
         // (this host's GNU date has %N).
-        assert!(produced_ns(&files[0]).is_some(), "a nanosecond production time: {listing:?}");
+        let produced = produced_ns(&files[0]);
+        assert!(produced.is_some(), "a nanosecond production time: {listing:?}");
+        let produced_after = produced.map(|p| p.saturating_sub(started_ns));
         assert!(std::fs::read_dir(root.join("inbox")).unwrap().flatten().all(|e| !e.file_name().to_string_lossy().contains("probe")), "no probe file left");
         // The probe is gone and reaped. Reaped matters: signal 0 still finds a zombie. The group still holds
         // its members' id while any is alive, so a leak is killed through it and nothing else.
@@ -6244,7 +6249,7 @@ mod tests {
             panic!("the probe (pid {pid}) was left behind");
         }
         let _ = std::fs::remove_dir_all(root);
-        (v, took, pid)
+        (v, took, pid, produced_after)
     }
 
     /// P1-E (board #425 review): the helper's start-time probe is bounded. A tmux that never answers and
@@ -6253,9 +6258,15 @@ mod tests {
     #[test]
     fn a_hung_tmux_does_not_hold_the_helper_and_leaves_no_probe_behind() {
         for body in ["trap '' TERM\nexec sleep 120", "trap '' TERM\necho 1792351058\nexec sleep 120"] {
-            let (v, took, _) = helper_against_fake_tmux(body);
+            let (v, took, _, produced_after) = helper_against_fake_tmux(body);
             assert!(took < std::time::Duration::from_secs(4), "the helper returned within its budget, not after the hung tmux: {took:?}");
             assert!(v.get("tmm_tmux").is_none(), "without the instance field (the legacy path), whatever it printed first: {v}");
+            // Board #45 round 3 (validator's P1): the production time is taken
+            // BEFORE the bounded tmux probe, so a hook that the probe held is
+            // never stamped later than a command typed meanwhile.
+            let after = produced_after.expect("a production time");
+            assert!(took > std::time::Duration::from_millis(500), "the probe really held the helper: {took:?}");
+            assert!(after < 300_000_000, "stamped at the start, not after the {took:?} probe: {} ms after spawn", after / 1_000_000);
         }
     }
 
@@ -6264,12 +6275,12 @@ mod tests {
     /// older server's. A clean exit still carries it.
     #[test]
     fn the_probe_identity_is_used_only_when_tmux_exits_cleanly() {
-        let (v, _, _) = helper_against_fake_tmux("echo 1792351058\nexit 1");
+        let (v, _, _, _) = helper_against_fake_tmux("echo 1792351058\nexit 1");
         assert!(v.get("tmm_tmux").is_none(), "a number then a failure is no identity: {v}");
-        let (v, _, _) = helper_against_fake_tmux("echo 1792351058\nkill -9 $$");
+        let (v, _, _, _) = helper_against_fake_tmux("echo 1792351058\nkill -9 $$");
         assert!(v.get("tmm_tmux").is_none(), "a number then a signal is no identity: {v}");
         // A clean answer is carried.
-        let (v, _, _) = helper_against_fake_tmux("echo 1792351058");
+        let (v, _, _, _) = helper_against_fake_tmux("echo 1792351058");
         assert_eq!(v["tmm_tmux"], "/tmp/tmm-hang-425/sock,4242,1792351058", "a clean answer is carried: {v}");
     }
 
