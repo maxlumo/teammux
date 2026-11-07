@@ -8537,14 +8537,14 @@ while True:
             std::fs::write(ws.join(format!(".tmm/agents/{name}/launch.json")),
                 r#"{"backend":"kiro","cmd":"kiro-cli chat --agent x","team":""}"#).unwrap();
         }
-        let dir = ws.to_string_lossy().to_string();
+        let (dir, cli) = (ws.to_string_lossy().to_string(), { std::fs::copy("/bin/sleep", ws.join("kiro-cli")).unwrap(); format!("{}/kiro-cli 120", ws.display()) }); // a live kiro by its process (#65)
         let tmux = |args: &[&str]| std::process::Command::new("tmux").args(args).status().map(|s| s.success()).unwrap_or(false);
-        if !tmux(&["new-session", "-d", "-s", &session, "-n", "dev", "-c", &dir, "sleep 120"]) {
+        if !tmux(&["new-session", "-d", "-s", &session, "-n", "dev", "-c", &dir, &cli]) {
             eprintln!("no tmux server — skipping");
             return;
         }
         let _cleanup = KillOnDrop(session.clone(), ws.clone());
-        assert!(tmux(&["new-window", "-d", "-t", &format!("={session}:"), "-n", "aux", "-c", &dir, "sleep 120"]));
+        assert!(tmux(&["new-window", "-d", "-t", &format!("={session}:"), "-n", "aux", "-c", &dir, &cli]));
         crate::projects::adopt(&session, Some(&format!("r394-{}", &session[8..16]))).expect("adopt");
 
         // Board #419: the store's high-water AHEAD of the wall clock, as after
