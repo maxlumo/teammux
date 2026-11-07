@@ -503,10 +503,19 @@ pub fn parse_frame(text: &str, nonce: &str, ask: &Ask) -> Result<Frame, &'static
             }
         }
         // Ids XOR a failure word; the ids within the discovery budget.
-        (Frame::KiroModels { ids, fail }, Ask::KiroModels) | (Frame::CodexModels { ids, fail }, Ask::CodexModels { .. }) => {
+        (Frame::KiroModels { ids, fail }, Ask::KiroModels) => {
             let ids_ok = ids.as_ref().is_none_or(|ids| {
                 !ids.is_empty() && crate::projects::models::bounded(ids.clone(), crate::backends::ModelKind::Authoritative).is_ok()
             });
+            if ids.is_some() == fail.is_some() || !ids_ok || !word_in(fail, FAIL_WORDS) {
+                return Err(BAD);
+            }
+        }
+        // codex's ids are SUGGESTIONS: they cross untrimmed (review R2), and
+        // the gateway's `bounded` keeps what fits and says the list was cut.
+        // The frame cap bounds the bytes.
+        (Frame::CodexModels { ids, fail }, Ask::CodexModels { .. }) => {
+            let ids_ok = ids.as_ref().is_none_or(|ids| !ids.is_empty());
             if ids.is_some() == fail.is_some() || !ids_ok || !word_in(fail, FAIL_WORDS) {
                 return Err(BAD);
             }
@@ -713,8 +722,9 @@ fn kiro_model_ids(overlay: &str, limit: Duration) -> Frame {
 const CODEX_DEBUG_CAP: u64 = 8 * 1024 * 1024;
 
 /// codex's offered model ids (`codex debug models`, read by
-/// `codex::debug_model_ids`) with `CODEX_HOME` = `home`, bounded as
-/// suggestions so the frame stays within the discovery budget.
+/// `codex::debug_model_ids`) with `CODEX_HOME` = `home`. NOT trimmed here
+/// (review R2): a cut made on this side of the probe would reach the
+/// gateway as a complete list; `models::bounded` there trims and says so.
 #[cfg(not(any(target_os = "android", target_os = "ios")))]
 fn codex_model_ids(overlay: &str, home: &Path, limit: Duration) -> Frame {
     let mut cmd = std::process::Command::new("codex");
@@ -722,11 +732,9 @@ fn codex_model_ids(overlay: &str, home: &Path, limit: Duration) -> Frame {
     let fail = |w: &str| Frame::CodexModels { ids: None, fail: Some(w.into()) };
     match probe::run_status_as(cmd, limit, Channel::Stdout, CODEX_DEBUG_CAP, probe::Group::Caller) {
         Ok((_, code)) if code != Some(0) => fail("exit"),
-        Ok((out, _)) => match crate::backends::codex::debug_model_ids(out.as_bytes())
-            .and_then(|ids| crate::projects::models::bounded(ids, crate::backends::ModelKind::Suggestions).ok())
-        {
-            Some(l) if !l.ids.is_empty() => Frame::CodexModels { ids: Some(l.ids), fail: None },
-            _ => fail("bad_answer"),
+        Ok((out, _)) => match crate::backends::codex::debug_model_ids(out.as_bytes()) {
+            Some(ids) => Frame::CodexModels { ids: Some(ids), fail: None },
+            None => fail("bad_answer"),
         },
         Err(f) => fail(f.word()),
     }
@@ -1804,6 +1812,15 @@ mod tests {
         let h = home.to_str().unwrap();
         let ok = run(&format!("#!/bin/sh\n[ \"$*\" = 'debug models' ] && [ \"$CODEX_HOME\" = '{h}' ] || exit 2\necho '{{\"models\":[{{\"slug\":\"gpt-6-astra\",\"visibility\":\"list\"}},{{\"slug\":\"codex-auto-review\",\"visibility\":\"hide\"}},{{\"slug\":\"gpt-6.1-sol\",\"visibility\":\"list\"}}]}}'\n"), h);
         assert_eq!(ok, Some(Ok(Frame::CodexModels { ids: Some(vec!["gpt-6-astra".into(), "gpt-6.1-sol".into()]), fail: None })));
+        // Review (2): the helper never trims. Over the id budget every id
+        // reaches the gateway, whose `bounded` says the list was cut.
+        let many: Vec<String> = (0..1100).map(|i| format!("m{i}")).collect();
+        let json = format!("{{\"models\":[{}]}}", many.iter().map(|m| format!("{{\"slug\":\"{m}\",\"visibility\":\"list\"}}")).collect::<Vec<_>>().join(","));
+        std::fs::write(dir.join("many.json"), &json).unwrap();
+        let over = run(&format!("#!/bin/sh\ncat '{}'\n", dir.join("many.json").display()), h);
+        assert_eq!(over, Some(Ok(Frame::CodexModels { ids: Some(many.clone()), fail: None })), "every id, untrimmed");
+        let cut = crate::projects::models::bounded(many, crate::backends::ModelKind::Suggestions).unwrap();
+        assert_eq!((cut.ids.len(), cut.complete), (crate::projects::models::MAX_IDS, false), "the gateway says it was cut");
         let unknown = run("#!/bin/sh\necho '{\"models\":[{\"slug\":\"a\"}]}'\n", h);
         assert_eq!(unknown, Some(Ok(Frame::CodexModels { ids: None, fail: Some("bad_answer".into()) })), "an unknown shape is no list");
         let failing = run("#!/bin/sh\necho 'error: unknown subcommand debug' >&2; exit 2\n", h);

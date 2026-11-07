@@ -81,14 +81,18 @@ fn cache() -> &'static Cache {
 /// remembered as an empty catalogue, so the next request asks again. A hit
 /// also needs the source stamp it was fetched under (board #70): a list
 /// left from a previous codex provider never refuses or offers for the
-/// current one.
+/// current one. The stamp a list is STORED under is the one of the config
+/// it was derived from (the fetch returns both from one read, review R1),
+/// never the one looked up with, which a config changed in between would
+/// make another file's.
 pub fn list_fact(backend: &str) -> Result<List, ModelReason> {
     let stamp = crate::backends::Backend::parse(backend).and_then(|b| b.model_list_stamp());
     list_fact_with(backend, stamp, || fetch(backend))
 }
 
-/// `list_fact` with the stamp and the fetch injected.
-fn list_fact_with(backend: &str, stamp: Option<String>, fetch: impl FnOnce() -> Result<List, ModelReason>) -> Result<List, ModelReason> {
+/// `list_fact` with the lookup stamp and the fetch injected; the fetch
+/// answers the stamp of what it read with the list.
+fn list_fact_with(backend: &str, stamp: Option<String>, fetch: impl FnOnce() -> (Option<String>, Result<List, ModelReason>)) -> Result<List, ModelReason> {
     if let Ok(c) = cache().lock() {
         if let Some((.., at, list)) = c.iter().find(|(b, s, ..)| b == backend && *s == stamp) {
             if at.elapsed() < TTL {
@@ -96,10 +100,11 @@ fn list_fact_with(backend: &str, stamp: Option<String>, fetch: impl FnOnce() -> 
             }
         }
     }
-    let fetched = fetch()?;
+    let (read, fetched) = fetch();
+    let fetched = fetched?;
     if let Ok(mut c) = cache().lock() {
         c.retain(|(b, ..)| b != backend);
-        c.push((backend.to_string(), stamp, Instant::now(), fetched.clone()));
+        c.push((backend.to_string(), read, Instant::now(), fetched.clone()));
     }
     Ok(fetched)
 }
@@ -237,10 +242,10 @@ pub fn member(backend: &str, fact: &Result<List, ModelReason>, model: &str) -> R
 
 /// Ask the backend (the sources live on the backend files, board #127) and
 /// apply the budget.
-fn fetch(backend: &str) -> Result<List, ModelReason> {
-    let b = crate::backends::Backend::parse(backend).ok_or(ModelReason::NotListed)?;
-    let (ids, kind) = b.model_list()?;
-    bounded(ids, kind)
+fn fetch(backend: &str) -> (Option<String>, Result<List, ModelReason>) {
+    let Some(b) = crate::backends::Backend::parse(backend) else { return (None, Err(ModelReason::NotListed)) };
+    let (stamp, list) = b.model_list_stamped();
+    (stamp, list.and_then(|(ids, kind)| bounded(ids, kind)))
 }
 
 #[cfg(test)]
@@ -255,12 +260,27 @@ mod tests {
     fn a_cached_list_follows_its_source_stamp() {
         let b = "test-stamp-backend";
         let list = |id: &str| Ok(List { ids: vec![id.to_string()], kind: ModelKind::Authoritative, complete: true });
-        let bedrock = Some("model_provider = \"amazon-bedrock-runtime\"".to_string());
-        let ust = Some("model_provider = \"ust\"".to_string());
-        assert_eq!(list_fact_with(b, bedrock.clone(), || list("global.openai.gpt-6.1-sol")).unwrap().ids, ["global.openai.gpt-6.1-sol"]);
+        let bedrock = Some("digest-bedrock".to_string());
+        let ust = Some("digest-ust".to_string());
+        assert_eq!(list_fact_with(b, bedrock.clone(), || (bedrock.clone(), list("global.openai.gpt-6.1-sol"))).unwrap().ids, ["global.openai.gpt-6.1-sol"]);
         assert_eq!(list_fact_with(b, bedrock.clone(), || panic!("same config: cached")).unwrap().ids, ["global.openai.gpt-6.1-sol"]);
-        assert_eq!(list_fact_with(b, ust.clone(), || list("gpt-6.1-sol")).unwrap().ids, ["gpt-6.1-sol"], "a new provider is a new list");
-        assert_eq!(list_fact_with(b, bedrock, || list("global.openai.gpt-6-astra")).unwrap().ids, ["global.openai.gpt-6-astra"], "and back again");
+        assert_eq!(list_fact_with(b, ust.clone(), || (ust.clone(), list("gpt-6.1-sol"))).unwrap().ids, ["gpt-6.1-sol"], "a new provider is a new list");
+        assert_eq!(list_fact_with(b, bedrock.clone(), || (bedrock.clone(), list("global.openai.gpt-6-astra"))).unwrap().ids, ["global.openai.gpt-6-astra"], "and back again");
+        forget(b);
+    }
+
+    /// Board #70 review (1): the list is cached under the stamp of the config
+    /// it was DERIVED from, never the one looked up with. A config changed
+    /// from A to B between the lookup and the fetch caches B's list under B;
+    /// the next ask under A fetches again instead of reusing B's list.
+    #[test]
+    fn a_list_is_cached_under_the_config_it_was_read_from() {
+        let b = "test-stamp-snapshot";
+        let list = |id: &str| Ok(List { ids: vec![id.to_string()], kind: ModelKind::Suggestions, complete: true });
+        let (a, bb) = (Some("digest-a".to_string()), Some("digest-b".to_string()));
+        assert_eq!(list_fact_with(b, a.clone(), || (bb.clone(), list("from-b"))).unwrap().ids, ["from-b"], "this answer is B's");
+        assert_eq!(list_fact_with(b, bb.clone(), || panic!("B's list is cached under B")).unwrap().ids, ["from-b"]);
+        assert_eq!(list_fact_with(b, a.clone(), || (a.clone(), list("from-a"))).unwrap().ids, ["from-a"], "A never gets B's list");
         forget(b);
     }
 

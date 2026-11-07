@@ -877,6 +877,16 @@ impl Backend {
         }
     }
 
+    /// `model_list` with the stamp of the source it was read from, both from
+    /// ONE read (board #70 review R1): what the cache stores a list under.
+    #[cfg(not(any(target_os = "android", target_os = "ios")))]
+    pub fn model_list_stamped(self) -> (Option<String>, Result<(Vec<String>, ModelKind), ModelReason>) {
+        match self {
+            Backend::Codex => codex::model_list_stamped(),
+            _ => (None, self.model_list()),
+        }
+    }
+
     /// The BASELINE default (board #511): what a NEW agent with an empty model
     /// is declared or derived to start on, through the SAME pure parse or
     /// inherit function its renderer uses — never through the discovery

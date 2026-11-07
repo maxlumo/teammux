@@ -55,11 +55,28 @@ pub(crate) fn effort_values() -> &'static [&'static str] {
 /// picker says so and typed ids stay accepted.
 #[cfg(not(any(target_os = "android", target_os = "ios")))]
 pub(crate) fn model_list() -> Result<(Vec<String>, super::ModelKind), super::ModelReason> {
-    use super::ModelReason::{Invalid, NotListed, Unreadable};
-    let Some(config) = super::read_model_source(&codex_user_home().join("config.toml"))? else { return Err(NotListed) };
+    model_list_stamped().1
+}
+
+/// `model_list` with the stamp of the config text it was derived from
+/// (board #70 review R1): ONE read of `config.toml` gives both, so the cache
+/// never stores one config's list under another config's stamp.
+#[cfg(not(any(target_os = "android", target_os = "ios")))]
+pub(crate) fn model_list_stamped() -> (Option<String>, Result<(Vec<String>, super::ModelKind), super::ModelReason>) {
+    match super::read_model_source(&codex_user_home().join("config.toml")) {
+        Err(r) => (None, Err(r)),
+        Ok(None) => (None, Err(super::ModelReason::NotListed)),
+        Ok(Some(config)) => (Some(stamp_of(&config)), list_of(&config)),
+    }
+}
+
+/// The list one config text declares (`model_list`'s rules).
+#[cfg(not(any(target_os = "android", target_os = "ios")))]
+fn list_of(config: &str) -> Result<(Vec<String>, super::ModelKind), super::ModelReason> {
+    use super::ModelReason::{Invalid, Unreadable};
     config.parse::<toml::Table>().map_err(|_| Invalid)?;
-    let Some(path) = catalog_path(&config) else {
-        return listed_by_codex(&config).map(|ids| (ids, super::ModelKind::Suggestions));
+    let Some(path) = catalog_path(config) else {
+        return listed_by_codex(config).map(|ids| (ids, super::ModelKind::Suggestions));
     };
     // A catalogue that IS named but cannot be read is a failure, not stock.
     let catalog = super::read_model_source(&path)?.ok_or(Unreadable)?;
@@ -74,9 +91,14 @@ pub(crate) fn model_list() -> Result<(Vec<String>, super::ModelKind), super::Mod
 /// when it cannot be read (nothing is cached apart).
 #[cfg(not(any(target_os = "android", target_os = "ios")))]
 pub(crate) fn model_list_stamp() -> Option<String> {
+    super::read_model_source(&codex_user_home().join("config.toml")).ok().flatten().map(|c| stamp_of(&c))
+}
+
+/// The stamp of one config text.
+#[cfg(not(any(target_os = "android", target_os = "ios")))]
+fn stamp_of(config: &str) -> String {
     use sha2::Digest;
-    let config = super::read_model_source(&codex_user_home().join("config.toml")).ok().flatten()?;
-    Some(hex::encode(sha2::Sha256::digest(config.as_bytes())))
+    hex::encode(sha2::Sha256::digest(config.as_bytes()))
 }
 
 /// `codex debug models` for `config`, in the environment a pane gets
@@ -103,6 +125,12 @@ pub(crate) mod cli_stand_in {
     type Staged = Option<Result<Vec<String>, crate::backends::ModelReason>>;
     static ANSWER: Mutex<Staged> = Mutex::new(None);
     static ASKED: Mutex<Option<String>> = Mutex::new(None);
+    static REWRITE: Mutex<Option<String>> = Mutex::new(None);
+    /// While the next ask runs, the user's config.toml becomes `text`: a
+    /// config changed between the read and the answer (review R1).
+    pub(crate) fn rewrite_during_ask(text: &str) {
+        *REWRITE.lock().unwrap() = Some(text.to_string());
+    }
     pub(crate) fn answer(a: Result<Vec<String>, crate::backends::ModelReason>) {
         *ANSWER.lock().unwrap() = Some(a);
     }
@@ -112,6 +140,9 @@ pub(crate) mod cli_stand_in {
     }
     pub(super) fn ask(config: &str) -> Result<Vec<String>, crate::backends::ModelReason> {
         *ASKED.lock().unwrap() = Some(config.to_string());
+        if let Some(text) = REWRITE.lock().unwrap().take() {
+            std::fs::write(super::codex_user_home().join("config.toml"), text).unwrap();
+        }
         ANSWER.lock().unwrap().clone().unwrap_or(Err(crate::backends::ModelReason::CliFailed))
     }
 }
@@ -1532,6 +1563,29 @@ mod tests {
         assert_ne!(model_list_stamp(), Some(stamp), "a provider switch is another stamp");
         std::fs::remove_file(home.join("config.toml")).unwrap();
         assert_eq!(model_list_stamp(), None, "no config, no stamp");
+    }
+
+    /// Board #70 review R1, through the real config file: the stamp a list
+    /// is stored under is the one of the text it was derived from. The
+    /// config changes from UST to Bedrock WHILE codex is being asked; the
+    /// answer is UST's and says so, and the Bedrock config now on disk has
+    /// another stamp, so the cache cannot hand UST's list to it.
+    #[test]
+    fn the_stamp_and_the_list_come_from_one_read() {
+        let home = codex_user_home();
+        let ust = "model_provider = \"ust\"\n";
+        let bedrock = "model_provider = \"amazon-bedrock-runtime\"\n";
+        std::fs::write(home.join("config.toml"), ust).unwrap();
+        cli_stand_in::answer(Ok(vec!["gpt-6.1-sol".into()]));
+        cli_stand_in::rewrite_during_ask(bedrock);
+        let (stamp, list) = model_list_stamped();
+        assert_eq!(cli_stand_in::asked().as_deref(), Some(ust), "codex was asked about the text that was read");
+        assert_eq!(std::fs::read_to_string(home.join("config.toml")).unwrap(), bedrock, "the file changed during the ask");
+        assert_eq!(list, Ok((vec!["gpt-6.1-sol".to_string()], super::super::ModelKind::Suggestions)));
+        assert_eq!(stamp, Some(stamp_of(ust)), "stored under the config it came from");
+        assert_ne!(model_list_stamp(), stamp, "the config on disk now looks up another entry");
+        cli_stand_in::answer(Err(super::super::ModelReason::CliFailed));
+        std::fs::remove_file(home.join("config.toml")).unwrap();
     }
 
     /// `codex debug models` on codex-cli 0.166.0 (board #70): the ids codex
