@@ -7,6 +7,7 @@
   import 'katex/dist/katex.min.css';
   import { t, i18n, hanLang } from '../core/i18n.svelte.ts';
   import { copyText } from '../core/clipboard.ts';
+  import { copyBody } from './copy-body.ts';
   import OperationFeedback from '../ui/OperationFeedback.svelte';
   import { feedbackPosition } from '../ui/feedback-position.ts';
   import { scheduleCompletion } from '../ui/feedback-lifetime.ts';
@@ -20,7 +21,7 @@
   import { FONT_CHANGE_EVENT } from '../app/fonts.svelte.ts';
   import { askTurns, blockKey } from './hub-turns.ts';
   import { NO_LABELS } from './names.ts';
-  import { parseQuote, copyBody, TAIL_GAP, bottomGap, tailAfterScroll, markMentions, showMentions, mentionedAgents, splitImages, toolColor, pickAnchor, toolEventParts, elideTail, foldedCommandArgs, markIssueRefs, foldLines, statusNote, noteStateColor, runtimeLabel, agentHue, sysParts, sysVerbColor, boardLine, boardStatusColor, promptParts, sameDay, continuesRun, perLineOf, STEPS_ROWS, stateIsLive } from './hub.ts';
+  import { parseQuote, TAIL_GAP, bottomGap, tailAfterScroll, markMentions, showMentions, mentionedAgents, splitImages, toolColor, pickAnchor, toolEventParts, elideTail, foldedCommandArgs, markIssueRefs, foldLines, statusNote, noteStateColor, runtimeLabel, agentHue, sysParts, sysVerbColor, boardLine, boardStatusColor, promptParts, sameDay, continuesRun, perLineOf, STEPS_ROWS, stateIsLive } from './hub.ts';
 
   let {
     blocks = [], agents = [], managedNames = [], knownNames = managedNames, names = NO_LABELS, issueIds = [], selected = '', visible = false, compact = false,
