@@ -55,7 +55,6 @@ pub(super) fn refuse(hub: &AgentNotificationHub, envelope: &InboxEnvelope, bytes
 }
 
 #[cfg(test)]
-#[cfg(not(any(target_os = "android", target_os = "ios")))]
 mod tests {
     use super::super::*;
     use super::MAX_HOOK_PAYLOAD_BYTES;
