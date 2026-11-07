@@ -710,6 +710,7 @@ and every live check with a real agent CLI runs in the live rig:
 
 ```bash
 pnpm run test:live:docker            # check `smoke`: one codex turn and one claude turn
+pnpm run test:live:docker codex-models   # board #70: codex's list follows its config (agents-overview.md § Model catalogue)
 ```
 
 - **The image** is `docker/validator/Dockerfile`'s `live` target: this

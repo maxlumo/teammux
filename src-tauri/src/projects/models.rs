@@ -62,7 +62,9 @@ pub fn bounded(ids: Vec<String>, kind: ModelKind) -> Result<List, ModelReason> {
 /// (~3s measured), which is fine once per app run and much too slow per save.
 const TTL: Duration = Duration::from_secs(600);
 
-type Cache = Mutex<Vec<(String, Instant, List)>>;
+/// One cached list: the backend, its source stamp (`Backend::model_list_stamp`),
+/// when it was fetched, and the list.
+type Cache = Mutex<Vec<(String, Option<String>, Instant, List)>>;
 
 fn cache() -> &'static Cache {
     static CACHE: OnceLock<Cache> = OnceLock::new();
@@ -76,19 +78,28 @@ fn cache() -> &'static Cache {
 /// validates through here, so one hung `--list-models` used to serialise
 /// every save behind it. Two concurrent misses may both fetch — a rare 3 s,
 /// not a bug. Only an `Ok` list is cached (board #511): a failure is never
-/// remembered as an empty catalogue, so the next request asks again.
+/// remembered as an empty catalogue, so the next request asks again. A hit
+/// also needs the source stamp it was fetched under (board #70): a list
+/// left from a previous codex provider never refuses or offers for the
+/// current one.
 pub fn list_fact(backend: &str) -> Result<List, ModelReason> {
+    let stamp = crate::backends::Backend::parse(backend).and_then(|b| b.model_list_stamp());
+    list_fact_with(backend, stamp, || fetch(backend))
+}
+
+/// `list_fact` with the stamp and the fetch injected.
+fn list_fact_with(backend: &str, stamp: Option<String>, fetch: impl FnOnce() -> Result<List, ModelReason>) -> Result<List, ModelReason> {
     if let Ok(c) = cache().lock() {
-        if let Some((_, at, list)) = c.iter().find(|(b, ..)| b == backend) {
+        if let Some((.., at, list)) = c.iter().find(|(b, s, ..)| b == backend && *s == stamp) {
             if at.elapsed() < TTL {
                 return Ok(list.clone());
             }
         }
     }
-    let fetched = fetch(backend)?;
+    let fetched = fetch()?;
     if let Ok(mut c) = cache().lock() {
         c.retain(|(b, ..)| b != backend);
-        c.push((backend.to_string(), Instant::now(), fetched.clone()));
+        c.push((backend.to_string(), stamp, Instant::now(), fetched.clone()));
     }
     Ok(fetched)
 }
@@ -235,6 +246,23 @@ fn fetch(backend: &str) -> Result<List, ModelReason> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// Board #70: a cached list is reused only under the stamp it was
+    /// fetched with. A codex provider switch (a new config.toml) asks again
+    /// at once; the same config reuses the list. Backend name is the test's
+    /// own, so no other test's cache entry is touched.
+    #[test]
+    fn a_cached_list_follows_its_source_stamp() {
+        let b = "test-stamp-backend";
+        let list = |id: &str| Ok(List { ids: vec![id.to_string()], kind: ModelKind::Authoritative, complete: true });
+        let bedrock = Some("model_provider = \"amazon-bedrock-runtime\"".to_string());
+        let ust = Some("model_provider = \"ust\"".to_string());
+        assert_eq!(list_fact_with(b, bedrock.clone(), || list("global.openai.gpt-6.1-sol")).unwrap().ids, ["global.openai.gpt-6.1-sol"]);
+        assert_eq!(list_fact_with(b, bedrock.clone(), || panic!("same config: cached")).unwrap().ids, ["global.openai.gpt-6.1-sol"]);
+        assert_eq!(list_fact_with(b, ust.clone(), || list("gpt-6.1-sol")).unwrap().ids, ["gpt-6.1-sol"], "a new provider is a new list");
+        assert_eq!(list_fact_with(b, bedrock, || list("global.openai.gpt-6-astra")).unwrap().ids, ["global.openai.gpt-6-astra"], "and back again");
+        forget(b);
+    }
 
     /// Everything about this must degrade soft: a machine with no kiro-cli, an
     /// expired login, or a future output format must not make saving an agent

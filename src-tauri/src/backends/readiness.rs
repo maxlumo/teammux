@@ -421,6 +421,10 @@ pub enum Ask {
     /// gateway's own environment has no `KIRO_API_KEY`, which the user's zsh
     /// rc exports, so `--list-models` there opened a browser login and failed).
     KiroModels,
+    /// codex's effective catalogue (`codex debug models`, board #70), with
+    /// `CODEX_HOME` = this private scratch dir holding a copy of the user's
+    /// config: codex writes into its home, and the user's is only read.
+    CodexModels { home: PathBuf },
 }
 
 /// Claude Code's answer to `auth status`, as words.
@@ -456,6 +460,7 @@ pub enum Frame {
     Refresh { env: BTreeMap<String, bool>, claude: Option<ClaudeAnswer> },
     KiroTest { whoami: WhoamiAnswer, models: CatalogueAnswer },
     KiroModels { ids: Option<Vec<String>>, fail: Option<String> },
+    CodexModels { ids: Option<Vec<String>>, fail: Option<String> },
 }
 
 const CLAUDE_METHODS: &[&str] = &["oauth", "api_key", "third_party", "other"];
@@ -498,7 +503,7 @@ pub fn parse_frame(text: &str, nonce: &str, ask: &Ask) -> Result<Frame, &'static
             }
         }
         // Ids XOR a failure word; the ids within the discovery budget.
-        (Frame::KiroModels { ids, fail }, Ask::KiroModels) => {
+        (Frame::KiroModels { ids, fail }, Ask::KiroModels) | (Frame::CodexModels { ids, fail }, Ask::CodexModels { .. }) => {
             let ids_ok = ids.as_ref().is_none_or(|ids| {
                 !ids.is_empty() && crate::projects::models::bounded(ids.clone(), crate::backends::ModelKind::Authoritative).is_ok()
             });
@@ -536,8 +541,11 @@ pub fn shell_probe(base: &Baseline, helper: &Path, overlay_path: &str, ask: &Ask
         Ask::KiroModels => {
             cmd.args(["kiro-models", "-"]);
         }
+        Ask::CodexModels { home } => {
+            cmd.arg("codex-models").arg(home);
+        }
     }
-    let cap = if *ask == Ask::KiroModels { MODELS_FRAME_CAP } else { FRAME_CAP };
+    let cap = if matches!(ask, Ask::KiroModels | Ask::CodexModels { .. }) { MODELS_FRAME_CAP } else { FRAME_CAP };
     let text = probe::run(cmd, remaining, Channel::Fd3, cap).map_err(|f| match f {
         Failure::Timeout => "probe_timeout",
         Failure::Overflow => "probe_protocol",
@@ -600,6 +608,8 @@ pub fn helper_frame(args: &[String], is_set: &dyn Fn(&str) -> bool) -> Option<St
             Frame::KiroTest { whoami, models }
         }
         "kiro-models" if names.is_empty() && claude_dir == "-" => kiro_model_ids(overlay, left(CATALOGUE_LIMIT)),
+        #[cfg(not(any(target_os = "android", target_os = "ios")))]
+        "codex-models" if names.is_empty() && Path::new(claude_dir).is_absolute() => codex_model_ids(overlay, Path::new(claude_dir), left(CATALOGUE_LIMIT)),
         _ => return None,
     };
     Some(format!("{nonce} {}\n", serde_json::to_string(&frame).ok()?))
@@ -694,6 +704,49 @@ fn kiro_model_ids(overlay: &str, limit: Duration) -> Frame {
             Err(_) => fail("bad_answer"),
         },
         Err(f) => fail(f.word()),
+    }
+}
+
+/// The most of `codex debug models`' stdout that is read: it carries every
+/// model's base instructions (745 260 bytes measured on codex-cli 0.166.0);
+/// only the ids go into the frame.
+const CODEX_DEBUG_CAP: u64 = 8 * 1024 * 1024;
+
+/// codex's offered model ids (`codex debug models`, read by
+/// `codex::debug_model_ids`) with `CODEX_HOME` = `home`, bounded as
+/// suggestions so the frame stays within the discovery budget.
+#[cfg(not(any(target_os = "android", target_os = "ios")))]
+fn codex_model_ids(overlay: &str, home: &Path, limit: Duration) -> Frame {
+    let mut cmd = std::process::Command::new("codex");
+    cmd.args(["debug", "models"]).env("PATH", overlay).env("CODEX_HOME", home);
+    let fail = |w: &str| Frame::CodexModels { ids: None, fail: Some(w.into()) };
+    match probe::run_status_as(cmd, limit, Channel::Stdout, CODEX_DEBUG_CAP, probe::Group::Caller) {
+        Ok((_, code)) if code != Some(0) => fail("exit"),
+        Ok((out, _)) => match crate::backends::codex::debug_model_ids(out.as_bytes())
+            .and_then(|ids| crate::projects::models::bounded(ids, crate::backends::ModelKind::Suggestions).ok())
+        {
+            Some(l) if !l.ids.is_empty() => Frame::CodexModels { ids: Some(l.ids), fail: None },
+            _ => fail("bad_answer"),
+        },
+        Err(f) => fail(f.word()),
+    }
+}
+
+/// codex's offered model ids for `config` (the user's config.toml text), in
+/// the environment a pane gets (board #70). The copy lives in a private
+/// scratch dir (0700, the file 0600) that is removed on every exit path; the
+/// user's codex home is never written.
+pub fn codex_models(config: &str, deadline: Instant) -> Result<Vec<String>, &'static str> {
+    let base = baseline(deadline)?;
+    let helper = helper().ok_or("helper_missing")?;
+    let scratch = Scratch::new().map_err(|_| "scratch_failed")?;
+    scratch.write("config.toml", config).map_err(|_| "scratch_failed")?;
+    let ask = Ask::CodexModels { home: scratch.path().to_path_buf() };
+    let got = shell_probe(&base, &helper, &overlay_path(), &ask, deadline);
+    drop(scratch);
+    match got? {
+        Frame::CodexModels { ids: Some(ids), .. } => Ok(ids),
+        _ => Err("cli_failed"),
     }
 }
 
@@ -1728,6 +1781,35 @@ mod tests {
         let (set_up, answers) = decide_test(&Ok(Frame::KiroTest { whoami, models }));
         assert_eq!(set_up, SetUp::unknown("cli_exit").by_cli());
         assert_eq!(answers["state"], "yes");
+    }
+
+    /// Board #70: the helper's `codex-models` mode runs `codex debug models`
+    /// with `CODEX_HOME` = the dir it was given, and answers the offered ids
+    /// or a failure word: a failing exit, an unknown shape, a relative dir.
+    #[test]
+    fn codex_models_mode_runs_debug_models_in_the_given_home() {
+        use std::os::unix::fs::PermissionsExt;
+        let dir = crate::config::fresh_process_dir("tmm-rdy-codex-models");
+        let home = dir.join("home");
+        std::fs::create_dir_all(&home).unwrap();
+        let cli = dir.join("codex");
+        let run = |script: &str, home: &str| {
+            std::fs::write(&cli, script).unwrap();
+            std::fs::set_permissions(&cli, std::fs::Permissions::from_mode(0o755)).unwrap();
+            let far = (std::time::SystemTime::now() + Duration::from_secs(20)).duration_since(std::time::UNIX_EPOCH).unwrap().as_millis().to_string();
+            let overlay = format!("{}:/usr/bin:/bin", dir.display());
+            let args: Vec<String> = [nonce().as_str(), far.as_str(), overlay.as_str(), "codex-models", home].iter().map(|x| x.to_string()).collect();
+            helper_frame(&args, &|_| false).map(|line| parse_frame(&line, &nonce(), &Ask::CodexModels { home: PathBuf::from(home) }))
+        };
+        let h = home.to_str().unwrap();
+        let ok = run(&format!("#!/bin/sh\n[ \"$*\" = 'debug models' ] && [ \"$CODEX_HOME\" = '{h}' ] || exit 2\necho '{{\"models\":[{{\"slug\":\"gpt-6-astra\",\"visibility\":\"list\"}},{{\"slug\":\"codex-auto-review\",\"visibility\":\"hide\"}},{{\"slug\":\"gpt-6.1-sol\",\"visibility\":\"list\"}}]}}'\n"), h);
+        assert_eq!(ok, Some(Ok(Frame::CodexModels { ids: Some(vec!["gpt-6-astra".into(), "gpt-6.1-sol".into()]), fail: None })));
+        let unknown = run("#!/bin/sh\necho '{\"models\":[{\"slug\":\"a\"}]}'\n", h);
+        assert_eq!(unknown, Some(Ok(Frame::CodexModels { ids: None, fail: Some("bad_answer".into()) })), "an unknown shape is no list");
+        let failing = run("#!/bin/sh\necho 'error: unknown subcommand debug' >&2; exit 2\n", h);
+        assert_eq!(failing, Some(Ok(Frame::CodexModels { ids: None, fail: Some("exit".into()) })));
+        assert_eq!(run("#!/bin/sh\nexit 0\n", "relative/home"), None, "only an absolute home is asked");
+        assert_eq!(run("#!/bin/sh\nexit 0\n", "-"), None, "the mode needs a home");
     }
 
     /// The `kiro-models` mode (2026-11-04): the helper runs `--list-models`

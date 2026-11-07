@@ -865,6 +865,18 @@ impl Backend {
         }
     }
 
+    /// What a cached model list is keyed on besides the backend (board #70):
+    /// the source a list follows when it can change under a running server,
+    /// so a changed source is a new list at the next ask. `None`: the cache
+    /// period alone decides. Declared in the backend's file.
+    #[cfg(not(any(target_os = "android", target_os = "ios")))]
+    pub fn model_list_stamp(self) -> Option<String> {
+        match self {
+            Backend::Codex => codex::model_list_stamp(),
+            _ => None,
+        }
+    }
+
     /// The BASELINE default (board #511): what a NEW agent with an empty model
     /// is declared or derived to start on, through the SAME pure parse or
     /// inherit function its renderer uses — never through the discovery

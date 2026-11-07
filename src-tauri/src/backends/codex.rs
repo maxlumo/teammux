@@ -35,25 +35,99 @@ pub(crate) fn effort_values() -> &'static [&'static str] {
     &["minimal", "low", "medium", "high", "xhigh"]
 }
 
-/// codex models are the slugs of the catalog the user's own config points at
-/// (`model_catalog_json`): the bedrock-runtime endpoint rejects any other
-/// spelling with `validation_error: The provided model identifier is invalid`
-/// (measured on codex-cli 0.154.0, board #231 — `gpt-5.6-sol` fails where
-/// `global.openai.gpt-5.6-sol` answers), so the catalog is authoritative and
-/// a bare slug is rejected at save time. `None` when the config names no
-/// catalog — stock codex takes aliases nobody can enumerate, and validation
-/// degrades to accept-all (models.rs module doc).
+/// codex models, for the config the user runs (`~/.codex/config.toml`, which
+/// every managed home links and whose provider the managed `--profile`
+/// never overrides).
+///
+/// A config that names a catalog (`model_catalog_json`) is AUTHORITATIVE: the
+/// bedrock-runtime endpoint rejects any other spelling with
+/// `validation_error: The provided model identifier is invalid` (measured on
+/// codex-cli 0.154.0, board #231 — `gpt-5.6-sol` fails where
+/// `global.openai.gpt-5.6-sol` answers), so a bare slug is refused at save.
+///
+/// A config that names none (board #70) keeps the provider's catalog BUILT
+/// IN (codex-cli 0.166.0: neither the UST nor the Bedrock config names a
+/// file, and both used to answer "nothing to list"). Codex renders that
+/// effective catalog itself, `codex debug models` (`debug_model_ids`); it is
+/// offered as SUGGESTIONS, because a custom provider may serve ids codex
+/// does not list (UST's `/v1/models` serves every listed id and many more,
+/// measured 2026-11-07). A codex that cannot answer is `CliFailed`: the
+/// picker says so and typed ids stay accepted.
 #[cfg(not(any(target_os = "android", target_os = "ios")))]
 pub(crate) fn model_list() -> Result<(Vec<String>, super::ModelKind), super::ModelReason> {
     use super::ModelReason::{Invalid, NotListed, Unreadable};
     let Some(config) = super::read_model_source(&codex_user_home().join("config.toml"))? else { return Err(NotListed) };
     config.parse::<toml::Table>().map_err(|_| Invalid)?;
-    // A stock codex names no catalogue: nothing enumerable, a fact.
-    let Some(path) = catalog_path(&config) else { return Err(NotListed) };
+    let Some(path) = catalog_path(&config) else {
+        return listed_by_codex(&config).map(|ids| (ids, super::ModelKind::Suggestions));
+    };
     // A catalogue that IS named but cannot be read is a failure, not stock.
     let catalog = super::read_model_source(&path)?.ok_or(Unreadable)?;
     let slugs = catalog_slugs_whole(&catalog).ok_or(Invalid)?;
     Ok((slugs, super::ModelKind::Authoritative))
+}
+
+/// What the model cache keys a codex list on (board #70): the config's
+/// text, so a provider switch is a new list at the next ask, not after the
+/// cache period. `None` when it cannot be read (nothing is cached apart).
+#[cfg(not(any(target_os = "android", target_os = "ios")))]
+pub(crate) fn model_list_stamp() -> Option<String> {
+    super::read_model_source(&codex_user_home().join("config.toml")).ok().flatten()
+}
+
+/// `codex debug models` for `config`, in the environment a pane gets
+/// (`readiness::codex_models`: the baseline login shell, a private scratch
+/// `CODEX_HOME` holding a copy of the config, removed after the run, since
+/// codex writes into its home).
+#[cfg(all(not(test), not(any(target_os = "android", target_os = "ios"))))]
+fn listed_by_codex(config: &str) -> Result<Vec<String>, super::ModelReason> {
+    let deadline = std::time::Instant::now() + super::readiness::MODELS_BUDGET;
+    super::readiness::codex_models(config, deadline).map_err(|_| super::ModelReason::CliFailed)
+}
+
+/// Under test the host codex is never run: a stand-in answers what the test
+/// staged (default: a failure, which refuses nothing) and records the
+/// config it was asked about.
+#[cfg(test)]
+fn listed_by_codex(config: &str) -> Result<Vec<String>, super::ModelReason> {
+    cli_stand_in::ask(config)
+}
+
+#[cfg(test)]
+pub(crate) mod cli_stand_in {
+    use std::sync::Mutex;
+    type Staged = Option<Result<Vec<String>, crate::backends::ModelReason>>;
+    static ANSWER: Mutex<Staged> = Mutex::new(None);
+    static ASKED: Mutex<Option<String>> = Mutex::new(None);
+    pub(crate) fn answer(a: Result<Vec<String>, crate::backends::ModelReason>) {
+        *ANSWER.lock().unwrap() = Some(a);
+    }
+    /// The config of the last ask, cleared by reading it.
+    pub(crate) fn asked() -> Option<String> {
+        ASKED.lock().unwrap().take()
+    }
+    pub(super) fn ask(config: &str) -> Result<Vec<String>, crate::backends::ModelReason> {
+        *ASKED.lock().unwrap() = Some(config.to_string());
+        ANSWER.lock().unwrap().clone().unwrap_or(Err(crate::backends::ModelReason::CliFailed))
+    }
+}
+
+/// The ids `codex debug models` OFFERS (board #70, shape measured on
+/// codex-cli 0.166.0, a debug subcommand, so bound to that version): every
+/// `models[]` entry has a string `slug` and `visibility`; `"list"` is what
+/// codex's own picker shows, `"hide"` (internal reviewers, experiments) is
+/// not. Read whole: an entry outside that shape means an answer this parser
+/// does not know, so `None`, never a shorter list.
+pub(crate) fn debug_model_ids(stdout: &[u8]) -> Option<Vec<String>> {
+    let v: serde_json::Value = serde_json::from_slice(stdout).ok()?;
+    let mut ids = Vec::new();
+    for m in v.get("models")?.as_array()? {
+        let slug = m.get("slug")?.as_str()?;
+        if m.get("visibility")?.as_str()? == "list" {
+            ids.push(slug.to_string());
+        }
+    }
+    (!ids.is_empty()).then_some(ids)
 }
 
 /// The baseline default: the user's `config.toml` `model` — the file the
@@ -1391,11 +1465,20 @@ mod tests {
         let home = codex_user_home();
         assert_eq!(model_list(), Err(super::super::ModelReason::NotListed), "no config yet — no list");
 
-        // A config with no catalog is stock codex — aliases, accept-all.
-        std::fs::write(home.join("config.toml"), "model = \"gpt-5.6-sol\"\n").unwrap();
-        assert_eq!(model_list(), Err(super::super::ModelReason::NotListed), "stock codex: nothing enumerable");
-        // ...but its model IS the baseline default (board #511).
-        assert_eq!(baseline_model(), Ok(Some("gpt-5.6-sol".to_string())));
+        // A config with no catalog (board #70): codex's own catalogue for the
+        // config (`codex debug models`) is offered as SUGGESTIONS — a custom
+        // provider may serve more than codex lists, so it never refuses.
+        std::fs::write(home.join("config.toml"), "model = \"gpt-6.1-sol\"\nmodel_provider = \"ust\"\n").unwrap();
+        cli_stand_in::answer(Ok(vec!["gpt-6-astra".into(), "gpt-6.1-sol".into()]));
+        assert_eq!(model_list(), Ok((vec!["gpt-6-astra".into(), "gpt-6.1-sol".into()], super::super::ModelKind::Suggestions)));
+        assert_eq!(cli_stand_in::asked(), Some("model = \"gpt-6.1-sol\"\nmodel_provider = \"ust\"\n".to_string()), "codex is asked about the config as it is");
+        // A CLI that cannot answer is a FAILURE the picker shows, never a
+        // catalogue: typed ids stay accepted (AC3).
+        cli_stand_in::answer(Err(super::super::ModelReason::CliFailed));
+        assert_eq!(model_list(), Err(super::super::ModelReason::CliFailed));
+        cli_stand_in::asked();
+        // ...and its model IS the baseline default (board #511).
+        assert_eq!(baseline_model(), Ok(Some("gpt-6.1-sol".to_string())));
 
         let catalog = home.join("models.json");
         std::fs::write(
@@ -1416,6 +1499,8 @@ mod tests {
         std::fs::write(home.join("config.toml"), format!("model_catalog_json = {:?}\n", home.join("gone.json"))).unwrap();
         assert_eq!(model_list(), Err(super::super::ModelReason::Unreadable));
 
+        assert_eq!(cli_stand_in::asked(), None, "a named catalogue is read, codex is not run");
+
         // Authoritative, so read whole or not at all (board #511).
         assert_eq!(catalog_slugs_whole("not json"), None);
         assert_eq!(catalog_slugs_whole(r#"{"models":"nope"}"#), None);
@@ -1424,6 +1509,22 @@ mod tests {
         // Leave the home catalog-less: sibling tests share the per-process
         // dir and must keep seeing "no authoritative list".
         std::fs::remove_file(home.join("config.toml")).unwrap();
+    }
+
+    /// `codex debug models` on codex-cli 0.166.0 (board #70): the ids codex
+    /// offers are the `visibility: "list"` slugs, in its order; `hide` ones
+    /// (internal reviewers, experiments) are not offered. Read whole: an
+    /// entry without a string slug or visibility is an answer this parser
+    /// does not know, so there is no list rather than a shorter one.
+    #[test]
+    fn debug_models_offers_the_listed_slugs_whole_or_nothing() {
+        let measured = br#"{"models":[{"slug":"gpt-6-astra","visibility":"list","base_instructions":"..."},{"slug":"gpt-6.1-sol","visibility":"list"},{"slug":"codex-auto-review","visibility":"hide"},{"slug":"gpt-5.5","visibility":"list"}]}"#;
+        assert_eq!(debug_model_ids(measured), Some(vec!["gpt-6-astra".to_string(), "gpt-6.1-sol".to_string(), "gpt-5.5".to_string()]));
+        assert_eq!(debug_model_ids(b"not json"), None);
+        assert_eq!(debug_model_ids(br#"{"models":[]}"#), None, "nothing to offer");
+        assert_eq!(debug_model_ids(br#"{"models":[{"slug":"a","visibility":"hide"}]}"#), None, "nothing listed");
+        assert_eq!(debug_model_ids(br#"{"models":[{"slug":"a","visibility":"list"},{"visibility":"list"}]}"#), None, "one entry without a slug");
+        assert_eq!(debug_model_ids(br#"{"models":[{"slug":"a","visibility":"list"},{"slug":"b"}]}"#), None, "one entry without a visibility");
     }
 
     /// The measured 0.153.4 sub-agent shapes (board #169): a child's event is
