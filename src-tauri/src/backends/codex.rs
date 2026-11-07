@@ -67,12 +67,16 @@ pub(crate) fn model_list() -> Result<(Vec<String>, super::ModelKind), super::Mod
     Ok((slugs, super::ModelKind::Authoritative))
 }
 
-/// What the model cache keys a codex list on (board #70): the config's
-/// text, so a provider switch is a new list at the next ask, not after the
-/// cache period. `None` when it cannot be read (nothing is cached apart).
+/// What the model cache keys a codex list on (board #70): the SHA-256 of
+/// the config's text, so a provider switch is a new list at the next ask,
+/// not after the cache period. A digest, never the text (validator S1): a
+/// config can carry credentials, and no config enters the cache. `None`
+/// when it cannot be read (nothing is cached apart).
 #[cfg(not(any(target_os = "android", target_os = "ios")))]
 pub(crate) fn model_list_stamp() -> Option<String> {
-    super::read_model_source(&codex_user_home().join("config.toml")).ok().flatten()
+    use sha2::Digest;
+    let config = super::read_model_source(&codex_user_home().join("config.toml")).ok().flatten()?;
+    Some(hex::encode(sha2::Sha256::digest(config.as_bytes())))
 }
 
 /// `codex debug models` for `config`, in the environment a pane gets
@@ -1509,6 +1513,25 @@ mod tests {
         // Leave the home catalog-less: sibling tests share the per-process
         // dir and must keep seeing "no authoritative list".
         std::fs::remove_file(home.join("config.toml")).unwrap();
+    }
+
+    /// Board #70 S1 (validator): the cache keys a codex list on a DIGEST of
+    /// the config, never its text: a config can carry credentials, and no
+    /// config enters the cache (agents-overview.md § Model catalogue). The
+    /// same text is the same stamp; any change is another.
+    #[test]
+    fn the_list_stamp_is_a_digest_never_the_config() {
+        let home = codex_user_home();
+        let a = "model_provider = \"ust\"\n# SENTINEL-c0ffee-secret\n";
+        std::fs::write(home.join("config.toml"), a).unwrap();
+        let stamp = model_list_stamp().expect("a readable config has a stamp");
+        assert!(!stamp.contains("SENTINEL") && !stamp.contains("ust"), "the stamp holds no config text: {stamp}");
+        assert_eq!(stamp.len(), 64, "a sha-256 hex digest");
+        assert_eq!(model_list_stamp(), Some(stamp.clone()), "same text, same stamp");
+        std::fs::write(home.join("config.toml"), "model_provider = \"amazon-bedrock-runtime\"\n").unwrap();
+        assert_ne!(model_list_stamp(), Some(stamp), "a provider switch is another stamp");
+        std::fs::remove_file(home.join("config.toml")).unwrap();
+        assert_eq!(model_list_stamp(), None, "no config, no stamp");
     }
 
     /// `codex debug models` on codex-cli 0.166.0 (board #70): the ids codex
