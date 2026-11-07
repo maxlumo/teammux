@@ -4,7 +4,7 @@
   import { activeModal } from './lib/ui/modal.ts';
   import { createPressDrag } from './lib/ui/press-drag.ts';
   import Settings from './lib/app/Settings.svelte';
-  import { nativeShellHeight, unpanShell, webviewSizesForKeyboard } from './lib/app/keyboard-fit.ts';
+  import { nativeShellHeight, unpanShell, viewportKeyboard, webviewSizesForKeyboard } from './lib/app/keyboard-fit.ts';
   import Sessions from './lib/sessions/Sessions.svelte';
   import Terminal from './lib/terminal/Terminal.svelte';
   import SplitView from './lib/sessions/SplitView.svelte';
@@ -1102,16 +1102,16 @@
       }
       if (!vv) return;
       const h = vv.height;
-      // Update full height when viewport grows (keyboard closing)
-      if (h > fullHeight) fullHeight = h;
-      const kbOpen = h < fullHeight - KB_OPEN_THRESHOLD;
-      const wasKbOpen = document.documentElement.classList.contains('keyboard-open');
+      // Keyboard-open is the visual viewport shorter than the CURRENT window,
+      // never a remembered height (board #56 round 3: a window that shrank
+      // with no keyboard read as keyboard-open and hid the tab bar).
+      const kb = viewportKeyboard(h, window.innerHeight, KB_OPEN_THRESHOLD);
+      fullHeight = window.innerHeight;
       document.documentElement.style.setProperty('--app-height', h + 'px');
-      document.documentElement.classList.toggle('keyboard-open', kbOpen);
+      document.documentElement.classList.toggle('keyboard-open', kb.open);
       // After layout, shift terminal so cursor stays visible
       requestAnimationFrame(() => {
-        const kbShift = kbOpen ? (fullHeight - h) : 0;
-        window.dispatchEvent(new CustomEvent('keyboard-shift', { detail: { kbHeight: kbShift } }));
+        window.dispatchEvent(new CustomEvent('keyboard-shift', { detail: { kbHeight: kb.kbHeight } }));
       });
       // No explicit refit needed — --app-height already reflects the
       // visible viewport, so Terminal.svelte's ResizeObserver picks up

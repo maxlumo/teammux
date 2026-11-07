@@ -1,6 +1,6 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { nativeShellHeight, unpanShell, webviewSizesForKeyboard } from './keyboard-fit.ts';
+import { nativeShellHeight, unpanShell, viewportKeyboard, webviewSizesForKeyboard } from './keyboard-fit.ts';
 
 // Board #56, the owner's phone (2026-11-06): with the keyboard closed the
 // composer was cut and the tab bar was below the screen; the shell height was
@@ -43,4 +43,16 @@ test('a WebView from M139 sizes for the keyboard itself; an older one, or an unk
   assert.equal(webviewSizesForKeyboard(ua('144.0.7559.20')), true);
   assert.equal(webviewSizesForKeyboard(ua('138.0.7204.179')), false);
   assert.equal(webviewSizesForKeyboard('Mozilla/5.0 (Linux; Android 16) AppleWebKit/537.36'), false, 'no Chrome version: the native path, as before');
+});
+
+// Board #56 round 3, validator-2's measurement (note 15, WebView 144): a window
+// that shrank with the keyboard closed (844 -> 640) was read as keyboard-open
+// against the remembered 844, which hid the tab bar. Keyboard-open is the
+// visual viewport shorter than the CURRENT layout viewport, never a remembered
+// height.
+test('the keyboard is up only when the visual viewport is shorter than the current window', () => {
+  assert.deepEqual(viewportKeyboard(640, 640, 100), { open: false, kbHeight: 0 }, 'the window itself shrank: no keyboard');
+  assert.deepEqual(viewportKeyboard(844, 844, 100), { open: false, kbHeight: 0 });
+  assert.deepEqual(viewportKeyboard(565, 844, 100), { open: true, kbHeight: 279 }, 'the WebView shrank the visual viewport for the keyboard');
+  assert.deepEqual(viewportKeyboard(780, 844, 100), { open: false, kbHeight: 0 }, 'a difference inside the threshold is no keyboard');
 });

@@ -1701,3 +1701,10 @@ test('only the desktop clears the legacy CSS zoom; Android keeps the zoom it app
   assert.doesNotMatch(source, /if \(isTauri\) \{\n    document\.documentElement\.style\.zoom = '';/u);
   assert.match(source, /if \(webviewSizesForKeyboard\(navigator\.userAgent\)\) return;/u, 'a WebView that sizes for the keyboard leaves the native height unused');
 });
+
+// Board #56 round 3: the visualViewport path reads the keyboard against the
+// current window, never a remembered maximum.
+test('the visualViewport path reads the keyboard against the current window (board #56 round 3)', () => {
+  assert.match(source, /const kb = viewportKeyboard\(h, window\.innerHeight, KB_OPEN_THRESHOLD\);/u);
+  assert.doesNotMatch(source, /const kbOpen = h < fullHeight - KB_OPEN_THRESHOLD;/u, 'no remembered height decides it');
+});

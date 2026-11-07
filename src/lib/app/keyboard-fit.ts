@@ -48,3 +48,17 @@ export function webviewSizesForKeyboard(userAgent: string): boolean {
   const major = Number((userAgent.match(/Chrome\/(\d+)/u) || [])[1]);
   return Number.isFinite(major) && major >= 139;
 }
+
+/**
+ * Is the keyboard up, by the visual viewport against the CURRENT layout
+ * viewport (board #56 round 3)? A WebView or browser that resizes the visual
+ * viewport for the keyboard leaves `innerHeight` whole, so the difference is
+ * the keyboard. A window that itself shrank (split screen, a rotation) shrinks
+ * both, and is no keyboard. validator-2 measured the old rule, a remembered
+ * maximum, reading a closed-keyboard window shrink 844 -> 640 as keyboard-open
+ * and hiding the tab bar (WebView 144).
+ */
+export function viewportKeyboard(vvHeight: number, innerHeight: number, threshold: number): { open: boolean; kbHeight: number } {
+  const kb = innerHeight - vvHeight;
+  return kb > threshold ? { open: true, kbHeight: kb } : { open: false, kbHeight: 0 };
+}
