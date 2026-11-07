@@ -1126,13 +1126,31 @@ fn rollout_failed_end(rollout: &str, open: &str) -> Option<(String, Option<Strin
                 }
                 let error = payload.get("error").filter(|e| e.is_object())?;
                 let status = error["codex_error_info"]["http_connection_failed"]["http_status_code"].as_u64().and_then(|s| u16::try_from(s).ok());
-                let provider = shared::provider_failure(status, None, error["message"].as_str().unwrap_or_default());
-                return Some((open.to_string(), provider));
+                let message = error["message"].as_str().unwrap_or_default();
+                let provider = shared::provider_failure(status, None, message);
+                // A rejected model id names the model (#65 item 2): the one the
+                // turn's own `turn_context` says it ran, when the tail holds it.
+                let model = shared::model_rejected(message).then(|| turn_model(rollout, open)).flatten();
+                return Some((open.to_string(), match (provider, model) {
+                    (Some(text), Some(model)) => Some(format!("model {model}: {text}")),
+                    (provider, _) => provider,
+                }));
             }
             _ => {}
         }
     }
     None
+}
+
+/// The model the turn `turn` ran, from its `turn_context` line (codex
+/// 0.166.0 writes one per turn with `turn_id` and `model`; measured on
+/// validator's rollout of 2026-11-07). `None` when the tail does not hold it.
+#[cfg(not(any(target_os = "android", target_os = "ios")))]
+fn turn_model(rollout: &str, turn: &str) -> Option<String> {
+    rollout.lines().rev().filter_map(|l| serde_json::from_str::<Value>(l).ok()).find_map(|row| {
+        let p = &row["payload"];
+        (row["type"] == "turn_context" && p["turn_id"].as_str() == Some(turn)).then(|| p["model"].as_str().map(str::to_string)).flatten()
+    })
 }
 
 /// The thread a killed codex pane was in, read from codex's own files.
@@ -1558,6 +1576,23 @@ mod tests {
         assert_eq!(read(t413, &[&other]), None, "no end yet");
         assert_eq!(read("", &[&end("", serde_json::json!({"message":"401 Unauthorized"}))]), None, "no turn id: no identity, nothing recorded");
         assert_eq!(read("t-null", &[&end("t-null", serde_json::Value::Null)]), None, "error null: an ordinary end, the Stop hook's");
+    }
+
+    /// Board #65 item 2, validator's real rollout of 2026-11-07 01:46 (codex
+    /// 0.166.0, after the provider switch): the refused turn's `task_complete`
+    /// error and the `turn_context` that names its model. The end is a
+    /// person's, and its text names the model the provider rejected.
+    #[test]
+    fn a_rejected_model_id_ends_the_turn_and_names_the_model() {
+        let turn = "01a1b3af-8f7e-7820-9bc1-e3c626f65be3";
+        let context = serde_json::json!({"type":"turn_context","payload":{"turn_id":turn,"model":"gpt-6.1-sol","effort":"high"}}).to_string();
+        let start = serde_json::json!({"type":"event_msg","payload":{"type":"task_started","turn_attribution":{"turn_id":turn,"turn_trigger":"user"}}}).to_string();
+        let message = r#"{"error":{"message":"The provided model identifier is invalid.","type":"invalid_request_error","param":null,"code":"validation_error"}}"#;
+        let end = serde_json::json!({"type":"event_msg","payload":{"type":"task_complete","root_turn_id":turn,"turn_id":turn,"last_agent_message":null,"error":{"message":message,"codex_error_info":"other"},"started_at":1794015989,"completed_at":1794015990,"duration_ms":824}}).to_string();
+        let older = serde_json::json!({"type":"turn_context","payload":{"turn_id":"t-old","model":"gpt-old"}}).to_string();
+        let read = |lines: &[&str]| super::rollout_failed_end(&lines.join("\n"), turn);
+        assert_eq!(read(&[&older, &context, &start, &end]), Some((turn.to_string(), Some(format!("model gpt-6.1-sol: {message}")))));
+        assert_eq!(read(&[&start, &end]), Some((turn.to_string(), Some(message.to_string()))), "no turn_context: the provider's words alone");
     }
 
     /// Board #47, frames captured on codex-cli 0.166.0 (scratch tmux, 120x40,

@@ -417,7 +417,21 @@ number in a STATUS POSITION (at the start, or after `API Error:`, `Error
 code:`, `status`, `HTTP` or `Error`, three digits standing alone, so never a
 request id, a line number or a duration); else a measured sentence ("invalid
 API key", "insufficient credit", "request too large", "payload too large",
-"Please run /login"). `rate_limit`, `server_error`, `max_output_tokens` and
+"Please run /login"). A MODEL ID the provider rejects is a person's too
+(board #65 item 2, 2026-11-07): after the provider switch at 01:41, codex
+agents still named the old model and failed every turn, and nothing in the
+Hub said why. validator's codex 0.166.0 recorded each refused turn as a
+`task_complete` error whose message is the gateway's JSON body, `{"error":
+{"message":"The provided model identifier is invalid.",…}}`, with
+`codex_error_info: "other"` and no status, so it was read as ordinary.
+`MODEL_PHRASES` holds that measured sentence, and `model_rejected` reads it.
+It counts with no status or with a 400 or 404, never against a 429 or 5xx.
+codex's reader also names the model: the refused turn's own `turn_context`
+line carries `model` (`gpt-6.1-sol` there), so the text the status and the
+one notice carry is `model gpt-6.1-sol: <the provider's message>`. The
+hook backends (claude, kimi, omp) read the same sentence through the same
+predicate, but their payloads carry no model, so their notice is the
+provider's message alone (not measured on a real refusal). `rate_limit`, `server_error`, `max_output_tokens` and
 every other failure retry by themselves, so they stay an ordinary failed end
 with no notice (#354). A known limit, accepted by validator and the
 orchestrator: with NO explicit status, a status written in another form is

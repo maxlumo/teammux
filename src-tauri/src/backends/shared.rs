@@ -650,6 +650,17 @@ const ORDINARY_KINDS: [&str; 3] = ["rate_limit", "server_error", "max_output_tok
 /// codex 0.166.0 "Payload Too Large"; the gateway's "insufficient credit").
 const PERSON_PHRASES: [&str; 5] = ["invalid api key", "insufficient credit", "request too large", "payload too large", "please run /login"];
 
+/// Measured sentences that say the provider rejects the MODEL ID (board #65
+/// item 2): validator's codex 0.166.0 on 2026-11-07 01:46, after the provider
+/// switch, recorded Bedrock's sentence on every refused turn with no status.
+const MODEL_PHRASES: [&str; 1] = ["the provided model identifier is invalid"];
+
+/// Does this error text say the provider rejects the model id?
+pub(crate) fn model_rejected(text: &str) -> bool {
+    let lower = text.to_lowercase();
+    MODEL_PHRASES.iter().any(|p| lower.contains(p))
+}
+
 /// The ONE reading of a turn that ended on a provider error (board #39):
 /// `Some(text)` when only a person can clear it, the text redacted and
 /// bounded, with the CLI's error `kind` and the `status` in front when the
@@ -667,9 +678,13 @@ pub(crate) fn provider_failure(status: Option<u16>, kind: Option<&str>, text: &s
     // a retryable 429 or 5xx is never overridden by a number or a phrase in
     // the text. With none, claude's kind enum, then a number in a STATUS
     // POSITION, then the measured sentences.
+    // A rejected model id (#65) is a person's under any status that is not
+    // retryable: codex records it with none, a gateway may answer 400 or 404.
+    let model = MODEL_PHRASES.iter().any(|p| lower.contains(p));
     let person = match status {
-        Some(s) => PERSON_STATUSES.contains(&s),
-        None => kind.is_some_and(|k| PERSON_KINDS.contains(&k))
+        Some(s) => PERSON_STATUSES.contains(&s) || (model && matches!(s, 400 | 404)),
+        None => model
+            || kind.is_some_and(|k| PERSON_KINDS.contains(&k))
             || match status_in_text(&lower) {
                 Some(s) => PERSON_STATUSES.contains(&s),
                 None => PERSON_PHRASES.iter().any(|p| lower.contains(p)),
@@ -928,6 +943,24 @@ mod tests {
         }
         assert_eq!(provider_failure(Some(429), None, "invalid API key"), None, "an explicit retryable status wins over a phrase");
         assert_eq!(provider_failure(None, None, ""), None);
+    }
+
+    /// Board #65 item 2: a model id the provider rejects fails every turn the
+    /// same way until a person changes it. The sentence is measured: validator's
+    /// codex 0.166.0 on 2026-11-07 01:46, after the provider switch, recorded it
+    /// on every refused turn with no status (`codex_error_info: "other"`).
+    #[test]
+    fn a_model_id_the_provider_rejects_is_a_persons_to_clear() {
+        let bedrock = r#"{"error":{"message":"The provided model identifier is invalid.","type":"invalid_request_error","param":null,"code":"validation_error"}}"#;
+        assert_eq!(provider_failure(None, None, bedrock).as_deref(), Some(bedrock), "codex: no status, the sentence decides");
+        assert!(model_rejected(bedrock));
+        assert!(provider_failure(Some(400), None, bedrock).is_some(), "a 400 that says it is the same");
+        assert!(provider_failure(Some(404), None, "The provided model identifier is invalid.").is_some());
+        assert!(provider_failure(None, Some("invalid_request"), "The provided model identifier is invalid.").is_some(), "claude");
+        assert!(provider_failure(None, Some("APIStatusError"), "Error code: 400 - The provided model identifier is invalid.").is_some(), "kimi's shape");
+        assert_eq!(provider_failure(Some(429), None, bedrock), None, "a retryable status still wins");
+        assert_eq!(provider_failure(Some(400), None, "bad request"), None, "a bare 400 stays ordinary");
+        assert!(!model_rejected("invalid API key"));
     }
 
     /// Board #39, the ONE record of every credential form the redaction masks
