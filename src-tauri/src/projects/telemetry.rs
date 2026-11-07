@@ -2435,12 +2435,14 @@ pub struct ReportItem {
 }
 
 /// An activity row's delivery refs, from its stored `deliveries` column: the ONE reading, for
-/// every reader (board #57). Empty (or blank) is "no refs", which is how every writer stores
-/// none (`deliveries: if empty { String::new() }`); anything else must be the JSON array, and
-/// JSON that does not decode is an `Err`, so a reader still fails safe (#41). Before, the kill
-/// path parsed '' as JSON and refused every restart of a turn holding such a row.
+/// every reader (board #57). Exactly '' is "no refs", the writer's own spelling of none
+/// (`deliveries: if empty { String::new() }`); anything else must be the JSON array, and what
+/// does not decode is an `Err`, so a reader still fails safe (#41). A blank that is not empty
+/// (spaces, a newline, an NBSP) is malformed, not "none" (validator's round-1 probe; no writer
+/// stores one, and this host's store holds 0). Before, the kill path parsed '' as JSON and
+/// refused every restart of a turn holding such a row.
 pub(crate) fn delivery_refs(json: &str) -> Result<Vec<DeliveryRef>, serde_json::Error> {
-    if json.trim().is_empty() {
+    if json.is_empty() {
         return Ok(Vec::new());
     }
     serde_json::from_str(json)

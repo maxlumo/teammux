@@ -3117,5 +3117,15 @@ mod tests {
             rusqlite::params![s]).map(|_| ()).map_err(|e| e.to_string())).unwrap();
         let err = replace_cli(&s, "dev", None, || Ok(())).expect_err("malformed refs refuse");
         assert!(err.contains("does not decode"), "{err}");
+        // validator's 03:47 probe: only the writer's exact '' is "no refs". A blank
+        // that is NOT empty (spaces, a newline and a tab, an NBSP) is malformed and
+        // still refuses; no writer stores one (0 such rows in this host's store).
+        for blank in ["   ", "\n\t", "\u{a0}"] {
+            crate::projects::with_store(|st| st.conn_for_test().execute(
+                "UPDATE activity SET deliveries = ?2 WHERE id = (SELECT MAX(id) FROM activity WHERE session = ?1 AND kind = 'steered')",
+                rusqlite::params![s, blank]).map(|_| ()).map_err(|e| e.to_string())).unwrap();
+            let err = replace_cli(&s, "dev", None, || Ok(())).expect_err(&format!("a non-empty blank {blank:?} refuses"));
+            assert!(err.contains("does not decode"), "{blank:?}: {err}");
+        }
     }
 }
