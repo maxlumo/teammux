@@ -1707,7 +1707,7 @@ mod tests {
         }
         // the launch programs
         let programs: Vec<_> = Backend::ALL.iter().map(|b| b.launch_program()).collect();
-        assert_eq!(programs, ["kiro-cli", "claude", "codex", "grok", "omp", "kimi", "dsh"]);
+        assert_eq!(programs, ["kiro-cli", "claude", "codex", "grok", "omp", "kimi", "dsh", "pi"]);
     }
 
     /// Reviewer P1-B: a config file cannot hold the check. A FIFO is refused

@@ -256,7 +256,7 @@ export function outsideLinks(dirs, roots, executables = []) {
 /** The agent CLIs a managed pane runs (`Backend::launch_program`): their own executables are
  * the one kind of outside target a scratch home may link to (board #54 round 1: codex 0.166.0
  * links its arg0 helpers, `tmp/arg0-linux/<id>/apply_patch` and kin, to its binary). */
-export const CLI_PROGRAMS = ['claude', 'codex', 'dsh', 'grok', 'kimi', 'kiro-cli', 'omp'];
+export const CLI_PROGRAMS = ['claude', 'codex', 'dsh', 'grok', 'kimi', 'kiro-cli', 'omp', 'pi'];
 
 /** The real executables of `CLI_PROGRAMS` found on `path` (a PATH string), first match each. */
 export function cliExecutables(path) {

@@ -3530,7 +3530,7 @@ hooks = [ { type = "command", command = "/opt/guard.sh" } ]
             assert_eq!(b.describe()["default_input_mode"], b.default_input_mode(), "{}", b.name());
         }
         let defaults: Vec<(&str, &str)> = Backend::ALL.iter().map(|b| (b.name(), b.default_input_mode())).collect();
-        assert_eq!(defaults, [("kiro", "steer"), ("claude", "queue"), ("codex", "queue"), ("grok", "queue"), ("omp", "queue"), ("kimi", "queue"), ("dsh", "queue")],
+        assert_eq!(defaults, [("kiro", "steer"), ("claude", "queue"), ("codex", "queue"), ("grok", "queue"), ("omp", "queue"), ("kimi", "queue"), ("dsh", "queue"), ("pi", "queue")],
             "owner #336: a new kiro steers; every other backend keeps queue");
         assert!(super::super::models::validate_input_mode("kiro", "interrupt").is_err());
     }

@@ -16,7 +16,7 @@
 
 ---
 
-You run Kiro CLI, Claude Code, Codex, Grok, OMP, Kimi Code or DeepSeek Harness
+You run Kiro CLI, Claude Code, Codex, Grok, OMP, pi, Kimi Code or DeepSeek Harness
 inside tmux. Teammux connects those real sessions to your phone or desktop,
 gives every project a chat room shared by you and your agents, and lets agents
 spawn, brief and review one another.

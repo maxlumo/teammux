@@ -2331,3 +2331,12 @@ test('showMentions shows each address by its label, the quoted ＠ form too, and
   assert.equal(showMentions('mail dev@dev.io, not @devx', names), 'mail dev@dev.io, not @devx', 'not an address, or another name');
   assert.equal(showMentions('@dev', agentNames([])), '@dev', 'no labels: unchanged');
 });
+
+test('pi offers only the commands measured inline (#71): model, thinking, new, compact', async () => {
+  const { offeredCommands, commandPalette } = await import('./hub.ts');
+  assert.deepEqual(offeredCommands('pi').map((c) => c.name), ['model', 'thinking', 'new', 'compact']);
+  assert.ok(!offeredCommands('pi').some((c) => c.name === 'quit' || c.name === 'share'), 'an exit and an upload are never offered');
+  const levels = commandPalette('/thinking ', [], 'pi')?.items.map((i) => i.value);
+  assert.deepEqual(levels, ['off', 'minimal', 'low', 'medium', 'high', 'xhigh', 'max']);
+  assert.deepEqual(commandPalette('/model ', ['ust/claude-opus-5-5'], 'pi')?.items.map((i) => i.value), ['ust/claude-opus-5-5']);
+});

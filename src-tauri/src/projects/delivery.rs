@@ -1374,10 +1374,12 @@ fn send_into_locked(session: &str, window: &str, target: &str, text: &str) -> Re
     // Enter (board #436 validator P1; limits at `kiro::picker_open`). A
     // delivery never reaches this with an `@` for such a CLI: `type_text`
     // typed it as `＠`.
-    let picker = text.contains('@')
+    // A `/command` into a CLI whose `/` arguments open a completion menu
+    // (pi, board #71) gets the same guard: its Enter accepts the suggestion.
+    let picker = (text.contains('@') || text.starts_with('/'))
         .then(|| recipe_mode(session, window).map(|(backend, _)| backend))
         .flatten()
-        .filter(|backend| backend.at_opens_picker());
+        .filter(|backend| needs_picker_guard(text, *backend));
     crate::tmux::with_write_guard(guard, || match picker {
         None => crate::tmux::send_command(target, text),
         Some(backend) => crate::tmux::send_command_with(target, text, || {
@@ -1388,6 +1390,13 @@ fn send_into_locked(session: &str, window: &str, target: &str, text: &str) -> Re
             Ok(())
         }),
     })
+}
+
+/// Whether `text` typed into `backend` may leave a picker open before its
+/// Enter: an `@` into a CLI whose `@` opens one (#436), or a `/command`
+/// into one whose `/` arguments do (#71).
+fn needs_picker_guard(text: &str, backend: crate::backends::Backend) -> bool {
+    (text.contains('@') && backend.at_opens_picker()) || (text.starts_with('/') && backend.slash_opens_picker())
 }
 
 /// What a write refused because the window is restarting says: nothing was
@@ -1503,6 +1512,19 @@ fn type_text(session: &str, window: &str, target: &str, text: &str) -> Result<()
 
 #[cfg(test)]
 mod tests {
+    /// Board #71: a verbatim `/command` into pi gets the picker guard (its
+    /// argument menu takes the Enter, measured on pi 1.5.0); an `@` still
+    /// does wherever `@` opens a picker; prose and other CLIs' commands don't.
+    #[test]
+    fn a_pi_command_and_an_at_get_the_picker_guard() {
+        use crate::backends::Backend;
+        assert!(needs_picker_guard("/thinking high", Backend::Pi));
+        assert!(needs_picker_guard("/model ust/claude-sonnet-5-5", Backend::Pi));
+        assert!(!needs_picker_guard("/compact", Backend::Codex), "codex's slash menu was not measured to take the Enter");
+        assert!(needs_picker_guard("/goal see @src/x.ts", Backend::Kiro));
+        assert!(!needs_picker_guard("hello", Backend::Pi));
+    }
+
     use super::*;
     use crate::projects::telemetry::{record_notification, record_prompt};
 

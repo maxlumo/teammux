@@ -13,6 +13,7 @@ pub(crate) mod grok;
 pub(crate) mod kimi;
 pub(crate) mod kiro;
 pub(crate) mod omp;
+pub(crate) mod pi;
 pub(crate) mod pi_telemetry;
 /// Backend readiness (board #492): the `backends_check` RPC and the
 /// `tmm readiness-probe` helper. Desktop-only, like the probe runner.
@@ -97,6 +98,7 @@ pub enum Backend {
     Omp,
     Kimi,
     Dsh,
+    Pi,
 }
 
 /// Where a spawn's first prompt goes — see `Backend::first_prompt`.
@@ -111,13 +113,13 @@ pub enum FirstPrompt {
 
 impl Backend {
     /// Every backend, in the one canonical order (seeds, pickers, caps).
-    pub const ALL: [Backend; 7] =
-        [Backend::Kiro, Backend::Claude, Backend::Codex, Backend::Grok, Backend::Omp, Backend::Kimi, Backend::Dsh];
+    pub const ALL: [Backend; 8] =
+        [Backend::Kiro, Backend::Claude, Backend::Codex, Backend::Grok, Backend::Omp, Backend::Kimi, Backend::Dsh, Backend::Pi];
 
     /// `ALL` as the string names — kept literally beside it so a `const` can
     /// borrow it (`SPAWNABLE_BACKENDS`); the roundtrip test pins the two in
     /// sync.
-    pub const NAMES: [&'static str; 7] = ["kiro", "claude", "codex", "grok", "omp", "kimi", "dsh"];
+    pub const NAMES: [&'static str; 8] = ["kiro", "claude", "codex", "grok", "omp", "kimi", "dsh", "pi"];
 
     /// The documented fallback where an absent backend means kiro (the
     /// registry dispatch's old inline `unwrap_or("kiro")`).
@@ -130,6 +132,7 @@ impl Backend {
             "codex" => Some(Backend::Codex),
             "grok" => Some(Backend::Grok),
             "omp" => Some(Backend::Omp),
+            "pi" => Some(Backend::Pi),
             "kimi" => Some(Backend::Kimi),
             "dsh" => Some(Backend::Dsh),
             _ => None,
@@ -143,6 +146,7 @@ impl Backend {
             Backend::Codex => "codex",
             Backend::Grok => "grok",
             Backend::Omp => "omp",
+            Backend::Pi => "pi",
             Backend::Kimi => "kimi",
             Backend::Dsh => "dsh",
         }
@@ -185,6 +189,7 @@ impl Backend {
             Backend::Codex => codex::effort_values(),
             Backend::Grok => grok::effort_values(),
             Backend::Omp => omp::effort_values(),
+            Backend::Pi => pi::effort_values(),
             Backend::Kimi => kimi::effort_values(),
             Backend::Dsh => dsh::effort_values(),
         }
@@ -309,6 +314,7 @@ impl Backend {
             Backend::Codex => codex::command_echo(name, args),
             Backend::Grok => grok::command_echo(name, args),
             Backend::Omp => omp::command_echo(name, args),
+            Backend::Pi => None,
             Backend::Kimi => kimi::command_echo(name, args),
             Backend::Dsh => dsh::command_echo(name, args),
         }
@@ -410,6 +416,7 @@ impl Backend {
             Backend::Codex => codex::SWITCHES_INPUT_MODE,
             Backend::Grok => grok::SWITCHES_INPUT_MODE,
             Backend::Omp => omp::SWITCHES_INPUT_MODE,
+            Backend::Pi => pi::SWITCHES_INPUT_MODE,
             Backend::Kimi => kimi::SWITCHES_INPUT_MODE,
             Backend::Dsh => dsh::SWITCHES_INPUT_MODE,
         }
@@ -434,7 +441,7 @@ impl Backend {
             Backend::Claude => claude::RESTORE_EVIDENCE,
             Backend::Kimi => kimi::RESTORE_EVIDENCE,
             // No startup signal measured (kiro: not yet; codex, grok, omp: none).
-            Backend::Kiro | Backend::Codex | Backend::Grok | Backend::Omp => None,
+            Backend::Kiro | Backend::Codex | Backend::Grok | Backend::Omp | Backend::Pi => None,
         }
     }
 
@@ -450,7 +457,7 @@ impl Backend {
             Backend::Claude => claude::startup_confirmation(),
             Backend::Kimi => kimi::startup_confirmation(),
             Backend::Dsh => dsh::startup_confirmation(),
-            Backend::Grok | Backend::Omp => None,
+            Backend::Grok | Backend::Omp | Backend::Pi => None,
         }
     }
 
@@ -476,6 +483,7 @@ impl Backend {
         match self {
             Backend::Kiro => kiro::AT_OPENS_FILE_PICKER,
             Backend::Omp => omp::AT_OPENS_FILE_PICKER,
+            Backend::Pi => pi::AT_OPENS_FILE_PICKER,
             Backend::Codex => codex::AT_OPENS_FILE_PICKER,
             Backend::Kimi => kimi::AT_OPENS_FILE_PICKER,
             // Measured NOT to (board #36, claude 2.1.318: a trailing `@reviewer`
@@ -493,8 +501,17 @@ impl Backend {
     pub fn picker_open(self, screen: &str) -> bool {
         match self {
             Backend::Kiro => kiro::picker_open(screen),
+            Backend::Pi => pi::picker_open(screen),
             Backend::Claude | Backend::Codex | Backend::Grok | Backend::Omp | Backend::Kimi | Backend::Dsh => false,
         }
+    }
+
+    /// Does typing a `/command` with arguments open this CLI's completion
+    /// menu, so its Enter accepts a suggestion instead of submitting (board
+    /// #71, measured on pi 1.5.0)? Then a verbatim command gets the same
+    /// one-read picker guard as an `@` (`delivery::send_into`).
+    pub fn slash_opens_picker(self) -> bool {
+        matches!(self, Backend::Pi)
     }
 
     /// For a backend that loses typed text (`loses_busy_input`): is its pane
@@ -596,6 +613,7 @@ impl Backend {
             Backend::Claude => claude::provider_failure(payload),
             Backend::Kimi => kimi::provider_failure(payload),
             Backend::Omp => omp::provider_failure(payload),
+            Backend::Pi => omp::provider_failure(payload),
             _ => None,
         }
     }
@@ -615,6 +633,7 @@ impl Backend {
             Backend::Codex => codex::normalize_kind(payload),
             Backend::Grok => grok::normalize_kind(payload),
             Backend::Omp => omp::normalize_kind(payload),
+            Backend::Pi => omp::normalize_kind(payload),
             Backend::Kimi => kimi::normalize_kind(payload),
             Backend::Dsh => dsh::normalize_kind(payload),
         }
@@ -629,6 +648,7 @@ impl Backend {
             Backend::Codex => codex::is_user_prompt_submit(payload),
             Backend::Grok => grok::is_user_prompt_submit(payload),
             Backend::Omp => omp::is_user_prompt_submit(payload),
+            Backend::Pi => omp::is_user_prompt_submit(payload),
             Backend::Kimi => kimi::is_user_prompt_submit(payload),
             Backend::Dsh => dsh::is_user_prompt_submit(payload),
         }
@@ -641,7 +661,7 @@ impl Backend {
     pub fn cli_own_prompt(self, prompt: &str) -> Option<String> {
         match self {
             Backend::Claude => claude::task_notification(prompt),
-            Backend::Kiro | Backend::Codex | Backend::Grok | Backend::Omp | Backend::Kimi | Backend::Dsh => None,
+            Backend::Kiro | Backend::Codex | Backend::Grok | Backend::Omp | Backend::Kimi | Backend::Dsh | Backend::Pi => None,
         }
     }
 
@@ -686,6 +706,7 @@ impl Backend {
             Backend::Codex => codex::known(),
             Backend::Grok => grok::known(),
             Backend::Omp => omp::known(),
+            Backend::Pi => pi::known(),
             Backend::Kimi => kimi::known(),
             Backend::Dsh => dsh::known(),
         }
@@ -712,6 +733,7 @@ impl Backend {
             Backend::Codex => codex::set_up_need(),
             Backend::Grok => grok::set_up_need(),
             Backend::Omp => omp::set_up_need(),
+            Backend::Pi => pi::set_up_need(),
             Backend::Kimi => kimi::set_up_need(),
             Backend::Dsh => readiness::Need::env(vec![dsh::KEY_ENV.to_string()]),
         }
@@ -737,6 +759,7 @@ impl Backend {
             Backend::Codex => codex::render_codex(def, window_name, home, workspace, system_prompt, skills),
             Backend::Grok => grok::render_grok(def, window_name, home, system_prompt, skills),
             Backend::Omp => omp::render_omp(def, window_name, home, system_prompt, skills),
+            Backend::Pi => pi::render_pi(def, window_name, home, system_prompt, skills),
             Backend::Kimi => kimi::render_kimi(def, window_name, home, workspace, system_prompt, skills),
             Backend::Dsh => dsh::render_dsh(def, window_name, home, system_prompt, skills),
         }
@@ -772,6 +795,7 @@ impl Backend {
             Backend::Codex => codex::resume_exact(cmd, id),
             Backend::Grok => grok::resume_exact(cmd, id),
             Backend::Omp => omp::resume_exact(cmd, id),
+            Backend::Pi => pi::resume_exact(cmd, id),
             Backend::Kimi => kimi::resume_exact(cmd, id),
             Backend::Dsh => dsh::resume_exact(cmd, id),
         }
@@ -815,6 +839,7 @@ impl Backend {
             Backend::Codex => codex::resume_command(cmd, id, home),
             Backend::Grok => grok::resume_command(cmd, id),
             Backend::Omp => omp::resume_command(cmd, id),
+            Backend::Pi => pi::resume_command(cmd, id),
             Backend::Kimi => kimi::resume_command(cmd, id),
             Backend::Dsh => dsh::resume_command(cmd, id),
         }
@@ -837,6 +862,7 @@ impl Backend {
             Backend::Codex => codex::refresh(home, &notifications.helper_command("codex")),
             Backend::Grok => grok::refresh(home, &notifications.helper_command("grok")),
             Backend::Omp => omp::refresh(home, &notifications.helper_command("omp")),
+            Backend::Pi => pi::refresh(home, &notifications.helper_command("pi")),
             Backend::Kimi => kimi::refresh(home, &notifications.helper_command("kimi")),
             Backend::Dsh => dsh::refresh(home, &notifications.helper_command("dsh")),
         }
@@ -855,6 +881,7 @@ impl Backend {
             Backend::Codex => codex::sniff_codex(pane),
             Backend::Grok => grok::sniff_grok(pane),
             Backend::Omp => omp::sniff_omp(pane),
+            Backend::Pi => pi::sniff_pi(pane),
             Backend::Kimi => kimi::sniff_kimi(pane),
             Backend::Dsh => dsh::sniff_dsh(pane),
         }
@@ -873,6 +900,7 @@ impl Backend {
             Backend::Codex => codex::model_list(),
             Backend::Grok => grok::model_list(),
             Backend::Omp => omp::model_list(),
+            Backend::Pi => pi::model_list(),
             Backend::Kimi => kimi::model_list(),
             Backend::Dsh => Err(ModelReason::NotListed),
         }
@@ -914,6 +942,7 @@ impl Backend {
             Backend::Codex => codex::baseline_model(),
             Backend::Grok => grok::baseline_model(),
             Backend::Omp => omp::baseline_model(),
+            Backend::Pi => pi::baseline_model(),
             Backend::Kimi => kimi::baseline_model(),
             Backend::Dsh => Ok(Some(dsh::DEFAULT_MODEL.to_string())),
         }
@@ -1078,6 +1107,7 @@ mod tests {
             (Backend::Claude, "claude --x", "claude --x --resume conv"),
             (Backend::Grok, "grok", "grok --resume conv"),
             (Backend::Omp, "omp", "omp --resume conv"),
+            (Backend::Pi, "pi", "pi --session-id conv"),
             (Backend::Kimi, "kimi", "kimi -S conv"),
             (Backend::Dsh, "dsh-headless", "TMM_DSH_SESSION=conv dsh-headless"),
             (Backend::Codex, "command codex --cfg x", "command codex resume conv --cfg x"),

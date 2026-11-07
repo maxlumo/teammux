@@ -10,7 +10,7 @@ they are one document.)
 ## Tenets
 
 We are a **shell, not an engine**. tmux owns processes and sessions, the agent
-CLIs (kiro, claude, codex, grok, omp, kimi, dsh) own intelligence and their own harness,
+CLIs (kiro, claude, codex, grok, omp, pi, kimi, dsh) own intelligence and their own harness,
 MCP and skills own tools. We own four things — the **connection**, the
 **room**, the **identity**, the **window** — and a person can always walk back
 to the terminal and take over. Full text with reasons and evidence:
@@ -45,7 +45,7 @@ The non-negotiables below are the tenets' enforced, mechanizable form.
 
 Tauri 2 cross-platform app (Rust + Svelte 5) for monitoring and controlling
 tmux sessions from a phone, and — through the **Hub** — for running and
-talking to AI coding agents (kiro, codex, claude, grok, omp, kimi, dsh) inside those sessions.
+talking to AI coding agents (kiro, codex, claude, grok, omp, pi, kimi, dsh) inside those sessions.
 WebSocket JSON-RPC with token auth + optional E2E encryption. Targets: Android
 (primary), macOS desktop, browser/PWA.
 
