@@ -7102,6 +7102,9 @@ while True:
             .args(["new-window", "-d", "-t", &session, "-n", "lead", "-c", &ws.to_string_lossy(), "cat"])
             .status()
             .unwrap();
+        // Torn down on drop, also when an assertion fails part-way (board #61:
+        // a trailing kill-session left tmm-note-* sessions after a failure).
+        let _teardown = KillOnDrop(session.clone(), ws.clone());
         crate::projects::adopt(&session, Some("note-notify-test")).expect("adopt test project");
         let id = crate::projects::board_save(&session, None, Some("Notify"), Some("b"), None, Some("dev"), "human").unwrap();
 
@@ -7186,9 +7189,6 @@ while True:
         for word in ["notified", "delivered", "typed"] {
             assert!(!refused.to_string().contains(word), "{word}: {refused}");
         }
-
-        let _ = std::process::Command::new("tmux").args(["kill-session", "-t", &session]).status();
-        let _ = std::fs::remove_dir_all(&ws);
     }
     #[test]
     fn stopping_a_managed_agent_kills_the_window_and_says_so() {
