@@ -115,6 +115,22 @@ if [ "$check" = codex-provider ]; then
   if ask beta; then echo "live-check: codex-provider: after the switch it answered beta"; else echo "live-check: codex-provider: FAIL (no answer after the switch)"; rc=1; fi
   pane=$(tmux list-panes -a -F '#{pane_id} #{window_name}' | awk '$2=="lcodex"{print $1; exit}')
   if tmux capture-pane -p -S -200 -t "$pane" | grep -q 'thread/resume failed'; then echo "live-check: codex-provider: FAIL (codex printed thread/resume failed)"; rc=1; fi
+  # Review R2, MEASURED and reported, never pass/fail: does a trusted project config's
+  # model_provider outrank the home's? The chat now runs on ${provider}2. The project names
+  # ${provider}; our rule then predicts nothing (unknown), so the restart resumes as before.
+  # If codex honours the project layer it refuses that resume, a provider mismatch.
+  mkdir -p /work/live/.codex
+  printf 'model_provider = "%s"\n' "$provider" > /work/live/.codex/config.toml
+  printf '\n[projects."/work/live"]\ntrust_level = "trusted"\n' >> "$cfg_file"
+  tmm agent restart lcodex --project live >/dev/null
+  sleep 25
+  echo "live-check: codex-provider: project-layer restart line: $(tmm log --project live --limit 40 | grep '\[tmm\] restarted lcodex' | tail -1)"
+  pane=$(tmux list-panes -a -F '#{pane_id} #{window_name}' | awk '$2=="lcodex"{print $1; exit}')
+  if tmux capture-pane -p -S -200 -t "$pane" | grep -q 'thread/resume failed'; then
+    echo "live-check: codex-provider: MEASURED project layer: honoured (codex refused the resume: $(tmux capture-pane -p -S -200 -t "$pane" | grep -m1 'thread/resume failed'))"
+  else
+    echo "live-check: codex-provider: MEASURED project layer: not honoured for the provider (resumed; pane runs $(pane_cmd))"
+  fi
   tmm agent list --project live
   exit $rc
 fi

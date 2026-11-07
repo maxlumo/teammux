@@ -931,9 +931,7 @@ fn dispatch_hub(req: &Request, notifications: Option<&crate::agent_notifications
                 Some(window) => Some(crate::projects::delivery::replace_cli(session, agent, launch, || kill_agent_cli(session, agent, window)).map_err(RpcError::Internal)?),
                 None => None,
             };
-            // Read before the start, which writes the new thread (board #74).
-            let notice = crate::projects::spawn::restart_notice::resume_notice_for(session, agent);
-            let resumed = start_agent_owned(session, agent, permit, owned, launch).map_err(|e| RpcError::Internal(format!("restart failed: {e}")))?;
+            let (resumed, notice) = start_agent_owned(session, agent, permit, owned, launch).map_err(|e| RpcError::Internal(format!("restart failed: {e}")))?;
             let _ = rooms::post(&room, agent, &crate::projects::spawn::restart_notice::restart_line(agent, before, crate::projects::delivery::recipe_backend(session, agent), notice.as_deref()));
             Ok(serde_json::json!({ "restarted": agent, "resumed": resumed }))
         }
@@ -1002,9 +1000,8 @@ fn dispatch_hub(req: &Request, notifications: Option<&crate::agent_notifications
                         }
                     }
                 }
-                let notice = crate::projects::spawn::restart_notice::resume_notice_for(session, w);
                 match start_agent_owned(session, w, permit, owned, launch) {
-                    Ok(_) => {
+                    Ok((_, notice)) => {
                         let _ = rooms::post(&room, w, &crate::projects::spawn::restart_notice::restart_line(w, before, crate::projects::delivery::recipe_backend(session, w), notice.as_deref()));
                         restarted.push(w.clone());
                     }
@@ -1169,7 +1166,7 @@ fn before_kill_in_test() {}
 
 #[cfg(not(any(target_os = "android", target_os = "ios")))]
 fn start_agent(session: &str, agent: &str, permit: crate::projects::StartPermit) -> Result<bool, String> {
-    start_agent_owned(session, agent, permit, None, launch_backend(session, agent))
+    start_agent_owned(session, agent, permit, None, launch_backend(session, agent)).map(|(resumed, _)| resumed)
 }
 
 /// The backend a start of `agent` will launch (`spawn::launch_backend`), read before the start
@@ -1186,12 +1183,14 @@ fn launch_backend(session: &str, agent: &str) -> Option<crate::backends::Backend
 /// writes its own hold first (its new window begins as a shell) and refuses
 /// if it cannot. The failure path retires only THIS start's hold.
 #[cfg(not(any(target_os = "android", target_os = "ios")))]
-fn start_agent_owned(session: &str, agent: &str, permit: crate::projects::StartPermit, owned: Option<Option<String>>, launch: Option<crate::backends::Backend>) -> Result<bool, String> {
+fn start_agent_owned(session: &str, agent: &str, permit: crate::projects::StartPermit, owned: Option<Option<String>>, launch: Option<crate::backends::Backend>) -> Result<(bool, Option<String>), String> {
     let id = match owned {
         Some(id) => id,
         None => crate::projects::delivery::begin_start(session, agent, launch)?,
     };
-    let resume = |p: &crate::projects::store::Project, s: &str, a: &str| resume_slot(p, s, a, launch);
+    // Why the launch did not resume, decided after the refresh (#74 R1).
+    let notice = std::cell::RefCell::new(None);
+    let resume = |p: &crate::projects::store::Project, s: &str, a: &str| resume_slot(p, s, a, launch, Some(&notice));
     let respawn = |s: &str, a: &str| crate::projects::spawn::respawn_for(s, a, launch);
     let resumed = match start_agent_with(session, agent, permit, resume, respawn) {
         Ok(r) => r,
@@ -1218,7 +1217,7 @@ fn start_agent_owned(session: &str, agent: &str, permit: crate::projects::StartP
         }
     };
     flush_held_when_ready(session, agent, launch);
-    Ok(resumed)
+    Ok((resumed, notice.into_inner()))
 }
 
 /// The new CLI's ready edge (board #38): `delivery::watch_start`, the first
@@ -1235,13 +1234,17 @@ fn flush_held_when_ready(session: &str, agent: &str, launch: Option<crate::backe
 /// registry def, else the hooks refresh still repairs observation), then
 /// recreate THIS slot from the declaration. `None` = no such slot yet.
 #[cfg(not(any(target_os = "android", target_os = "ios")))]
-fn resume_slot(project: &crate::projects::store::Project, session: &str, agent: &str, launch: Option<crate::backends::Backend>) -> Option<crate::projects::reconcile::SlotResult> {
+fn resume_slot(project: &crate::projects::store::Project, session: &str, agent: &str, launch: Option<crate::backends::Backend>, notice: Option<&std::cell::RefCell<Option<String>>>) -> Option<crate::projects::reconcile::SlotResult> {
     // A privacy or materialization failure REFUSES the start (board #448
     // P1-B): it is reported, and neither the old recipe nor a respawn runs.
     let refreshed = crate::projects::spawn::refresh_agent_for(&project.path, session, agent, launch)
         .and_then(|done| if done { Ok(true) } else { crate::projects::spawn::refresh_hooks(&project.path, agent) });
     if let Err(e) = refreshed {
         return Some(crate::projects::reconcile::SlotResult { window_name: agent.to_string(), status: "refused", error: Some(e) });
+    }
+    // The materials are final now; the launch below reads the same files.
+    if let Some(n) = notice {
+        *n.borrow_mut() = crate::projects::spawn::restart_notice::resume_notice_for(session, agent);
     }
     crate::projects::up_agent(&project.id, agent).ok().flatten()
 }
@@ -3127,12 +3130,12 @@ mod tests {
             last_up_at: None, last_seen_at: None, archived: false, room: String::new(),
         })).unwrap();
         let project = crate::projects::project_for_session(&session).unwrap().unwrap();
-        let r = resume_slot(&project, &session, "lg", None).expect("an answer");
+        let r = resume_slot(&project, &session, "lg", None, None).expect("an answer");
         assert_eq!(r.status, "refused");
         assert!(r.error.as_deref().unwrap().contains("not started"), "{:?}", r.error);
         let respawned = std::cell::Cell::new(false);
         let permit = crate::projects::start_permit(&session, "lg").unwrap();
-        let got = start_agent_with(&session, "lg", permit, |p: &crate::projects::store::Project, s: &str, a: &str| resume_slot(p, s, a, None), |_: &str, _: &str| { respawned.set(true); Ok(serde_json::json!({})) });
+        let got = start_agent_with(&session, "lg", permit, |p: &crate::projects::store::Project, s: &str, a: &str| resume_slot(p, s, a, None, None), |_: &str, _: &str| { respawned.set(true); Ok(serde_json::json!({})) });
         assert!(got.as_ref().is_err_and(|e| e.contains("not started")), "{got:?}");
         assert!(!respawned.get(), "no fallback launch");
         assert!(window_of_agent(&session, "lg").is_none(), "no window");
@@ -3150,7 +3153,7 @@ mod tests {
         let profile = ws.join("outside-profile.json");
         std::fs::write(&profile, r#"{"name":"kh"}"#).unwrap();
         std::os::unix::fs::symlink(&profile, kh.join("agents/kh.json")).unwrap();
-        let r = resume_slot(&project, &session, "kh", None).expect("an answer");
+        let r = resume_slot(&project, &session, "kh", None, None).expect("an answer");
         assert_eq!(r.status, "refused", "{:?}", r.error);
         assert_eq!(std::fs::read_to_string(&profile).unwrap(), r#"{"name":"kh"}"#, "the link's target is untouched");
         crate::projects::restore_hold::with_store_for_test(|st| st.delete_project(&session)).ok();
@@ -8356,20 +8359,20 @@ while True:
         //    during the respawn; the start returns clean — v2 stands.
         crate::projects::mark_agent_stopped(&session, "dev").unwrap();
         let permit = crate::projects::start_permit(&session, "dev").unwrap();
-        assert_eq!(start_agent_with(&session, "dev", permit, |p: &crate::projects::store::Project, s: &str, a: &str| resume_slot(p, s, a, None), fallback(true, true)), Ok(false), "the fallback ran");
+        assert_eq!(start_agent_with(&session, "dev", permit, |p: &crate::projects::store::Project, s: &str, a: &str| resume_slot(p, s, a, None, None), fallback(true, true)), Ok(false), "the fallback ran");
         assert!(stopped(), "a Stop written during the nested launch survives the verb");
         // 2. No mark when the verb began; one appears during the respawn — it stands.
         crate::projects::tests::forget_stop(&project.id, "dev");
         let permit = crate::projects::start_permit(&session, "dev").unwrap();
-        start_agent_with(&session, "dev", permit, |p: &crate::projects::store::Project, s: &str, a: &str| resume_slot(p, s, a, None), fallback(true, true)).unwrap();
+        start_agent_with(&session, "dev", permit, |p: &crate::projects::store::Project, s: &str, a: &str| resume_slot(p, s, a, None, None), fallback(true, true)).unwrap();
         assert!(stopped(), "no mark at the start, a mark during it: it stands");
         // 3. A failed launch keeps the mark the verb read.
         let permit = crate::projects::start_permit(&session, "dev").unwrap();
-        assert!(start_agent_with(&session, "dev", permit, |p: &crate::projects::store::Project, s: &str, a: &str| resume_slot(p, s, a, None), fallback(false, false)).is_err());
+        assert!(start_agent_with(&session, "dev", permit, |p: &crate::projects::store::Project, s: &str, a: &str| resume_slot(p, s, a, None, None), fallback(false, false)).is_err());
         assert!(stopped(), "a failed start clears nothing");
         // Control: the same verb, clean and unraced, clears exactly what it read.
         let permit = crate::projects::start_permit(&session, "dev").unwrap();
-        start_agent_with(&session, "dev", permit, |p: &crate::projects::store::Project, s: &str, a: &str| resume_slot(p, s, a, None), fallback(false, true)).unwrap();
+        start_agent_with(&session, "dev", permit, |p: &crate::projects::store::Project, s: &str, a: &str| resume_slot(p, s, a, None, None), fallback(false, true)).unwrap();
         assert!(!stopped());
 
         // A9: a resume whose window came back but whose CLI did not launch is
@@ -8857,3 +8860,6 @@ while True:
         crate::projects::registry_delete("rfe").ok();
     }
 }
+
+#[cfg(all(test, not(any(target_os = "android", target_os = "ios"))))]
+mod restart_tests;

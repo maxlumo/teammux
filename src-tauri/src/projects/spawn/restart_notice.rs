@@ -80,7 +80,11 @@ mod tests {
         let resume = |id: &str| format!("command codex resume {id} -c a=b --dangerously-bypass-approvals-and-sandbox");
         let id = "01a1b6a1-7c52-7461-96ad-2b987988a3f6";
         let rollout = |first: &str| std::fs::write(day.join(format!("rollout-2026-11-07T15-29-58-{id}.jsonl")), format!("{first}\n{{\"type\":\"event_msg\"}}\n")).unwrap();
-        let meta = |provider: &str| format!(r#"{{"timestamp":"2026-11-07T15:29:58.000Z","type":"session_meta","payload":{{"id":"{id}","cli_version":"0.166.0","model_provider":"{provider}","base_instructions":"..."}}}}"#);
+        let proj = ws.join("proj");
+        std::fs::create_dir_all(proj.join("sub")).unwrap();
+        let cwd = proj.join("sub");
+        let meta_in = |provider: &str, cwd: &std::path::Path| format!(r#"{{"timestamp":"2026-11-07T15:29:58.000Z","type":"session_meta","payload":{{"id":"{id}","cwd":{},"cli_version":"0.166.0","model_provider":"{provider}","base_instructions":"..."}}}}"#, serde_json::json!(cwd.to_string_lossy()));
+        let meta = |provider: &str| meta_in(provider, &cwd);
         crate::backends::codex::set_test_version(Some("0.166.0"));
         std::fs::write(codex.join("config.toml"), "model = \"gpt-6.1-sol\"\nmodel_provider = \"ust\"\n").unwrap();
 
@@ -91,6 +95,30 @@ mod tests {
 
         rollout(&meta("amazon-bedrock-runtime"));
         assert_eq!(line(id), cmd, "a chat from another provider: fresh, never a dead resume");
+        // Review R2: a project `.codex/config.toml` in the chat's cwd or an
+        // ancestor that names a provider may outrank the home's layers, so
+        // the effective provider is unknown and the chat resumes as today.
+        // One that names none changes nothing; an unreadable one is unknown.
+        std::fs::create_dir_all(proj.join(".codex")).unwrap();
+        std::fs::write(proj.join(".codex/config.toml"), "model_provider = \"amazon-bedrock-runtime\"\n").unwrap();
+        assert_eq!(line(id), resume(id), "a project config that names a provider: unknown, resume as today");
+        assert_eq!(resume_notice(wss, "cx", Some(id), None), None);
+        std::fs::write(proj.join(".codex/config.toml"), "[tui]\nstatus_line = []\n").unwrap();
+        assert_eq!(line(id), cmd, "a project config that names no provider changes nothing");
+        std::fs::write(proj.join(".codex/config.toml"), "not = [toml").unwrap();
+        assert_eq!(line(id), resume(id), "an unreadable project config: unknown");
+        std::fs::remove_dir_all(proj.join(".codex")).unwrap();
+        // The home's own config met as an ancestor's `.codex` (the user's
+        // ~/.codex under HOME, which the home links) is the layer already read.
+        let linked = ws.join("linked");
+        std::fs::create_dir_all(linked.join(".codex")).unwrap();
+        std::os::unix::fs::symlink(codex.join("config.toml"), linked.join(".codex/config.toml")).unwrap();
+        std::fs::create_dir_all(linked.join("w")).unwrap();
+        rollout(&meta_in("amazon-bedrock-runtime", &linked.join("w")));
+        assert_eq!(line(id), cmd, "the home's own config as an ancestor is not another layer");
+        rollout(&r#"{"type":"session_meta","payload":{"model_provider":"amazon-bedrock-runtime"}}"#.to_string());
+        assert_eq!(line(id), resume(id), "a session_meta without its cwd: unknown");
+        rollout(&meta("amazon-bedrock-runtime"));
         let why = crate::backends::codex::resume_refusal(&home, id).expect("the reason");
         assert!(why.contains("amazon-bedrock-runtime") && why.contains("ust"), "{why}");
         // The room's reason comes from the same choice (board #74 AC1).

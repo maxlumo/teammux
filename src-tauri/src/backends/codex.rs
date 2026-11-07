@@ -983,7 +983,13 @@ pub(crate) fn resume_refusal(home: &std::path::Path, id: &str) -> Option<String>
         return None;
     }
     let codex = home.join("codex");
-    let was = rollout_provider(&rollout_path(&codex.join("sessions"), id)?)?;
+    let (was, cwd) = rollout_meta(&rollout_path(&codex.join("sessions"), id)?)?;
+    // Review R2: a project `.codex/config.toml` can sit above the home's
+    // layers (a trusted one does, #448). One that names a provider makes the
+    // effective one unknown here, and unknown keeps today's resume (AC2).
+    if project_names_provider(&cwd, &codex.join("config.toml")) {
+        return None;
+    }
     let now = current_provider(&codex)?;
     (was != now).then(|| format!("its chat was started on {was} and codex is now on {now}, which codex will not resume"))
 }
@@ -999,16 +1005,52 @@ pub(crate) fn resume_refusal(_home: &std::path::Path, _id: &str) -> Option<Strin
 #[cfg(not(any(target_os = "android", target_os = "ios")))]
 const SESSION_META_CAP: u64 = 1024 * 1024;
 
-/// `session_meta.payload.model_provider` from a rollout's first line.
+/// `session_meta.payload.model_provider` and `.cwd` from a rollout's first
+/// line.
 #[cfg(not(any(target_os = "android", target_os = "ios")))]
-fn rollout_provider(rollout: &std::path::Path) -> Option<String> {
+fn rollout_meta(rollout: &std::path::Path) -> Option<(String, std::path::PathBuf)> {
     use std::io::{BufRead, Read};
     let f = std::fs::File::open(rollout).ok()?;
     let mut first = String::new();
     std::io::BufReader::new(f.take(SESSION_META_CAP)).read_line(&mut first).ok()?;
     let v: serde_json::Value = serde_json::from_str(first.trim_end()).ok()?;
     (v.get("type")?.as_str()? == "session_meta").then_some(())?;
-    v.get("payload")?.get("model_provider")?.as_str().map(str::to_string)
+    let payload = v.get("payload")?;
+    let provider = payload.get("model_provider")?.as_str()?.to_string();
+    let cwd = std::path::PathBuf::from(payload.get("cwd")?.as_str()?);
+    Some((provider, cwd))
+}
+
+/// Whether a `.codex/config.toml` in the chat's cwd or any ancestor may
+/// choose the provider (review R2): it names `model_provider`, or it cannot
+/// be read or parsed. Trust is not judged here; any such file makes the
+/// effective provider unknown. The home's own config, reached as a project
+/// file (the user's `~/.codex/config.toml` is an ancestor's `.codex` of every
+/// workspace under HOME, and the managed home links it), is the layer
+/// already read, so it is skipped by identity.
+#[cfg(not(any(target_os = "android", target_os = "ios")))]
+fn project_names_provider(cwd: &std::path::Path, home_config: &std::path::Path) -> bool {
+    let home_real = std::fs::canonicalize(home_config).ok();
+    for dir in cwd.ancestors() {
+        let file = dir.join(".codex").join("config.toml");
+        match std::fs::symlink_metadata(&file) {
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => continue,
+            Err(_) => return true,
+            Ok(_) => {}
+        }
+        if home_real.is_some() && std::fs::canonicalize(&file).ok() == home_real {
+            continue;
+        }
+        let named = super::read_model_source(&file)
+            .ok()
+            .flatten()
+            .and_then(|t| t.parse::<toml::Table>().ok())
+            .map(|t| t.contains_key("model_provider"));
+        if named != Some(false) {
+            return true;
+        }
+    }
+    false
 }
 
 /// The provider a managed codex in `codex` (its CODEX_HOME) runs: the
