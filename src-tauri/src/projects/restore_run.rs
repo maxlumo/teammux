@@ -3796,6 +3796,8 @@ mod tests {
         // R3: the prompt's turn is open, so the line waits for its end.
         assert!(!held(&p.session, "dev"));
         assert_eq!(held_rows(&p.session, "dev").len(), 1, "kept for the turn's end");
+        server.run(&["send-keys", "-t", &pane, "C-u", "exec cat", "Enter"]).unwrap(); // #77: the restored CLI stands in as cat; a bare shell is a CLI that is not running
+        assert!((0..100).any(|_| tmux::pane_format(&pane, "#{pane_current_command}").as_deref() == Some("cat") || { std::thread::sleep(std::time::Duration::from_millis(50)); false }));
         record_notification(&p.session, "dev", "completed");
         super::super::delivery::flush(&p.session, "dev");
         assert!(held_rows(&p.session, "dev").is_empty());
