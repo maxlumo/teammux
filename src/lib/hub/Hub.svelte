@@ -43,7 +43,7 @@
   import { alertOf } from './notify-centre.svelte.ts';
   import HubSearch from './HubSearch.svelte';
   import { createHubSearch } from './hub-search.svelte.ts';
-  import { agentNames, patchNames, RESERVED_LABELS } from './names.ts';
+  import { agentNames, applyRename, keepLabels, RESERVED_LABELS } from './names.ts';
   import { HUMAN, agentHue, quotePreview, stateDotColor, mergeMessages, mergeEvents, backendColor as colorOf, feedBlocks, filterBlocks, mergeStates, pickLead, pickDrawerAgent, addressed, addressedTeam, mentionTokens, mentionedAgents, unreadSenders, stoppedAgents, slashCommand, inputModeSwitch, issueSpans, systemLine, detailWords } from './hub.ts';
   import { issueRef } from './board.ts';
   import { AGENT_TEAM, lacksCap } from '../core/login-caps.ts';
@@ -375,8 +375,8 @@
       // 站的功能"): they leave the working list and wait, restorable, in the
       // collapsed section at the bottom of the sidebar.
       const all = projects ?? [];
-      trash = adopt(trash, all.filter((r) => r.project.archived));
-      rows = adopt(rows, sortRows(all.filter((r) => !r.project.archived), talk));
+      trash = adopt(trash, keepLabels(trash, all.filter((r) => r.project.archived)));
+      rows = adopt(rows, sortRows(keepLabels(rows, all.filter((r) => !r.project.archived)), talk));
       void refreshUnread();
       if (!rowsBase && rows.length) rowsBase = new Set(rows.map((r) => r.project.id));
       panes = adopt(panes, sp.panes ?? []);
@@ -2098,11 +2098,7 @@
   // A rename anywhere re-labels at once (board #21): the open feed, the
   // roster and the picker read `names`, so nothing reloads.
   const onRenamed = (r) => {
-    labelsBy = { ...labelsBy, [r.session]: patchNames(labelsBy[r.session] ?? [], r) };
-    // The sidebar's rows carry their project's labels (#69): a rename in a
-    // project that is not open re-labels its row now, not at the next list.
-    const relabel = (list) => list.map((row) => (row.project.session === r.session ? { ...row, labels: patchNames(row.labels ?? [], r) } : row));
-    rows = relabel(rows); trash = relabel(trash);
+    ({ labelsBy, rows, trash } = applyRename({ labelsBy, rows, trash }, r));
   };
   $effect(() => {
     addAgentRenamedListener(onRenamed);

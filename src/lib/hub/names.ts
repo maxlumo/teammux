@@ -62,3 +62,30 @@ export const NO_LABELS: Names = agentNames([]);
  * `tmm`). The rename dialog says them as you type; the server stays the
  * judge. names.test.ts reads both Rust functions and fails if they differ. */
 export const RESERVED_LABELS: readonly string[] = ['all', 'human', 'tmm'];
+
+/** A row the sidebar shows by label: a project and, when the server could
+ * read it, that project's label table (`project_list`, board #69). */
+interface LabelledRow { project: { id: string; session: string }; labels?: AgentLabel[] }
+
+/** A list answer's rows, each without a table (its labels could not be read,
+ * or an older server) keeping the one last known for its project: a failed
+ * read never erases known labels (code-quality.md, validator S2 on #69). */
+export function keepLabels<T extends LabelledRow>(prev: readonly T[], next: T[]): T[] {
+  return next.map((row) => {
+    if (row.labels) return row;
+    const known = prev.find((p) => p.project.id === row.project.id)?.labels;
+    return known ? { ...row, labels: known } : row;
+  });
+}
+
+/** One `agent_renamed` push applied to the Hub's label state: the open
+ * rooms' tables (`labelsBy`, keyed by session) and the sidebar's rows, so a
+ * rename in a project that is not open re-labels its row at once (#69). */
+export function applyRename<T extends LabelledRow>(state: { labelsBy: Record<string, AgentLabel[]>; rows: T[]; trash: T[] }, renamed: AgentLabel & { session: string }) {
+  const relabel = (list: T[]) => list.map((row) => (row.project.session === renamed.session ? { ...row, labels: patchNames(row.labels ?? [], renamed) } : row));
+  return {
+    labelsBy: { ...state.labelsBy, [renamed.session]: patchNames(state.labelsBy[renamed.session] ?? [], renamed) },
+    rows: relabel(state.rows),
+    trash: relabel(state.trash),
+  };
+}

@@ -6567,10 +6567,13 @@ test('Only mine is one visible button in the search box, on and off, the same fi
 
 test('the sidebar shows every project\'s agents by their labels, and a rename in a closed project follows at once (#69)', { timeout: 60000 }, async (context) => {
   const slots = [{ ord: 0, window_name: 'dev', cwd: '/other', kind: 'agent', command: 'codex', auto_run: true, first_seen_at: 1 }];
+  // The server omits `labels` when it cannot read them (validator S2): the
+  // first list answers the table, every later one cannot.
+  let lists = 0;
   const { rpc, renamed } = labelled({
     projectList: async () => ({ projects: [
       { project: { id: 'fixture', name: 'fixture', session: 'fixture', path: '/fixture' }, live: true, slots: [] },
-      { project: { id: 'other', name: 'other', session: 'other', path: '/other' }, live: false, slots, labels: [{ agent: 'dev', label: 'robert', aliases: [] }] },
+      { project: { id: 'other', name: 'other', session: 'other', path: '/other' }, live: false, slots, ...(lists++ ? {} : { labels: [{ agent: 'dev', label: 'robert', aliases: [] }] }) },
     ] }),
   });
   const app = await (await compiledHub()).mount(context, {
@@ -6586,5 +6589,9 @@ test('the sidebar shows every project\'s agents by their labels, and a rename in
     for (const listener of renamed) (listener as (r: unknown) => void)(push);
     await settleHub(app);
     assert.deepEqual(chips(), ['sam'], 'a rename in a project that is not open re-labels its row with no list read');
+    const before = lists;
+    await app.advance(20000); await settleHub(app);
+    assert.ok(lists > before, 'the list was read again');
+    assert.deepEqual(chips(), ['sam'], 'a list that could not read the labels keeps the known ones');
   } finally { await app.close(); }
 });

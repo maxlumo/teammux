@@ -158,6 +158,16 @@ mod tests {
         assert_eq!(row["labels"], serde_json::json!([{ "agent": "builder", "label": "robert", "aliases": ["bob"] }]));
     }
 
+    /// Validator S2 on #69: a label table that cannot be read is left out of
+    /// the row, never sent as an empty table that would erase known labels.
+    #[test]
+    fn a_project_list_row_whose_labels_cannot_be_read_leaves_them_out() {
+        let read = crate::projects::projects::list_row(serde_json::json!({ "live": true }), "p", Ok(vec![Label { agent: "dev".into(), label: "robert".into(), aliases: vec![] }]));
+        assert_eq!(read["labels"], serde_json::json!([{ "agent": "dev", "label": "robert", "aliases": [] }]));
+        let failed = crate::projects::projects::list_row(serde_json::json!({ "live": true }), "p", Err("no such table: agent_names".into()));
+        assert_eq!(failed, serde_json::json!({ "live": true }), "no labels key at all");
+    }
+
     /// Board #20 (orchestrator 13:35): removing an agent frees its labels. A
     /// later agent spawned with the same physical name inherits none: its
     /// old label no longer resolves to it, and it is shown by its own name.

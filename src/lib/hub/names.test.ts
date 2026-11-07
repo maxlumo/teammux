@@ -1,7 +1,7 @@
 import assert from 'node:assert/strict';
 import test from 'node:test';
 import { readFileSync } from 'node:fs';
-import { agentNames, patchNames, RESERVED_LABELS } from './names.ts';
+import { agentNames, patchNames, keepLabels, RESERVED_LABELS } from './names.ts';
 
 // The cases of address.rs's `Names` tests (board #20), read on the client
 // over the same wire table: the client APPLIES the server's labels, it never
@@ -58,4 +58,12 @@ test('the reserved words the rename hint says are exactly the server\'s (#21 rou
   assert.match(allowed, /crate::address::is_routing_word\(l\)/u, 'label_allowed refuses the routing words');
   const server = [...words(body(read('address.rs'), 'is_routing_word')), ...words(allowed)];
   assert.deepEqual([...RESERVED_LABELS].sort(), server.sort());
+});
+
+test('keepLabels: a row the server could not read labels for keeps the last known table; a read table wins (#69, validator S2)', () => {
+  const robert = [{ agent: 'dev', label: 'robert', aliases: [] }];
+  const row = (id: string, labels?: { agent: string; label: string; aliases: string[] }[]) => ({ project: { id, session: id }, ...(labels ? { labels } : {}) });
+  const prev = [row('a', robert), row('b', [])];
+  assert.deepEqual(keepLabels(prev, [row('a'), row('b'), row('c')]), [row('a', robert), row('b', []), row('c')]);
+  assert.deepEqual(keepLabels(prev, [row('a', [])]), [row('a', [])], 'an answered empty table is a reset, not a failure');
 });

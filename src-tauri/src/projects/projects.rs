@@ -20,13 +20,7 @@ pub fn list(include_archived: bool) -> Result<Value, String> {
         let mut out = Vec::with_capacity(projects.len());
         for p in projects {
             let slots = store.slots(&p.id)?;
-            // Its agents' labels (board #69), the table hub_agents sends, so
-            // the sidebar shows every project's agents by label. Unreadable
-            // labels show the names as they are, like `names::names`.
-            let labels = store.agent_names(&p.id).unwrap_or_else(|e| {
-                eprintln!("project_list: {}: agent labels unreadable, names shown as they are: {e}", p.session);
-                Vec::new()
-            });
+            let labels = store.agent_names(&p.id);
             out.push((p, slots, labels));
         }
         Ok(out)
@@ -35,10 +29,23 @@ pub fn list(include_archived: bool) -> Result<Value, String> {
         .into_iter()
         .map(|(p, slots, labels)| {
             let live = tmux::session_exists(&p.session);
-            json!({ "project": p, "slots": slots, "live": live, "labels": labels })
+            list_row(json!({ "project": p, "slots": slots, "live": live }), &p.session, labels)
         })
         .collect();
     Ok(json!({ "projects": projects }))
+}
+
+/// One `project_list` row with its agents' labels (board #69), the table
+/// hub_agents sends, so the sidebar shows every project's agents by label. A
+/// table that cannot be read is LEFT OUT, never sent as empty: the client
+/// keeps the labels it last knew (validator S2 on #69, code-quality.md: a
+/// failed read never erases known state).
+pub(super) fn list_row(mut row: Value, session: &str, labels: Result<Vec<crate::address::Label>, String>) -> Value {
+    match labels {
+        Ok(labels) => row["labels"] = json!(labels),
+        Err(e) => eprintln!("project_list: {session}: agent labels unreadable, left out: {e}"),
+    }
+    row
 }
 
 /// Create a project for a directory. Idempotent by SESSION, not by path:
