@@ -712,12 +712,13 @@ and every live check with a real agent CLI runs in the live rig:
 pnpm run test:live:docker            # check `smoke`: one codex turn and one claude turn
 pnpm run test:live:docker codex-models   # board #70: codex's list follows its config (agents-overview.md § Model catalogue)
 pnpm run test:live:docker codex-provider   # board #74: a codex chat restarted under another provider comes back fresh (agents-overview.md)
+pnpm run test:live:docker pi             # board #71: a managed pi end to end (agents-overview.md § The pi backend)
 ```
 
 - **The image** is `docker/validator/Dockerfile`'s `live` target: this
   checkout's `server` and `tmm` built inside, and the CLIs pinned to the
   versions measured on this host: claude 2.1.319, codex-cli 0.166.0, omp
-  18.15.0 (npm), with Bun 1.4.4 for omp (its package's `engines` names
+  18.15.0 (npm), pi 1.5.0 (npm, @earendil-works/pi-coding-agent, board #71), with Bun 1.4.4 for omp (its package's `engines` names
   `bun >=1.4.4`; round 1, validator-2: without it `omp --version` failed with
   `env: bun: No such file or directory`). Measured in the built image: each
   `--version` answers its pinned version. kiro-cli 2.37.1 and kimi 2.5.1 have no public pinned install

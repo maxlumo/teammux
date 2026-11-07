@@ -14,9 +14,15 @@
 #                      under another (a second provider id for the same endpoint, in this
 #                      container's copy of the config), comes back on a fresh conversation and
 #                      the room says why; a restart under the same provider resumes as before.
+#   live-check pi      board #71: a managed pi 1.5.0 agent end to end. The rig writes ~/.pi/agent
+#                      in the owner's provider shape (ust anthropic-messages + ust-openai
+#                      openai-responses, apiKey $UST_API_KEY; orchestrator, #71 note 6); nothing of
+#                      the host's ~/.pi. Spawned with a model and effort, a turn answered through
+#                      the telemetry, /model and /thinking from the room, a restart that resumes
+#                      the conversation, the user's auth.json and models.json still linked.
 set -euo pipefail
 check="${1:-smoke}"
-case "$check" in smoke|codex-models|codex-provider) ;; *) echo "live-check: unknown check '$check' (known: smoke, codex-models, codex-provider)" >&2; exit 2 ;; esac
+case "$check" in smoke|codex-models|codex-provider|pi) ;; *) echo "live-check: unknown check '$check' (known: smoke, codex-models, codex-provider, pi)" >&2; exit 2 ;; esac
 
 cfg="$HOME/.config/teammux"
 mkdir -p "$cfg" /work/live
@@ -34,12 +40,57 @@ if [ -d /stage ]; then
 fi
 
 # Each CLI answers for itself at its pinned version (round 1: omp needs its Bun runtime).
-for c in claude codex omp bun; do printf 'live-check: %s --version: %s\n' "$c" "$($c --version 2>&1 | head -1)"; done
+for c in claude codex omp bun pi; do printf 'live-check: %s --version: %s\n' "$c" "$($c --version 2>&1 | head -1)"; done
 
 server >"$HOME/server.log" 2>&1 &
 for _ in $(seq 1 100); do tmm project list >/dev/null 2>&1 && break; sleep 0.2; done
 tmm project create /work/live --name live >/dev/null
 tmm project up live >/dev/null
+
+if [ "$check" = pi ]; then
+  [ -n "${UST_API_KEY:-}" ] || { echo "live-check: pi: skipped: UST_API_KEY not set"; exit 2; }
+  [ -f "$HOME/.codex/config.toml" ] || { echo "live-check: pi: skipped: no UST base URL (codex config not staged)"; exit 2; }
+  rc=0
+  A="$HOME/.pi/agent"; mkdir -p "$A"
+  base=$(sed -n 's/^base_url *= *"\(.*\)"/\1/p' "$HOME/.codex/config.toml" | head -1)
+  cat > "$A/models.json" <<J
+{"providers":{"ust":{"baseUrl":"${base%/v1}","api":"anthropic-messages","apiKey":"\$UST_API_KEY","models":[{"id":"claude-opus-5-5","reasoning":true},{"id":"claude-fable-5-1","reasoning":true},{"id":"claude-sonnet-5-5","reasoning":true},{"id":"claude-haiku-5-5","reasoning":true}]},
+"ust-openai":{"baseUrl":"$base","api":"openai-responses","apiKey":"\$UST_API_KEY","models":[{"id":"gpt-6-astra"},{"id":"gpt-6.1-sol"}]}}}
+J
+  printf '{"defaultProvider":"ust","defaultModel":"claude-opus-5-5","defaultThinkingLevel":"medium"}\n' > "$A/settings.json"
+  printf '{}\n' > "$A/auth.json"
+  ok() { echo "live-check: pi: $1"; }; bad() { echo "live-check: pi: FAIL ($1)"; rc=1; }
+  all=$(tmm agent backends --models 2>&1 || true); row=$(printf '%s\n' "$all" | grep '^pi ' || true); ok "models: ${row:-none; the whole answer: $all}"
+  case "$row" in *"ust/claude-haiku-5-5"*) ;; *) bad "the model list lacks models.json's ids" ;; esac
+  tmm registry save --name lpi --backend pi --model ust/claude-haiku-5-5 --effort low --system "Live check agent. Answer in one short line." >/dev/null
+  tmm spawn lpi --project live >/dev/null
+  sleep 25
+  H=/work/live/.tmm/agents/lpi
+  for f in auth.json models.json; do [ "$(readlink "$H/$f")" = "$A/$f" ] && ok "$f linked to the user's" || bad "$f is not a link to the user's ($(ls -la "$H/$f" 2>&1))"; done
+  pane() { tmux list-panes -a -F '#{pane_id} #{window_name}' | awk '$2=="lpi"{print $1; exit}'; }
+  foot() { tmux capture-pane -p -t "$(pane)" | grep -E '%/[0-9]+k' | tail -1 | sed 's/  */ /g'; }
+  ok "pane runs: $(tmux list-panes -a -F '#{window_name} #{pane_current_command}' | awk '$1=="lpi"{print $2; exit}')"
+  ok "footer: $(foot)"
+  ask() { tmm send --project live "@lpi $1" >/dev/null; timeout 180 bash -c "until tmm log --project live --limit 40 | grep -q '] lpi: $2'; do sleep 2; done"; }
+  ask "reply with the single word ready" ready && ok "turn 1 answered ready (Stop recorded through the telemetry)" || bad "no answer to turn 1"
+  tmm agent list --project live | grep lpi || true
+  # /model first: switching the model resets the level (measured), so /thinking follows it.
+  tmm send --project live "@lpi /model ust/claude-sonnet-5-5" >/dev/null; sleep 6
+  tmm send --project live "@lpi /thinking high" >/dev/null; sleep 4
+  ok "footer after /model ust/claude-sonnet-5-5, /thinking high: $(foot)"
+  case "$(foot)" in *"claude-sonnet-5-5 • high"*) ;; *) bad "the footer does not show the switched model and level" ;; esac
+  ask "reply with the single word second" second && ok "turn 2 answered second" || bad "no answer to turn 2"
+  tmm agent restart lpi --project live >/dev/null
+  sleep 25
+  ok "restart line: $(tmm log --project live --limit 40 | grep '\[tmm\] restarted lpi' | tail -1)"
+  ok "footer after the restart (the definition's model and effort win): $(foot)"
+  ask "what single word did you reply first in this conversation? answer with that word only" ready && ok "after the restart it remembered 'ready' (resumed)" || bad "the restart did not resume the conversation"
+  for f in auth.json models.json; do [ "$(readlink "$H/$f")" = "$A/$f" ] || bad "$f lost its link after a restart"; done
+  tmm send --project live "@lpi /new" >/dev/null; sleep 6
+  ask "reply with the single word fresh" fresh && ok "after /new it answered fresh" || bad "no answer after /new"
+  tmm agent list --project live
+  exit $rc
+fi
 
 if [ "$check" = codex-models ]; then
   [ -f "$HOME/.codex/config.toml" ] || { echo "live-check: codex-models: skipped: ~/.codex/config.toml not staged"; exit 2; }

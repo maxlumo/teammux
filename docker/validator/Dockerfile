@@ -69,7 +69,7 @@ ENTRYPOINT ["tmm-e2e"]
 # The ONE place a live check with a real agent CLI runs (owner, 2026-11-06 15:07: no test on this
 # host). `docker build --target live`. The CLIs are pinned to the versions measured on the host
 # (claude 2.1.319, codex-cli 0.166.0, omp 18.15.0 with the Bun 1.4.4 its package names in
-# `engines`, `bun >=1.4.4`); kiro-cli 2.37.1 and kimi 2.5.1 have no
+# `engines`, `bun >=1.4.4`, pi 1.5.0 from @earendil-works/pi-coding-agent, board #71); kiro-cli 2.37.1 and kimi 2.5.1 have no
 # public pinned install measured yet and are NOT faked here (#55 notes). No credential is baked in:
 # they arrive by NAME at `docker run` (scripts/live-docker.mjs). The marker lets scratch-env run.
 FROM node:22-trixie-slim AS live
@@ -78,6 +78,7 @@ RUN apt-get update \
     && rm -rf /var/lib/apt/lists/*
 RUN npm install -g --no-fund --no-audit \
       @anthropic-ai/claude-code@2.1.319 @openai/codex@0.166.0 @oh-my-pi/pi-coding-agent@18.15.0 bun@1.4.4 \
+      @earendil-works/pi-coding-agent@1.5.0 \
     && npm cache clean --force
 RUN usermod -l tmm -d /home/tmm -m node && groupmod -n tmm node \
     && install -d -o tmm -g tmm /work \
@@ -87,6 +88,7 @@ COPY docker/live/live-check.sh /usr/local/bin/live-check
 USER tmm
 # Every CLI's no-update switch (scripts/test-rust.mjs UPDATE_SWITCHES), so nothing self-updates.
 ENV HOME=/home/tmm TERM=xterm-256color LANG=C.UTF-8 \
-    DISABLE_AUTOUPDATER=1 DISABLE_UPDATES=1 KIMI_CODE_NO_AUTO_UPDATE=1 KIRO_NO_AUTO_UPDATE=1
+    DISABLE_AUTOUPDATER=1 DISABLE_UPDATES=1 KIMI_CODE_NO_AUTO_UPDATE=1 KIRO_NO_AUTO_UPDATE=1 \
+    PI_SKIP_VERSION_CHECK=1 PI_TELEMETRY=0
 WORKDIR /work
 ENTRYPOINT ["live-check"]
