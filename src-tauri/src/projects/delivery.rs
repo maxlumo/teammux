@@ -1078,7 +1078,7 @@ fn deliver_gated(
     if may_release(known, busy, strict.is_some(), &held) {
         flush_locked(session, window, target, steered.then_some(behind), Some(&_order));
     } else if strict.is_some() {
-        if super::exited::not_running(session, window) { telemetry::record_held_blocked(session, window, &telemetry::held_rows(session, window), &super::exited::held_reason(session, window)) } else { warn_if_overdue(session, window) }
+        if !super::restore_hold::held(session, window) && !starting(session, window) && super::exited::not_running(session, window) { telemetry::record_held_blocked(session, window, &telemetry::held_rows(session, window), &super::exited::held_reason(session, window)) } else { warn_if_overdue(session, window) }
     }
     true
 }
@@ -1527,7 +1527,7 @@ mod tests {
     }
 
     pub(super) fn fake() {
-        TYPED.with(|t| *t.borrow_mut() = Some(Vec::new()));
+        TYPED.with(|t| *t.borrow_mut() = Some(Vec::new())); crate::projects::exited::RUNNING_IN_TEST.with(|r| r.set(true));
         VERBATIM_UNDER_TURN_LOCK.with(|v| v.borrow_mut().clear());
         REFUSE.with(|r| *r.borrow_mut() = None);
     }

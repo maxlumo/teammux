@@ -44,13 +44,16 @@ enum Cli {
     Starting,
     /// Seen and gone, or never seen past the grace: back at the shell.
     Exited,
+    /// A managed window whose CLI state could not be READ (reviewer R1 on
+    /// #77): never permission to type. Delivery holds; the card keeps its state.
+    Unknown,
 }
 
 /// `st` as the Hub and `tmm agent list` show it for `pane`: the turn state,
 /// unless the window's CLI is starting or exited to the shell.
 pub fn shown(session: &str, workspace: Option<&str>, pane: &TmuxPane, mut st: AgentStatus) -> AgentStatus {
     let (state, detail) = match classify(session, workspace, pane) {
-        Cli::Shown => return st,
+        Cli::Shown | Cli::Unknown => return st,
         Cli::Starting => (STARTING, ""),
         Cli::Exited => (STATE, DETAIL),
     };
@@ -72,17 +75,48 @@ pub fn not_running(session: &str, window: &str) -> bool {
 pub fn held_reason(session: &str, window: &str) -> String {
     match read_now(session, window) {
         Cli::Starting => "the agent is starting: its CLI has not come up yet".to_string(),
+        Cli::Unknown => "its CLI state could not be read, so nothing is typed until it can".to_string(),
         _ => format!("the agent is not running: its CLI exited to the shell; restart it with `tmm agent restart {window}`"),
     }
 }
 
+/// A test's failed read of the pane listing (reviewer R1 on #77), while every
+/// other tmux query, the send included, still works.
+#[cfg(test)]
+pub(crate) static PANE_READ_FAILS_IN_TEST: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
+
+#[cfg(test)]
+thread_local! {
+    /// The delivery tests' fake typing (`delivery::tests::fake`) has no pane:
+    /// on that thread a managed window's CLI reads as running.
+    pub(crate) static RUNNING_IN_TEST: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
+}
+
+/// The window's CLI, read now. A read that fails for a MANAGED window is
+/// `Unknown`, never `Shown` (reviewer R1 on #77): the project lookup, the
+/// pane listing, or no active pane of that name. A session that is no
+/// project, and a window with no managed home, are not this rule's.
 fn read_now(session: &str, window: &str) -> Cli {
-    let Some(workspace) = crate::projects::project_for_session(session).ok().flatten().map(|p| p.path) else { return Cli::Shown };
-    crate::tmux::list_panes(session)
-        .unwrap_or_default()
-        .iter()
-        .find(|p| p.window_name == window && p.active)
-        .map_or(Cli::Shown, |pane| classify(session, Some(&workspace), pane))
+    #[cfg(test)]
+    if RUNNING_IN_TEST.with(|r| r.get()) {
+        return Cli::Shown;
+    }
+    let workspace = match crate::projects::project_for_session(session) {
+        Ok(Some(p)) => p.path,
+        Ok(None) => return Cli::Shown,
+        Err(_) => return Cli::Unknown,
+    };
+    if !crate::projects::is_managed_in(Some(&workspace), window) {
+        return Cli::Shown;
+    }
+    #[cfg(test)]
+    let panes = if PANE_READ_FAILS_IN_TEST.load(std::sync::atomic::Ordering::Relaxed) { Err("forced (test)".to_string()) } else { crate::tmux::list_panes(session) };
+    #[cfg(not(test))]
+    let panes = crate::tmux::list_panes(session);
+    match panes {
+        Ok(panes) => panes.iter().find(|p| p.window_name == window && p.active).map_or(Cli::Unknown, |pane| classify(session, Some(&workspace), pane)),
+        Err(_) => Cli::Unknown,
+    }
 }
 
 /// The launch each window's CLI was last SEEN running under (its launch
