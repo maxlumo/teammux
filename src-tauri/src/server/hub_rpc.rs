@@ -5384,6 +5384,10 @@ mod tests {
             let _ = std::fs::remove_dir_all(&ws);
             return;
         }
+        // Owns the session from its creation (#61 R1), so a failing check
+        // below cannot leave it behind; the guard under test is the one inside
+        // the unwind, and this one only drops after the assertions.
+        let _owner = KillOnDrop(session.clone(), ws.clone());
         let alive = |name: &str| {
             std::process::Command::new("tmux")
                 .args(["has-session", "-t", &format!("={name}")])
