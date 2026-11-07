@@ -436,7 +436,9 @@ note 14, orchestrator 20:20): codex's managed profile
 (`<home>/codex/tmm-agent.config.toml`, `model`), and for claude, kimi and omp
 the `--model` / `-m` on the recipe's launch line
 (`projects::model_refused`). When the render named none it says
-`model (its backend's default): …`. codex's reader puts the refused turn's
+`model (its backend's default): …`; when what the render wrote cannot be
+read or parsed it says `model unknown (its launch config could not be read):
+…`, never the default (validator note 26). codex's reader puts the refused turn's
 own `turn_context` model in front first when its rollout tail holds it
 (`gpt-6.1-sol` there), because that follows a `/model`; the launched model is
 the fallback for every backend, at the hook path and the capture tick alike.
