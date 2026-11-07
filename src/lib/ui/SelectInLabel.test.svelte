@@ -1,4 +1,4 @@
-<script>
+<script lang="ts">
   import Select from './Select.svelte';
   let value = $state('kiro'), escapes = $state(0);
 </script>
