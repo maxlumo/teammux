@@ -285,7 +285,10 @@
      character. */
   .sr-head { display: flex; flex-wrap: wrap; align-items: center; justify-content: space-between; gap: var(--menu-item-gap); }
   .sr-status { flex: 1 1 auto; min-width: 0; color: var(--text2); font-size: var(--fs-meta); }
-  .sr-tools { display: flex; align-items: center; gap: var(--ui-gap); flex: none; }
+  /* The tools fold onto further lines rather than crop when the panel is
+     narrower than all of them (validator S1 on #73: at 320px the row was
+     351px wide in a 302px panel and Messages started off its left edge). */
+  .sr-tools { display: flex; flex-wrap: wrap; align-items: center; gap: var(--ui-gap); flex: 0 1 auto; min-width: 0; }
   .sr-notice { margin: 0 var(--menu-item-padding-x) var(--menu-item-padding-y); }
   .sr-label, .sr-more { padding: 0 var(--menu-item-padding-x); color: var(--text3); font-size: var(--fs-micro); }
   .sr-more { padding-top: var(--menu-item-padding-y); }
