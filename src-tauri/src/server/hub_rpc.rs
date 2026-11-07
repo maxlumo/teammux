@@ -6315,12 +6315,14 @@ while True:
             .args(["new-session", "-d", "-s", &session, "-n", &name, "-c", &ws.to_string_lossy(), "cat"])
             .status().map(|s| s.success()).unwrap_or(false)
             && std::process::Command::new("tmux").args(["new-window", "-d", "-t", &session, "-n", "kirow", "-c", &ws.to_string_lossy(), "cat"]).status().map(|s| s.success()).unwrap_or(false);
+        // Taken before the skip check (#61 review R2): new-window is chained into
+        // `created`, so a session can exist even when `created` is false.
+        let _cleanup = KillOnDrop(session.clone(), ws.clone());
         if !created {
             eprintln!("no tmux server — skipping");
             let _ = std::fs::remove_dir_all(&ws);
             return;
         }
-        let _cleanup = KillOnDrop(session.clone(), ws.clone());
         crate::projects::adopt(&session, Some("cmd-dsh-test")).expect("adopt project");
         let call = |agent: &str, text: &str| handle_hub_request(&req("hub_command", serde_json::json!({ "session": session, "agent": agent, "text": text })), None);
         let screen = |w: &str| crate::tmux::capture_pane_plain(&format!("{session}:{w}"), Some(0)).unwrap_or_default();
@@ -6386,12 +6388,14 @@ while True:
             .args(["new-session", "-d", "-s", &session, "-n", &good, "-c", &ws.to_string_lossy(), "cat"])
             .status().map(|s| s.success()).unwrap_or(false)
             && std::process::Command::new("tmux").args(["new-window", "-d", "-t", &session, "-n", &bad, "-c", &ws.to_string_lossy(), "cat"]).status().map(|s| s.success()).unwrap_or(false);
+        // Taken before the skip check (#61 review R2): new-window is chained into
+        // `created`, so a session can exist even when `created` is false.
+        let _cleanup = KillOnDrop(session.clone(), ws.clone());
         if !created {
             eprintln!("no tmux server — skipping");
             let _ = std::fs::remove_dir_all(&ws);
             return;
         }
-        let _cleanup = KillOnDrop(session.clone(), ws.clone());
         crate::projects::adopt(&session, Some("cmd-all-test")).expect("adopt project");
         crate::safe_fs::jam(&bad_profile.join("cordis.patch.yml"));
         let r = handle_hub_request(&req("hub_command", serde_json::json!({ "session": session, "agent": "all", "text": "/effort low" })), None);
