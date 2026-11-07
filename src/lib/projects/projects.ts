@@ -3,6 +3,7 @@
 // parts worth testing, and `node --test` can reach them without a DOM.
 
 import { agentByBackend, paneAgent, type PaneLike } from '../core/agents.ts';
+import type { AgentLabel } from '../hub/names.ts';
 
 export type SlotKind = 'shell' | 'agent';
 
@@ -38,6 +39,9 @@ export interface ProjectRow {
   project: Project;
   slots: Slot[];
   live: boolean;
+  /** Its agents' labels (`project_list`, board #69), the same table as
+   * `hub_agents.labels`; absent on an older server. */
+  labels?: AgentLabel[];
 }
 
 /** A window the user can expect back after `up` (see capture::SETTLE_SECS). */

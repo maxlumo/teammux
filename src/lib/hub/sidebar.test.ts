@@ -92,3 +92,12 @@ test('a closed project counts declarations even when stale panes remain', () => 
   assert.deepEqual(rowAgentCounts({ ...row, live: false }, live), { live: 0, stopped: 6 });
   assert.deepEqual(rowAgentCounts({ ...row, slots: [] }, []), { live: 0, stopped: 0 });
 });
+
+test('a live chip shows its agent\'s label and keeps the physical name for its key and state (#69)', () => {
+  const panes = [pane('dev', 0, { agent: 'codex' })];
+  const labelled = { ...row, labels: [{ agent: 'dev', label: 'robert', aliases: [] }] };
+  const [chip] = rowAgents(labelled, panes, { 'alpha:dev': 'working' }, catalog);
+  assert.equal(chip!.name, 'robert');
+  assert.equal(chip!.state, 'working');
+  assert.deepEqual(rowAgents(labelled, panes, {}, catalog).map((a) => a.key), rowAgents(row, panes, {}, catalog).map((a) => a.key));
+});

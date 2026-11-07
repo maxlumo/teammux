@@ -2,6 +2,7 @@ import { paneAgent, type BackendCatalog } from '../core/agents.ts';
 import type { TmuxPane } from '../core/ws.ts';
 import type { ProjectRow } from '../projects/projects.ts';
 import { occurrenceKeys } from './hub.ts';
+import { agentNames } from './names.ts';
 
 export type SidebarPane = Pick<TmuxPane,
   'session' | 'window' | 'window_name' | 'active' | 'current_command' | 'agent'>;
@@ -39,8 +40,10 @@ export function rowAgents(row: ProjectRow, panes: readonly SidebarPane[], agentS
       if (s.kind === 'agent') chips.push({ icon: catalog.icon(s.command), name: s.window_name, state: '' });
     }
   }
+  // Keys and states stay physical; only the shown name is the label (#69).
   const keys = occurrenceKeys(chips.map((chip) => chip.name));
-  return chips.map((chip, i) => ({ ...chip, key: keys[i]! }));
+  const names = agentNames(row.labels);
+  return chips.map((chip, i) => ({ ...chip, name: names.shown(chip.name), key: keys[i]! }));
 }
 
 /** Hover counts the roster split into live and stopped. */

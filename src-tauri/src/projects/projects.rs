@@ -20,15 +20,22 @@ pub fn list(include_archived: bool) -> Result<Value, String> {
         let mut out = Vec::with_capacity(projects.len());
         for p in projects {
             let slots = store.slots(&p.id)?;
-            out.push((p, slots));
+            // Its agents' labels (board #69), the table hub_agents sends, so
+            // the sidebar shows every project's agents by label. Unreadable
+            // labels show the names as they are, like `names::names`.
+            let labels = store.agent_names(&p.id).unwrap_or_else(|e| {
+                eprintln!("project_list: {}: agent labels unreadable, names shown as they are: {e}", p.session);
+                Vec::new()
+            });
+            out.push((p, slots, labels));
         }
         Ok(out)
     })?;
     let projects: Vec<Value> = rows
         .into_iter()
-        .map(|(p, slots)| {
+        .map(|(p, slots, labels)| {
             let live = tmux::session_exists(&p.session);
-            json!({ "project": p, "slots": slots, "live": live })
+            json!({ "project": p, "slots": slots, "live": live, "labels": labels })
         })
         .collect();
     Ok(json!({ "projects": projects }))

@@ -145,6 +145,19 @@ mod tests {
         assert_eq!(resolve(&s, "validator"), "validator");
     }
 
+    /// Board #69: the project list carries each project's labels, the table
+    /// hub_agents sends, so the sidebar can show every project's agents by
+    /// label without opening it.
+    #[test]
+    fn the_project_list_carries_each_projects_labels() {
+        let s = project_with("listed", &["builder", "validator"]);
+        rename(&s, "builder", Some("bob")).unwrap();
+        rename(&s, "bob", Some("robert")).unwrap();
+        let listed = crate::projects::list(true).unwrap();
+        let row = listed["projects"].as_array().unwrap().iter().find(|r| r["project"]["session"] == s.as_str()).expect("listed").clone();
+        assert_eq!(row["labels"], serde_json::json!([{ "agent": "builder", "label": "robert", "aliases": ["bob"] }]));
+    }
+
     /// Board #20 (orchestrator 13:35): removing an agent frees its labels. A
     /// later agent spawned with the same physical name inherits none: its
     /// old label no longer resolves to it, and it is shown by its own name.

@@ -2099,6 +2099,10 @@
   // roster and the picker read `names`, so nothing reloads.
   const onRenamed = (r) => {
     labelsBy = { ...labelsBy, [r.session]: patchNames(labelsBy[r.session] ?? [], r) };
+    // The sidebar's rows carry their project's labels (#69): a rename in a
+    // project that is not open re-labels its row now, not at the next list.
+    const relabel = (list) => list.map((row) => (row.project.session === r.session ? { ...row, labels: patchNames(row.labels ?? [], r) } : row));
+    rows = relabel(rows); trash = relabel(trash);
   };
   $effect(() => {
     addAgentRenamedListener(onRenamed);

@@ -6564,3 +6564,27 @@ test('Only mine is one visible button in the search box, on and off, the same fi
     assert.equal(app.document.querySelector('.search-token'), null);
   } finally { await app.close(); }
 });
+
+test('the sidebar shows every project\'s agents by their labels, and a rename in a closed project follows at once (#69)', { timeout: 60000 }, async (context) => {
+  const slots = [{ ord: 0, window_name: 'dev', cwd: '/other', kind: 'agent', command: 'codex', auto_run: true, first_seen_at: 1 }];
+  const { rpc, renamed } = labelled({
+    projectList: async () => ({ projects: [
+      { project: { id: 'fixture', name: 'fixture', session: 'fixture', path: '/fixture' }, live: true, slots: [] },
+      { project: { id: 'other', name: 'other', session: 'other', path: '/other' }, live: false, slots, labels: [{ agent: 'dev', label: 'robert', aliases: [] }] },
+    ] }),
+  });
+  const app = await (await compiledHub()).mount(context, {
+    props: { visible: true },
+    setup(window) { window.Element.prototype.getAnimations = () => []; window.HTMLCanvasElement.prototype.getContext = () => null; },
+    modules: [rpc],
+  });
+  try {
+    await settleHub(app);
+    const chips = () => texts(app.document, '.proj-row .side-win-name');
+    assert.deepEqual(chips(), ['robert'], 'a stopped project\'s agent wears its label from the list');
+    const push = app.window.JSON.parse(JSON.stringify({ session: 'other', agent: 'dev', label: 'sam', aliases: ['robert'] }));
+    for (const listener of renamed) (listener as (r: unknown) => void)(push);
+    await settleHub(app);
+    assert.deepEqual(chips(), ['sam'], 'a rename in a project that is not open re-labels its row with no list read');
+  } finally { await app.close(); }
+});
