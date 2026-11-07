@@ -25,6 +25,7 @@ use std::path::{Path, PathBuf};
 
 use crate::backends::shared;
 use crate::tmux;
+pub mod restart_notice;
 
 use super::store::RegAgent;
 
@@ -1634,29 +1635,6 @@ pub fn relaunch_line(project_path: &str, window_name: &str, session_id: Option<&
     Ok(Some(with_env(&env, &cmd)))
 }
 
-/// Why `relaunch_line` for the same arguments starts fresh instead of
-/// resuming (board #74), for the room; `None` when it resumes, when the
-/// recipe cannot be read, or when a backend switch already starts it fresh
-/// (`relaunch_line`'s `observed` rule, said by its own room line).
-pub fn resume_notice(project_path: &str, window_name: &str, session_id: Option<&str>, observed: Option<&str>) -> Option<String> {
-    let (_, backend, _, home) = recipe_parts(project_path, window_name).ok()??;
-    if observed.is_some_and(|o| o != backend) {
-        return None;
-    }
-    crate::backends::Backend::parse(&backend)?.resume_notice(session_id.filter(|s| !s.is_empty()), &home)
-}
-
-/// `resume_notice` for the managed agent `agent` in `session`, from its
-/// slot's recorded conversation and backend; `None` when it resumes, or
-/// when nothing can be read. Read before a start, which writes the new
-/// thread (board #74).
-pub fn resume_notice_for(session: &str, agent: &str) -> Option<String> {
-    let project = super::project_for_session(session).ok()??;
-    let (project, slots) = super::projects::load(&project.id).ok()?;
-    let slot = slots.iter().find(|s| s.kind == super::store::SlotKind::Agent && s.window_name == agent)?;
-    resume_notice(&project.path, agent, slot.agent_session_id.as_deref(), slot.command.as_deref())
-}
-
 /// The strict relaunch for a restore after a reboot (board #422): the
 /// persisted identity with the EXACT conversation, or `Err` — a recipe that
 /// cannot be read, an unknown backend, or a resume the backend cannot prove
@@ -2021,75 +1999,6 @@ mod relaunch_tests {
         );
         std::fs::remove_dir_all(&ws).ok();
     }
-    /// Board #74, measured on codex-cli 0.166.0: codex refuses `resume <id>`
-    /// when the chat's rollout was started under another provider than the
-    /// current one (`thread/resume failed: This chat uses
-    /// amazon-bedrock-runtime, but your current provider is ust`) and leaves
-    /// the pane at the shell. The restart starts fresh instead; the same
-    /// provider, an unreadable rollout or another codex version resume as
-    /// before.
-    #[test]
-    fn a_codex_chat_from_another_provider_restarts_fresh() {
-        let ws = crate::config::test_scratch("tmm-relaunch-codex-provider");
-        let wss = ws.to_str().unwrap();
-        let home = agent_home(wss, "cx");
-        let codex = home.join("codex");
-        let day = codex.join("sessions/2026/11/07");
-        std::fs::create_dir_all(&day).unwrap();
-        let cmd = "command codex -c a=b --dangerously-bypass-approvals-and-sandbox";
-        LaunchRecipe { backend: "codex", env: &[], cmd, spawned_by: "", team: None, agent_def: "", member: "", from_member: "", input_mode: "" }.write(&home).unwrap();
-        let line = |id: &str| relaunch_line(wss, "cx", Some(id), None).unwrap().unwrap();
-        let resume = |id: &str| format!("command codex resume {id} -c a=b --dangerously-bypass-approvals-and-sandbox");
-        let id = "01a1b6a1-7c52-7461-96ad-2b987988a3f6";
-        let rollout = |first: &str| std::fs::write(day.join(format!("rollout-2026-11-07T15-29-58-{id}.jsonl")), format!("{first}\n{{\"type\":\"event_msg\"}}\n")).unwrap();
-        let meta = |provider: &str| format!(r#"{{"timestamp":"2026-11-07T15:29:58.000Z","type":"session_meta","payload":{{"id":"{id}","cli_version":"0.166.0","model_provider":"{provider}","base_instructions":"..."}}}}"#);
-        crate::backends::codex::set_test_version(Some("0.166.0"));
-        std::fs::write(codex.join("config.toml"), "model = \"gpt-6.1-sol\"\nmodel_provider = \"ust\"\n").unwrap();
-
-        rollout(&meta("ust"));
-        assert_eq!(line(id), resume(id), "same provider: the chat resumes");
-        assert_eq!(crate::backends::codex::resume_refusal(&home, id), None);
-        assert_eq!(resume_notice(wss, "cx", Some(id), None), None);
-
-        rollout(&meta("amazon-bedrock-runtime"));
-        assert_eq!(line(id), cmd, "a chat from another provider: fresh, never a dead resume");
-        let why = crate::backends::codex::resume_refusal(&home, id).expect("the reason");
-        assert!(why.contains("amazon-bedrock-runtime") && why.contains("ust"), "{why}");
-        // The room's reason comes from the same choice (board #74 AC1).
-        assert_eq!(resume_notice(wss, "cx", Some(id), None), Some(why.clone()));
-        assert_eq!(resume_notice(wss, "cx", Some(id), Some("omp")), None, "a backend switch says its own line");
-
-        // The managed profile can name the provider; it wins over config.toml.
-        std::fs::write(codex.join(crate::backends::shared::codex_profile_file()), "model_provider = \"amazon-bedrock-runtime\"\n").unwrap();
-        assert_eq!(line(id), resume(id), "the profile's provider is the current one");
-        std::fs::remove_file(codex.join(crate::backends::shared::codex_profile_file())).unwrap();
-
-        // No provider named anywhere: codex's default, openai.
-        std::fs::write(codex.join("config.toml"), "model = \"gpt-6.1-sol\"\n").unwrap();
-        rollout(&meta("openai"));
-        assert_eq!(line(id), resume(id), "both on the default provider");
-        std::fs::write(codex.join("config.toml"), "model_provider = \"ust\"\n").unwrap();
-
-        // Cannot tell: resume as today (AC2).
-        rollout("not json");
-        assert_eq!(line(id), resume(id), "an unreadable session_meta resumes as before");
-        rollout(r#"{"type":"session_meta","payload":{"id":"x"}}"#);
-        assert_eq!(line(id), resume(id), "a session_meta without a provider resumes as before");
-        std::fs::write(codex.join("config.toml"), "not = [toml").unwrap();
-        rollout(&meta("amazon-bedrock-runtime"));
-        assert_eq!(line(id), resume(id), "an unreadable config resumes as before");
-        std::fs::write(codex.join("config.toml"), "model_provider = \"ust\"\n").unwrap();
-
-        // The rule is codex's, measured on one version only.
-        crate::backends::codex::set_test_version(Some("0.167.0"));
-        assert_eq!(line(id), resume(id), "an unmeasured codex resumes as before");
-        crate::backends::codex::set_test_version(None);
-        assert_eq!(line(id), resume(id), "an unknown codex version resumes as before");
-        crate::backends::codex::set_test_version(Some("0.166.0"));
-        assert_eq!(line(id), cmd);
-        crate::backends::codex::set_test_version(None);
-    }
-
 
     /// Board #29 (measured on codex-cli 0.166.0): `/new` writes nothing a
     /// hook or the session index reports, but it creates
