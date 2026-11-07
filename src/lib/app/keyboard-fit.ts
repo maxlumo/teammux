@@ -50,15 +50,29 @@ export function webviewSizesForKeyboard(userAgent: string): boolean {
 }
 
 /**
- * Is the keyboard up, by the visual viewport against the CURRENT layout
- * viewport (board #56 round 3)? A WebView or browser that resizes the visual
- * viewport for the keyboard leaves `innerHeight` whole, so the difference is
- * the keyboard. A window that itself shrank (split screen, a rotation) shrinks
- * both, and is no keyboard. validator-2 measured the old rule, a remembered
- * maximum, reading a closed-keyboard window shrink 844 -> 640 as keyboard-open
- * and hiding the tab bar (WebView 144).
+ * Is the keyboard up (board #56 round 3, the orchestrator's rule)? Only while
+ * an editable element is focused, and then if the visual viewport is shorter
+ * than the CURRENT window (a WebView that resizes only the visual viewport,
+ * M139+), or the current window is shorter than `resting`, the height measured
+ * while nothing was focused, at the SAME width (index.html's
+ * interactive-widget=resizes-content shrinks both viewports). That resting
+ * height is the only remembered value, and one of another width (a rotation)
+ * is not compared. A window that shrank itself with nothing focused becomes the
+ * new resting height, so it never reads as a keyboard: validator-2 measured the
+ * old remembered-maximum rule hiding the tab bar on 844 -> 640 (WebView 144),
+ * and the current-window-only rule reading a resizes-content keyboard as
+ * closed.
  */
-export function viewportKeyboard(vvHeight: number, innerHeight: number, threshold: number): { open: boolean; kbHeight: number } {
-  const kb = innerHeight - vvHeight;
+export function viewportKeyboard(
+  vvHeight: number,
+  innerHeight: number,
+  innerWidth: number,
+  resting: { height: number; width: number } | null,
+  focused: boolean,
+  threshold: number,
+): { open: boolean; kbHeight: number } {
+  if (!focused) return { open: false, kbHeight: 0 };
+  const rest = resting && resting.width === innerWidth ? resting.height : 0;
+  const kb = Math.max(innerHeight, rest) - vvHeight;
   return kb > threshold ? { open: true, kbHeight: kb } : { open: false, kbHeight: 0 };
 }

@@ -1705,6 +1705,7 @@ test('only the desktop clears the legacy CSS zoom; Android keeps the zoom it app
 // Board #56 round 3: the visualViewport path reads the keyboard against the
 // current window, never a remembered maximum.
 test('the visualViewport path reads the keyboard against the current window (board #56 round 3)', () => {
-  assert.match(source, /const kb = viewportKeyboard\(h, window\.innerHeight, KB_OPEN_THRESHOLD\);/u);
+  assert.match(source, /const kb = viewportKeyboard\(h, window\.innerHeight, window\.innerWidth, resting, focused, KB_OPEN_THRESHOLD\);/u);
+  assert.match(source, /resting = \{ height: window\.innerHeight, width: window\.innerWidth \};/u, 'the resting height is taken with nothing focused, with its width');
   assert.doesNotMatch(source, /const kbOpen = h < fullHeight - KB_OPEN_THRESHOLD;/u, 'no remembered height decides it');
 });

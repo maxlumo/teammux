@@ -47,12 +47,22 @@ test('a WebView from M139 sizes for the keyboard itself; an older one, or an unk
 
 // Board #56 round 3, validator-2's measurement (note 15, WebView 144): a window
 // that shrank with the keyboard closed (844 -> 640) was read as keyboard-open
-// against the remembered 844, which hid the tab bar. Keyboard-open is the
-// visual viewport shorter than the CURRENT layout viewport, never a remembered
-// height.
-test('the keyboard is up only when the visual viewport is shorter than the current window', () => {
-  assert.deepEqual(viewportKeyboard(640, 640, 100), { open: false, kbHeight: 0 }, 'the window itself shrank: no keyboard');
-  assert.deepEqual(viewportKeyboard(844, 844, 100), { open: false, kbHeight: 0 });
-  assert.deepEqual(viewportKeyboard(565, 844, 100), { open: true, kbHeight: 279 }, 'the WebView shrank the visual viewport for the keyboard');
-  assert.deepEqual(viewportKeyboard(780, 844, 100), { open: false, kbHeight: 0 }, 'a difference inside the threshold is no keyboard');
+// against the remembered 844, which hid the tab bar. And its note 22: index.html
+// declares interactive-widget=resizes-content, so a keyboard can shrink BOTH
+// viewports (844 -> 544), which "visual shorter than the window" alone reads as
+// closed. One rule for both: the keyboard can only be up while a text input is
+// focused, and it is measured against the height the window had with nothing
+// focused (and against the current window, for a WebView that only shrinks
+// the visual viewport).
+test('the keyboard is up only while an editable is focused, against the window and the resting height at the same width', () => {
+  const rest = { height: 844, width: 390 };
+  assert.deepEqual(viewportKeyboard(640, 640, 390, { height: 640, width: 390 }, false, 100), { open: false, kbHeight: 0 }, 'the window itself shrank, nothing focused');
+  assert.deepEqual(viewportKeyboard(565, 844, 390, rest, true, 100), { open: true, kbHeight: 279 }, 'M139+: only the visual viewport shrank');
+  assert.deepEqual(viewportKeyboard(544, 544, 390, rest, true, 100), { open: true, kbHeight: 300 }, 'resizes-content: both shrank (validator-2 note 22)');
+  assert.deepEqual(viewportKeyboard(565, 844, 390, rest, false, 100), { open: false, kbHeight: 0 }, 'no focused editable: no keyboard');
+  assert.deepEqual(viewportKeyboard(844, 844, 390, rest, true, 100), { open: false, kbHeight: 0 }, 'focused, nothing shrank (a hardware keyboard)');
+  assert.deepEqual(viewportKeyboard(780, 844, 390, rest, true, 100), { open: false, kbHeight: 0 }, 'inside the threshold');
+  assert.deepEqual(viewportKeyboard(390, 390, 844, rest, true, 100), { open: false, kbHeight: 0 }, 'rotated: a resting height of another width is not compared');
+  assert.deepEqual(viewportKeyboard(150, 390, 844, rest, true, 100), { open: true, kbHeight: 240 }, 'rotated: the current window still counts');
+  assert.deepEqual(viewportKeyboard(544, 544, 390, null, true, 100), { open: false, kbHeight: 0 }, 'no resting height yet: only the current window');
 });

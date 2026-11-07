@@ -1024,9 +1024,12 @@
     let lastNativeKb = 0;
     let pendingNativeKb = 0;
     let pendingNativeTimer = 0;
+    // An EDITABLE element is focused: only then can a soft keyboard be up
+    // (board #56 round 3: a contenteditable editor counts as well).
     const hasFocusedTextInput = () => {
-      const activeTag = document.activeElement?.tagName;
-      return activeTag === 'TEXTAREA' || activeTag === 'INPUT';
+      const el = document.activeElement;
+      const activeTag = el?.tagName;
+      return activeTag === 'TEXTAREA' || activeTag === 'INPUT' || el?.isContentEditable === true;
     };
     // Board #56: with the keyboard closed the shell is the window's CURRENT
     // height (a remembered larger one cut the composer on the owner's phone),
@@ -1092,6 +1095,7 @@
     // the terminal's ResizeObserver refit on window resize.
     const isTouch = 'ontouchstart' in window || navigator.maxTouchPoints > 0;
     const vv = isTouch ? window.visualViewport : null;
+    let resting = hasFocusedTextInput() ? null : { height: window.innerHeight, width: window.innerWidth };
     const vpHandler = () => {
       // Android sizes the shell from its native height; a pan the WebView
       // makes afterwards (the keyboard up, the focused input revealed) is
@@ -1102,11 +1106,18 @@
       }
       if (!vv) return;
       const h = vv.height;
-      // Keyboard-open is the visual viewport shorter than the CURRENT window,
-      // never a remembered height (board #56 round 3: a window that shrank
-      // with no keyboard read as keyboard-open and hid the tab bar).
-      const kb = viewportKeyboard(h, window.innerHeight, KB_OPEN_THRESHOLD);
-      fullHeight = window.innerHeight;
+      // Keyboard-open only while a text input is focused, against the window's
+      // resting height (board #56 round 3: a window that shrank with nothing
+      // focused read as keyboard-open and hid the tab bar; a resizes-content
+      // keyboard shrinks both viewports).
+      const focused = hasFocusedTextInput();
+      // The resting height is the window with nothing focused (no keyboard can
+      // be up then), with its width: a window that shrank itself becomes it.
+      if (!focused) {
+        resting = { height: window.innerHeight, width: window.innerWidth };
+        fullHeight = window.innerHeight;
+      }
+      const kb = viewportKeyboard(h, window.innerHeight, window.innerWidth, resting, focused, KB_OPEN_THRESHOLD);
       document.documentElement.style.setProperty('--app-height', h + 'px');
       document.documentElement.classList.toggle('keyboard-open', kb.open);
       // After layout, shift terminal so cursor stays visible
