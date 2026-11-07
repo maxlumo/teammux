@@ -1305,7 +1305,7 @@ async fn main() {
                 fail(EXIT_USAGE, "--def must be valid JSON");
             }
             let description = flags.get("description").cloned().flatten().unwrap_or_default();
-            let r = rpc_needing(&ctx, MCP_MASKED, "teams_save", json!({ "def": { "name": name, "description": description, "members": members } })).await;
+            let r = rpc_needing(&ctx, tmux_mobile::server::definition_save_cap(&members), "teams_save", json!({ "def": { "name": name, "description": description, "members": members } })).await;
             if ctx.json { println!("{r}"); } else { println!("✓ saved team {name} ({} members)", r.get("members").and_then(|v| v.as_u64()).unwrap_or(0)); print_unapplied(&r); }
         }
         ("teams", rest) if rest.first().map(String::as_str) == Some("delete") => {
@@ -1631,7 +1631,7 @@ async fn main() {
             };
             let backend = flags.get("backend").cloned().flatten().unwrap_or_default();
             let def = registry_def(&name, &backend, &flags);
-            let r = rpc_needing(&ctx, MCP_MASKED, "registry_save", json!({ "def": def })).await;
+            let r = rpc_needing(&ctx, tmux_mobile::server::definition_save_cap(&def.to_string()), "registry_save", json!({ "def": def })).await;
             if ctx.json { println!("{r}"); } else { println!("✓ saved {name}"); print_unapplied(&r); }
         }
         ("skills", rest) if rest.first().map(String::as_str) == Some("list") => {
@@ -3131,6 +3131,7 @@ async fn try_rpc(ctx: &Ctx, method: &str, params: Value) -> Result<Value, (i32, 
 /// `"<set>"` on save. An older one prints the values and would store the
 /// marker as a literal, so tmm sends none of the six to it.
 const MCP_MASKED: &str = "mcp_masked";
+
 
 /// The list row's tail for an issue that is still blocked (board #43):
 /// ` · blocked by #38`. An issue whose blockers are all done says nothing.
@@ -4899,6 +4900,7 @@ old — X []
         assert_eq!(pos, vec!["registry", "save"]);
         assert_eq!(registry_def("dev", "kiro", &flags)["input_mode"], "steer", "a given mode is sent");
         assert_eq!(registry_def("dev", "kiro", &flags)["omp_tools"], true, "#72: --omp-tools is valued too");
+        assert_eq!(tmux_mobile::server::definition_save_cap(&registry_def("dev", "kiro", &flags).to_string()), "omp_tools", "#72 R1");
     }
 
     /// Board #432: `--from` is a VALUED flag (else its name fell out as a positional and the

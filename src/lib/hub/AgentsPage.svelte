@@ -20,6 +20,7 @@
   import ConfirmDialog from '../ui/ConfirmDialog.svelte';
   import CommandButton from '../ui/CommandButton.svelte';
   import Switch from '../ui/Switch.svelte';
+  import { OMP_TOOLS, lacksCap } from '../core/login-caps.ts';
   import CheckboxGroup from '../ui/CheckboxGroup.svelte';
   import { activeModal } from '../ui/modal.ts';
   import { configFingerprint, configPayload, configValid } from './config-draft.ts';
@@ -80,6 +81,9 @@
   // phone's Settings row reads too (backends-view.ts). A reconnect (caps
   // unknown) keeps it; a server known to lack it has no entry.
   const backendsCap = watchBackendsCap(() => guardOwner);
+  // omp's own-tools switch (#72) only where the server keeps it; one known to lack it says so.
+  let caps = $state(guardOwner?.connection?.getCaps?.());
+  $effect(() => { const off = guardOwner?.connection?.onCaps?.((c) => { caps = c; }); return typeof off === 'function' ? off : undefined; });
   const CATS = $derived([
     { id: 'global', label: 'agentsGlobal', hint: 'settingsGlobalHint', count: null },
     { id: 'agents', label: 'agentsTitle', hint: 'settingsAgentsHint', count: () => String(defs.length) },
@@ -870,8 +874,10 @@
 <!-- omp's own tools (board #72): one switch, off by default, on the
      definition and an inline member agent; a derived member takes its base's. -->
 {#snippet ompToolsField(draft, backend = draft.backend)}
-  {#if backend === 'omp'}
+  {#if backend === 'omp' && caps?.includes(OMP_TOOLS)}
     <div class="config-field"><Switch checked={draft.omp_tools === true} label={t('agentsOmpTools')} disabled={saving || removing} onchange={(on) => { draft.omp_tools = on; }} /></div>
+  {:else if backend === 'omp' && lacksCap(caps, OMP_TOOLS)}
+    <p class="hint">{t('agentsOmpToolsOld')}</p>
   {/if}
 {/snippet}
 {#snippet inputModeHint(draft, inherited = null)}

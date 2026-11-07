@@ -42,6 +42,11 @@ export const BOARD_BLOCKS = 'board_blocks';
  * success, so the Board offers no agreement without this. */
 export const BOARD_AGREEMENT = 'board_agreement';
 
+/** A definition keeps `omp_tools`, omp's own plan/ask/goal/out switch (board #72). An older
+ * server ignores the key and saves the rest, which reads as a success while its omp keeps its
+ * own defaults, so the switch is offered, and a save carrying it sent, only when announced. */
+export const OMP_TOOLS = 'omp_tools';
+
 /** What an older server lacking a capability means for the person, per cap. */
 const TOO_OLD: Record<string, string> = {
   [BOARD_DISPATCH]: 'This server is older than the app. Update the server to assign.',
@@ -51,6 +56,7 @@ const TOO_OLD: Record<string, string> = {
   [AGENT_TEAM]: 'This server is older than the app. Update the server to move an agent between teams.',
   [HUB_FILES]: 'This server is older than the app. Update the server to list files.',
   [MCP_MASKED]: 'This server is older than the app and shows MCP secrets. Update the server to see or edit agent, team and MCP definitions.',
+  [OMP_TOOLS]: 'This server is older than the app. Update the server to choose omp\u2019s own tools.',
 };
 
 /** A login answer's `caps`: the plain, non-empty strings in it, or `[]` for an

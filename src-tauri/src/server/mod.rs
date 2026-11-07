@@ -51,9 +51,25 @@ pub type NotificationHub = Arc<AgentNotificationHub>;
 /// needs one refuses the write instead of saving a label nobody acts on. The
 /// phone's server has no Hub, so it announces none.
 #[cfg(not(any(target_os = "android", target_os = "ios")))]
-pub(crate) const LOGIN_CAPS: &[&str] = &["board_dispatch", "board_notify", "spawn_join", "agent_team", "hub_files", "mcp_masked", "backends_check", "board_blocks", "board_agreement", "command_when_idle"];
+pub(crate) const LOGIN_CAPS: &[&str] = &["board_dispatch", "board_notify", "spawn_join", "agent_team", "hub_files", "mcp_masked", "backends_check", "board_blocks", "board_agreement", "command_when_idle", "omp_tools"];
 #[cfg(any(target_os = "android", target_os = "ios"))]
 pub(crate) const LOGIN_CAPS: &[&str] = &[];
+
+/// The capability a definition save needs (`tmm registry save`, `tmm teams save`): one whose
+/// JSON names `omp_tools` needs a server that keeps it (board #72), since an older one drops the
+/// key and says saved; every other save needs the masking server (#451).
+pub fn definition_save_cap(def_json: &str) -> &'static str {
+    if def_json.contains("\"omp_tools\"") { "omp_tools" } else { "mcp_masked" }
+}
+
+#[cfg(test)]
+#[test]
+fn a_definition_naming_omp_tools_needs_the_server_that_keeps_it() {
+    assert_eq!(definition_save_cap(r#"{"name":"dev","omp_tools":true}"#), "omp_tools");
+    assert_eq!(definition_save_cap(r#"[{"name":"w","agent":{"backend":"omp","omp_tools":false}}]"#), "omp_tools", "an explicit off, too");
+    assert_eq!(definition_save_cap(r#"{"name":"dev"}"#), "mcp_masked");
+    assert!(LOGIN_CAPS.is_empty() || LOGIN_CAPS.contains(&"omp_tools"), "this server announces it");
+}
 
 // ─── RoomPoster implementation ───────────────────────────────────────────────
 // The notification hub needs to post into project rooms from the hook consumer

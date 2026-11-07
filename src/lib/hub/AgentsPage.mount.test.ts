@@ -1324,6 +1324,7 @@ test('omp’s own tools are one switch, shown only for omp, off by default, save
     modules: [rpc({
       registryList: async () => ({ agents: [{ ...alpha, name: 'om', backend: 'omp' }, { ...alpha, name: 'cc', backend: 'claude' }] }),
       registrySave: async (value: unknown) => { writes.push(value); },
+      getCaps: () => ['mcp_masked', 'omp_tools'],
     })],
   });
   const sw = () => app.document.querySelector<HTMLButtonElement>('[role=switch][aria-label^="omp’s own tools"]');
@@ -1338,5 +1339,18 @@ test('omp’s own tools are one switch, shown only for omp, off by default, save
     command(app, 'Save').click();
     for (let i = 0; i < 5 && !writes.length; i++) await app.flush();
     assert.equal(writes[0]?.omp_tools, true);
+  } finally { await app.close(); }
+});
+
+test('a server that does not keep omp\u2019s own-tools switch is not offered it, and says to update (#72 R1)', async context => {
+  const fixture = await hostFixture();
+  const app = await fixture.mount(context, {
+    props: { ready: () => {}, backends: [{ name: 'omp', icon: '/assets/omp.svg', color: '--backend-omp', efforts: [], input_modes: false }] },
+    modules: [rpc({ registryList: async () => ({ agents: [{ ...alpha, name: 'om', backend: 'omp' }] }), getCaps: () => ['mcp_masked'] })],
+  });
+  try {
+    await openAgent(app, 'om');
+    assert.equal(app.document.querySelector('[role=switch][aria-label^="omp\u2019s own tools"]'), null, 'no switch the server would drop');
+    assert.ok([...app.document.querySelectorAll('.editor .hint')].some(h => /older than the app.*omp\u2019s own tools/u.test(h.textContent ?? '')), 'it says why');
   } finally { await app.close(); }
 });

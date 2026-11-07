@@ -46,3 +46,19 @@ test('a server that says mcp_masked is asked, and a switch to one that does not 
   await assert.rejects(() => api.registryList(), (e: any) => e.code === 'login_pending', 'an unanswered login is a wait, never a yes');
   assert.equal(sent.length, 6);
 });
+
+test('a save turning omp’s own tools on goes only to a server that keeps the switch (#72 R1)', async () => {
+  const def = (omp_tools: boolean) => ({ name: 'o', backend: 'omp', model: '', effort: '', omp_tools, system: '', skills: '[]', mcp: '[]' } as never);
+  const team = (omp_tools: boolean) => ({ name: 't', description: '', members: JSON.stringify([{ name: 'w', agent: { backend: 'omp', omp_tools } }]) } as never);
+  const old = wire(['mcp_masked']);
+  await assert.rejects(() => old.api.registrySave(def(true)), (e: any) => e.code === 'server_too_old' && /omp’s own tools/u.test(e.message));
+  await assert.rejects(() => old.api.teamsSave(team(true)), (e: any) => e.code === 'server_too_old');
+  assert.deepEqual(old.sent, [], 'an older server is never told an ON it would drop');
+  await old.api.registrySave(def(false));
+  await old.api.teamsSave(team(false));
+  assert.deepEqual(old.sent, ['registry_save', 'teams_save'], 'off is what an older server does anyway: other edits still save');
+  const current = wire(['mcp_masked', 'omp_tools']);
+  await current.api.registrySave(def(true));
+  await current.api.teamsSave(team(true));
+  assert.deepEqual(current.sent, ['registry_save', 'teams_save']);
+});
