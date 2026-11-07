@@ -26,7 +26,7 @@
   import { excerptOf, highlight, lineSuffix, pathParts, SEARCH_MAX_TERMS, searchTerms, type FileHit, type SearchHit } from './hub-search.ts';
   import type { HubSearch } from './hub-search.svelte.ts';
 
-  let { search, projectName = (room: string) => room, agentName = (name: string, _room?: string) => name, onjump = (_hit: Pick<SearchHit, 'room' | 'id' | 'seq'>) => {}, onopenfile = (_file: FileHit) => {}, onclearagent = () => {} }: {
+  let { search, projectName = (room: string) => room, agentName = (name: string, _room?: string) => name, onjump = (_hit: Pick<SearchHit, 'room' | 'id' | 'seq'>) => {}, onopenfile = (_file: FileHit) => {}, onclearagent = () => {}, mine = false, ontogglemine = () => {} }: {
     search: HubSearch;
     /** The project a room belongs to, for a hit found in ALL rooms. */
     projectName?: (room: string) => string;
@@ -40,6 +40,11 @@
      * the Hub's, so removing it is the Hub's act (the same toggle the card's
      * menu and its double-click use). */
     onclearagent?: () => void;
+    /** "Only mine" is the reading filter (board #289); the box offers it as
+     * its first scope (#73), because the title menu was its only door and
+     * the owner did not find it. On and off are the Hub's one toggle. */
+    mine?: boolean;
+    ontogglemine?: () => void;
   } = $props();
 
   let barEl = $state<HTMLElement | null>(null);
@@ -193,6 +198,7 @@
       <span class="sr-tools compact-tools">
         <Segmented options={modes} value={search.mode} onchange={(m) => search.setMode(m)} ariaLabel={t('hubSearchModes')} />
         {#if search.status === 'error' && search.error !== 'too-many' && search.error !== 'files-unsupported'}<CommandButton variant="secondary" label={t('hubSearchRetry')} onclick={() => search.retry()} />{/if}
+        <CommandButton variant="secondary" label={t('hubOnlyMine')} pressed={mine} onclick={() => { inputEl?.focus({ preventScroll: true }); ontogglemine(); }} />
         <CommandButton variant="secondary" label={t('hubSearchAllRooms')} pressed={search.scope === 'all'}
           onclick={() => search.setScope(search.scope === 'all' ? 'room' : 'all')} />
       </span>
@@ -273,8 +279,12 @@
     max-width: var(--pop-maxw, none);
     max-height: min(520px, calc(100vh / var(--ui-zoom, 1) - 16px), var(--pop-maxh, 100vh)); overflow-y: auto;
   }
-  .sr-head { display: flex; align-items: center; justify-content: space-between; gap: var(--menu-item-gap); }
-  .sr-status { min-width: 0; color: var(--text2); font-size: var(--fs-meta); }
+  /* The tools wrap under the status when both do not fit (#73: with Only mine
+     the phone's row squeezed the hint to one letter per line); the status
+     keeps its sentence's width as its basis, so it wraps as a line, never per
+     character. */
+  .sr-head { display: flex; flex-wrap: wrap; align-items: center; justify-content: space-between; gap: var(--menu-item-gap); }
+  .sr-status { flex: 1 1 auto; min-width: 0; color: var(--text2); font-size: var(--fs-meta); }
   .sr-tools { display: flex; align-items: center; gap: var(--ui-gap); flex: none; }
   .sr-notice { margin: 0 var(--menu-item-padding-x) var(--menu-item-padding-y); }
   .sr-label, .sr-more { padding: 0 var(--menu-item-padding-x); color: var(--text3); font-size: var(--fs-micro); }

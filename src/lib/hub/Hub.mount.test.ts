@@ -6527,3 +6527,40 @@ test('Rename on the card menu opens one dialog: the label goes to the server, a 
     assert.deepEqual(texts(app.document, '.m-who'), ['alice', 'bob']);
   } finally { await app.close(); }
 });
+
+test('Only mine is one visible button in the search box, on and off, the same filter as the title menu’s (#73)', { timeout: 60000 }, async (context) => {
+  const now = Date.now();
+  const message = (seq: number, from: string, body: string, to: string[] = []) => ({ id: `m${seq}`, seq, room: 'proj:fixture', from, ts: now - 1000 + seq, body, kind: 'msg', to });
+  const { rpc } = labelled({
+    hubLog: async () => ({ messages: [
+      message(1, 'human', '@alice look at the build'),
+      message(2, 'alice', 'build is green', ['human']),
+      message(3, 'bob', '@alice agent chatter'),
+    ], has_more: false }),
+    hubSearch: async () => ({ messages: [] }),
+  });
+  const app = await (await compiledHub()).mount(context, {
+    props: { visible: true },
+    setup(window) { window.Element.prototype.getAnimations = () => []; window.HTMLCanvasElement.prototype.getContext = () => null; },
+    modules: [rpc],
+  });
+  try {
+    await settleHub(app);
+    const bodies = () => texts(app.document, '.msg .m-body').map((b) => b?.split('\n')[0]);
+    assert.equal(bodies().length, 3);
+    app.document.querySelector<HTMLButtonElement>('.head-tools button[aria-label="Search messages"]')!.click();
+    await settleHub(app);
+    const mine = () => [...app.document.querySelectorAll<HTMLButtonElement>('.search-panel button')].find((b) => b.textContent?.trim() === 'Only mine');
+    assert.ok(mine(), 'the open search box offers Only mine without a query');
+    assert.equal(mine()!.getAttribute('aria-pressed'), 'false');
+    mine()!.click();
+    await settleHub(app);
+    assert.deepEqual(bodies(), ['@alice look at the build', 'build is green'], 'my words and what is recorded to me, not the agents’ chatter');
+    assert.equal(mine()!.getAttribute('aria-pressed'), 'true');
+    assert.ok(app.document.querySelector('.search-token'), 'the box wears the filter as its scope');
+    mine()!.click();
+    await settleHub(app);
+    assert.equal(bodies().length, 3, 'the same button leaves it');
+    assert.equal(app.document.querySelector('.search-token'), null);
+  } finally { await app.close(); }
+});

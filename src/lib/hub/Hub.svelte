@@ -2765,7 +2765,7 @@
           controls={mobile || compact || !drawerShown ? undefined : drawerId}
           onclick={() => termOpen && drawerView === 'term' && !compact ? closeDrawer() : (drawerView = 'term', openDrawer())} />
         </div>
-        <HubSearch {search} projectName={(room) => roomProjectName(rows, room)} agentName={filterName} onjump={jumpToHit} onopenfile={openFileHit} onclearagent={() => setFilter('', 'user')} />
+        <HubSearch {search} projectName={(room) => roomProjectName(rows, room)} agentName={filterName} onjump={jumpToHit} onopenfile={openFileHit} onclearagent={() => setFilter('', 'user')} mine={filterAgent === HUMAN} ontogglemine={() => toggleFilter(HUMAN)} />
         {#if headerCopyFeedback && headerCopyAnchor}
           <div class="header-copy-feedback pop-layer" use:feedbackPosition={{ trigger: headerCopyAnchor, bounds: headerCopyAnchor.closest('main'), keepClear: headerCopyAnchor.closest('.chat-head') }}>
             <OperationFeedback value={headerCopyFeedback} ondismiss={headerCopyFeedback.kind === 'error' ? headerCopyLifetime.clear : undefined} />
