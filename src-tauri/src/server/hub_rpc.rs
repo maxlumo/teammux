@@ -254,9 +254,9 @@ fn dispatch_hub(req: &Request, notifications: Option<&crate::agent_notifications
                 }
                 // A window a restore made and has not seen ready (board #422
                 // round 3) may still be a shell: a /word typed there runs a
-                // path. Refused for that window, like a refused typing.
-                if crate::projects::restore_hold::held(session, &pane.window_name) {
-                    refused.push(format!("{}: restoring, not ready", pane.window_name));
+                // path. Refused for that window, like a refused typing; so is one whose CLI exited to it (#77).
+                if crate::projects::restore_hold::held(session, &pane.window_name) || crate::projects::exited::not_running(session, &pane.window_name) {
+                    refused.push(format!("{}: {}", pane.window_name, if crate::projects::exited::not_running(session, &pane.window_name) { crate::projects::exited::held_reason(session, &pane.window_name) } else { "restoring, not ready".to_string() }));
                     continue;
                 }
                 // The receipt, recorded BEFORE typing like every delivery:

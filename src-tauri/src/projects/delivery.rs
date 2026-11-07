@@ -407,8 +407,8 @@ fn strict_occupied(session: &str, window: &str) -> Option<bool> {
     // A window being restarted (board #38 round 1) is occupied until its
     // screen PROVES the new CLI ready: its pane may still be the shell the
     // launch line is typed into (validator: a held line typed there gave
-    // `zsh: bad pattern: [tmm` and codex never started).
-    if starting(session, window) {
+    // `zsh: bad pattern: [tmm`); so is one whose CLI exited to it (#77).
+    if starting(session, window) || super::exited::not_running(session, window) {
         return Some(true);
     }
     let (backend, _) = recipe_mode(session, window)?;
@@ -1078,7 +1078,7 @@ fn deliver_gated(
     if may_release(known, busy, strict.is_some(), &held) {
         flush_locked(session, window, target, steered.then_some(behind), Some(&_order));
     } else if strict.is_some() {
-        warn_if_overdue(session, window);
+        if super::exited::not_running(session, window) { telemetry::record_held_blocked(session, window, &telemetry::held_rows(session, window), &super::exited::held_reason(session, window)) } else { warn_if_overdue(session, window) }
     }
     true
 }
