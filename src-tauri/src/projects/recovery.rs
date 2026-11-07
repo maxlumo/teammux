@@ -945,7 +945,7 @@ pub fn check_once() {
                 // notice (#39); any other error the CLI ended the turn on is
                 // plain rest, said to nobody (board #52, #354).
                 match found {
-                    (turn, Some(text)) => commit_provider(&project.session, &p.window_name, (turn, text), seen),
+                    (turn, Some(text)) => commit_provider(&project.session, &p.window_name, (turn, super::model_refused::named(&project.session, &p.window_name, &text)), seen),
                     (turn, None) => commit_failed(&project.session, &p.window_name, &turn, seen),
                 };
                 continue;

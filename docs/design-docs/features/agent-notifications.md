@@ -425,13 +425,22 @@ Hub said why. validator's codex 0.166.0 recorded each refused turn as a
 {"message":"The provided model identifier is invalid.",…}}`, with
 `codex_error_info: "other"` and no status, so it was read as ordinary.
 `MODEL_PHRASES` holds that measured sentence, and `model_rejected` reads it.
-It counts with no status or with a 400 or 404, never against a 429 or 5xx.
-codex's reader also names the model: the refused turn's own `turn_context`
-line carries `model` (`gpt-6.1-sol` there), so the text the status and the
-one notice carry is `model gpt-6.1-sol: <the provider's message>`. The
-hook backends (claude, kimi, omp) read the same sentence through the same
-predicate, but their payloads carry no model, so their notice is the
-provider's message alone (not measured on a real refusal). `rate_limit`, `server_error`, `max_output_tokens` and
+It counts with no status or with a 400 or 404, never against a 429 or 5xx,
+whether the CLI gives that status or the text writes it (validator note 10:
+a `503 …` in the message used to let the phrase win; the status in the text
+is read first). The text the status and the one notice carry names the
+model: `model <id>: <the provider's message>`. The id is the one the agent
+was LAUNCHED with, read from what its render wrote, so a later edit of the
+definition never relabels a CLI still running on the old model (validator
+note 14, orchestrator 20:20): codex's managed profile
+(`<home>/codex/tmm-agent.config.toml`, `model`), and for claude, kimi and omp
+the `--model` / `-m` on the recipe's launch line
+(`projects::model_refused`). When the render named none it says
+`model (its backend's default): …`. codex's reader puts the refused turn's
+own `turn_context` model in front first when its rollout tail holds it
+(`gpt-6.1-sol` there), because that follows a `/model`; the launched model is
+the fallback for every backend, at the hook path and the capture tick alike.
+claude, kimi and omp were not measured on a real model refusal. `rate_limit`, `server_error`, `max_output_tokens` and
 every other failure retry by themselves, so they stay an ordinary failed end
 with no notice (#354). A known limit, accepted by validator and the
 orchestrator: with NO explicit status, a status written in another form is

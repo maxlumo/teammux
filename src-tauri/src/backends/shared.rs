@@ -678,9 +678,10 @@ pub(crate) fn provider_failure(status: Option<u16>, kind: Option<&str>, text: &s
     // a retryable 429 or 5xx is never overridden by a number or a phrase in
     // the text. With none, claude's kind enum, then a number in a STATUS
     // POSITION, then the measured sentences.
-    // A rejected model id (#65) is a person's under any status that is not
-    // retryable: codex records it with none, a gateway may answer 400 or 404.
-    let model = MODEL_PHRASES.iter().any(|p| lower.contains(p));
+    // A rejected model id (#65) is a person's under a 400, a 404 or no status:
+    // codex records it with none, a gateway may answer 400 or 404. A status
+    // WRITTEN in the text is read first, so a 429 or 5xx there stays ordinary.
+    let model = MODEL_PHRASES.iter().any(|p| lower.contains(p)) && status_in_text(&lower).is_none_or(|s| matches!(s, 400 | 404));
     let person = match status {
         Some(s) => PERSON_STATUSES.contains(&s) || (model && matches!(s, 400 | 404)),
         None => model
@@ -960,6 +961,11 @@ mod tests {
         assert!(provider_failure(None, Some("APIStatusError"), "Error code: 400 - The provided model identifier is invalid.").is_some(), "kimi's shape");
         assert_eq!(provider_failure(Some(429), None, bedrock), None, "a retryable status still wins");
         assert_eq!(provider_failure(Some(400), None, "bad request"), None, "a bare 400 stays ordinary");
+        // Validator note 10: a retryable status WRITTEN in the text is read
+        // before the phrase, so a 429 or 5xx stays an ordinary retryable end.
+        assert_eq!(provider_failure(None, None, "503 Service Unavailable: The provided model identifier is invalid."), None);
+        assert_eq!(provider_failure(None, None, "unexpected status 429 Too Many Requests: The provided model identifier is invalid."), None);
+        assert!(provider_failure(None, None, "Error code: 400 - The provided model identifier is invalid.").is_some(), "a 400 in the text is still a person's");
         assert!(!model_rejected("invalid API key"));
     }
 

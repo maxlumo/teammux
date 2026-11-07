@@ -5,15 +5,8 @@ use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex};
 
+mod payload;
 const MAX_INBOX_BYTES: u64 = 256 * 1024;
-/// The ceiling on one hook envelope that is still READ (board #65 item 1).
-/// Over MAX_INBOX_BYTES it used to be refused whole, losing the turn's end
-/// and reply with only a server log line; up to this it is consumed like any
-/// other (the reply is cut at MAX_STORED_REPLY_BYTES with its marker). Past
-/// it the room says so once. 8 MiB is 32 times the bound and about 570
-/// times the largest real reply measured (14 634 chars, #42), so only a
-/// runaway reaches it, and it bounds what one read can hold in memory.
-const MAX_HOOK_PAYLOAD_BYTES: u64 = 8 * 1024 * 1024;
 /// The ONE bound on a stored final reply (board #42 AC2): 256 KiB, the bound
 /// every hook payload already has (`MAX_INBOX_BYTES`), so a hook-sourced
 /// reply never meets it and only a runaway fallback read can. The largest
@@ -392,34 +385,6 @@ impl AgentNotificationHub {
         kept_summary(kept, oldest);
     }
 
-    /// A hook envelope past MAX_HOOK_PAYLOAD_BYTES is not read (board #65
-    /// item 1), so its turn's end and reply are lost: the room says so once,
-    /// as the agent's own `[tmm]` line to the human. Its pane is read from the
-    /// envelope's head, which the helper always writes first and in plain
-    /// characters (`{"backend":"…","pane_id":"%N",…`); a pane that does not
-    /// resolve to a managed window says nothing (the server log still does).
-    #[cfg(not(any(target_os = "android", target_os = "ios")))]
-    fn say_runaway(&self, path: &Path, bytes: u64) {
-        use std::io::Read;
-        let mut head = [0u8; 256];
-        let got = std::fs::File::open(path).and_then(|mut f| f.read(&mut head)).unwrap_or(0);
-        let head = String::from_utf8_lossy(&head[..got]);
-        let Some(pane) = head.split("\"pane_id\":\"").nth(1).and_then(|t| t.split('"').next()) else { return };
-        let Ok((session, window, _)) = tmux::resolve_pane_id(pane) else { return };
-        if crate::projects::managed_home(&session, &window).is_none() {
-            return;
-        }
-        let Some(poster) = self.state.lock().unwrap().poster.clone() else { return };
-        let body = format!(
-            "[tmm] a hook payload of {:.1} MiB was over the {} MiB limit and was not read: this turn's end and reply were not recorded",
-            bytes as f64 / (1024.0 * 1024.0),
-            MAX_HOOK_PAYLOAD_BYTES / (1024 * 1024)
-        );
-        if let Err(e) = poster.post_final(&session, &window, &body, &[crate::address::HUMAN.to_string()]) {
-            eprintln!("⚠  the oversized-payload notice of {session}:{window} was not recorded in the room: {e}");
-        }
-    }
-
     fn consume_file(
         &self,
         path: &Path,
@@ -427,15 +392,10 @@ impl AgentNotificationHub {
         #[cfg_attr(any(target_os = "android", target_os = "ios"), allow(unused_variables))] unavailable: &mut Option<String>,
     ) -> Result<(), Consume> {
         let metadata = std::fs::metadata(path).map_err(|e| e.to_string())?;
-        if metadata.len() > MAX_HOOK_PAYLOAD_BYTES {
-            #[cfg(not(any(target_os = "android", target_os = "ios")))]
-            self.say_runaway(path, metadata.len());
-            return Err(format!("payload too large ({} bytes, over the {} MiB limit)", metadata.len(), MAX_HOOK_PAYLOAD_BYTES / (1024 * 1024)).into());
-        }
+        // Past the read ceiling only its head is read, and it is judged like any other (#65).
+        let oversized = metadata.len() > payload::MAX_HOOK_PAYLOAD_BYTES;
         #[cfg_attr(any(target_os = "android", target_os = "ios"), allow(unused_mut))]
-        let mut envelope: InboxEnvelope =
-            serde_json::from_slice(&std::fs::read(path).map_err(|e| e.to_string())?)
-                .map_err(|e| format!("invalid envelope: {e}"))?;
+        let mut envelope: InboxEnvelope = if oversized { payload::head_envelope(path)? } else { payload::whole_envelope(path)? };
         envelope.produced = produced_ns(path);
         // Whose pane is this, and does it exist THERE? (board #425) ONE tmux response answers
         // both for this envelope alone, and its result is what every later step uses.
@@ -472,6 +432,7 @@ impl AgentNotificationHub {
         if let Some(hook) = AFTER_ATTRIBUTED.with(|h| h.borrow_mut().take()) {
             hook();
         }
+        if oversized { return Err(payload::refuse(self, &envelope, metadata.len())); }
         #[cfg(not(any(target_os = "android", target_os = "ios")))]
         if let Some(seq) = envelope.payload.get("tmm_seq").and_then(Value::as_u64) {
             let pane = envelope.pane_id.clone();
@@ -784,7 +745,7 @@ impl AgentNotificationHub {
             // on a different end.
             // (Under a restore generation, its row is the hold's acceptance too.)
             let _ = match &normalized.provider_error {
-                Some(text) => crate::projects::telemetry::record_provider_failure(&session, &window, text),
+                Some(text) => crate::projects::telemetry::record_provider_failure(&session, &window, &crate::projects::model_refused::named(&session, &window, text)),
                 None => crate::projects::telemetry::record_notification_with(&session, &window, &normalized.kind, normalized.quality),
             };
             // A turn edge (stop, ask) means the CLI just repainted its footer —
@@ -901,9 +862,9 @@ impl AgentNotificationHub {
     /// already redacted (`shared::provider_failure`).
     #[cfg(not(any(target_os = "android", target_os = "ios")))]
     fn provider_failure_notice(&self, session: &str, window: &str, normalized: &Normalized) -> Option<String> {
-        let text = normalized.provider_error.as_deref()?;
+        let text = crate::projects::model_refused::named(session, window, normalized.provider_error.as_deref()?);
         crate::projects::managed_home(session, window)?;
-        Some(provider_notice_body(text))
+        Some(provider_notice_body(&text))
     }
 
     pub fn helper_command(&self, backend: &str) -> String {
@@ -2515,87 +2476,6 @@ mod tests {
         assert_eq!(typed.len(), 1, "{typed:?}");
         assert!(typed[0].ends_with(&format!("(whole reply: tmm log --seq {})", row["seq"])), "{}", &typed[0][typed[0].len() - 60..]);
         assert!(!typed[0].contains("PENTESTER-VERDICTS"), "the typed line keeps its budget");
-    }
-
-    /// Board #65 item 1: a hook payload over the inbox bound used to be
-    /// refused whole ("payload too large"), losing that turn's end AND its
-    /// reply with only a server log line. Up to MAX_HOOK_PAYLOAD_BYTES it is
-    /// consumed like any other: the turn ends and the reply is stored cut
-    /// with its marker. Past that it is refused, and the room says so once.
-    #[test]
-    fn an_oversized_hook_payload_still_ends_its_turn_and_a_runaway_one_is_said() {
-        crate::projects::tests::use_test_store();
-        let session = format!("tmm-big-{}", uuid::Uuid::new_v4());
-        let ws = crate::config::test_scratch("tmm-big-ws");
-        struct Teardown(String, Vec<std::path::PathBuf>);
-        impl Drop for Teardown {
-            fn drop(&mut self) {
-                let _ = std::process::Command::new("tmux").args(["kill-session", "-t", &format!("={}", self.0)]).stderr(std::process::Stdio::null()).status();
-                for d in &self.1 {
-                    let _ = std::fs::remove_dir_all(d);
-                }
-            }
-        }
-        std::fs::create_dir_all(ws.join(".tmm/agents/dev")).unwrap();
-        std::fs::write(ws.join(".tmm/agents/dev/launch.json"), "{}").unwrap();
-        let created = std::process::Command::new("tmux")
-            .args(["new-session", "-d", "-s", &session, "-n", "dev", "-c", &ws.to_string_lossy(), "sleep 60"])
-            .status()
-            .map(|s| s.success())
-            .unwrap_or(false);
-        if !created {
-            eprintln!("no tmux server — skipping");
-            let _ = std::fs::remove_dir_all(&ws);
-            return;
-        }
-        let root = crate::config::test_scratch("tmm-big-hub");
-        let _teardown = Teardown(session.clone(), vec![ws.clone(), root.clone()]);
-        assert!(crate::projects::adopt(&session, Some("big-test")).is_ok(), "the project is adopted");
-        let pane_id = String::from_utf8(
-            std::process::Command::new("tmux").args(["display-message", "-p", "-t", &session, "#{pane_id}"]).output().unwrap().stdout,
-        ).unwrap().trim().to_string();
-        struct Real;
-        impl RoomPoster for Real {
-            fn post_final(&self, session: &str, agent: &str, body: &str, reply_to: &[String]) -> Result<(), String> {
-                crate::server::post_final_for_test(session, agent, body, reply_to, |_, _| {})
-            }
-        }
-        let hub = AgentNotificationHub::load_at(root.clone());
-        hub.set_room_poster(std::sync::Arc::new(Real));
-        let (_, win, _) = crate::tmux::resolve_pane_id(&pane_id).expect("pane resolves");
-        let inbox = root.join("inbox");
-        std::fs::create_dir_all(&inbox).unwrap();
-        let mut n = 0;
-        let mut feed = |payload: Value| {
-            n += 1;
-            let bytes = serde_json::to_vec(&json!({"backend": "claude", "pane_id": pane_id, "payload": payload})).unwrap();
-            std::fs::write(inbox.join(format!("{n}-ev.json")), &bytes).unwrap();
-            hub.consume_inbox();
-            bytes.len()
-        };
-        let rows = || {
-            let page = crate::projects::rooms::history_page(&crate::projects::rooms::session_room(&session), None, 10);
-            page["messages"].as_array().unwrap().iter().map(|m| m["body"].as_str().unwrap_or("").to_string()).collect::<Vec<_>>()
-        };
-        let status = || crate::projects::telemetry::derive(&session, "dev", 0);
-
-        // 1. 300 KiB of reply: over the old 256 KiB inbox bound.
-        let asked = "[tmm chat 2026-11-07 19:10] human: @dev write it all out";
-        hub.start_turn(&session, &win, reply_targets("", asked));
-        feed(json!({"hook_event_name": "UserPromptSubmit", "prompt": asked, "session_id": "c1"}));
-        assert_eq!(status().state, "running");
-        let size = feed(json!({"hook_event_name": "Stop", "last_assistant_message": "x".repeat(300 * 1024), "session_id": "c1"}));
-        assert!(size as u64 > 256 * 1024, "the envelope is past the old bound: {size}");
-        assert_eq!(status().state, "idle", "the turn ended");
-        assert!(rows().iter().any(|b| b.ends_with("[reply cut at 256 KiB]")), "the reply is stored, cut, and says so");
-
-        // 2. A runaway payload past the ceiling: refused, and said once.
-        feed(json!({"hook_event_name": "UserPromptSubmit", "prompt": asked, "session_id": "c1"}));
-        let size = feed(json!({"hook_event_name": "Stop", "last_assistant_message": "y".repeat(9 * 1024 * 1024), "session_id": "c1"}));
-        assert!(size as u64 > MAX_HOOK_PAYLOAD_BYTES);
-        let said: Vec<String> = rows().into_iter().filter(|b| b.starts_with("[tmm] a hook payload")).collect();
-        assert_eq!(said, vec!["[tmm] a hook payload of 9.0 MiB was over the 8 MiB limit and was not read: this turn's end and reply were not recorded".to_string()]);
-        assert_eq!(std::fs::read_dir(&inbox).unwrap().filter(|e| e.as_ref().unwrap().path().extension().is_some_and(|x| x == "json")).count(), 0, "the file is gone, not retried");
     }
 
     /// Board #39, the incident: builder-2's claude ended on "API Error: 402

@@ -27,6 +27,7 @@ pub mod global_prompt;
 pub mod managed;
 pub mod mcp_mask;
 pub mod message_paths;
+pub mod model_refused;
 pub mod models;
 pub mod names;
 pub mod projects;
