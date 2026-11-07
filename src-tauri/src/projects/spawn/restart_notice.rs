@@ -116,6 +116,17 @@ mod tests {
         std::fs::write(codex.join("config.toml"), "not = [toml").unwrap();
         rollout(&meta("amazon-bedrock-runtime"));
         assert_eq!(line(id), resume(id), "an unreadable config resumes as before");
+        // Validator P1 on cbc93aac: a model_provider that is not a string is a
+        // config codex itself refuses ("invalid type: integer 17, expected a
+        // string"), not a provider: the current one cannot be told, so the
+        // restart resumes as today and says nothing (AC2), in either layer.
+        std::fs::write(codex.join("config.toml"), "model_provider = 17\n").unwrap();
+        assert_eq!(line(id), resume(id), "a non-string provider in config.toml resumes as before");
+        assert_eq!(resume_notice(wss, "cx", Some(id), None), None);
+        std::fs::write(codex.join("config.toml"), "model_provider = \"ust\"\n").unwrap();
+        std::fs::write(codex.join(crate::backends::shared::codex_profile_file()), "model_provider = [\"x\"]\n").unwrap();
+        assert_eq!(line(id), resume(id), "a non-string provider in the profile resumes as before");
+        std::fs::remove_file(codex.join(crate::backends::shared::codex_profile_file())).unwrap();
         std::fs::write(codex.join("config.toml"), "model_provider = \"ust\"\n").unwrap();
 
         // The rule is codex's, measured on one version only.

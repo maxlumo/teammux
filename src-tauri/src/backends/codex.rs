@@ -1013,14 +1013,19 @@ fn rollout_provider(rollout: &std::path::Path) -> Option<String> {
 
 /// The provider a managed codex in `codex` (its CODEX_HOME) runs: the
 /// profile's, else config.toml's, else `openai`. `None` when a file that
-/// exists cannot be read or parsed.
+/// exists cannot be read or parsed, or names a `model_provider` that is not
+/// a string (validator P1: codex refuses that config, so the current
+/// provider cannot be told and the restart resumes as before).
 #[cfg(not(any(target_os = "android", target_os = "ios")))]
 fn current_provider(codex: &std::path::Path) -> Option<String> {
     let named = |file: &str| -> Option<Option<String>> {
         let text = super::read_model_source(&codex.join(file)).ok()?;
         let Some(text) = text else { return Some(None) };
         let table = text.parse::<toml::Table>().ok()?;
-        Some(table.get("model_provider").and_then(toml::Value::as_str).map(str::to_string))
+        match table.get("model_provider") {
+            None => Some(None),
+            Some(v) => v.as_str().map(|p| Some(p.to_string())),
+        }
     };
     let profile = named(&shared::codex_profile_file())?;
     let config = named("config.toml")?;
