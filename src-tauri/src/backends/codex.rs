@@ -1142,6 +1142,15 @@ fn rollout_failed_end(rollout: &str, open: &str) -> Option<(String, Option<Strin
     None
 }
 
+/// The model a managed codex was LAUNCHED with (board #65 item 2): its
+/// managed profile's `model`, written whole on every render. `None` when the
+/// render named none (the user's own default) or the file cannot be read.
+#[cfg(not(any(target_os = "android", target_os = "ios")))]
+pub(crate) fn profile_model(home: &std::path::Path) -> Option<String> {
+    let table: toml::Table = std::fs::read_to_string(home.join("codex").join(shared::codex_profile_file())).ok()?.parse().ok()?;
+    table.get("model").and_then(|m| m.as_str()).map(str::trim).filter(|m| !m.is_empty()).map(str::to_string)
+}
+
 /// The model the turn `turn` ran, from its `turn_context` line (codex
 /// 0.166.0 writes one per turn with `turn_id` and `model`; measured on
 /// validator's rollout of 2026-11-07). `None` when the tail does not hold it.

@@ -54,7 +54,8 @@ pub(super) fn refuse(hub: &AgentNotificationHub, envelope: &InboxEnvelope, bytes
     Consume::Drop(format!("payload too large ({bytes} bytes, over the {} MiB limit)", MAX_HOOK_PAYLOAD_BYTES / (1024 * 1024)))
 }
 
-#[cfg(all(test, not(any(target_os = "android", target_os = "ios"))))]
+#[cfg(test)]
+#[cfg(not(any(target_os = "android", target_os = "ios")))]
 mod tests {
     use super::super::*;
     use super::MAX_HOOK_PAYLOAD_BYTES;

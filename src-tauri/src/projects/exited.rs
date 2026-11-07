@@ -108,6 +108,12 @@ fn classify(session: &str, workspace: Option<&str>, pane: &TmuxPane) -> Cli {
     if !SHELLS.contains(&pane.current_command.as_str()) || home.join("starting").exists() || crate::projects::restore_hold::held(session, &pane.window_name) {
         return Cli::Shown;
     }
+    // A backend whose CLI IS a resident shell (dsh: each turn is a fresh process
+    // started from its zsh) is at a shell while it is alive and idle.
+    let backend = crate::projects::recipe::recipe_section(&home).read().ok().flatten().and_then(|r| r.get("backend").and_then(|b| b.as_str()).and_then(crate::backends::Backend::parse));
+    if backend.is_some_and(|b| b.config_read_every_turn()) {
+        return Cli::Shown;
+    }
     // Seen under THIS launch and now back at the shell: exited, at once.
     if seen().lock().unwrap().get(&key) == Some(&launched) {
         return Cli::Exited;
@@ -209,6 +215,13 @@ mod tests {
         }).expect("the pane runs cat");
         assert_eq!(state(&other).state, "idle");
 
+        // A dsh's CLI is its resident zsh: at a shell while alive and idle,
+        // never exited (its pane's process is the shell itself).
+        let mut at_shell = shell.clone();
+        at_shell.current_command = "zsh".into();
+        assert_eq!(state(&at_shell).state, STATE, "a codex at zsh: exited");
+        crate::projects::spawn::LaunchRecipe { backend: crate::backends::Backend::Dsh.name(), env: &[], cmd: "zsh", spawned_by: "", team: None, agent_def: "", member: "", from_member: "", input_mode: "" }.write(&home).unwrap();
+        assert_eq!(state(&at_shell).state, "idle", "a dsh at its zsh: its turn state");
         // An unmanaged shell window is just a shell.
         std::fs::remove_file(home.join("launch.json")).unwrap();
         assert_eq!(state(&other).state, "idle");

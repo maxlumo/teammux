@@ -26,10 +26,8 @@ pub fn named(session: &str, window: &str, text: &str) -> String {
 /// The model `home`'s CLI was launched with; `None` for its backend's default.
 fn launched(home: &Path) -> Option<String> {
     let recipe = super::recipe::recipe_section(home).read().ok().flatten()?;
-    if recipe.get("backend").and_then(|b| b.as_str()) == Some("codex") {
-        let profile = std::fs::read_to_string(home.join("codex").join(crate::backends::shared::codex_profile_file())).ok()?;
-        let table: toml::Table = profile.parse().ok()?;
-        return table.get("model").and_then(|m| m.as_str()).map(str::trim).filter(|m| !m.is_empty()).map(str::to_string);
+    if recipe.get("backend").and_then(|b| b.as_str()).and_then(crate::backends::Backend::parse) == Some(crate::backends::Backend::Codex) {
+        return crate::backends::codex::profile_model(home);
     }
     flag_model(recipe.get("cmd").and_then(|c| c.as_str())?)
 }
