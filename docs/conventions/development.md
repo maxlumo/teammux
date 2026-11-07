@@ -713,6 +713,7 @@ pnpm run test:live:docker            # check `smoke`: one codex turn and one cla
 pnpm run test:live:docker codex-models   # board #70: codex's list follows its config (agents-overview.md § Model catalogue)
 pnpm run test:live:docker codex-provider   # board #74: a codex chat restarted under another provider comes back fresh (agents-overview.md)
 pnpm run test:live:docker pi             # board #71: a managed pi end to end (agents-overview.md § The pi backend)
+pnpm run test:live:docker omp-tools        # board #72: omp's own tools off by default, on by the switch (agents-overview.md)
 ```
 
 - **The image** is `docker/validator/Dockerfile`'s `live` target: this

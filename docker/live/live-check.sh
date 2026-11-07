@@ -22,7 +22,7 @@
 #                      the conversation, the user's auth.json and models.json still linked.
 set -euo pipefail
 check="${1:-smoke}"
-case "$check" in smoke|codex-models|codex-provider|pi) ;; *) echo "live-check: unknown check '$check' (known: smoke, codex-models, codex-provider, pi)" >&2; exit 2 ;; esac
+case "$check" in smoke|codex-models|codex-provider|pi|omp-tools) ;; *) echo "live-check: unknown check '$check' (known: smoke, codex-models, codex-provider, pi, omp-tools)" >&2; exit 2 ;; esac
 
 cfg="$HOME/.config/teammux"
 mkdir -p "$cfg" /work/live
@@ -89,6 +89,36 @@ J
   tmm send --project live "@lpi /new" >/dev/null; sleep 6
   ask "reply with the single word fresh" fresh && ok "after /new it answered fresh" || bad "no answer after /new"
   tmm agent list --project live
+  exit $rc
+fi
+
+if [ "$check" = omp-tools ]; then
+  # Board #72: a managed omp's own tools (plan, ask, goal, out) are off by default and on by
+  # the definition's switch, read from omp's own /tools list ('* name' active, '- name' not).
+  rc=0
+  pid() { tmux list-panes -a -F '#{pane_id} #{window_name}' | awk '$2=="lomp"{print $1; exit}'; }
+  # omp's /tools is a scrolling table (│ │ name │ description); every page is read, then closed.
+  tools() {
+    tmm send --project live "@lomp /tools" >/dev/null; sleep 6
+    for _ in $(seq 1 25); do tmux capture-pane -p -t "$(pid)" || true; tmux send-keys -t "$(pid)" PageDown; sleep 0.4; done \
+      | sed -n 's/^[[:space:]]*│ │ \([a-z_][a-z0-9_]*\)[[:space:]]*│.*/\1/p' | sort -u
+    tmux send-keys -t "$(pid)" Escape
+  }
+  has() { printf '%s\n' "$1" | grep -qx "$2"; }
+  tmm registry save --name lomp --backend omp --system "Live check agent." >/dev/null
+  tmm spawn lomp --project live >/dev/null
+  sleep 25
+  echo "live-check: omp-tools: config.yml (default): $(tr '\n' ' ' < /work/live/.tmm/agents/lomp/config.yml)"
+  off=$(tools); echo "live-check: omp-tools: /tools with the switch off: $(printf '%s ' $off)"
+  for t in ask goal; do if has "$off" "$t"; then echo "live-check: omp-tools: FAIL ($t active with the switch off)"; rc=1; fi; done
+  if ! has "$off" read; then echo "live-check: omp-tools: FAIL (no tool list read)"; rc=1; echo "    panes: $(tmux list-panes -a -F '#{pane_id} #{window_name} #{pane_current_command}' | tr '\n' ';')"; tmm log --project live --limit 6 | sed 's/^/    /'; fi
+  tmm registry save --name lomp --backend omp --system "Live check agent." --omp-tools on >/dev/null
+  tmm agent restart lomp --project live >/dev/null
+  sleep 25
+  echo "live-check: omp-tools: config.yml (on): $(tr '\n' ' ' < /work/live/.tmm/agents/lomp/config.yml 2>/dev/null || echo absent)"
+  on=$(tools); echo "live-check: omp-tools: /tools with the switch on: $(printf '%s ' $on)"
+  if ! has "$on" ask; then echo "live-check: omp-tools: FAIL (ask not active with the switch on)"; rc=1; fi
+  if [ $rc = 0 ]; then echo "live-check: omp-tools: PASS"; fi
   exit $rc
 fi
 
