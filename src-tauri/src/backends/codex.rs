@@ -984,13 +984,15 @@ pub(crate) fn resume_refusal(home: &std::path::Path, id: &str) -> Option<String>
     }
     let codex = home.join("codex");
     let (was, cwd) = rollout_meta(&rollout_path(&codex.join("sessions"), id)?)?;
+    let now = current_provider(&codex)?;
     // Review R2: a project `.codex/config.toml` can sit above the home's
-    // layers (a trusted one does, #448). One that names a provider makes the
-    // effective one unknown here, and unknown keeps today's resume (AC2).
-    if project_names_provider(&cwd, &codex.join("config.toml")) {
+    // layers (a trusted one does, #448). One that names ANOTHER provider, or
+    // cannot be read, makes the effective one unknown here, and unknown keeps
+    // today's resume (AC2). One that agrees, or names none, leaves the home's
+    // decision standing (orchestrator, #74 note 27).
+    if project_disagrees(&cwd, &codex.join("config.toml"), &now) {
         return None;
     }
-    let now = current_provider(&codex)?;
     (was != now).then(|| format!("its chat was started on {was} and codex is now on {now}, which codex will not resume"))
 }
 
@@ -1022,14 +1024,15 @@ fn rollout_meta(rollout: &std::path::Path) -> Option<(String, std::path::PathBuf
 }
 
 /// Whether a `.codex/config.toml` in the chat's cwd or any ancestor may
-/// choose the provider (review R2): it names `model_provider`, or it cannot
-/// be read or parsed. Trust is not judged here; any such file makes the
-/// effective provider unknown. The home's own config, reached as a project
+/// choose a provider other than `home_provider` (review R2, round 3): it
+/// names a different `model_provider`, a non-string one, or cannot be read
+/// or parsed. Trust is not judged here. A file naming the same provider, or
+/// none, cannot change the outcome whichever layer wins. The home's own config, reached as a project
 /// file (the user's `~/.codex/config.toml` is an ancestor's `.codex` of every
 /// workspace under HOME, and the managed home links it), is the layer
 /// already read, so it is skipped by identity.
 #[cfg(not(any(target_os = "android", target_os = "ios")))]
-fn project_names_provider(cwd: &std::path::Path, home_config: &std::path::Path) -> bool {
+fn project_disagrees(cwd: &std::path::Path, home_config: &std::path::Path, home_provider: &str) -> bool {
     let home_real = std::fs::canonicalize(home_config).ok();
     for dir in cwd.ancestors() {
         let file = dir.join(".codex").join("config.toml");
@@ -1041,13 +1044,11 @@ fn project_names_provider(cwd: &std::path::Path, home_config: &std::path::Path) 
         if home_real.is_some() && std::fs::canonicalize(&file).ok() == home_real {
             continue;
         }
-        let named = super::read_model_source(&file)
-            .ok()
-            .flatten()
-            .and_then(|t| t.parse::<toml::Table>().ok())
-            .map(|t| t.contains_key("model_provider"));
-        if named != Some(false) {
-            return true;
+        let Some(table) = super::read_model_source(&file).ok().flatten().and_then(|t| t.parse::<toml::Table>().ok()) else { return true };
+        match table.get("model_provider") {
+            None => {}
+            Some(v) if v.as_str() == Some(home_provider) => {}
+            Some(_) => return true,
         }
     }
     false

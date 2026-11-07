@@ -131,6 +131,17 @@ if [ "$check" = codex-provider ]; then
   else
     echo "live-check: codex-provider: MEASURED project layer: not honoured for the provider (resumed; pane runs $(pane_cmd))"
   fi
+  # Round 3 (orchestrator, #74 note 27): the home goes back to ${provider}, so home and project
+  # AGREE on ${provider} while the chat runs on ${provider}2. Whichever layer wins, codex would
+  # refuse that chat, so the restart must start fresh, say why, and answer.
+  sed -i "s/^model_provider *=.*/model_provider = \"${provider}\"/" "$cfg_file"
+  tmm agent restart lcodex --project live >/dev/null
+  sleep 25
+  line=$(tmm log --project live --limit 40 | grep '\[tmm\] restarted lcodex' | tail -1)
+  echo "live-check: codex-provider: agreeing project and home restart line: $line"
+  case "$line" in *"fresh conversation: its chat was started on ${provider}2 and codex is now on ${provider}"*) ;; *) echo "live-check: codex-provider: FAIL (agreeing layers: no fresh start with its reason)"; rc=1 ;; esac
+  case "$(pane_cmd)" in bash|zsh|sh|dash) echo "live-check: codex-provider: FAIL (agreeing layers: a shell, not codex)"; rc=1 ;; esac
+  if ask gamma; then echo "live-check: codex-provider: agreeing layers: it answered gamma"; else echo "live-check: codex-provider: FAIL (agreeing layers: no answer)"; rc=1; fi
   tmm agent list --project live
   exit $rc
 fi

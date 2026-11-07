@@ -105,6 +105,12 @@ mod tests {
         assert_eq!(resume_notice(wss, "cx", Some(id), None), None);
         std::fs::write(proj.join(".codex/config.toml"), "[tui]\nstatus_line = []\n").unwrap();
         assert_eq!(line(id), cmd, "a project config that names no provider changes nothing");
+        // Round 3 (orchestrator, #74 note 27): a project naming the SAME
+        // provider as the home cannot change the outcome whichever layer
+        // wins, so the mismatch stands: fresh, with the reason.
+        std::fs::write(proj.join(".codex/config.toml"), "model_provider = \"ust\"\n").unwrap();
+        assert_eq!(line(id), cmd, "a project agreeing with the home: the home's decision stands");
+        assert!(resume_notice(wss, "cx", Some(id), None).is_some_and(|w| w.contains("amazon-bedrock-runtime") && w.contains("ust")));
         std::fs::write(proj.join(".codex/config.toml"), "not = [toml").unwrap();
         assert_eq!(line(id), resume(id), "an unreadable project config: unknown");
         std::fs::remove_dir_all(proj.join(".codex")).unwrap();
