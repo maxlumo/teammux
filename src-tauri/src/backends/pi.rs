@@ -309,12 +309,17 @@ pub(crate) fn pi_settings(user: Option<&Value>, model: &str, effort: &str, skill
 }
 
 /// The user's `auth.json` and `models.json`, linked into the home through
-/// the held, private walk (codex's mechanism). An older file of ours by
-/// either name may be replaced; a link that already points there stays.
+/// the held, private walk (codex's mechanism); a link that already points
+/// there stays. `auth.json` is NEVER ours to replace (review R1, codex's own
+/// auth policy): with no user file, pi creates the home's and a /login in
+/// the pane writes real credentials into it, so a render leaves it, and a
+/// user file that appears later refuses the render instead of deleting
+/// either login. `models.json` holds no credentials of pi's making (pi has
+/// no write path to it), so an older file of ours by that name may go.
 #[cfg(not(any(target_os = "android", target_os = "ios")))]
 fn link_user_files(home: &Path, user_dir: &Path) -> Result<(), String> {
     let dir = crate::safe_fs::private_subdir(home).map_err(|e| format!("{}: {e}", home.display()))?;
-    shared::link_user_file(&dir, user_dir, "auth.json", true, "pi")?;
+    shared::link_user_file(&dir, user_dir, "auth.json", false, "pi")?;
     shared::link_user_file(&dir, user_dir, "models.json", true, "pi")
 }
 
@@ -407,8 +412,9 @@ pub(crate) fn set_up_need() -> super::readiness::Need {
     Need::Found(SetUp::unknown("credential_store_unverified").with_via(via))
 }
 
-#[cfg(all(test, not(any(target_os = "android", target_os = "ios"))))]
+#[cfg(test)]
 mod tests {
+    #![cfg(not(any(target_os = "android", target_os = "ios")))]
     use super::*;
 
     /// The measured footer (pi 1.5.0, #71 note 9), idle and busy, with and
@@ -477,6 +483,37 @@ mod tests {
         assert!(!picker_open(&closed));
         let quoted = format!(" → high was the answer\n{rule}\n\n{rule}\n/work/live\n0.0%/128k (auto)  x\n");
         assert!(!picker_open(&quoted));
+    }
+
+    /// Review R1 (#71): pi's own credentials in the home are never deleted.
+    /// With no user auth.json, pi creates <home>/auth.json and a /login
+    /// writes it; renders keep it. A user auth.json that appears later
+    /// refuses the render and touches neither file. A correct link stays.
+    #[cfg(unix)]
+    #[test]
+    fn a_managed_pi_login_survives_every_render() {
+        let root = crate::config::test_scratch("tmm-pi-auth");
+        let user = root.join("user");
+        let home = root.join("home");
+        std::fs::create_dir_all(&user).unwrap();
+        std::fs::create_dir_all(&home).unwrap();
+        std::fs::write(home.join("auth.json"), r#"{"anthropic":{"type":"oauth","refresh":"SENTINEL-native"}}"#).unwrap();
+        link_user_files(&home, &user).unwrap();
+        link_user_files(&home, &user).unwrap();
+        assert_eq!(std::fs::read_to_string(home.join("auth.json")).unwrap(), r#"{"anthropic":{"type":"oauth","refresh":"SENTINEL-native"}}"#, "no user source: the home's own login stays");
+        std::fs::write(user.join("auth.json"), r#"{"user":"SENTINEL-user"}"#).unwrap();
+        let err = link_user_files(&home, &user).unwrap_err();
+        assert!(err.contains("refusing to replace existing pi path: auth.json"), "{err}");
+        assert!(std::fs::read_to_string(home.join("auth.json")).unwrap().contains("SENTINEL-native"), "the home's login is not replaced");
+        assert!(std::fs::read_to_string(user.join("auth.json")).unwrap().contains("SENTINEL-user"), "the user's is not touched");
+        // A home that never had its own: the user's is linked, and stays linked.
+        let fresh = root.join("fresh");
+        std::fs::create_dir_all(&fresh).unwrap();
+        link_user_files(&fresh, &user).unwrap();
+        link_user_files(&fresh, &user).unwrap();
+        assert!(std::fs::symlink_metadata(fresh.join("auth.json")).unwrap().file_type().is_symlink());
+        assert_eq!(std::fs::read_link(fresh.join("auth.json")).unwrap(), std::fs::canonicalize(user.join("auth.json")).unwrap());
+        std::fs::remove_dir_all(&root).ok();
     }
 
     /// The resume dialect: `--session-id <id>` exact, `--continue` recent.
