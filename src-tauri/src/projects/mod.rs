@@ -21,6 +21,7 @@ pub mod agents;
 pub mod board;
 pub mod capture;
 pub mod delivery;
+pub mod exited;
 pub mod live_config;
 pub mod global_prompt;
 pub mod managed;

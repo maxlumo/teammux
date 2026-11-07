@@ -83,7 +83,7 @@ export function stateNeedsYou(state: string, detail = ''): boolean {
  * (`hubDetail_<detail>`). A turn that ended on a provider error only a person
  * can clear (`provider_failed`, board #39: no credit, a bad key, a request
  * too large) also carries the provider's own words in `error`. */
-export const PERSON_DETAILS: readonly string[] = ['auth_expired', 'conversation_blocked', 'recovery_exhausted', 'restore_not_ready', 'provider_failed'];
+export const PERSON_DETAILS: readonly string[] = ['auth_expired', 'conversation_blocked', 'recovery_exhausted', 'restore_not_ready', 'provider_failed', 'cli_exited'];
 
 export function needsPerson(detail: string | undefined | null): boolean {
   return !!detail && PERSON_DETAILS.includes(detail);

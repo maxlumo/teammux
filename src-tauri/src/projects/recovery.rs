@@ -101,6 +101,7 @@ pub fn person_remedy(detail: &str) -> Option<&'static str> {
         super::telemetry::RESTORE_NOT_READY_DETAIL => Some("restored, not ready; type a prompt into it"),
         // Its provider refused the turn: no credit, a bad key, a request too large (board #39).
         super::telemetry::PROVIDER_FAILED_DETAIL => Some("its provider refused it; fix what the error says, then send it a line"),
+        super::exited::DETAIL => Some("its CLI exited to the shell; restart it"),
         _ => None,
     }
 }

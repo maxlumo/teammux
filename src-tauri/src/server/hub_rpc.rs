@@ -2995,7 +2995,7 @@ fn agent_states(session: &str) -> serde_json::Value {
         .values()
         .map(|p| {
             let agent = agents::detect_pane(ws.as_deref(), p);
-            let st = telemetry::derive(session, &p.window_name, activity.get(&p.window).copied().unwrap_or(0));
+            let st = crate::projects::exited::shown(session, ws.as_deref(), p, telemetry::derive(session, &p.window_name, activity.get(&p.window).copied().unwrap_or(0)));
             let managed = agent.is_some() && crate::projects::is_managed_in(ws.as_deref(), &p.window_name);
             // What the agent's own status line says: model, context used, effort,
             // branch. There is no API for a CLI's live state, so it is SNIFFED

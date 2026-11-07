@@ -4550,6 +4550,7 @@ old — X []
         assert_eq!(super::detail_tail("conversation_blocked", ""), " — conversation_blocked (save its state, then clear the conversation)");
         assert_eq!(super::detail_tail("recovery_exhausted", ""), " — recovery_exhausted (auto-continue stopped; needs a person)");
         assert_eq!(super::detail_tail("last_turn_failed", ""), " — last_turn_failed");
+        assert_eq!(super::detail_tail("cli_exited", ""), " — cli_exited (its CLI exited to the shell; restart it)", "#65 item 3");
         assert_eq!(super::detail_tail("", ""), "");
         // Board #39: a provider failure also prints the provider's own words.
         assert_eq!(
