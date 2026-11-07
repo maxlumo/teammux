@@ -23,7 +23,10 @@ function agentPayload(value: AgentDraft): RegAgent {
     // whenever that list had not arrived. Only an explicit backend change in
     // the editor resets it; the server stays the authority.
     input_mode: value.input_mode === 'steer' ? 'steer' : 'queue',
-    omp_tools: value.omp_tools === true,
+    // Only when the draft holds a value (#72 R1): read from a server that keeps
+    // it, or set by the switch it offers. An older server's draft has none, so
+    // its saves carry none and still go.
+    ...(typeof value.omp_tools === 'boolean' ? { omp_tools: value.omp_tools } : {}),
     system: value.system,
     skills: JSON.stringify(value.skillSel), mcp: JSON.stringify([...value.mcpSel, ...value.mcpExtra]),
   };

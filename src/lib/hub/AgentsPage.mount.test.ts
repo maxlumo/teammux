@@ -1354,3 +1354,27 @@ test('a server that does not keep omp\u2019s own-tools switch is not offered it,
     assert.ok([...app.document.querySelectorAll('.editor .hint')].some(h => /older than the app.*omp\u2019s own tools/u.test(h.textContent ?? '')), 'it says why');
   } finally { await app.close(); }
 });
+
+test('an inline omp member keeps its stored own-tools switch through an unrelated edit (#72 R1)', async context => {
+  const fixture = await hostFixture();
+  const writes: any[] = [];
+  const team = { name: 'squad', description: '', members: JSON.stringify([
+    { name: 'raw', base: '', role: 'Raw', agent: { name: 'raw', backend: 'omp', model: '', effort: '', input_mode: 'queue', omp_tools: true, system: 'Bare.', skills: '[]', mcp: '[]' } },
+  ]) };
+  let controls!: { section: (value: string) => void };
+  const app = await fixture.mount(context, {
+    props: { ready: (value: typeof controls) => controls = value, backends: [{ name: 'omp', icon: '/assets/omp.svg', color: '--backend-omp', efforts: [], input_modes: false }] },
+    modules: [rpc({ teamsList: async () => ({ teams: [team] }), teamsSave: async (value: any) => { writes.push(value); return {}; }, getCaps: () => ['mcp_masked', 'omp_tools'] })],
+  });
+  try {
+    controls.section('teams'); await app.flush();
+    await openAgent(app, 'squad');
+    assert.equal(app.document.querySelector('[role=switch][aria-label^="omp’s own tools"]')?.getAttribute('aria-checked'), 'true', 'the stored on is shown');
+    const role = app.document.querySelector<HTMLInputElement | HTMLTextAreaElement>('.member [aria-label="Role"], .member textarea');
+    assert.ok(role, 'a role field');
+    role!.value = 'Raw, edited'; role!.dispatchEvent(new app.window.Event('input', { bubbles: true })); await app.flush();
+    command(app, 'Save').click();
+    for (let i = 0; i < 5 && !writes.length; i++) await app.flush();
+    assert.equal(JSON.parse(writes[0].members)[0].agent.omp_tools, true, 'an unrelated edit never turns it off');
+  } finally { await app.close(); }
+});

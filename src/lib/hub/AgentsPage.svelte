@@ -625,6 +625,8 @@
       effort: agent.effort ?? '',
       input_mode: stored ? (agent.input_mode ?? 'queue') : backendDefaultInputMode(backend),
       modeFollowsDefault: !stored,
+      // A stored switch is carried (#72): a re-save never turns it off unasked.
+      ...(typeof agent.omp_tools === 'boolean' ? { omp_tools: agent.omp_tools } : {}),
       system: agent.system ?? '',
       skillSel: skillEntries.filter((x) => typeof x === 'string'),
       mcpSel: mcpEntries.filter((x) => typeof x === 'string'),
@@ -817,12 +819,12 @@
             ...def,
             effort: def.effort ?? '',
             input_mode: def.input_mode ?? 'queue',
-            omp_tools: def.omp_tools === true,
+            ...(typeof def.omp_tools === 'boolean' ? { omp_tools: def.omp_tools } : {}),
             skillSel: skillSel.filter((x) => typeof x === 'string'),
             mcpSel: mcpEntries.filter((x) => typeof x === 'string'),
             mcpExtra: mcpEntries.filter((x) => typeof x !== 'string'),
           }
-        : { name: '', backend: defaultBackend(), model: '', effort: '', input_mode: backendDefaultInputMode(defaultBackend()), modeFollowsDefault: true, omp_tools: false, system: '', skillSel: [], mcpSel: [], mcpExtra: [] };
+        : { name: '', backend: defaultBackend(), model: '', effort: '', input_mode: backendDefaultInputMode(defaultBackend()), modeFollowsDefault: true, system: '', skillSel: [], mcpSel: [], mcpExtra: [] };
       rememberDraft();
     });
   }

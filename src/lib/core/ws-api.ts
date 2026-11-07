@@ -603,23 +603,29 @@ export function createWsApi(connection: Connection) {
    * env/header values and keeps the stored one for `"<set>"`: the #377 gate —
    * wait for an unanswered login, then check THIS socket's caps in the block
    * that sends. An older server would put the values in the answer. */
-  // A save that turns omp's own tools ON also needs a server that keeps the
-  // switch (#72): an older one would drop it and report success.
-  const masked = async <T>(method: string, params?: Record<string, unknown>, ompOn = false) => {
+  // A save that carries omp's own-tools switch at all, on OR off, also needs a
+  // server that keeps it (#72): an older one drops it and reports success while
+  // its omp keeps its native defaults (all on).
+  const masked = async <T>(method: string, params?: Record<string, unknown>, carriesOmpTools = false) => {
     await holdForLogin(connection);
     requireCap(connection, MCP_MASKED);
-    if (ompOn) requireCap(connection, OMP_TOOLS);
+    if (carriesOmpTools) requireCap(connection, OMP_TOOLS);
     return call<T>(method, params);
   };
+  const namesOmpTools = (def: object | null | undefined) => !!def && Object.hasOwn(def, 'omp_tools');
+  /** A team's members JSON names the switch in any inline agent (parsed, never matched as text). */
+  const membersNameOmpTools = (members: string) => {
+    try { const list = JSON.parse(members); return Array.isArray(list) && list.some((m) => namesOmpTools(m?.agent)); } catch { return false; }
+  };
   const registryList = () => masked<{ agents: RegAgent[] }>('registry_list');
-  const registrySave = (def: RegAgent) => masked('registry_save', { def }, def.omp_tools === true);
+  const registrySave = (def: RegAgent) => masked('registry_save', { def }, namesOmpTools(def));
   const registryDelete = (name: string) => call('registry_delete', { name });
   /** The app-wide agent instructions (`<config>/AGENTS.md`): prepended to every
    * managed agent's system prompt at spawn (tmm-cli.md § The app-wide instructions). */
   const globalPromptGet = () => call<{ text: string; path: string; max_bytes: number }>('global_prompt_get');
   const globalPromptSet = (text: string) => call('global_prompt_set', { text });
   const teamsList = () => masked<{ teams: RegTeam[] }>('teams_list');
-  const teamsSave = (def: RegTeam) => masked('teams_save', { def }, /"omp_tools":true/u.test(def.members));
+  const teamsSave = (def: RegTeam) => masked('teams_save', { def }, membersNameOmpTools(def.members));
   const teamsDelete = (name: string) => call('teams_delete', { name });
   /** The backends this server can spawn, with the client's resource names for
    * each (name, avatar path, colour token, effort levels), first = default. */
