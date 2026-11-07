@@ -319,8 +319,22 @@ pub(crate) fn pi_settings(user: Option<&Value>, model: &str, effort: &str, skill
 #[cfg(not(any(target_os = "android", target_os = "ios")))]
 fn link_user_files(home: &Path, user_dir: &Path) -> Result<(), String> {
     let dir = crate::safe_fs::private_subdir(home).map_err(|e| format!("{}: {e}", home.display()))?;
-    shared::link_user_file(&dir, user_dir, "auth.json", false, "pi")?;
+    shared::link_user_file(&dir, user_dir, "auth.json", false, "pi").map_err(|e| auth_conflict(e, home, user_dir))?;
     shared::link_user_file(&dir, user_dir, "models.json", true, "pi")
+}
+
+/// The refusal for two logins (validator, #71 note 33): both paths, and the
+/// one step that resolves it. Nothing is removed by us.
+#[cfg(not(any(target_os = "android", target_os = "ios")))]
+fn auth_conflict(e: String, home: &Path, user_dir: &Path) -> String {
+    if !e.starts_with("refusing to replace existing pi path: auth.json") {
+        return e;
+    }
+    let (managed, user) = (home.join("auth.json"), user_dir.join("auth.json"));
+    format!(
+        "refusing to replace existing pi path: auth.json. This agent's home holds its own pi login, {}, and your pi login, {}, now exists too. Neither was changed, and the agent was not started. To give the agent your login, back up and then remove {}, and start the agent again.",
+        managed.display(), user.display(), managed.display()
+    )
 }
 
 /// The telemetry extension of a managed pi home (pi's dialect of the one
@@ -504,6 +518,8 @@ mod tests {
         std::fs::write(user.join("auth.json"), r#"{"user":"SENTINEL-user"}"#).unwrap();
         let err = link_user_files(&home, &user).unwrap_err();
         assert!(err.contains("refusing to replace existing pi path: auth.json"), "{err}");
+        let (m, u) = (home.join("auth.json"), user.join("auth.json"));
+        assert!(err.contains(&format!("back up and then remove {}", m.display())) && err.contains(&u.display().to_string()), "both paths, and which to remove: {err}");
         assert!(std::fs::read_to_string(home.join("auth.json")).unwrap().contains("SENTINEL-native"), "the home's login is not replaced");
         assert!(std::fs::read_to_string(user.join("auth.json")).unwrap().contains("SENTINEL-user"), "the user's is not touched");
         // A home that never had its own: the user's is linked, and stays linked.
