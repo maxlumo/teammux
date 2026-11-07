@@ -437,8 +437,13 @@ fn wait_dead(name: &str, budget_ms: u64) -> Option<Task> {
 /// that when it opens an agent.)
 fn create_window(session: &str, name: &str, cwd: &str) -> Result<String> {
     tmux::ensure_session(session, cwd).map_err(Error::Tmux)?;
+    // `new-window -t` takes a target WINDOW: a bare session name resolved to a
+    // window whose name starts with it, and tmux aimed the new window at that
+    // window's index ("index 1 in use", board #58). `=session:` names the
+    // session exactly and lets tmux pick the next free index.
+    let target = tmux::exact_session(session);
     let mut args = vec![
-        "new-window", "-d", "-t", session, "-n", name, "-P", "-F", "#{pane_id}",
+        "new-window", "-d", "-t", &target, "-n", name, "-P", "-F", "#{pane_id}",
     ];
     if !cwd.is_empty() {
         args.push("-c");
@@ -595,7 +600,8 @@ fn parse_line(line: &str) -> Option<Task> {
 /// to dead tasks, so a running task's output is never second-guessed.
 fn strip_dead_marker(text: &str) -> String {
     text.lines()
-        .filter(|l| !(l.starts_with("Pane is dead (") && l.ends_with(')')))
+        // tmux 3.2a pads the annotation to the pane's width (board #58).
+        .filter(|l| !(l.starts_with("Pane is dead (") && l.trim_end().ends_with(')')))
         .collect::<Vec<_>>()
         .join("\n")
 }
@@ -738,6 +744,12 @@ mod tests {
             strip_dead_marker("Pane is dead (status 0, x)\nreal output"),
             "real output"
         );
+        // Board #58, measured on tmux 3.2a (this host's): the annotation is
+        // padded with spaces to the pane's width, and a capture keeps them, so
+        // the marker stayed and the blank rows above it filled the whole tail
+        // (testing.md's "cause not diagnosed" row for stop's tail).
+        let padded = format!("line-one\nline-two\n^C\n\n\n\nPane is dead (signal 2, Sat Nov  7 04:23:12 2026){}", " ".repeat(31));
+        assert_eq!(tail_lines(strip_dead_marker(&padded).trim_end(), 20, None), "line-one\nline-two\n^C");
     }
 
     #[test]
@@ -865,6 +877,25 @@ mod tests {
         let _ = remove(&shielded);
         let _ = tmux::kill_session(session);
         let _ = running;
+    }
+
+    /// Board #58 (validator, auditing #57): `new-window -t <session>` takes a
+    /// target WINDOW, so a bare session name resolved to a window whose name
+    /// starts with it, and the second task in a session named like its first
+    /// failed with "index 1 in use". A task window is created in exactly its
+    /// session, at the next free index, whatever the other windows are called.
+    #[test]
+    fn a_task_window_is_created_in_its_session_whatever_its_windows_are_named() {
+        let scope = GlobalSocket::hold();
+        let _server = PrivateTmux::start(&scope, "prefixnames");
+        let session = "tmm-test-prefix";
+        let sh = |c: &str| -> Vec<String> { vec!["sh".into(), "-c".into(), c.into()] };
+        let first = format!("{session}-close");
+        let second = format!("{session}-keep");
+        start(&first, &sh("sleep 300"), Some(session), true, None, &[]).expect("the first task starts");
+        start(&second, &sh("sleep 300"), Some(session), true, None, &[]).expect("a second task named like the first starts too");
+        assert!(find(&first).is_some() && find(&second).is_some(), "both windows exist");
+        let _ = tmux::kill_session(session);
     }
 
     /// Board #206: `stop` ends the process, hands back the last lines and

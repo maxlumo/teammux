@@ -424,7 +424,7 @@ pub(crate) fn implicit_socket() -> std::path::PathBuf {
 /// rename-session, list-windows, list-panes, new-window and display-message
 /// (verified on tmux 3.6a). `set-option` and `set-hook` targets reject `=`,
 /// which is why `ensure_session`/`set_resize_hook` pass the bare name.
-fn exact_session(session: &str) -> String {
+pub(crate) fn exact_session(session: &str) -> String {
     if session.starts_with('=') { session.to_string() } else { format!("={session}:") }
 }
 

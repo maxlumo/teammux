@@ -265,6 +265,8 @@ where the command has `--output`, else the nearest flag within two edits, else t
 Retention is bounded since board #206 (30 min past death, every verb reaps;
 `stop` closes; see "Retention is bounded" below).
 
+**A task window is created in exactly its session** (board #58, 2026-11-07). `new-window -t` takes a target WINDOW, so a bare session name resolved to a window whose name starts with it, and the second task of a session named like its first failed with `index 1 in use`. `create_window` now targets `=session:` (`tmux::exact_session`), as every other window command in `tmux.rs` already did. And a dead task's tail is its OUTPUT: on tmux 3.2a the `Pane is dead (…)` annotation is padded to the pane's width, and the stripper ignores that padding, or `stop` and `logs` returned the blank rows above it. Pinned by `a_task_window_is_created_in_its_session_whatever_its_windows_are_named`, `dead_marker_and_its_padding_leave_the_log` and `stop_closes_the_window_with_its_tail_unless_kept` (all three red before the fix).
+
 The rest of `tmm` is a thin WS client: the hub subcommands go through
 `rpc()` and `state.db` is owned by the server process. `tmm task` is the one
 subtree that is purely local (`src-tauri/src/tasks.rs`, over `tmux.rs`), and it
