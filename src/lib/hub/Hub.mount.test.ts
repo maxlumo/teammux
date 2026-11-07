@@ -6573,7 +6573,8 @@ test('the sidebar shows every project\'s agents by their labels, and a rename in
   const { rpc, renamed } = labelled({
     projectList: async () => ({ projects: [
       { project: { id: 'fixture', name: 'fixture', session: 'fixture', path: '/fixture' }, live: true, slots: [] },
-      { project: { id: 'other', name: 'other', session: 'other', path: '/other' }, live: false, slots, ...(lists++ ? {} : { labels: [{ agent: 'dev', label: 'robert', aliases: [] }] }) },
+      // The third list archives it, the fourth restores it (validator, round 1).
+      { project: { id: 'other', name: 'other', session: 'other', path: '/other', archived: lists === 2 }, live: false, slots, ...(lists++ ? {} : { labels: [{ agent: 'dev', label: 'robert', aliases: [] }] }) },
     ] }),
   });
   const app = await (await compiledHub()).mount(context, {
@@ -6593,5 +6594,9 @@ test('the sidebar shows every project\'s agents by their labels, and a rename in
     await app.advance(20000); await settleHub(app);
     assert.ok(lists > before, 'the list was read again');
     assert.deepEqual(chips(), ['sam'], 'a list that could not read the labels keeps the known ones');
+    await app.advance(20000); await settleHub(app);
+    assert.deepEqual(chips(), [], 'archived: it left the working list');
+    await app.advance(20000); await settleHub(app);
+    assert.deepEqual(chips(), ['sam'], 'restored while the labels still cannot be read: the known label crossed the archive and back');
   } finally { await app.close(); }
 });

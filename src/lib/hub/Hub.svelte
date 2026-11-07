@@ -374,9 +374,9 @@
       // Archived projects are the RECYCLE BIN (owner, 2026-08-21: "相当于回收
       // 站的功能"): they leave the working list and wait, restorable, in the
       // collapsed section at the bottom of the sidebar.
-      const all = projects ?? [];
-      trash = adopt(trash, keepLabels(trash, all.filter((r) => r.project.archived)));
-      rows = adopt(rows, sortRows(keepLabels(rows, all.filter((r) => !r.project.archived)), talk));
+      const all = keepLabels([...rows, ...trash], projects ?? []);   // labels known in either list survive a failed read (#69)
+      trash = adopt(trash, all.filter((r) => r.project.archived));
+      rows = adopt(rows, sortRows(all.filter((r) => !r.project.archived), talk));
       void refreshUnread();
       if (!rowsBase && rows.length) rowsBase = new Set(rows.map((r) => r.project.id));
       panes = adopt(panes, sp.panes ?? []);

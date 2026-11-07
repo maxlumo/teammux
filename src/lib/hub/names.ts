@@ -69,7 +69,9 @@ interface LabelledRow { project: { id: string; session: string }; labels?: Agent
 
 /** A list answer's rows, each without a table (its labels could not be read,
  * or an older server) keeping the one last known for its project: a failed
- * read never erases known labels (code-quality.md, validator S2 on #69). */
+ * read never erases known labels (code-quality.md, validator S2 on #69).
+ * `prev` is every row the client knew, working list and archive alike, so a
+ * project that moves between them keeps its table (validator, round 1). */
 export function keepLabels<T extends LabelledRow>(prev: readonly T[], next: T[]): T[] {
   return next.map((row) => {
     if (row.labels) return row;

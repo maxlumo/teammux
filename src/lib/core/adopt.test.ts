@@ -49,9 +49,8 @@ test('Hub adopts every poll answer it stores (#444)', () => {
     'agentStates = adopt(agentStates, mergeStates(roomsRes.states ?? {}, selected, agents));',
     'feed = adopt(feed, mergeMessages(feed, messages));',
     'talkMap = adopt(talkMap, talk);',
-    // A row without a readable label table keeps its known one (#69, validator S2).
-    'trash = adopt(trash, keepLabels(trash, all.filter((r) => r.project.archived)));',
-    'rows = adopt(rows, sortRows(keepLabels(rows, all.filter((r) => !r.project.archived)), talk));',
+    'trash = adopt(trash, all.filter((r) => r.project.archived));',
+    'rows = adopt(rows, sortRows(all.filter((r) => !r.project.archived), talk));',
     'panes = adopt(panes, sp.panes ?? []);',
   ]) assert.ok(src.includes(line), line);
   assert.doesNotMatch(src, /^\s*agents = got;/mu, 'the raw roster assignment is gone');
