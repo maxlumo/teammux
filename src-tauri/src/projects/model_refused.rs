@@ -38,9 +38,11 @@ fn launched(home: &Path) -> Result<Option<String>, ()> {
 /// The value of `--model` or `-m` on a launch line, unquoted: `Ok(None)` with
 /// no such flag, `Err` for a flag with no value (note 31: present, unreadable).
 fn flag_model(cmd: &str) -> Result<Option<String>, ()> {
-    let words: Vec<&str> = cmd.split_whitespace().collect();
-    let Some(at) = words.iter().position(|w| *w == "--model" || *w == "-m") else { return Ok(None) };
-    let value = words.get(at + 1).ok_or(())?.trim_matches('\'').trim_matches('"');
+    // Argument boundaries come from the shell reading of the line (review R1):
+    // a quoted prompt path holding spaces or the text `--model` is one word.
+    let words = crate::shell::split(cmd).ok_or(())?;
+    let Some(at) = words.iter().position(|w| w == "--model" || w == "-m") else { return Ok(None) };
+    let value = words.get(at + 1).ok_or(())?.trim();
     if value.is_empty() { Err(()) } else { Ok(Some(value.to_string())) }
 }
 
@@ -65,6 +67,13 @@ mod tests {
         assert_eq!(launched(&home), Ok(None), "no flag: the backend's default");
         recipe("kimi", "command kimi --auto -m");
         assert!(launched(&home).is_err(), "a flag with no value: unknown");
+        // Review R1: the line as render_omp writes it, through shell::quote. A
+        // quoted prompt path holding spaces and the text `--model` is one word,
+        // so the model is the real flag's value, never a token inside the path.
+        let omp_line = format!("command omp --auto-approve --append-system-prompt {} --model {}", crate::shell::quote("/work/demo --model decoy/.tmm/agents/x/system-prompt.md"), crate::shell::quote("ust/right"));
+        assert_eq!(flag_model(&omp_line), Ok(Some("ust/right".to_string())), "the real flag, not one inside a quoted path");
+        assert_eq!(flag_model("command claude --model 'a b'"), Ok(Some("a b".to_string())), "a quoted value is read whole");
+        assert!(flag_model("command omp --append-system-prompt '/work/demo --model x").is_err(), "a line that cannot be decoded: unknown");
         recipe("codex", "codex --profile tmm-agent --no-daemon");
         std::fs::create_dir_all(home.join("codex")).unwrap();
         std::fs::write(home.join("codex/tmm-agent.config.toml"), "model = \"gpt-6.1-sol\"\nmodel_reasoning_effort = \"high\"\n").unwrap();

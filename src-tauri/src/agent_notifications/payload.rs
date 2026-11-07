@@ -42,7 +42,7 @@ pub(super) fn refuse(hub: &AgentNotificationHub, envelope: &InboxEnvelope, bytes
         let poster = hub.state.lock().unwrap().poster.clone();
         if let (Some(poster), Some(_)) = (poster, crate::projects::managed_home(session, window)) {
             let body = format!(
-                "[tmm] a hook payload of {:.1} MiB was over the {} MiB limit and was not read: this turn's end and reply were not recorded",
+                "[tmm] a hook payload of {:.1} MiB was over the {} MiB limit and was not read, so nothing it carried was recorded (if it was this turn's last hook, that is its end and reply)",
                 bytes as f64 / (1024.0 * 1024.0),
                 MAX_HOOK_PAYLOAD_BYTES / (1024 * 1024)
             );
@@ -137,7 +137,7 @@ mod tests {
         let size = feed(json!({"hook_event_name": "Stop", "last_assistant_message": "y".repeat(9 * 1024 * 1024), "session_id": "c1"}));
         assert!(size as u64 > MAX_HOOK_PAYLOAD_BYTES);
         let said: Vec<String> = rows().into_iter().filter(|b| b.starts_with("[tmm] a hook payload")).collect();
-        assert_eq!(said, vec!["[tmm] a hook payload of 9.0 MiB was over the 8 MiB limit and was not read: this turn's end and reply were not recorded".to_string()]);
+        assert_eq!(said, vec!["[tmm] a hook payload of 9.0 MiB was over the 8 MiB limit and was not read, so nothing it carried was recorded (if it was this turn's last hook, that is its end and reply)".to_string()]);
         assert_eq!(std::fs::read_dir(&inbox).unwrap().filter(|e| e.as_ref().unwrap().path().extension().is_some_and(|x| x == "json")).count(), 0, "the file is gone, not retried");
     }
 

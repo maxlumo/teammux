@@ -39,9 +39,79 @@ pub fn quote(value: &str) -> String {
     escaped(value)
 }
 
+/// The inverse of `quote` for reading a launch line back (board #65 review
+/// R1): POSIX word splitting over whitespace, with single quotes literal,
+/// double quotes honouring `\\` before `"` `\\` `$` and a backtick, and a bare
+/// backslash escaping the next byte. `None` for an unterminated quote or a
+/// trailing backslash: a line that cannot be decoded is unknown, never guessed.
+pub fn split(line: &str) -> Option<Vec<String>> {
+    let (mut words, mut word, mut in_word) = (Vec::new(), String::new(), false);
+    let mut chars = line.chars();
+    while let Some(c) = chars.next() {
+        match c {
+            c if c.is_whitespace() => {
+                if in_word {
+                    words.push(std::mem::take(&mut word));
+                    in_word = false;
+                }
+            }
+            '\'' => {
+                in_word = true;
+                loop {
+                    match chars.next()? {
+                        '\'' => break,
+                        c => word.push(c),
+                    }
+                }
+            }
+            '"' => {
+                in_word = true;
+                loop {
+                    match chars.next()? {
+                        '"' => break,
+                        '\\' => match chars.next()? {
+                            c @ ('"' | '\\' | '$' | '`') => word.push(c),
+                            c => {
+                                word.push('\\');
+                                word.push(c);
+                            }
+                        },
+                        c => word.push(c),
+                    }
+                }
+            }
+            '\\' => {
+                in_word = true;
+                word.push(chars.next()?);
+            }
+            c => {
+                in_word = true;
+                word.push(c);
+            }
+        }
+    }
+    if in_word {
+        words.push(word);
+    }
+    Some(words)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// `split` reads back what `quote` wrote, word for word, including the
+    /// embedded quote and the spaces a workspace path may hold (#65 R1).
+    #[test]
+    fn split_is_the_inverse_of_quote() {
+        let words = ["command", "omp", "--append-system-prompt", "/work/demo --model decoy/.tmm/agents/x/system-prompt.md", "--model", "ust/right", "it's", "", "你是「经理」"];
+        let line = words.iter().map(|w| quote(w)).collect::<Vec<_>>().join(" ");
+        assert_eq!(split(&line), Some(words.iter().map(|w| w.to_string()).collect()));
+        assert_eq!(split(r#"a "b \"c\" $d" e\ f"#), Some(vec!["a".into(), "b \"c\" $d".into(), "e f".into()]));
+        assert_eq!(split("a 'unterminated"), None, "an undecodable line is unknown");
+        assert_eq!(split("a \""), None);
+        assert_eq!(split("trailing\\"), None);
+    }
 
     /// The UNION of every vector the three pre-#125 quoters were tested on,
     /// plus the boundary bytes their safe sets disagreed about. Each row pins
