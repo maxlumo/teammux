@@ -59,7 +59,20 @@ pub(crate) const LOGIN_CAPS: &[&str] = &[];
 /// JSON names `omp_tools` needs a server that keeps it (board #72), since an older one drops the
 /// key and says saved; every other save needs the masking server (#451).
 pub fn definition_save_cap(def_json: &str) -> &'static str {
-    if def_json.contains("\"omp_tools\"") { "omp_tools" } else { "mcp_masked" }
+    // Decided on the PARSED keys, at any depth (review R1 round 3, validator
+    // note 28): a text match misses a valid escaped key such as `omp\u005ftools`.
+    // Text that is not JSON names no key; the server refuses it on its own.
+    fn names_omp_tools(v: &serde_json::Value) -> bool {
+        match v {
+            serde_json::Value::Object(m) => m.iter().any(|(k, v)| k == "omp_tools" || names_omp_tools(v)),
+            serde_json::Value::Array(a) => a.iter().any(names_omp_tools),
+            _ => false,
+        }
+    }
+    match serde_json::from_str::<serde_json::Value>(def_json) {
+        Ok(v) if names_omp_tools(&v) => "omp_tools",
+        _ => "mcp_masked",
+    }
 }
 
 #[cfg(test)]
@@ -68,6 +81,9 @@ fn a_definition_naming_omp_tools_needs_the_server_that_keeps_it() {
     assert_eq!(definition_save_cap(r#"{"name":"dev","omp_tools":true}"#), "omp_tools");
     assert_eq!(definition_save_cap(r#"[{"name":"w","agent":{"backend":"omp","omp_tools":false}}]"#), "omp_tools", "an explicit off, too");
     assert_eq!(definition_save_cap(r#"{"name":"dev"}"#), "mcp_masked");
+    assert_eq!(definition_save_cap(r#"[{"name":"w","agent":{"backend":"omp","omp\u005ftools":true}}]"#), "omp_tools", "an escaped key decodes to omp_tools (validator note 28)");
+    assert_eq!(definition_save_cap("[\n  {\n    \"name\": \"w\",\n    \"agent\": { \"omp_tools\" : false }\n  }\n]"), "omp_tools", "any formatting");
+    assert_eq!(definition_save_cap(r#"{"note":"mentions \"omp_tools\" in a value"}"#), "mcp_masked", "a value is not a key");
     assert!(LOGIN_CAPS.is_empty() || LOGIN_CAPS.contains(&"omp_tools"), "this server announces it");
 }
 
