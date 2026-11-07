@@ -13,6 +13,7 @@ pub(crate) mod grok;
 pub(crate) mod kimi;
 pub(crate) mod kiro;
 pub(crate) mod omp;
+pub(crate) mod pi_telemetry;
 /// Backend readiness (board #492): the `backends_check` RPC and the
 /// `tmm readiness-probe` helper. Desktop-only, like the probe runner.
 #[cfg(not(any(target_os = "android", target_os = "ios")))]
