@@ -34,3 +34,17 @@ export function unpanShell(
   shell.scrollIntoView({ block: 'start', inline: 'nearest' });
   return true;
 }
+
+/**
+ * Does this WebView resize the visual viewport for the keyboard itself (board
+ * #56 round 2)? Android's "Understand window insets in WebView" (updated
+ * 2026-10-28): from M139 it does, so the app sizing the shell from
+ * MainActivity's native keyboard height as well would handle the keyboard
+ * twice. Such a WebView takes the browser's visualViewport path, the one the
+ * owner's phone browser shows right; an older one, or a user agent with no
+ * Chrome version, keeps the native path.
+ */
+export function webviewSizesForKeyboard(userAgent: string): boolean {
+  const major = Number((userAgent.match(/Chrome\/(\d+)/u) || [])[1]);
+  return Number.isFinite(major) && major >= 139;
+}

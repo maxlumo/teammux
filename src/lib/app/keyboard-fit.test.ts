@@ -1,6 +1,6 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { nativeShellHeight, unpanShell } from './keyboard-fit.ts';
+import { nativeShellHeight, unpanShell, webviewSizesForKeyboard } from './keyboard-fit.ts';
 
 // Board #56, the owner's phone (2026-11-06): with the keyboard closed the
 // composer was cut and the tab bar was below the screen; the shell height was
@@ -30,4 +30,17 @@ test('a panned visual viewport is returned to the shell top, and an unpanned one
   assert.equal(unpanShell(null, shell), false, 'no visual viewport');
   assert.equal(unpanShell({ offsetTop: 225 }, null), false, 'no shell');
   assert.equal(calls.length, 1);
+});
+
+// Board #56 round 2 (orchestrator, Android's "Understand window insets in
+// WebView", updated 2026-10-28): from M139 the WebView resizes the visual
+// viewport for the keyboard itself, so the app sizing the shell from the native
+// keyboard height as well handles the keyboard twice. One mechanism: such a
+// WebView takes the browser's visualViewport path.
+test('a WebView from M139 sizes for the keyboard itself; an older one, or an unknown one, does not', () => {
+  const ua = (v: string) => `Mozilla/5.0 (Linux; Android 16; Pixel 9) AppleWebKit/537.36 (KHTML, like Gecko) Version/4.0 Chrome/${v} Mobile Safari/537.36`;
+  assert.equal(webviewSizesForKeyboard(ua('139.0.7258.94')), true);
+  assert.equal(webviewSizesForKeyboard(ua('144.0.7559.20')), true);
+  assert.equal(webviewSizesForKeyboard(ua('138.0.7204.179')), false);
+  assert.equal(webviewSizesForKeyboard('Mozilla/5.0 (Linux; Android 16) AppleWebKit/537.36'), false, 'no Chrome version: the native path, as before');
 });

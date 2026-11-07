@@ -4,7 +4,7 @@
   import { activeModal } from './lib/ui/modal.ts';
   import { createPressDrag } from './lib/ui/press-drag.ts';
   import Settings from './lib/app/Settings.svelte';
-  import { nativeShellHeight, unpanShell } from './lib/app/keyboard-fit.ts';
+  import { nativeShellHeight, unpanShell, webviewSizesForKeyboard } from './lib/app/keyboard-fit.ts';
   import Sessions from './lib/sessions/Sessions.svelte';
   import Terminal from './lib/terminal/Terminal.svelte';
   import SplitView from './lib/sessions/SplitView.svelte';
@@ -1004,8 +1004,11 @@
   });
   // Remove the legacy CSS zoom. Desktop UI scaling now uses WKWebView's
   // native pageZoom through Tauri, so viewport geometry and visual scale stay
-  // in the same coordinate system.
-  if (isTauri) {
+  // in the same coordinate system. The DESKTOP only (board #56 round 2,
+  // validator-2's lead): Android scales with CSS zoom (setUiZoom above), and
+  // clearing it there left --ui-zoom dividing every shell height and width by
+  // a zoom that was no longer applied.
+  if (isTauriDesktop) {
     document.documentElement.style.zoom = '';
     localStorage.removeItem('tmux_zoom');
   }
@@ -1046,6 +1049,10 @@
       // container size, which Terminal.svelte's ResizeObserver picks up.
     };
     const nativeHandler = (e) => {
+      // One mechanism (board #56 round 2): a WebView that resizes the visual
+      // viewport for the keyboard itself (M139+) is sized by the browser's
+      // visualViewport path below, never also by this native height.
+      if (webviewSizesForKeyboard(navigator.userAgent)) return;
       androidNativeKb = true; // suppress visualViewport handler on Android
       const kbh = e.detail?.height || 0;
       lastNativeKb = kbh;

@@ -1691,3 +1691,13 @@ test('the Android keyboard path fits the shell to the current height and undoes 
   assert.match(source, /window\.addEventListener\('resize', onNativeResize\);/u, 'a size change with no keyboard is taken');
   assert.match(source, /window\.removeEventListener\('resize', onNativeResize\);/u);
 });
+
+// Board #56 round 2, validator-2's lead: on Android the legacy-zoom cleanup
+// (meant for the desktop's WKWebView pageZoom) wiped the CSS zoom setUiZoom had
+// just applied, but left --ui-zoom, so every shell height and width was divided
+// by a zoom that was not applied. Only the desktop clears it.
+test('only the desktop clears the legacy CSS zoom; Android keeps the zoom it applies (board #56)', () => {
+  assert.match(source, /if \(isTauriDesktop\) \{\n    document\.documentElement\.style\.zoom = '';/u);
+  assert.doesNotMatch(source, /if \(isTauri\) \{\n    document\.documentElement\.style\.zoom = '';/u);
+  assert.match(source, /if \(webviewSizesForKeyboard\(navigator\.userAgent\)\) return;/u, 'a WebView that sizes for the keyboard leaves the native height unused');
+});
