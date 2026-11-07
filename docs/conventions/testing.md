@@ -930,14 +930,19 @@ flaky wall-clock assertions in the test.
     (`_tmux_mobile_test_<pid>_<test>`). The guard is taken before anything
     exists and kills and removes on drop, also on panic (the #251 rule).
     A test that starts its session with a raw `tmux new-session` takes the
-    same kind of guard right after it (`KillOnDrop` in `server/hub_rpc.rs`),
-    never a trailing `kill-session`: a failed assertion skips the trailing
+    same kind of guard (`KillOnDrop` in `server/hub_rpc.rs`) IMMEDIATELY after
+    it succeeds, before any other step that can fail (a `new-window`, an
+    `adopt`), never a trailing `kill-session`: a failed assertion skips the trailing
     line, and four `tmm-note-*` sessions were killed by hand on 2026-11-06
     (board #61; measured with a forced panic in
     `a_notified_note_announces_once_and_leaves_the_flagless_note_alone`: one
     session left before the guard, none after; the three other unguarded
     `hub_rpc` tests, board-reply, stop and clean-start, left three before
     and none after). No `hub_rpc` test ends with a trailing `kill-session`.
+    Round 2 (validator's LD_PRELOAD fixture failing only that test's
+    `new-window` spawn): the notify test and `a_ship_reaches…` took the
+    guard after their `new-window` and left one session each; with the guard
+    first, none.
   - A directory held for the whole process (the test store, the config
     dir, the kimi/codex homes, the integration crate's config dir, the symlink
     fixtures):

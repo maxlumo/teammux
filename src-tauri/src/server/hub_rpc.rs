@@ -7015,12 +7015,12 @@ while True:
             let _ = std::fs::remove_dir_all(&ws);
             return;
         }
+        // Torn down on drop, taken before any other step that can fail (#61).
+        let _teardown = KillOnDrop(session.clone(), ws.clone());
         std::process::Command::new("tmux")
             .args(["new-window", "-d", "-t", &session, "-n", "lead", "-c", &ws.to_string_lossy(), "cat"])
             .status()
             .unwrap();
-        // Torn down on drop, also when an assertion fails part-way.
-        let _teardown = KillOnDrop(session.clone(), ws.clone());
         crate::projects::adopt(&session, Some("ship-once-test")).expect("adopt test project");
         let call = |method: &str, params: serde_json::Value| {
             let r = handle_hub_request(&req(method, params), None);
@@ -7092,13 +7092,13 @@ while True:
             let _ = std::fs::remove_dir_all(&ws);
             return;
         }
+        // Torn down on drop, taken before any other step that can fail (board
+        // #61: a trailing kill-session, then a failing new-window, left it).
+        let _teardown = KillOnDrop(session.clone(), ws.clone());
         std::process::Command::new("tmux")
             .args(["new-window", "-d", "-t", &session, "-n", "lead", "-c", &ws.to_string_lossy(), "cat"])
             .status()
             .unwrap();
-        // Torn down on drop, also when an assertion fails part-way (board #61:
-        // a trailing kill-session left tmm-note-* sessions after a failure).
-        let _teardown = KillOnDrop(session.clone(), ws.clone());
         crate::projects::adopt(&session, Some("note-notify-test")).expect("adopt test project");
         let id = crate::projects::board_save(&session, None, Some("Notify"), Some("b"), None, Some("dev"), "human").unwrap();
 
