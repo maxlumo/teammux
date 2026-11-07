@@ -905,7 +905,38 @@ pub(crate) fn line_is_private(cmd: &str) -> bool {
 
 pub(crate) fn resume_command(cmd: &str, id: Option<&str>, home: Option<&std::path::Path>) -> String {
     let resume = |which: &str| with_resume(cmd, which).unwrap_or_else(|| cmd.to_string());
-    let recorded = || resume(&id.map(crate::shell::quote).unwrap_or_else(|| "--last".to_string()));
+    match resume_target(id, home) {
+        // Board #74: a chat codex will not reopen starts fresh instead.
+        Target::Thread(t) if home.and_then(|h| resume_refusal(h, &t)).is_some() => cmd.to_string(),
+        Target::Thread(t) => resume(&crate::shell::quote(&t)),
+        Target::Last => resume("--last"),
+        Target::Fresh => cmd.to_string(),
+    }
+}
+
+/// Why the restart `resume_command` builds for (`id`, `home`) starts fresh
+/// instead of resuming its thread (board #74), for the room; `None` when it
+/// resumes, or starts fresh for a reason of its own (#29's cleared thread).
+pub(crate) fn resume_notice(id: Option<&str>, home: &std::path::Path) -> Option<String> {
+    match resume_target(id, Some(home)) {
+        Target::Thread(t) => resume_refusal(home, &t),
+        _ => None,
+    }
+}
+
+/// What a codex restart reopens.
+enum Target {
+    /// This thread, by id.
+    Thread(String),
+    /// codex's own `--last` (no id recorded and no pane thread read).
+    Last,
+    /// Nothing: a fresh conversation.
+    Fresh,
+}
+
+/// The ONE choice of what a restart reopens, for the line and the notice.
+fn resume_target(id: Option<&str>, home: Option<&std::path::Path>) -> Target {
+    let recorded = || id.map(|t| Target::Thread(t.to_string())).unwrap_or(Target::Last);
     let Some(current) = home.and_then(pane_thread) else { return recorded() };
     // Nothing to change: the pane's thread is the one recorded.
     if current.has_rollout && Some(current.id.as_str()) == id {
@@ -916,9 +947,9 @@ pub(crate) fn resume_command(cmd: &str, id: Option<&str>, home: Option<&std::pat
             if current.has_rollout {
                 // Review P1 (#29 round 0): the slot's id lags a capture tick
                 // behind a new thread's first turn; the lock is the pane's own.
-                resume(&crate::shell::quote(&current.id))
+                Target::Thread(current.id)
             } else {
-                cmd.to_string()
+                Target::Fresh
             }
         }
         v => {
@@ -929,6 +960,71 @@ pub(crate) fn resume_command(cmd: &str, id: Option<&str>, home: Option<&std::pat
             recorded()
         }
     }
+}
+
+/// The codex version the provider-mismatch refusal was measured on (board
+/// #74): `thread/resume failed: This chat uses amazon-bedrock-runtime, but
+/// your current provider is ust` (modelProviderMismatch), codex then exits
+/// to the shell.
+pub(crate) const PROVIDER_REFUSAL_MEASURED: &str = "0.166.0";
+
+/// Why codex will not resume thread `id` in `home`, or `None` (board #74).
+/// Codex records the chat's provider in its rollout's first line
+/// (`session_meta.payload.model_provider`) and refuses a resume under any
+/// other: its error names exactly those two values. The current provider is
+/// the managed profile's `model_provider` when it names one, else the
+/// linked `config.toml`'s, else codex's default `openai`. Codex's rule,
+/// predicted on the measured version ONLY: another version, or anything
+/// that cannot be read, is `None`, and the restart resumes as before, so a
+/// changed rule can never silently drop a chat codex would reopen.
+#[cfg(not(any(target_os = "android", target_os = "ios")))]
+pub(crate) fn resume_refusal(home: &std::path::Path, id: &str) -> Option<String> {
+    if codex_version().as_deref() != Some(PROVIDER_REFUSAL_MEASURED) {
+        return None;
+    }
+    let codex = home.join("codex");
+    let was = rollout_provider(&rollout_path(&codex.join("sessions"), id)?)?;
+    let now = current_provider(&codex)?;
+    (was != now).then(|| format!("its chat was started on {was} and codex is now on {now}, which codex will not resume"))
+}
+
+/// No managed codex runs on the phone: nothing is refused there.
+#[cfg(any(target_os = "android", target_os = "ios"))]
+pub(crate) fn resume_refusal(_home: &std::path::Path, _id: &str) -> Option<String> {
+    None
+}
+
+/// The most of a rollout's first line that is read: `session_meta` carries
+/// the model's base instructions (tens of KB measured).
+#[cfg(not(any(target_os = "android", target_os = "ios")))]
+const SESSION_META_CAP: u64 = 1024 * 1024;
+
+/// `session_meta.payload.model_provider` from a rollout's first line.
+#[cfg(not(any(target_os = "android", target_os = "ios")))]
+fn rollout_provider(rollout: &std::path::Path) -> Option<String> {
+    use std::io::{BufRead, Read};
+    let f = std::fs::File::open(rollout).ok()?;
+    let mut first = String::new();
+    std::io::BufReader::new(f.take(SESSION_META_CAP)).read_line(&mut first).ok()?;
+    let v: serde_json::Value = serde_json::from_str(first.trim_end()).ok()?;
+    (v.get("type")?.as_str()? == "session_meta").then_some(())?;
+    v.get("payload")?.get("model_provider")?.as_str().map(str::to_string)
+}
+
+/// The provider a managed codex in `codex` (its CODEX_HOME) runs: the
+/// profile's, else config.toml's, else `openai`. `None` when a file that
+/// exists cannot be read or parsed.
+#[cfg(not(any(target_os = "android", target_os = "ios")))]
+fn current_provider(codex: &std::path::Path) -> Option<String> {
+    let named = |file: &str| -> Option<Option<String>> {
+        let text = super::read_model_source(&codex.join(file)).ok()?;
+        let Some(text) = text else { return Some(None) };
+        let table = text.parse::<toml::Table>().ok()?;
+        Some(table.get("model_provider").and_then(toml::Value::as_str).map(str::to_string))
+    };
+    let profile = named(&shared::codex_profile_file())?;
+    let config = named("config.toml")?;
+    Some(profile.or(config).unwrap_or_else(|| "openai".to_string()))
 }
 
 /// How much of a rollout's END is read for its newest turn end (board #39,

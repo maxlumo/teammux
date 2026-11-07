@@ -10,9 +10,13 @@
 #                      staged config (no catalogue named) the list is codex's own `debug models`
 #                      for that provider; a provider switch in this container's copy changes the
 #                      list at the next ask; an agent saved on a listed id answers a turn on it.
+#   live-check codex-provider   board #74: a codex chat started under one provider, restarted
+#                      under another (a second provider id for the same endpoint, in this
+#                      container's copy of the config), comes back on a fresh conversation and
+#                      the room says why; a restart under the same provider resumes as before.
 set -euo pipefail
 check="${1:-smoke}"
-case "$check" in smoke|codex-models) ;; *) echo "live-check: unknown check '$check' (known: smoke, codex-models)" >&2; exit 2 ;; esac
+case "$check" in smoke|codex-models|codex-provider) ;; *) echo "live-check: unknown check '$check' (known: smoke, codex-models, codex-provider)" >&2; exit 2 ;; esac
 
 cfg="$HOME/.config/teammux"
 mkdir -p "$cfg" /work/live
@@ -68,6 +72,49 @@ if [ "$check" = codex-models ]; then
   fi
   pane=$(tmux list-panes -a -F '#{pane_id} #{window_name}' | awk '$2=="lcodex"{print $1; exit}')
   echo "live-check: codex-models: lcodex footer: $(tmux capture-pane -p -t "$pane" | grep -E 'Context [0-9]+% (used|left)' | tail -1)"
+  tmm agent list --project live
+  exit $rc
+fi
+
+if [ "$check" = codex-provider ]; then
+  [ -f "$HOME/.codex/config.toml" ] || { echo "live-check: codex-provider: skipped: ~/.codex/config.toml not staged"; exit 2; }
+  rc=0
+  cfg_file="$HOME/.codex/config.toml"
+  provider=$(sed -n 's/^model_provider *= *"\(.*\)"/\1/p' "$cfg_file")
+  echo "live-check: codex-provider: staged provider: ${provider:-openai}"
+  ask() { # $1 word: one turn that must answer it
+    tmm send --project live "@lcodex reply with the single word $1" >/dev/null
+    timeout 180 bash -c "until tmm log --project live --limit 30 | grep -q '] lcodex: $1'; do sleep 2; done"
+  }
+  pane_cmd() { tmux list-panes -a -F '#{window_name} #{pane_current_command}' | awk '$1=="lcodex"{print $2; exit}'; }
+  tmm registry save --name lcodex --backend codex --system "Live check agent. Answer in one short line." >/dev/null
+  tmm spawn lcodex --project live >/dev/null
+  sleep 20
+  if ask alpha; then echo "live-check: codex-provider: turn 1 on $provider answered alpha"; else echo "live-check: codex-provider: FAIL (no first answer)"; exit 1; fi
+  # Same provider: the restart resumes, as before.
+  tmm agent restart lcodex --project live >/dev/null
+  sleep 20
+  echo "live-check: codex-provider: same-provider restart line: $(tmm log --project live --limit 40 | grep '\[tmm\] restarted lcodex' | tail -1)"
+  # The switch, in this container's COPY only: a second provider id for the same endpoint.
+  awk -v p="$provider" '
+    $0 ~ "^\\[model_providers\\."p"\\]" {copy=1}
+    copy && /^\[/ && $0 !~ "^\\[model_providers\\."p"\\]" {copy=0}
+    {print} copy {buf=buf $0 "\n"}
+    END {sub("\\[model_providers\\."p"\\]", "[model_providers."p"2]", buf); printf "\n%s", buf}
+  ' "$cfg_file" > "$cfg_file.new"
+  sed -i "s/^model_provider *=.*/model_provider = \"${provider}2\"/" "$cfg_file.new"
+  mv "$cfg_file.new" "$cfg_file"
+  echo "live-check: codex-provider: switched to ${provider}2 (sections: $(grep -c '^\[model_providers\.' "$cfg_file"))"
+  tmm agent restart lcodex --project live >/dev/null
+  sleep 25
+  line=$(tmm log --project live --limit 40 | grep '\[tmm\] restarted lcodex' | tail -1)
+  echo "live-check: codex-provider: cross-provider restart line: $line"
+  case "$line" in *"fresh conversation: its chat was started on $provider and codex is now on ${provider}2"*) ;; *) echo "live-check: codex-provider: FAIL (the room did not say why)"; rc=1 ;; esac
+  echo "live-check: codex-provider: pane runs: $(pane_cmd)"
+  case "$(pane_cmd)" in bash|zsh|sh|dash) echo "live-check: codex-provider: FAIL (a shell, not codex)"; rc=1 ;; esac
+  if ask beta; then echo "live-check: codex-provider: after the switch it answered beta"; else echo "live-check: codex-provider: FAIL (no answer after the switch)"; rc=1; fi
+  pane=$(tmux list-panes -a -F '#{pane_id} #{window_name}' | awk '$2=="lcodex"{print $1; exit}')
+  if tmux capture-pane -p -S -200 -t "$pane" | grep -q 'thread/resume failed'; then echo "live-check: codex-provider: FAIL (codex printed thread/resume failed)"; rc=1; fi
   tmm agent list --project live
   exit $rc
 fi

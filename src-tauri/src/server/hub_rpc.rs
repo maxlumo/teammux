@@ -931,8 +931,10 @@ fn dispatch_hub(req: &Request, notifications: Option<&crate::agent_notifications
                 Some(window) => Some(crate::projects::delivery::replace_cli(session, agent, launch, || kill_agent_cli(session, agent, window)).map_err(RpcError::Internal)?),
                 None => None,
             };
+            // Read before the start, which writes the new thread (board #74).
+            let notice = crate::projects::spawn::resume_notice_for(session, agent);
             let resumed = start_agent_owned(session, agent, permit, owned, launch).map_err(|e| RpcError::Internal(format!("restart failed: {e}")))?;
-            let _ = rooms::post(&room, agent, &restart_line(agent, before, crate::projects::delivery::recipe_backend(session, agent)));
+            let _ = rooms::post(&room, agent, &restart_line(agent, before, crate::projects::delivery::recipe_backend(session, agent), notice.as_deref()));
             Ok(serde_json::json!({ "restarted": agent, "resumed": resumed }))
         }
 
@@ -1000,9 +1002,10 @@ fn dispatch_hub(req: &Request, notifications: Option<&crate::agent_notifications
                         }
                     }
                 }
+                let notice = crate::projects::spawn::resume_notice_for(session, w);
                 match start_agent_owned(session, w, permit, owned, launch) {
                     Ok(_) => {
-                        let _ = rooms::post(&room, w, &restart_line(w, before, crate::projects::delivery::recipe_backend(session, w)));
+                        let _ = rooms::post(&room, w, &restart_line(w, before, crate::projects::delivery::recipe_backend(session, w), notice.as_deref()));
                         restarted.push(w.clone());
                     }
                     Err(e) => errors.push(serde_json::json!({ "name": w, "error": format!("restart failed: {e}") })),
@@ -1109,10 +1112,13 @@ pub(super) fn handle_hub_request(req: &Request, _notifications: Option<&crate::a
 #[cfg(not(any(target_os = "android", target_os = "ios")))]
 /// A restart's room line (board #46 S3): the recipe's backend before the
 /// start and after its re-render. A changed one starts FRESH (a conversation
-/// id never crosses backends), and the room says so; otherwise as before.
-fn restart_line(agent: &str, before: Option<crate::backends::Backend>, after: Option<crate::backends::Backend>) -> String {
-    match (before, after) {
-        (Some(b), Some(a)) if b != a => format!("[tmm] restarted {agent} on {}, fresh conversation", a.name()),
+/// id never crosses backends), and the room says so. So does a conversation
+/// its CLI will not resume (`notice`, board #74: a codex chat from another
+/// provider); otherwise as before.
+fn restart_line(agent: &str, before: Option<crate::backends::Backend>, after: Option<crate::backends::Backend>, notice: Option<&str>) -> String {
+    match (before, after, notice) {
+        (Some(b), Some(a), _) if b != a => format!("[tmm] restarted {agent} on {}, fresh conversation", a.name()),
+        (_, _, Some(why)) => format!("[tmm] restarted {agent}, fresh conversation: {why}"),
         _ => format!("[tmm] restarted {agent}"),
     }
 }
@@ -3114,9 +3120,12 @@ mod tests {
     #[test]
     fn a_restart_onto_another_backend_says_it_starts_a_fresh_conversation() {
         use crate::backends::Backend;
-        assert_eq!(restart_line("val", Some(Backend::Omp), Some(Backend::Codex)), "[tmm] restarted val on codex, fresh conversation");
-        assert_eq!(restart_line("val", Some(Backend::Codex), Some(Backend::Codex)), "[tmm] restarted val");
-        assert_eq!(restart_line("val", None, Some(Backend::Codex)), "[tmm] restarted val", "no recipe before: nothing to compare");
+        assert_eq!(restart_line("val", Some(Backend::Omp), Some(Backend::Codex), None), "[tmm] restarted val on codex, fresh conversation");
+        assert_eq!(restart_line("val", Some(Backend::Codex), Some(Backend::Codex), None), "[tmm] restarted val");
+        assert_eq!(restart_line("val", None, Some(Backend::Codex), None), "[tmm] restarted val", "no recipe before: nothing to compare");
+        // Board #74: a chat its CLI will not resume is said, with the reason.
+        let why = "its chat was started on amazon-bedrock-runtime and codex is now on ust, which codex will not resume";
+        assert_eq!(restart_line("val", Some(Backend::Codex), Some(Backend::Codex), Some(why)), format!("[tmm] restarted val, fresh conversation: {why}"));
     }
 
     /// Board #448 P1-B, the full start door: an agent whose saved recipe is an

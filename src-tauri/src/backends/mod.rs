@@ -795,6 +795,18 @@ impl Backend {
         }
     }
 
+    /// Why a restart of this backend's agent in `home`, recorded on `id`,
+    /// starts a fresh conversation instead of resuming it, in words for the
+    /// room (board #74), or `None` when it resumes as `resume_command`
+    /// builds it. Only codex refuses a chat on its own terms (a provider
+    /// switch). Declared in the backend's file.
+    pub fn resume_notice(self, id: Option<&str>, home: &std::path::Path) -> Option<String> {
+        match self {
+            Backend::Codex => codex::resume_notice(id, home),
+            _ => None,
+        }
+    }
+
     pub fn resume_command(self, cmd: &str, id: Option<&str>, home: Option<&std::path::Path>, agent: &str) -> String {
         match self {
             Backend::Kiro => kiro::resume_command(cmd, id, home, agent),
