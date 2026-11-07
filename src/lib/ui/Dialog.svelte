@@ -153,7 +153,7 @@
        the DirPicker's confirm button sat below the bottom edge, unreachable
        (owner 2026-08-25: "创建project选择路径，没看到确认按钮"). */
     width: min(420px, calc(100vw / var(--ui-zoom, 1) - 32px));
-    max-height: calc(100vh / var(--ui-zoom, 1) - 48px); overflow-y: auto;
+    max-height: calc(var(--app-height, 100vh) / var(--ui-zoom, 1) - 48px); overflow-y: auto;
     background: var(--bg); border: 1px solid var(--border); border-radius: var(--control-dialog-radius);
     box-shadow: 0 18px 60px rgba(0, 0, 0, 0.5); padding: 18px;
     display: flex; flex-direction: column; gap: 12px;
@@ -172,16 +172,17 @@
      for the keyboard, so the difference is exactly the part the keyboard
      covers (0 with no keyboard, and 0 where the layout viewport itself
      shrinks: index.html's resizes-content). With the keyboard up the sheet
-     sits on it, so it drops the safe-area padding the keyboard covers. */
+     sits on it, so it drops the safe-area padding the keyboard covers, and
+     the one max-height (on .dlg) is the shell's, never the screen's: no new
+     geometry, only the existing values against #56's height. */
   .dlg.sheet {
     left: 0; top: auto; bottom: max(0px, calc(100% - var(--app-height, 100%) / var(--ui-zoom, 1))); transform: none;
-    max-height: calc(var(--app-height, 100dvh) / var(--ui-zoom, 1) - 48px);
     width: 100%; max-width: none; border-radius: var(--control-dialog-radius) var(--control-dialog-radius) 0 0;
     border-left: none; border-right: none; border-bottom: none;
     padding: 16px 14px calc(16px + var(--sab, 0px)); /* var(--sab): env() is 0 in the APK */
     animation: sheet-up var(--t-move) ease-out;
     will-change: opacity;
   }
-  :global(html.keyboard-open) .dlg.sheet { padding-bottom: 16px; }
+  :global(html.keyboard-open) .dlg.sheet { --sab: 0px; }
   @media (prefers-reduced-motion: reduce) { .dlg-backdrop, .dlg, .dlg.sheet { animation: none; } }
 </style>

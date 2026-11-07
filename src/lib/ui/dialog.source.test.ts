@@ -95,7 +95,7 @@ test('the shell owns the modal contract its consumers stopped repeating', () => 
   // One card geometry, zoom-corrected (a raw vh at zoom > 1 put DirPicker's
   // confirm button below the screen edge, owner 2026-08-25).
   assert.match(text, /width: min\(420px, calc\(100vw \/ var\(--ui-zoom, 1\) - 32px\)\)/u);
-  assert.match(text, /max-height: calc\(100vh \/ var\(--ui-zoom, 1\) - 48px\)/u);
+  assert.match(text, /max-height: calc\(var\(--app-height, 100vh\) \/ var\(--ui-zoom, 1\) - 48px\)/u, 'the shell height, never the screen (#59)');
   assert.match(text, /border-radius: var\(--control-dialog-radius\)/u);
   assert.match(text, /padding: 16px 14px calc\(16px \+ var\(--sab, 0px\)\)/u, 'the sheet pads with --sab, never raw env()');
   // The only dialog species is the ROLE: app.css keys the confirmation's one
@@ -175,7 +175,6 @@ test('the phone Back peels the shell’s dialog before any page layer (#317)', a
 test('the phone sheet rests on the shell, above the keyboard (board #59)', async () => {
   const text = await readFile(new URL('./Dialog.svelte', import.meta.url), 'utf8');
   assert.match(text, /\.dlg\.sheet \{\n    left: 0; top: auto; bottom: max\(0px, calc\(100% - var\(--app-height, 100%\) \/ var\(--ui-zoom, 1\)\)\); transform: none;/u);
-  assert.match(text, /max-height: calc\(var\(--app-height, 100dvh\) \/ var\(--ui-zoom, 1\) - 48px\);/u, 'and never taller than the shell above the keyboard');
-  assert.match(text, /:global\(html\.keyboard-open\) \.dlg\.sheet \{ padding-bottom: 16px; \}/u, 'on the keyboard, no safe-area padding');
+  assert.match(text, /:global\(html\.keyboard-open\) \.dlg\.sheet \{ --sab: 0px; \}/u, 'on the keyboard, no safe-area padding, by the existing padding rule');
   assert.doesNotMatch(text, /left: 0; top: auto; bottom: 0;/u, 'no longer pinned to the layout viewport');
 });
