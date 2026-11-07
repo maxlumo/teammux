@@ -9,7 +9,7 @@ use super::registry::{DEFAULT_DSH_SYSTEM, DEFAULT_KIMI_SYSTEM, DEFAULT_OMP_SYSTE
 
 /// Bumped when the schema changes; `migrate` is the only place that knows the
 /// steps. Stored in SQLite's own `user_version` pragma.
-const SCHEMA_VERSION: i64 = 36;
+const SCHEMA_VERSION: i64 = 37;
 
 impl Store {
     /// Ensure the durable half of Board editability exists, then
@@ -751,6 +751,32 @@ impl Store {
             // foreign keys off (non-negotiable 9).
             self.ensure_delivery_verbatim()?;
         }
+        if version < 37 {
+            // v37 (board #72): omp's own tools on or off, on the definition
+            // next to model and effort. Every existing agent reads off (0),
+            // the owner's default; an omp agent loses plan, ask, goal and out
+            // at its next render. Inside the ladder, foreign keys off.
+            self.ensure_omp_tools()?;
+        }
+        Ok(())
+    }
+
+    /// The v37 shape (also a heal floor): `reg_agents.omp_tools`, added only
+    /// when absent.
+    pub(super) fn ensure_omp_tools(&self) -> Result<(), String> {
+        let has: bool = self
+            .conn
+            .query_row(
+                "SELECT EXISTS(SELECT 1 FROM pragma_table_info('reg_agents') WHERE name = 'omp_tools')",
+                [],
+                |r| r.get(0),
+            )
+            .map_err(|e| format!("inspect reg_agents.omp_tools: {e}"))?;
+        if !has {
+            self.conn
+                .execute_batch("ALTER TABLE reg_agents ADD COLUMN omp_tools INTEGER NOT NULL DEFAULT 0;")
+                .map_err(|e| format!("add reg_agents.omp_tools: {e}"))?;
+        }
         Ok(())
     }
 
@@ -1151,6 +1177,26 @@ mod tests {
         assert_eq!(store.issue_get("proj", 1).unwrap().unwrap()["agreement"], serde_json::Value::Null, "healed on open, plain");
     }
 
+    /// v36 -> v37 (board #72): `reg_agents.omp_tools` appears, every existing
+    /// definition reads off (the owner's default), and a saved on reads back.
+    #[test]
+    fn v36_definitions_gain_omp_tools_off() {
+        let scratch = crate::tmux::Scratch::new("store-v37");
+        let path = std::path::Path::new(&scratch.path()).join("state.db");
+        {
+            let store = Store::open(&path).unwrap();
+            store.conn.execute_batch("ALTER TABLE reg_agents DROP COLUMN omp_tools; PRAGMA user_version = 36;").unwrap();
+            store.conn.execute("INSERT OR REPLACE INTO reg_agents (name, backend, created_at, updated_at) VALUES ('old-omp', 'omp', 1, 1)", []).unwrap();
+        }
+        let store = Store::open(&path).unwrap();
+        let v: i64 = store.conn.query_row("PRAGMA user_version", [], |r| r.get(0)).unwrap();
+        assert_eq!(v, SCHEMA_VERSION);
+        let old = store.reg_get("old-omp").unwrap().unwrap();
+        assert!(!old.omp_tools, "an existing definition is off");
+        store.reg_save(&RegAgent { omp_tools: true, ..old }, 2).unwrap();
+        assert!(store.reg_get("old-omp").unwrap().unwrap().omp_tools, "a saved on reads back");
+    }
+
     /// v35 -> v36 (board #45): `deliveries.verbatim` appears, every existing
     /// row (typed or held) stays a chat line, a held command can be written,
     /// and the heal floor re-adds the column if a stamp ran ahead of it.
@@ -1167,7 +1213,7 @@ mod tests {
         let store = Store::open(&path).unwrap();
         let v: i64 = store.conn.query_row("PRAGMA user_version", [], |r| r.get(0)).unwrap();
         assert_eq!(v, SCHEMA_VERSION);
-        assert_eq!(SCHEMA_VERSION, 36);
+        assert!(SCHEMA_VERSION >= 36);
         assert!(store.pending_deliveries("s", Some("w")).unwrap()[0].verbatim.is_none());
         let held = store.held_deliveries("s", "w").unwrap();
         assert_eq!((held.len(), held[0].line.as_str(), held[0].verbatim), (1, "held line", None));
@@ -1393,7 +1439,7 @@ mod tests {
                 backend: "omp".into(),
                 model: String::new(),
                 effort: String::new(),
-                input_mode: "queue".into(),
+                input_mode: "queue".into(), omp_tools: false,
                 system: "My own omp persona.".into(),
                 skills: "[]".into(),
                 mcp: "[]".into(),
@@ -1445,7 +1491,7 @@ mod tests {
                 backend: "kimi".into(),
                 model: String::new(),
                 effort: String::new(),
-                input_mode: "queue".into(),
+                input_mode: "queue".into(), omp_tools: false,
                 system: "My own kimi persona.".into(),
                 skills: "[]".into(),
                 mcp: "[]".into(),
@@ -1498,7 +1544,7 @@ mod tests {
                 backend: "dsh".into(),
                 model: "my-model".into(),
                 effort: String::new(),
-                input_mode: "queue".into(),
+                input_mode: "queue".into(), omp_tools: false,
                 system: "My own dsh persona.".into(),
                 skills: "[]".into(),
                 mcp: "[]".into(),

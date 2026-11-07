@@ -77,6 +77,13 @@ pub struct RegAgent {
     /// member's inline agent saved before #245) has always meant, so it stays.
     #[serde(default = "default_input_mode")]
     pub input_mode: String,
+    /// omp's own tools (plan, ask, goal, out) on (board #72, owner: one
+    /// option, off by default). Off renders `<tool>.enabled: false` for each
+    /// into the home's config.yml; on renders nothing, so omp's defaults
+    /// apply. Ignored by every other backend. A stored text without the field
+    /// (an older team member's inline agent) means off.
+    #[serde(default)]
+    pub omp_tools: bool,
     #[serde(default)]
     pub system: String,
     /// JSON array of skill refs (local names or github URLs).
@@ -120,7 +127,7 @@ pub(super) fn row_to_reg_agent(r: &rusqlite::Row<'_>) -> rusqlite::Result<RegAge
         system: r.get(4)?,
         skills: r.get(5)?,
         mcp: r.get(6)?,
-        input_mode: r.get(7)?,
+        input_mode: r.get(7)?, omp_tools: r.get::<_, i64>(8)? != 0,
     })
 }
 
@@ -129,7 +136,7 @@ impl Store {
         let mut stmt = self
             .conn
             .prepare(
-                "SELECT name, backend, model, effort, system, skills, mcp, input_mode
+                "SELECT name, backend, model, effort, system, skills, mcp, input_mode, omp_tools
                    FROM reg_agents
                   ORDER BY CASE name
                     WHEN 'kiro' THEN 0
@@ -154,7 +161,7 @@ impl Store {
     pub fn reg_get(&self, name: &str) -> Result<Option<RegAgent>, String> {
         self.conn
             .query_row(
-                "SELECT name, backend, model, effort, system, skills, mcp, input_mode FROM reg_agents WHERE name = ?1",
+                "SELECT name, backend, model, effort, system, skills, mcp, input_mode, omp_tools FROM reg_agents WHERE name = ?1",
                 [name],
                 row_to_reg_agent,
             )
@@ -166,10 +173,10 @@ impl Store {
     pub fn reg_save(&self, a: &RegAgent, now: u64) -> Result<(), String> {
         self.conn
             .execute(
-                "INSERT INTO reg_agents (name, backend, model, effort, system, skills, mcp, input_mode, created_at, updated_at)
-                 VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?9, ?8, ?8)
+                "INSERT INTO reg_agents (name, backend, model, effort, system, skills, mcp, input_mode, omp_tools, created_at, updated_at)
+                 VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?9, ?10, ?8, ?8)
                  ON CONFLICT(name) DO UPDATE SET
-                   backend=?2, model=?3, effort=?4, system=?5, skills=?6, mcp=?7, input_mode=?9, updated_at=?8",
+                   backend=?2, model=?3, effort=?4, system=?5, skills=?6, mcp=?7, input_mode=?9, omp_tools=?10, updated_at=?8",
                 rusqlite::params![
                     a.name,
                     a.backend,
@@ -180,6 +187,7 @@ impl Store {
                     a.mcp,
                     now as i64,
                     a.input_mode,
+                    a.omp_tools as i64,
                 ],
             )
             .map(|_| ())
@@ -267,7 +275,7 @@ impl Store {
                 backend: "kiro".into(),
                 model: String::new(),
                 effort: String::new(),
-                input_mode: mode("kiro"),
+                input_mode: mode("kiro"), omp_tools: false,
                 system: DEFAULT_KIRO_SYSTEM.into(),
                 skills: r#"["tmm-cli","mcp-cli"]"#.into(),
                 mcp: "[]".into(),
@@ -277,7 +285,7 @@ impl Store {
                 backend: "codex".into(),
                 model: String::new(),
                 effort: String::new(),
-                input_mode: mode("codex"),
+                input_mode: mode("codex"), omp_tools: false,
                 system: "You are a powerful 10x developer running on Codex who can handle any task with decisive execution and minimal words.".into(),
                 skills: r#"["tmm-cli","mcp-cli"]"#.into(),
                 mcp: "[]".into(),
@@ -293,7 +301,7 @@ impl Store {
                 // account every turn of the seeded agent failed (board #511).
                 model: String::new(),
                 effort: String::new(),
-                input_mode: mode("claude"),
+                input_mode: mode("claude"), omp_tools: false,
                 system: "You are a powerful 10x developer running on Claude Code who can handle any task with decisive execution and minimal words.".into(),
                 skills: r#"["tmm-cli","mcp-cli"]"#.into(),
                 mcp: "[]".into(),
@@ -303,7 +311,7 @@ impl Store {
                 backend: "grok".into(),
                 model: String::new(),
                 effort: String::new(),
-                input_mode: mode("grok"),
+                input_mode: mode("grok"), omp_tools: false,
                 system: "You are a powerful 10x developer running on Grok who can handle any task with decisive execution and minimal words.".into(),
                 skills: r#"["tmm-cli","mcp-cli"]"#.into(),
                 mcp: "[]".into(),
@@ -318,7 +326,7 @@ impl Store {
                 // its bundled default and answered 403 (2026-11-03).
                 model: String::new(),
                 effort: String::new(),
-                input_mode: mode("omp"),
+                input_mode: mode("omp"), omp_tools: false,
                 system: DEFAULT_OMP_SYSTEM.into(),
                 skills: r#"["tmm-cli","mcp-cli"]"#.into(),
                 // omp ships its own web_search tool — no MCP search shim needed.
@@ -329,7 +337,7 @@ impl Store {
                 backend: "kimi".into(),
                 model: String::new(),
                 effort: String::new(),
-                input_mode: mode("kimi"),
+                input_mode: mode("kimi"), omp_tools: false,
                 system: DEFAULT_KIMI_SYSTEM.into(),
                 skills: r#"["tmm-cli","mcp-cli"]"#.into(),
                 mcp: "[]".into(),
@@ -339,7 +347,7 @@ impl Store {
                 backend: "dsh".into(),
                 model: String::new(),
                 effort: String::new(),
-                input_mode: mode("dsh"),
+                input_mode: mode("dsh"), omp_tools: false,
                 system: DEFAULT_DSH_SYSTEM.into(),
                 skills: r#"["tmm-cli","mcp-cli"]"#.into(),
                 mcp: "[]".into(),
@@ -487,7 +495,7 @@ mod tests {
             backend: "kiro".into(),
             model: String::new(),
             effort: String::new(),
-            input_mode: "queue".into(),
+            input_mode: "queue".into(), omp_tools: false,
             system: "custom".into(),
             skills: "[]".into(),
             mcp: "[]".into(),
@@ -541,7 +549,7 @@ mod tests {
             backend: "kiro".into(),
             model: "gpt-5.6-sol".into(),
             effort: "high".into(),
-            input_mode: "queue".into(),
+            input_mode: "queue".into(), omp_tools: false,
             system: String::new(),
             skills: r#"["tmm-cli","mcp-cli"]"#.into(),
             mcp: "[]".into(),

@@ -190,6 +190,7 @@ USAGE (human or agent — self-management):
                                       kiro, codex only; no receipt, reply may go to
                                       the wrong sender). Default: steer on kiro,
                                       queue elsewhere. Applied on restart
+                    [--omp-tools on|off]   omp's own plan/ask/goal/out (default off; restart)
   tmm registry delete <name>
   tmm prompt show|path                the app-wide agent instructions (<config>/AGENTS.md),
   tmm prompt set <text> | --file <p>  prepended to EVERY managed agent's system prompt at spawn;
@@ -1809,6 +1810,9 @@ fn registry_def(name: &str, backend: &str, flags: &Flags) -> Value {
     if let Some(mode) = flags.get("input-mode").cloned().flatten() {
         def["input_mode"] = json!(mode);
     }
+    // Board #72: sent only when given, so a save without it keeps the stored
+    // switch; a value other than on/off goes as text, which the server refuses.
+    if let Some(v) = flags.get("omp-tools").cloned().flatten() { def["omp_tools"] = match v.as_str() { "on" => json!(true), "off" => json!(false), _ => json!(v) }; }
     def
 }
 
@@ -2745,7 +2749,7 @@ const LOG_FLAGS: &[&str] = &["since", "limit", "f", "follow", "grep", "all", "fr
 /// the map keeps one value per key by design and that is fine for the rest.
 /// Flags that take a value: `--name value` or `--name=value`. Everything else is a switch.
 const VALUED: &[&str] = &["project", "agent", "server", "output", "since", "limit", "brief",
-                          "name", "session", "with-agent", "backend", "model", "effort", "input-mode", "system", "skills", "mcp",
+                          "name", "session", "with-agent", "backend", "model", "effort", "input-mode", "omp-tools", "system", "skills", "mcp",
                           "ref", "source", "description", "def", "grep", "image", "notify", "body", "assignee", "team", "join", "file",
                           "in", "at", "to", "code", "signal", "re", "as", "from", "before", "lines", "cols", "note", "args-json", "test",
                           "expect", "message-file", "blocked-by", "only", "seq", "cancel"];
@@ -2889,7 +2893,7 @@ const VERB_FLAGS: &[VerbFlags] = &[
     VerbFlags { key: "teams delete", ctx: true, flags: &[] },
     VerbFlags { key: "registry", ctx: true, flags: &[] },
     VerbFlags { key: "registry list", ctx: true, flags: &[] },
-    VerbFlags { key: "registry save", ctx: true, flags: &["name", "backend", "system", "model", "effort", "skills", "mcp", "input-mode"] },
+    VerbFlags { key: "registry save", ctx: true, flags: &["name", "backend", "system", "model", "effort", "skills", "mcp", "input-mode", "omp-tools"] },
     VerbFlags { key: "registry delete", ctx: true, flags: &[] },
     VerbFlags { key: "agent", ctx: true, flags: &[] },
     VerbFlags { key: "agent list", ctx: true, flags: &[] },
@@ -4885,7 +4889,7 @@ old — X []
     fn registry_save_takes_an_input_mode_value() {
         // Board #245: `--input-mode` is a VALUED flag; were it boolean, its
         // value would fall out as a positional and the def would save queue.
-        let args: Vec<String> = ["registry", "save", "--name", "dev", "--input-mode", "steer", "--backend", "kiro"]
+        let args: Vec<String> = ["registry", "save", "--name", "dev", "--input-mode", "steer", "--omp-tools", "on", "--backend", "kiro"]
             .iter()
             .map(|s| s.to_string())
             .collect();
@@ -4894,6 +4898,7 @@ old — X []
         assert_eq!(flags.get("backend").cloned().flatten().as_deref(), Some("kiro"));
         assert_eq!(pos, vec!["registry", "save"]);
         assert_eq!(registry_def("dev", "kiro", &flags)["input_mode"], "steer", "a given mode is sent");
+        assert_eq!(registry_def("dev", "kiro", &flags)["omp_tools"], true, "#72: --omp-tools is valued too");
     }
 
     /// Board #432: `--from` is a VALUED flag (else its name fell out as a positional and the

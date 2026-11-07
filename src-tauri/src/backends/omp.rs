@@ -301,7 +301,7 @@ pub(crate) fn render_omp(
     // 403 (2026-11-03). Nothing to write removes the previous render's file.
     let user_config = std::fs::read_to_string(omp_user_agent_dir().join("config.yml")).ok();
     let roles = omp_model_roles(user_config.as_deref(), &def.model);
-    shared::write_owned(&home.join("config.yml"), omp_config_yml(&roles).as_deref())?;
+    shared::write_owned(&home.join("config.yml"), omp_config_yml(&roles, def.omp_tools).as_deref())?;
     // ...and the same `default` role rides `--model` (omp 18.15.0, measured
     // 2026-11-03): a resumed session restores the model it last ran
     // (`model_change` in its jsonl) over config.yml, so a restart after a
@@ -383,16 +383,33 @@ pub(crate) fn omp_model_roles(user_config: Option<&str>, model: &str) -> serde_y
     roles
 }
 
-/// The isolated home's `config.yml` for those roles; `None` (no file) when
-/// there are none.
+/// omp's own tools a definition turns off unless it opts in (board #72,
+/// owner: "plan、ask、goal、out 等 … 默认关闭"). Each is gated by omp's own
+/// setting of that name, default true (omp 18.15.0 source: `plan.enabled`
+/// in plan-mode/settings.ts, `goal.enabled` in goals/settings.ts,
+/// `ask.enabled` and `out.enabled` in tools/settings.ts, read by
+/// tools/index.ts `isToolAllowed`). Settings are nested paths in
+/// config.yml (`getByPath` over the dotted id), so `ask.enabled` is
+/// `ask: {enabled: false}`.
+pub(crate) const OWN_TOOLS: &[&str] = &["plan", "ask", "goal", "out"];
+
+/// The isolated home's `config.yml`: those roles, and with `own_tools` off
+/// each of `OWN_TOOLS` disabled. `None` (no file) when there is nothing to say.
 #[cfg(not(any(target_os = "android", target_os = "ios")))]
-pub(crate) fn omp_config_yml(roles: &serde_yaml_ng::Mapping) -> Option<String> {
-    if roles.is_empty() {
-        return None;
+pub(crate) fn omp_config_yml(roles: &serde_yaml_ng::Mapping, own_tools: bool) -> Option<String> {
+    use serde_yaml_ng::{Mapping, Value};
+    let mut root = Mapping::new();
+    if !roles.is_empty() {
+        root.insert("modelRoles".into(), Value::Mapping(roles.clone()));
     }
-    let mut root = serde_yaml_ng::Mapping::new();
-    root.insert("modelRoles".into(), serde_yaml_ng::Value::Mapping(roles.clone()));
-    serde_yaml_ng::to_string(&root).ok()
+    if !own_tools {
+        for tool in OWN_TOOLS {
+            let mut off = Mapping::new();
+            off.insert("enabled".into(), Value::Bool(false));
+            root.insert((*tool).into(), Value::Mapping(off));
+        }
+    }
+    (!root.is_empty()).then(|| serde_yaml_ng::to_string(&root).ok()).flatten()
 }
 
 /// Where the user's own omp agent state lives. Only read, never written.
@@ -559,6 +576,26 @@ pub(crate) fn set_up_need_in(dir: &Path) -> super::readiness::Need {
 mod tests {
     use super::*;
     use serde_json::{json, Value};
+
+    /// Board #72: with omp's own tools off (the default), the home's
+    /// config.yml turns off plan, ask, goal and out by omp's own settings, as
+    /// nested paths, beside any model roles; on writes none of them, so with
+    /// no roles there is no file at all and omp's defaults apply.
+    #[test]
+    fn omp_own_tools_are_off_unless_the_definition_opts_in() {
+        let mut roles = serde_yaml_ng::Mapping::new();
+        roles.insert("default".into(), "ust/claude-opus-5-5".into());
+        let off: serde_yaml_ng::Mapping = serde_yaml_ng::from_str(&omp_config_yml(&roles, false).unwrap()).unwrap();
+        for tool in ["plan", "ask", "goal", "out"] {
+            assert_eq!(off[tool]["enabled"].as_bool(), Some(false), "{tool}: {off:?}");
+        }
+        assert_eq!(off["modelRoles"]["default"].as_str(), Some("ust/claude-opus-5-5"), "roles stay beside them");
+        assert!(off.get("todo").is_none() && off.get("task").is_none(), "only the four the owner named");
+        let on: serde_yaml_ng::Mapping = serde_yaml_ng::from_str(&omp_config_yml(&roles, true).unwrap()).unwrap();
+        assert_eq!(on.len(), 1, "on: nothing but the roles: {on:?}");
+        assert_eq!(omp_config_yml(&serde_yaml_ng::Mapping::new(), true), None, "on, no roles: no file");
+        assert!(omp_config_yml(&serde_yaml_ng::Mapping::new(), false).is_some(), "off, no roles: the file still turns them off");
+    }
 
     /// Run the generated telemetry extension under node with a stand-in
     /// `pi` (omp's documented `pi.on(event, handler)`), replaying `events`

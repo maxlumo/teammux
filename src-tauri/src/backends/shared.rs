@@ -1296,7 +1296,7 @@ mod tests {
         let home = root.join("ws/.tmm/agents/cx");
         std::fs::create_dir_all(&home).unwrap();
         std::os::unix::fs::symlink(&outside, home.join("codex")).unwrap();
-        let def = crate::projects::store::RegAgent { name: "cx".into(), backend: "codex".into(), model: String::new(), effort: String::new(), input_mode: "queue".into(), system: "x".into(), skills: "[]".into(), mcp: "[]".into() };
+        let def = crate::projects::store::RegAgent { name: "cx".into(), backend: "codex".into(), model: String::new(), effort: String::new(), input_mode: "queue".into(), omp_tools: false, system: "x".into(), skills: "[]".into(), mcp: "[]".into() };
         let r = super::super::codex::render_codex(&def, "cx", &home, &root.join("ws"), "prompt", &[]);
         if !had { std::fs::remove_file(&user_cfg).ok(); }
         assert!(r.is_err(), "refused");

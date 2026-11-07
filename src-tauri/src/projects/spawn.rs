@@ -1797,7 +1797,7 @@ mod relaunch_tests {
             backend: "kiro".into(),
             model: String::new(),
             effort: String::new(),
-            input_mode: "queue".into(),
+            input_mode: "queue".into(), omp_tools: false,
             system: "Persona text.".into(),
             skills: "[]".into(),
             mcp: "[]".into(),
@@ -2500,7 +2500,7 @@ mod tests {
             backend: backend.into(),
             model: String::new(),
             effort: String::new(),
-            input_mode: "queue".into(),
+            input_mode: "queue".into(), omp_tools: false,
             system: "Persona text.".into(),
             skills: "[]".into(),
             mcp: r#"[{"name":"files","command":"mcp-files","args":["--root","/tmp"]}]"#.into(),
@@ -3037,7 +3037,10 @@ mod tests {
         let r = render_omp(&d, "t2", &dir, "prompt", &[]).unwrap();
         assert!(!r.cmd.contains("--thinking"), "{}", r.cmd);
         assert!(!r.cmd.contains("--model"), "no role, no flag: omp's own default: {}", r.cmd);
-        assert!(!dir.join("config.yml").exists(), "empty model writes no config.yml");
+        // Board #72: the file now exists to turn omp's own tools off, but it
+        // names no model role, so omp's own default model stays.
+        let yml = std::fs::read_to_string(dir.join("config.yml")).unwrap();
+        assert!(!yml.contains("modelRoles"), "empty model writes no model role: {yml}");
         std::fs::remove_dir_all(&dir).ok();
     }
 
@@ -3056,7 +3059,8 @@ mod tests {
         d.mcp = "[]".into();
         let r = render_omp(&d, "t3", &dir, "prompt", &[]).unwrap();
         assert!(!r.cmd.contains("--model"), "the restart line follows the definition too: {}", r.cmd);
-        assert!(!dir.join("config.yml").exists(), "an unpinned model with no user roles falls back to omp's default");
+        let yml = std::fs::read_to_string(dir.join("config.yml")).unwrap();
+        assert!(!yml.contains("modelRoles"), "an unpinned model with no user roles falls back to omp's default: {yml}");
         assert!(!dir.join("mcp.json").exists(), "a revoked MCP server is gone");
         std::fs::remove_dir_all(&dir).ok();
     }
@@ -3069,7 +3073,7 @@ mod tests {
     #[test]
     fn omp_config_carries_the_user_model_roles_and_nothing_else() {
         use crate::backends::omp::{omp_config_yml, omp_model_roles};
-        let from = |user: Option<&str>, model: &str| omp_config_yml(&omp_model_roles(user, model));
+        let from = |user: Option<&str>, model: &str| omp_config_yml(&omp_model_roles(user, model), true);
         let user = "setupVersion: 2\ntheme: dark\nmodelRoles:\n  default: ust/claude-opus-5-5-kiro\n  smol: ust/claude-haiku-5-5-kiro\n";
         let roles = |yml: &str| -> serde_yaml_ng::Mapping {
             let root: serde_yaml_ng::Mapping = serde_yaml_ng::from_str(yml).unwrap();

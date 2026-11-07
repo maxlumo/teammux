@@ -1314,3 +1314,29 @@ test('a page whose list is already decided waits for nothing (#7 round 2)', asyn
     assert.equal(firstCalls, 0);
   } finally { await app.close(); }
 });
+
+test('omp’s own tools are one switch, shown only for omp, off by default, saved when turned on (#72)', async context => {
+  const fixture = await hostFixture();
+  const served = (name: string) => ({ name, icon: `/assets/${name}.svg`, color: `--backend-${name}`, efforts: [], input_modes: false });
+  const writes: any[] = [];
+  const app = await fixture.mount(context, {
+    props: { ready: () => {}, backends: [served('omp'), served('claude')] },
+    modules: [rpc({
+      registryList: async () => ({ agents: [{ ...alpha, name: 'om', backend: 'omp' }, { ...alpha, name: 'cc', backend: 'claude' }] }),
+      registrySave: async (value: unknown) => { writes.push(value); },
+    })],
+  });
+  const sw = () => app.document.querySelector<HTMLButtonElement>('[role=switch][aria-label^="omp’s own tools"]');
+  try {
+    await openAgent(app, 'cc');
+    assert.equal(sw(), null, 'claude: no switch');
+    command(app, 'Cancel').click(); await app.flush();
+    await openAgent(app, 'om');
+    assert.equal(sw()?.getAttribute('aria-checked'), 'false', 'off by default');
+    sw()!.click(); await app.flush();
+    assert.equal(sw()?.getAttribute('aria-checked'), 'true');
+    command(app, 'Save').click();
+    for (let i = 0; i < 5 && !writes.length; i++) await app.flush();
+    assert.equal(writes[0]?.omp_tools, true);
+  } finally { await app.close(); }
+});

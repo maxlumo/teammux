@@ -71,3 +71,10 @@ test('global instructions cannot overwrite from an unfinished/failed read or ove
   draft.value.text = 'long';
   assert.equal(configValid(draft, false), false);
 });
+
+test('the payload carries omp’s own-tools switch, off unless set (#72)', () => {
+  const off = configPayload({ kind: 'agent', value: { ...agent, backend: 'omp' } }) as { omp_tools: boolean };
+  assert.equal(off.omp_tools, false, 'absent: off, the owner’s default');
+  const on = configPayload({ kind: 'agent', value: { ...agent, backend: 'omp', omp_tools: true } }) as { omp_tools: boolean };
+  assert.equal(on.omp_tools, true);
+});

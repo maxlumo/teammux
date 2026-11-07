@@ -362,7 +362,7 @@ mod tests {
     use super::*;
 
     fn agent(name: &str, system: &str) -> RegAgent {
-        RegAgent { name: name.into(), backend: "claude".into(), model: String::new(), effort: String::new(), input_mode: "queue".into(), system: system.into(), skills: "[]".into(), mcp: "[]".into() }
+        RegAgent { name: name.into(), backend: "claude".into(), model: String::new(), effort: String::new(), input_mode: "queue".into(), omp_tools: false, system: system.into(), skills: "[]".into(), mcp: "[]".into() }
     }
     fn team(members: &str) -> RegTeam {
         RegTeam { name: "dev-squad".into(), description: "Ships features end to end.".into(), members: members.into() }

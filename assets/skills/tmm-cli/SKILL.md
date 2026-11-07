@@ -269,7 +269,7 @@ tmm project delete <session>        # forget it AND delete its agents' homes
 tmm registry list
 tmm registry save --name <n> --backend <kiro|claude|codex|grok|omp|kimi|dsh|pi>
       [--system <text>] [--model m] [--effort low|...|high]
-      [--skills a,b] [--mcp <json>] [--input-mode queue|steer]
+      [--skills a,b] [--mcp <json>] [--input-mode queue|steer] [--omp-tools on|off]
                                     # steer (kiro, codex): a line typed while
                                     #   busy enters the running turn; applied
                                     #   on restart

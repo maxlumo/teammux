@@ -822,7 +822,7 @@ pattern = "Bash(rm -rf*)"
             backend: "kimi".into(),
             model: "bedrock-kimi-k3".into(),
             effort: "high".into(),
-            input_mode: "queue".into(),
+            input_mode: "queue".into(), omp_tools: false,
             system: String::new(),
             skills: "[]".into(),
             mcp: r#"[{"name":"kiro-web-search","command":"uvx","args":["kiro-web-search==0.1.3"]}]"#.into(),

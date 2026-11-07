@@ -147,11 +147,18 @@ fn unnamed_input_mode(backend: &str, stored: Option<&str>) -> String {
 
 pub fn registry_save(def: &Value) -> Result<Value, String> {
     let named = names_input_mode(def);
+    // A save that names no omp_tools keeps the stored row's (board #72), so
+    // an edit through a client or a `tmm registry save` that does not know
+    // the switch never flips it; a NEW definition gets off, the owner's default.
+    let names_omp_tools = def.get("omp_tools").is_some_and(|v| !v.is_null());
     let mut def = def.clone();
     if !named {
         // A null is not a value serde's default covers; the mode is resolved
         // below, against the stored row.
         if let Some(obj) = def.as_object_mut() { obj.remove("input_mode"); }
+    }
+    if !names_omp_tools {
+        if let Some(obj) = def.as_object_mut() { obj.remove("omp_tools"); }
     }
     let mut agent: store::RegAgent =
         serde_json::from_value(def).map_err(|e| format!("invalid agent def {}", mcp_mask::no_echo(&e)))?;
@@ -180,6 +187,9 @@ pub fn registry_save(def: &Value) -> Result<Value, String> {
         let stored = store.reg_get(&agent.name)?;
         if !named {
             agent.input_mode = unnamed_input_mode(&agent.backend, stored.as_ref().map(|a| a.input_mode.as_str()));
+        }
+        if !names_omp_tools {
+            agent.omp_tools = stored.as_ref().is_some_and(|a| a.omp_tools);
         }
         // A `"<set>"` MCP value keeps the value of the row as stored NOW, by
         // server name and key (board #451) — never a list-time snapshot.
@@ -475,7 +485,7 @@ mod listing_tests {
     use crate::projects::store::RegAgent;
 
     fn a(name: &str, backend: &str) -> RegAgent {
-        RegAgent { name: name.into(), backend: backend.into(), model: String::new(), effort: String::new(), input_mode: "queue".into(), system: String::new(), skills: "[]".into(), mcp: "[]".into() }
+        RegAgent { name: name.into(), backend: backend.into(), model: String::new(), effort: String::new(), input_mode: "queue".into(), omp_tools: false, system: String::new(), skills: "[]".into(), mcp: "[]".into() }
     }
 
     /// Board #7: each listed agent says its group and its availability. A
@@ -551,5 +561,26 @@ mod listing_tests {
             Some("agent 'dsh' cannot start on this server: it runs on dsh, which is missing DEEPSEEK_API_KEY (not set in the login shell's environment). Nothing was started."));
         assert_eq!(agent_refusal(&a("kiro", "kiro"), true, &grey), None);
         assert_eq!(agent_refusal(&a("grok", "grok"), false, &grey), None, "unknown never refuses");
+    }
+
+    /// Board #72: a NEW definition has omp's own tools off; a save naming
+    /// the switch sets it; a later save that does not name it (a client or a
+    /// `tmm registry save` without the flag) keeps what is stored.
+    #[test]
+    fn omp_tools_is_off_for_a_new_definition_and_kept_by_a_save_that_does_not_name_it() {
+        let name = format!("ot-{}", &uuid::Uuid::new_v4().to_string()[..8]);
+        let save = |extra: Value| {
+            let mut d = json!({ "name": name, "backend": "omp", "model": "", "effort": "", "system": "x", "skills": "[]", "mcp": "[]" });
+            d.as_object_mut().unwrap().extend(extra.as_object().unwrap().clone());
+            registry_save(&d).unwrap();
+            registry_get(&name).unwrap().unwrap().omp_tools
+        };
+        assert!(!save(json!({})), "a new definition: off");
+        assert!(save(json!({ "omp_tools": true })), "named on");
+        assert!(save(json!({})), "unnamed keeps on");
+        assert!(save(json!({ "omp_tools": null })), "null is unnamed, keeps on");
+        assert!(!save(json!({ "omp_tools": false })), "named off");
+        assert!(!save(json!({})), "unnamed keeps off");
+        registry_delete(&name).ok();
     }
 }

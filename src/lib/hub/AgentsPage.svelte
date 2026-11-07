@@ -813,11 +813,12 @@
             ...def,
             effort: def.effort ?? '',
             input_mode: def.input_mode ?? 'queue',
+            omp_tools: def.omp_tools === true,
             skillSel: skillSel.filter((x) => typeof x === 'string'),
             mcpSel: mcpEntries.filter((x) => typeof x === 'string'),
             mcpExtra: mcpEntries.filter((x) => typeof x !== 'string'),
           }
-        : { name: '', backend: defaultBackend(), model: '', effort: '', input_mode: backendDefaultInputMode(defaultBackend()), modeFollowsDefault: true, system: '', skillSel: [], mcpSel: [], mcpExtra: [] };
+        : { name: '', backend: defaultBackend(), model: '', effort: '', input_mode: backendDefaultInputMode(defaultBackend()), modeFollowsDefault: true, omp_tools: false, system: '', skillSel: [], mcpSel: [], mcpExtra: [] };
       rememberDraft();
     });
   }
@@ -864,6 +865,13 @@
       <CommandButton variant="secondary" label={t('configRetry')} disabled={saving || removing} onclick={() => askModels(backend)} /></p>
   {:else if view.status === 'ok' && !view.complete}
     <p class="hint">{t('agentsModelsIncomplete')}</p>
+  {/if}
+{/snippet}
+<!-- omp's own tools (board #72): one switch, off by default, on the
+     definition and an inline member agent; a derived member takes its base's. -->
+{#snippet ompToolsField(draft, backend = draft.backend)}
+  {#if backend === 'omp'}
+    <div class="config-field"><Switch checked={draft.omp_tools === true} label={t('agentsOmpTools')} disabled={saving || removing} onchange={(on) => { draft.omp_tools = on; }} /></div>
   {/if}
 {/snippet}
 {#snippet inputModeHint(draft, inherited = null)}
@@ -1238,6 +1246,7 @@
                             ariaLabel={t('agentsEffort')} />
                         </label>
                         {@render inputModeField(m.agent)}
+                        {@render ompToolsField(m.agent)}
                       </div>
                       {@render modelNotes(m.agent.backend)}
                       {@render inputModeHint(m.agent)}
@@ -1315,6 +1324,7 @@
               ariaLabel={t('agentsEffort')} />
           </label>
           {@render inputModeField(editing)}
+          {@render ompToolsField(editing)}
         </div>
         {@render modelNotes(editing.backend)}
         {@render inputModeHint(editing)}

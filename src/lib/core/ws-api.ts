@@ -213,6 +213,8 @@ export interface RegAgent {
   /** What a line typed while it is busy does (board #245); absent = queue.
    * `steer` only on a backend whose `backends_list` entry has `input_modes`. */
   input_mode?: 'queue' | 'steer';
+  /** omp's own plan, ask, goal and out tools (board #72); absent = off. */
+  omp_tools?: boolean;
   system: string;
   skills: string;
   mcp: string;

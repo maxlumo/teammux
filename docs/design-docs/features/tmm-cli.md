@@ -112,7 +112,7 @@ tmm project restore [--run|--abandon]   the reboot restore: show (reads only) |
 
 # identity assets (central registry)
 tmm registry list|save|delete        agent definitions (--backend --system --model
-                                     --effort --input-mode --skills --mcp)
+                                     --effort --input-mode --omp-tools --skills --mcp)
 tmm teams list|save|delete           named agent teams (members + roles)
 tmm prompt show|path|set|clear       the app-wide instructions (<config>/AGENTS.md)
 tmm skills list|save|delete|refresh|import   app-owned skill store
