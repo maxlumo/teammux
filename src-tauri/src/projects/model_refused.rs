@@ -32,15 +32,16 @@ fn launched(home: &Path) -> Result<Option<String>, ()> {
     if recipe.get("backend").and_then(|b| b.as_str()).and_then(crate::backends::Backend::parse) == Some(crate::backends::Backend::Codex) {
         return crate::backends::codex::profile_model(home);
     }
-    Ok(flag_model(recipe.get("cmd").and_then(|c| c.as_str()).ok_or(())?))
+    flag_model(recipe.get("cmd").and_then(|c| c.as_str()).ok_or(())?)
 }
 
-/// The value of `--model` or `-m` on a launch line, unquoted.
-fn flag_model(cmd: &str) -> Option<String> {
+/// The value of `--model` or `-m` on a launch line, unquoted: `Ok(None)` with
+/// no such flag, `Err` for a flag with no value (note 31: present, unreadable).
+fn flag_model(cmd: &str) -> Result<Option<String>, ()> {
     let words: Vec<&str> = cmd.split_whitespace().collect();
-    let at = words.iter().position(|w| *w == "--model" || *w == "-m")?;
-    let value = words.get(at + 1)?.trim_matches('\'').trim_matches('"');
-    (!value.is_empty()).then(|| value.to_string())
+    let Some(at) = words.iter().position(|w| *w == "--model" || *w == "-m") else { return Ok(None) };
+    let value = words.get(at + 1).ok_or(())?.trim_matches('\'').trim_matches('"');
+    if value.is_empty() { Err(()) } else { Ok(Some(value.to_string())) }
 }
 
 #[cfg(test)]
@@ -62,12 +63,19 @@ mod tests {
         assert_eq!(launched(&home), Ok(Some("kimi-k3".to_string())));
         recipe("kimi", "command kimi --auto");
         assert_eq!(launched(&home), Ok(None), "no flag: the backend's default");
+        recipe("kimi", "command kimi --auto -m");
+        assert!(launched(&home).is_err(), "a flag with no value: unknown");
         recipe("codex", "codex --profile tmm-agent --no-daemon");
         std::fs::create_dir_all(home.join("codex")).unwrap();
         std::fs::write(home.join("codex/tmm-agent.config.toml"), "model = \"gpt-6.1-sol\"\nmodel_reasoning_effort = \"high\"\n").unwrap();
         assert_eq!(launched(&home), Ok(Some("gpt-6.1-sol".to_string())), "codex: its managed profile");
         std::fs::write(home.join("codex/tmm-agent.config.toml"), "model_reasoning_effort = \"high\"\n").unwrap();
         assert_eq!(launched(&home), Ok(None), "read, and it names none: the backend's default");
+        // Validator note 31: a `model` that is present but not a string is UNKNOWN.
+        std::fs::write(home.join("codex/tmm-agent.config.toml"), "model = 3\n").unwrap();
+        assert!(launched(&home).is_err(), "model = 3: unknown");
+        std::fs::write(home.join("codex/tmm-agent.config.toml"), "model = \"  \"\n").unwrap();
+        assert_eq!(launched(&home), Ok(None), "a string that trims to empty: the default");
         // Validator note 26: a profile that cannot be read is UNKNOWN, never the default.
         std::fs::write(home.join("codex/tmm-agent.config.toml"), "model = [not toml").unwrap();
         assert!(launched(&home).is_err(), "unparsable: unknown");
