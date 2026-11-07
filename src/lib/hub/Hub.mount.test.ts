@@ -2510,6 +2510,13 @@ test('Feed keeps native selection, Copy/Raw dismissal, path intents and room-loc
     assert.ok(actions());
     await app.advance(1);
     assert.equal(actions(), null);
+    const mine = app.document.querySelector<HTMLElement>('.msg.me')!;
+    mine.querySelector<HTMLElement>('.m-meta')!.click();
+    await app.flush();
+    mine.querySelector<HTMLElement>('.m-acts button:first-child')!.click();
+    await app.flush();
+    assert.deepEqual(copied, [body, 'Review this.'], 'Copy leaves out the leading @address (#68)');
+    await app.advance(1500);
     const head = app.document.querySelector<HTMLElement>('.s-head')!;
     head.click();
     await app.flush();

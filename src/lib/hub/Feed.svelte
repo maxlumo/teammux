@@ -20,7 +20,7 @@
   import { FONT_CHANGE_EVENT } from '../app/fonts.svelte.ts';
   import { askTurns, blockKey } from './hub-turns.ts';
   import { NO_LABELS } from './names.ts';
-  import { parseQuote, TAIL_GAP, bottomGap, tailAfterScroll, markMentions, showMentions, mentionedAgents, splitImages, toolColor, pickAnchor, toolEventParts, elideTail, foldedCommandArgs, markIssueRefs, foldLines, statusNote, noteStateColor, runtimeLabel, agentHue, sysParts, sysVerbColor, boardLine, boardStatusColor, promptParts, sameDay, continuesRun, perLineOf, STEPS_ROWS, stateIsLive } from './hub.ts';
+  import { parseQuote, copyBody, TAIL_GAP, bottomGap, tailAfterScroll, markMentions, showMentions, mentionedAgents, splitImages, toolColor, pickAnchor, toolEventParts, elideTail, foldedCommandArgs, markIssueRefs, foldLines, statusNote, noteStateColor, runtimeLabel, agentHue, sysParts, sysVerbColor, boardLine, boardStatusColor, promptParts, sameDay, continuesRun, perLineOf, STEPS_ROWS, stateIsLive } from './hub.ts';
 
   let {
     blocks = [], agents = [], managedNames = [], knownNames = managedNames, names = NO_LABELS, issueIds = [], selected = '', visible = false, compact = false,
@@ -615,14 +615,15 @@
   // Consume that one click per bubble before it can open the action row.
   const msgSelectionClicks = selectionClickGuard();
   let rawOpen = $state('');         // message key showing its raw source
-  /** Copy a message as the agent wrote it — markdown, image refs and all.
-   * copyText carries the insecure-context fallback (LAN http:// dev). */
+  /** Copy a message as the agent wrote it — markdown, image refs and all —
+   * minus its leading @addresses (`copyBody`, #68). copyText carries the
+   * insecure-context fallback (LAN http:// dev). */
   async function copyMsg(key, body, trigger) {
     if (msgOpen !== key || !(trigger instanceof HTMLElement)) return;
     setMessageActions(key);
     copyTrigger = trigger;
     const attempt = messageActs.gen;
-    const ok = await copyText(body ?? '');
+    const ok = await copyText(copyBody(body ?? ''));
     const next = ok ? messageActsCopyLanded(messageActs, attempt)
       : messageActsCopyFailed(messageActs, attempt, t('copyFailed'));
     if (next === messageActs) return;

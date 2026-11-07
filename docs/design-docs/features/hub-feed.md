@@ -25,7 +25,7 @@ counted or cut, so an argument-less command never folds (validator 16:49:
 eight long recipients + `/compact` offered an Expand that changed nothing);
 the arguments end in `……`, and the same unfold control shows them whole. It skips `elideTail`'s fence repair: a plain argument never
 gains a ```. The block's `body` is what the person typed
-(`@kiro /goal args`), so Copy and Raw read the command, not the room's marker.
+(`@kiro /goal args`), so Copy and Raw read the command, not the room's marker; Copy leaves out the leading addresses like every message's Copy (`/goal args`, board #68).
 Lifecycle lines (spawn, stop, restart, interrupt, board moves) keep the capsule;
 the capsule's command costume (`.sys-cmd`) is deleted.
 
@@ -77,6 +77,10 @@ A command bubble shows the check or nothing, never a hollow ring, which would
 promise an echo most commands never send. A `/command` is typed by
 `hub_command` directly and never passes through #257 holding, so it always
 reaches the CLI as a whole line.
+
+### Copy leaves out the leading addresses (board #68, 2026-11-07)
+
+Owner: "复制消息时，我点击消息上的复制按钮，不用把最前面 @ 的 Agent 名字（就是这个字符串）复制进来". A message's Copy puts `copyBody(body)` on the clipboard: the body as written, minus its LEADING run of `@addresses` and the spaces or `, ， 、 : ：` after them (`@alice @bob, please look` copies `please look`). The addresses are read by `mentionSpans`, the server's grammar, so an email (`me@alice.dev`) or a `@bob` mid-sentence stays. A body that is only addresses copies whole, because an empty clipboard would read as a failed copy. Raw still shows the body exactly as stored: Raw is the record, Copy is the text to reuse. Pinned by `copyBody drops only the leading run of @addresses (#68)` (hub.test.ts) and the Copy step of `Feed keeps native selection…` (Hub mount).
 
 ### Copy feedback belongs to a message, not its body (#167, 2026-09-12)
 
