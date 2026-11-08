@@ -162,3 +162,45 @@ fn a_line_to_a_codex_at_its_composer_is_typed_at_once() {
     assert!(wait(&|| rig.lines("SUBMIT:").iter().any(|l| l.contains("straight in")), 10000), "typed at once: {:?}", rig.screen());
     assert_eq!(rig.held(), 0);
 }
+
+/// Round 2 (reviewer's R1): only the screen capture fails, while the pane,
+/// its process and the typing work. An unread screen holds the line, a menu
+/// closed while the capture still fails keeps it held, and it is typed once
+/// only after a capture reads the composer.
+#[test]
+fn a_screen_that_cannot_be_read_holds_until_a_read_shows_the_composer() {
+    use std::sync::atomic::Ordering::SeqCst;
+    struct Restore;
+    impl Drop for Restore {
+        fn drop(&mut self) {
+            crate::projects::delivery::picker_hold::FAIL_CAPTURE.store(false, SeqCst);
+        }
+    }
+    let Some(rig) = Rig::start("held-unread") else { return };
+    let _restore = Restore;
+    rig.keys(&["/new", "Enter"]);
+    assert!(wait(&|| rig.screen().contains("enter select"), 5000), "the picker is open: {:?}", rig.screen());
+
+    crate::projects::delivery::picker_hold::FAIL_CAPTURE.store(true, SeqCst);
+    rig.post("@dev unread 2");
+    std::thread::sleep(std::time::Duration::from_millis(1500));
+    assert_eq!(rig.held(), 1, "an unread screen holds the line");
+    assert!(rig.lines("PICKED:").is_empty(), "{:?}", rig.screen());
+
+    // The menu closes, but the capture still fails: the tick keeps it held.
+    rig.keys(&["Escape"]);
+    assert!(wait(&|| rig.screen().contains("Ask Codex"), 5000), "{:?}", rig.screen());
+    crate::projects::delivery::release_closed_pickers();
+    std::thread::sleep(std::time::Duration::from_millis(500));
+    assert_eq!(rig.held(), 1, "no successful read, no release");
+    assert!(rig.lines("SUBMIT:").is_empty(), "{:?}", rig.screen());
+
+    // A capture that reads the composer releases it, once.
+    crate::projects::delivery::picker_hold::FAIL_CAPTURE.store(false, SeqCst);
+    crate::projects::delivery::release_closed_pickers();
+    assert!(wait(&|| rig.lines("SUBMIT:").iter().any(|l| l.contains("unread 2")), 10000), "typed after a good read: {:?}", rig.screen());
+    std::thread::sleep(std::time::Duration::from_millis(500));
+    assert_eq!(rig.lines("SUBMIT:").iter().filter(|l| l.contains("unread 2")).count(), 1, "once: {:?}", rig.screen());
+    assert!(rig.lines("PICKED:").is_empty(), "{:?}", rig.screen());
+    assert_eq!(rig.held(), 0);
+}

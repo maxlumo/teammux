@@ -703,8 +703,10 @@ pub(crate) const AUTO_COMPACT_TOKENS: i64 = 700_000;
 /// conversation run?" had its `2` (of `2026`) pick "Create new Git
 /// worktree", and the rest of the line became the prompt. By place and
 /// shape, never by a phrase anywhere: codex paints a menu's key hints as the
-/// screen's bottom furniture, a row of `<key> <action>` pairs (joined by
-/// ` · ` or by runs of spaces) one of which is an `esc` action: `enter
+/// screen's bottom furniture, a row made only of `<key> <action>` pairs
+/// (joined by ` · ` or by runs of spaces; a key is `enter`, `esc`, `space`,
+/// `tab`, `^x`, an arrow pair or a `shift+`/`ctrl+`/`alt+` chord, the keys
+/// measured in these rows) one of which is an `esc` action: `enter
 /// select · esc back` (`/new`, `/model`), `space toggle · enter save · esc
 /// save/close` (`/experimental`, round 1: validator's note 10 — a reading by
 /// the first key missed it), `enter resume   esc exit   ^c exit …` above
@@ -713,9 +715,18 @@ pub(crate) const AUTO_COMPACT_TOKENS: i64 = 700_000;
 /// `esc again to edit previous message` (one pair); a running turn's `esc to
 /// interrupt` sits above the composer, never at the bottom.
 pub fn picker_open(screen: &str) -> bool {
+    // Round 2 (reviewer): EVERY chunk must be a key and its action, or the
+    // status line, which ends with the thread title a person's words make
+    // (`… · /work/live · esc back`), would read as a menu.
+    let key = |k: &str| {
+        matches!(k, "enter" | "esc" | "space" | "tab" | "\u{2190}/\u{2192}" | "\u{2191}/\u{2193}")
+            || (k.len() == 2 && k.starts_with('^'))
+            || ["shift+", "ctrl+", "alt+"].iter().any(|m| k.starts_with(m))
+    };
+    let pair = |p: &str| p.split_once(' ').is_some_and(|(k, action)| key(k) && !action.trim().is_empty());
     let hints = |line: &str| {
         let pairs: Vec<&str> = line.split(" \u{b7} ").flat_map(|p| p.split("   ")).map(str::trim).filter(|p| !p.is_empty()).collect();
-        pairs.len() >= 2 && pairs.iter().any(|p| p.starts_with("esc "))
+        pairs.len() >= 2 && pairs.iter().all(|p| pair(p)) && pairs.iter().any(|p| p.starts_with("esc "))
     };
     screen.lines().rev().filter(|l| !l.trim().is_empty()).take(2).any(hints)
 }
@@ -1891,6 +1902,11 @@ mod tests {
         let busy = "\u{2022} Working (1s \u{2022} esc to interrupt)\n\n\u{2022} Queued follow-up inputs\n  \u{21b3} /auditguard @probe\n    shift+\u{2190} edit last queued message\n\n\u{203a} Ask Codex to do anything\n\n  GPT-6.1-Sol high \u{b7} Context 3% used \u{b7} /work/live\n  ? for shortcuts\n";
         let quoted_shape = "\u{2022} the footer reads: space toggle \u{b7} enter save \u{b7} esc save/close\n\n\u{203a} Ask Codex to do anything\n\n  GPT-6.1-Sol high \u{b7} Context 0% used \u{b7} /work/live\n  ? for shortcuts                                      \u{26a0} 1 warning \u{b7} f2 to view\n";
         assert!(!picker_open(idle) && !picker_open(after_escape) && !picker_open(quoted) && !picker_open(busy) && !picker_open(quoted_shape));
+        // Round 2 (reviewer): the status line ends with the thread title, a
+        // person's words; one that reads `esc back` is still a status line.
+        let titled = "\u{203a} Ask Codex to do anything\n\n  GPT-6.1-Sol high \u{b7} Context 0% used \u{b7} /work/live \u{b7} esc back\n";
+        let combined = "\u{203a} Ask Codex to do anything\n\n  GPT-6.1-Sol high \u{b7} Context 0% used \u{b7} /work/live\n  esc again to edit previous message                \u{26a0} 1 warning \u{b7} f2 to view\n";
+        assert!(!picker_open(titled) && !picker_open(combined));
     }
 
 }

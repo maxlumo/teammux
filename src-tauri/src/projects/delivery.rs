@@ -23,7 +23,7 @@ use std::sync::{Arc, Mutex, OnceLock};
 
 use super::telemetry;
 
-mod picker_hold;
+pub(crate) mod picker_hold;
 pub use picker_hold::release as release_closed_pickers;
 mod when_idle;
 pub use when_idle::{accepted_line, cancel_command, check_command_effects, command_session_started, command_when_idle, WhenIdle};
@@ -405,8 +405,7 @@ fn strict_occupied(session: &str, window: &str) -> Option<bool> {
     if super::restore_hold::held(session, window) {
         return Some(true);
     }
-    // A window being restarted (board #38 round 1) is occupied until its screen PROVES the new CLI ready: its pane may still be the shell the
-    // launch line is typed into (validator: a held line typed there gave
+    // A window being restarted (board #38 round 1) is occupied until its screen PROVES the new CLI ready: its pane may still be the shell the launch line is typed into (validator: a held line typed there gave
     // `zsh: bad pattern: [tmm`); so is one whose CLI exited to it (#77), and one whose picker is open (#66).
     if starting(session, window) || super::exited::not_running(session, window) || picker_hold::open(session, window) {
         return Some(true);
