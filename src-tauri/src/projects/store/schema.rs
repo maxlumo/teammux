@@ -5,11 +5,11 @@
 
 use super::*;
 // The v18 step backfills the omp default from the registry's own seed text.
-use super::registry::{DEFAULT_DSH_SYSTEM, DEFAULT_KIMI_SYSTEM, DEFAULT_OMP_SYSTEM};
+use super::registry::{DEFAULT_DSH_SYSTEM, DEFAULT_KIMI_SYSTEM, DEFAULT_OMP_SYSTEM, DEFAULT_PI_SYSTEM};
 
 /// Bumped when the schema changes; `migrate` is the only place that knows the
 /// steps. Stored in SQLite's own `user_version` pragma.
-const SCHEMA_VERSION: i64 = 37;
+const SCHEMA_VERSION: i64 = 38;
 
 impl Store {
     /// Ensure the durable half of Board editability exists, then
@@ -758,6 +758,24 @@ impl Store {
             // at its next render. Inside the ladder, foreign keys off.
             self.ensure_omp_tools()?;
         }
+        if version < 38 {
+            // v38 (board #79, owner 2026-11-08): the `pi` default joins
+            // EXISTING installs exactly once — the v32 mechanism (rows > 0
+            // gates out fresh databases, NOT EXISTS respects a user's own `pi`
+            // def, the stamp makes a later delete stick), with the seed's own
+            // text and pi's backend default mode.
+            let mode = crate::backends::Backend::Pi.default_input_mode();
+            self.conn
+                .execute(
+                    "INSERT INTO reg_agents (name, backend, model, effort, input_mode, system, skills, mcp, created_at, updated_at)
+                     SELECT 'pi', 'pi', '', '', ?1, ?2, '[\"tmm-cli\",\"mcp-cli\"]', '[]',
+                            CAST(strftime('%s','now') AS INTEGER), CAST(strftime('%s','now') AS INTEGER)
+                     WHERE (SELECT COUNT(*) FROM reg_agents) > 0
+                       AND NOT EXISTS (SELECT 1 FROM reg_agents WHERE name = 'pi')",
+                    rusqlite::params![mode, DEFAULT_PI_SYSTEM],
+                )
+                .map_err(|e| format!("migrate to 38: {e}"))?;
+        }
         Ok(())
     }
 
@@ -1479,7 +1497,7 @@ mod tests {
             assert_eq!(kimi.mcp, "[]", "a backfill follows the seed rule: no inline MCP");
             assert_eq!(
                 store.reg_list().unwrap().iter().map(|a| a.name.as_str()).collect::<Vec<_>>(),
-                ["kiro", "codex", "claude", "grok", "omp", "kimi", "dsh"]
+                ["kiro", "codex", "claude", "grok", "omp", "pi", "kimi", "dsh"]
             );
             assert!(store.reg_delete("kimi").unwrap());
         }
@@ -1532,7 +1550,7 @@ mod tests {
             assert_eq!(dsh.mcp, "[]", "a backfill follows the seed rule: no inline MCP");
             assert_eq!(
                 store.reg_list().unwrap().iter().map(|a| a.name.as_str()).collect::<Vec<_>>(),
-                ["kiro", "codex", "claude", "grok", "omp", "kimi", "dsh"]
+                ["kiro", "codex", "claude", "grok", "omp", "pi", "kimi", "dsh"]
             );
             assert!(store.reg_delete("dsh").unwrap());
         }
@@ -1563,6 +1581,60 @@ mod tests {
         assert!(fresh.reg_list().unwrap().is_empty());
     }
 
+    /// v38 (board #79, owner 2026-11-08: "pi Agent 做好了，然后我看到我们的设置
+    /// 里好像还没有它"): the v32 mechanism for `pi` — backfilled once into a
+    /// seeded registry in its backend's default input mode, after omp in the
+    /// fixed order; a delete sticks, a custom def is respected.
+    #[test]
+    fn v38_backfills_pi_into_an_already_seeded_registry() {
+        let scratch = crate::tmux::Scratch::new("migrate-pi");
+        let path = std::path::PathBuf::from(scratch.path()).join("state.db");
+        {
+            let store = Store::init(Connection::open(&path).unwrap()).unwrap();
+            store.reg_seed(1).unwrap();
+            store.conn.execute("DELETE FROM reg_agents WHERE name='pi'", []).unwrap();
+            store.conn.pragma_update(None, "user_version", 37).unwrap();
+        }
+        {
+            let store = Store::init(Connection::open(&path).unwrap()).unwrap();
+            let pi = store.reg_get("pi").unwrap().expect("v38 backfills the pi default");
+            assert_eq!(pi.backend, "pi");
+            assert_eq!(pi.system, "You are a powerful 10x developer running on pi who can handle any task with decisive execution and minimal words.");
+            assert_eq!((pi.model.as_str(), pi.effort.as_str()), ("", ""), "the seed rule: pi's own default applies");
+            assert_eq!(pi.input_mode, "queue", "pi's backend default mode");
+            assert_eq!(pi.skills, r#"["tmm-cli","mcp-cli"]"#);
+            assert_eq!(pi.mcp, "[]", "a backfill follows the seed rule: no inline MCP");
+            assert_eq!(
+                store.reg_list().unwrap().iter().map(|a| a.name.as_str()).collect::<Vec<_>>(),
+                ["kiro", "codex", "claude", "grok", "omp", "pi", "kimi", "dsh"]
+            );
+            assert!(store.reg_delete("pi").unwrap());
+        }
+        {
+            let store = Store::init(Connection::open(&path).unwrap()).unwrap();
+            assert!(store.reg_get("pi").unwrap().is_none(), "a deleted default never resurrects");
+            let custom = RegAgent {
+                name: "pi".into(),
+                backend: "pi".into(),
+                model: "ust/claude-haiku-5-5".into(),
+                effort: "low".into(),
+                input_mode: "queue".into(), omp_tools: false,
+                system: "My own pi persona.".into(),
+                skills: "[]".into(),
+                mcp: "[]".into(),
+            };
+            store.reg_save(&custom, 2).unwrap();
+            store.conn.pragma_update(None, "user_version", 37).unwrap();
+        }
+        {
+            let store = Store::init(Connection::open(&path).unwrap()).unwrap();
+            let pi = store.reg_get("pi").unwrap().unwrap();
+            assert_eq!((pi.system.as_str(), pi.model.as_str()), ("My own pi persona.", "ust/claude-haiku-5-5"), "NOT EXISTS respects a custom definition");
+        }
+        let fresh = Store::open_memory().unwrap();
+        assert!(fresh.reg_list().unwrap().is_empty(), "a fresh database is seeded by reg_seed, not the step");
+    }
+
     #[test]
     fn v4_to_v6_migration_adds_registry_and_assets() {
         // An existing v4 db (projects+slots only) must gain reg_agents.
@@ -1584,10 +1656,10 @@ mod tests {
         let store = Store::init(conn).unwrap();
         store.reg_seed(1).unwrap();
         let seeded = store.reg_list().unwrap();
-        assert_eq!(seeded.len(), 7);
+        assert_eq!(seeded.len(), 8);
         assert_eq!(
             seeded.iter().map(|a| a.name.as_str()).collect::<Vec<_>>(),
-            ["kiro", "codex", "claude", "grok", "omp", "kimi", "dsh"]
+            ["kiro", "codex", "claude", "grok", "omp", "pi", "kimi", "dsh"]
         );
         let v: i64 = store.conn.query_row("PRAGMA user_version", [], |r| r.get(0)).unwrap();
         assert_eq!(v, SCHEMA_VERSION);

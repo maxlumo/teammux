@@ -24,6 +24,12 @@ pub(super) const DEFAULT_KIMI_SYSTEM: &str = "You are a powerful 10x developer r
 /// (the seed rule): dsh's own profile default applies.
 pub(super) const DEFAULT_DSH_SYSTEM: &str = "You are a powerful 10x developer running on DeepSeek Harness who can handle any task with decisive execution and minimal words.";
 
+/// The `pi` default's system text — shared by `reg_seed` and the v38
+/// backfill migration (board #79), so the two cannot drift. The neutral
+/// persona the others carry; model and effort stay EMPTY (the seed rule):
+/// pi's own `defaultModel` and thinking level apply.
+pub(super) const DEFAULT_PI_SYSTEM: &str = "You are a powerful 10x developer running on pi who can handle any task with decisive execution and minimal words.";
+
 /// The shipped `kiro` default: the persona line and NOTHING else (board #344,
 /// owner 2026-10-11 / 10-15: "这个提示词是我们自己的 tmm 配置，发布版本的默认配置
 /// 不应该有这些"). A release must carry no personal workflow rules, so the seed
@@ -144,9 +150,10 @@ impl Store {
                     WHEN 'claude' THEN 2
                     WHEN 'grok' THEN 3
                     WHEN 'omp' THEN 4
-                    WHEN 'kimi' THEN 5
-                    WHEN 'dsh' THEN 6
-                    ELSE 7
+                    WHEN 'pi' THEN 5
+                    WHEN 'kimi' THEN 6
+                    WHEN 'dsh' THEN 7
+                    ELSE 8
                   END, name"
             )
             .map_err(|e| e.to_string())?;
@@ -241,7 +248,7 @@ impl Store {
             .map_err(|e| e.to_string())
     }
 
-    /// Seed the seven backend-native defaults once (empty table only).
+    /// Seed the eight backend-native defaults once (empty table only).
     /// `docs` / `reviewer` and `*-default` aliases are deliberately retired:
     /// one obvious entry per backend, with the defaults pinned to the top of
     /// every registry consumer by `reg_list`.
@@ -330,6 +337,16 @@ impl Store {
                 system: DEFAULT_OMP_SYSTEM.into(),
                 skills: r#"["tmm-cli","mcp-cli"]"#.into(),
                 // omp ships its own web_search tool — no MCP search shim needed.
+                mcp: "[]".into(),
+            },
+            RegAgent {
+                name: "pi".into(),
+                backend: "pi".into(),
+                model: String::new(),
+                effort: String::new(),
+                input_mode: mode("pi"), omp_tools: false,
+                system: DEFAULT_PI_SYSTEM.into(),
+                skills: r#"["tmm-cli","mcp-cli"]"#.into(),
                 mcp: "[]".into(),
             },
             RegAgent {
@@ -445,14 +462,14 @@ mod tests {
         let seeded = store.reg_list().unwrap();
         assert_eq!(
             seeded.iter().map(|a| a.name.as_str()).collect::<Vec<_>>(),
-            ["kiro", "codex", "claude", "grok", "omp", "kimi", "dsh"],
-            "the seven backend defaults are the fixed leading group"
+            ["kiro", "codex", "claude", "grok", "omp", "pi", "kimi", "dsh"],
+            "the eight backend defaults are the fixed leading group"
         );
         assert!(seeded.iter().all(|a| a.skills == r#"["tmm-cli","mcp-cli"]"#));
         // Board #336: each seed starts in its backend's default mode.
         assert_eq!(
             seeded.iter().map(|a| (a.name.as_str(), a.input_mode.as_str())).collect::<Vec<_>>(),
-            [("kiro", "steer"), ("codex", "queue"), ("claude", "queue"), ("grok", "queue"), ("omp", "queue"), ("kimi", "queue"), ("dsh", "queue")]
+            [("kiro", "steer"), ("codex", "queue"), ("claude", "queue"), ("grok", "queue"), ("omp", "queue"), ("pi", "queue"), ("kimi", "queue"), ("dsh", "queue")]
         );
         assert_eq!(
             seeded[0].system,
@@ -463,7 +480,7 @@ mod tests {
         // carry no personal workflow. A worktree location, a Git author rule
         // or a co-author trailer is one person's convention and lives in the
         // app-wide AGENTS.md and in that person's own stored definitions —
-        // never in what every fresh install is handed. Checked over ALL seven
+        // never in what every fresh install is handed. Checked over ALL eight
         // seeds, so adding a rule to any backend's default fails here.
         for a in &seeded {
             let lower = a.system.to_lowercase();
@@ -477,7 +494,7 @@ mod tests {
         // user's own default applies (the claude Bedrock pin and the omp
         // bedrock-extra pin both failed on every other host), and no inline
         // MCP, since the one it carried needed a credential only one install
-        // had (kiro-web-search wants KIRO_API_KEY). Checked over all seven.
+        // had (kiro-web-search wants KIRO_API_KEY). Checked over all eight.
         for a in &seeded {
             assert_eq!(a.model, "", "the {} seed names no model", a.name);
             assert_eq!(a.mcp, "[]", "the {} seed carries no inline MCP", a.name);
@@ -486,7 +503,7 @@ mod tests {
 
         // Seeding twice must not duplicate.
         store.reg_seed(200).unwrap();
-        assert_eq!(store.reg_list().unwrap().len(), 7);
+        assert_eq!(store.reg_list().unwrap().len(), 8);
 
         // A custom definition alphabetically before the defaults stays AFTER
         // their fixed group; the rest of the list is alphabetical.
@@ -503,7 +520,7 @@ mod tests {
         store.reg_save(&custom, 250).unwrap();
         assert_eq!(
             store.reg_list().unwrap().iter().map(|a| a.name.as_str()).collect::<Vec<_>>(),
-            ["kiro", "codex", "claude", "grok", "omp", "kimi", "dsh", "aaa-custom"]
+            ["kiro", "codex", "claude", "grok", "omp", "pi", "kimi", "dsh", "aaa-custom"]
         );
 
         // Upsert edits in place.
@@ -511,11 +528,11 @@ mod tests {
         kiro.model = "gpt-5.6-sol".into();
         store.reg_save(&kiro, 300).unwrap();
         assert_eq!(store.reg_get("kiro").unwrap().unwrap().model, "gpt-5.6-sol");
-        assert_eq!(store.reg_list().unwrap().len(), 8, "save by name is an upsert");
+        assert_eq!(store.reg_list().unwrap().len(), 9, "save by name is an upsert");
 
         assert!(store.reg_delete("aaa-custom").unwrap());
         assert!(!store.reg_delete("aaa-custom").unwrap(), "second delete is a no-op");
-        assert_eq!(store.reg_list().unwrap().len(), 7);
+        assert_eq!(store.reg_list().unwrap().len(), 8);
     }
 
     /// Board #344: a stored definition is the user's declaration and the seed
