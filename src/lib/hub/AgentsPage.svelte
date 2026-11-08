@@ -13,7 +13,7 @@
   import { scrollFade } from '../core/scrollFade.ts';
   import { t } from '../core/i18n.svelte.ts';
   import { renderMarkdown } from '../core/markdown.ts';
-  import { backendColor as colorOf, stateDotColor, stateIsLive } from '../hub/hub.ts';
+  import { backendColor as colorOf } from '../hub/hub.ts';
   import { moveMs, revealMs } from '../ui/motion.ts';
   import { hoverInfo } from '../ui/hover.ts';
   import Select from '../ui/Select.svelte';
@@ -146,6 +146,15 @@
   $effect(() => () => { alive = false; });
   let editing = $state(null);   // agent working copy or null
   let isNew = $state(false);
+  // Board #84: a harness default (the server's `default` group) stays on its
+  // backend; registry_save refuses a change too. Its reason for being
+  // unusable here is said in the editor, the row only greys. Both are read
+  // from the LISTED row, never the draft (round 1, reviewer note 9): the
+  // reason is the server's statement about that row's backend, so it shows
+  // only while the draft is still on it, and follows every re-list.
+  const listedEditing = $derived(editing && !isNew ? defs.find((d) => d.name === editing.name) ?? null : null);
+  const harnessDefault = $derived(listedEditing?.group === 'default');
+  const editingWhy = $derived(listedEditing && listedEditing.backend === editing.backend ? unavailableText(listedEditing, t) : '');
   // One editor at a time across the three kinds.
   let editingSkill = $state(null);
   let skillIsNew = $state(false);
@@ -887,13 +896,9 @@
 {/snippet}
 {#snippet agentRow(d)}
   {@const why = unavailableText(d, t)}
-  <button class="side-row" class:open={editing?.name === d.name && !isNew} class:unavailable={!!why} onclick={() => startEdit(d)}>
+  <button class="side-row" class:open={editing?.name === d.name && !isNew} class:unavailable={!!why} title={why || undefined} onclick={() => startEdit(d)}>
     {#if backendIcon(d.backend)}<img class="ava" src={backendIcon(d.backend)} alt={d.backend} />{:else}<span class="ava" style:background={backendColor(d.backend)}>{d.name.slice(0, 1).toUpperCase()}</span>{/if}
-    {#if why}
-      <span class="r-col"><span class="r-name">{d.name}</span><span class="r-sub r-why"><span class="r-dot" class:live-dot={stateIsLive('waiting')} style:background={stateDotColor('waiting')} aria-hidden="true"></span>{why}</span></span>
-    {:else}
-      <span class="r-name">{d.name}</span>
-    {/if}
+    <span class="r-name">{d.name}</span>
     <span class="r-backend">{d.backend}</span>
   </button>
 {/snippet}
@@ -1309,7 +1314,7 @@
         </label>
         <div class="config-row">
           <label class="config-field"><span class="config-field-label">{t('agentsBackend')}</span>
-            <Select bind:value={editing.backend} disabled={saving || removing} ariaLabel={t('agentsBackend')}
+            <Select bind:value={editing.backend} disabled={saving || removing || harnessDefault} ariaLabel={t('agentsBackend')}
               onchange={(b) => pickBackend(editing, b)}
               options={backends.map((b) => ({ value: b, icon: backendIcon(b) ?? undefined, hint: notInstalled(b) ? t('agentsBackendNotInstalled') : undefined }))} />
           </label>
@@ -1334,6 +1339,7 @@
           {@render inputModeField(editing)}
           {@render ompToolsField(editing)}
         </div>
+        {#if editingWhy}<p class="hint">{editingWhy}</p>{/if}
         {@render modelNotes(editing.backend)}
         {@render inputModeHint(editing)}
         <label class="config-field"><span class="config-field-label">{t('agentsSystem')}</span>
@@ -1557,14 +1563,11 @@
   /* Board #7: the two groups of the Agents list. The headings are the shared
      .side-h; the custom group opens with the page's one hairline (--border).
      An unavailable row keeps its name in full ink (it is still opened and
-     read) and greys its identity marks; the words under it say why, with the
-     one status dot (stateDotColor 'waiting': a person has to act), the same
-     7px dot the Backends section wears. */
+     read), greys its identity marks and stays one line high (board #84,
+     owner 2026-11-08); the words saying why are its title and a hint in its
+     editor, not a second line. */
   .agent-group.divided { border-top: 1px solid var(--border); margin-top: 6px; padding-top: 2px; }
-  .side-row.unavailable { align-items: flex-start; }
   .side-row.unavailable .ava, .side-row.unavailable .r-backend { opacity: var(--control-disabled-opacity); }
-  .r-why { display: flex; align-items: baseline; gap: 6px; font-family: var(--font-ui); }
-  .r-dot { flex: none; width: 7px; height: 7px; border-radius: 50%; align-self: center; }
   @media (max-width: 760px) {
     .member-head { min-height: 72px; }
     .member-summary { grid-template-columns: 34px minmax(0, 1fr) auto; min-height: 72px; padding: 10px 8px 10px 10px; }

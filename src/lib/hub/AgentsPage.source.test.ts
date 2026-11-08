@@ -137,11 +137,13 @@ test('entity errors use the same readable alert atom as Settings (#156)', () => 
 
 test('the Agents list groups use the shared atoms, and every spawn surface reads the one availability reader (#7)', async () => {
   // Headings are the shared .side-h, the divider is the --border hairline,
-  // the reason dot is the one state colour language; no literal colour.
+  // no literal colour.
   assert.match(source, /<div class="agent-group" class:divided=\{id === 'custom'\} role="group" aria-label=\{t\(label\)\}>\s*<div class="side-h">\{t\(label\)\}<\/div>/u);
   assert.match(source, /\.agent-group\.divided \{ border-top: 1px solid var\(--border\);/u);
-  assert.match(source, /<span class="r-dot" class:live-dot=\{stateIsLive\('waiting'\)\} style:background=\{stateDotColor\('waiting'\)\} aria-hidden="true"><\/span>\{why\}/u);
-  const block = /\/\* Board #7: the two groups[\s\S]*?\.r-dot \{[^}]*\}/u.exec(source)?.[0] ?? '';
+  // Board #84: one line high, the reason as the row's title; no second line.
+  assert.match(source, /class:unavailable=\{!!why\} title=\{why \|\| undefined\}/u);
+  assert.doesNotMatch(source, /r-why|r-dot/u, 'the second line and its dot are removed whole');
+  const block = /\/\* Board #7: the two groups[\s\S]*?\.side-row\.unavailable \.ava[^}]*\}/u.exec(source)?.[0] ?? '';
   assert.ok(block, 'the group CSS block');
   assert.doesNotMatch(block, /#[0-9a-f]{3,8}\b|rgb\(|font-size:/iu, 'tokens only: no literal colour, no raw font size');
   // validator-2 S1 (round 1): an unavailable thing dims with the ONE disabled

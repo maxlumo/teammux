@@ -1248,17 +1248,91 @@ for (const layout of ['desktop', 'compact'] as const) {
       const custom = app.document.querySelectorAll('.agent-group')[1]!;
       assert.ok(custom.classList.contains('divided'), 'the custom group opens with the divider');
       const row = (name: string) => [...app.document.querySelectorAll<HTMLButtonElement>('.agent-group .side-row')].find((r) => r.querySelector('.r-name')?.textContent === name)!;
+      // Board #84 (owner 2026-11-08 16:04): greyed in its row, ONE line high
+      // like every other row; the reason stays in words as the row's title
+      // and as a hint in its editor (#7: not colour alone).
       assert.ok(row('grok').classList.contains('unavailable'));
-      assert.equal(row('grok').querySelector('.r-sub')?.textContent?.trim(), 'Unavailable: grok not on the managed PATH', 'the reason in words, not colour alone');
-      assert.equal(row('grok').querySelector<HTMLElement>('.r-dot')?.style.background, 'var(--status-warn)', 'the one status-dot language: a person has to act');
+      assert.equal(row('grok').querySelector('.r-sub'), null, 'no second line');
+      assert.equal(row('grok').querySelector('.r-dot'), null, 'no extra dot');
+      assert.equal(row('grok').title, 'Unavailable: grok not on the managed PATH', 'the reason in words, not colour alone');
       assert.ok(!row('kiro').classList.contains('unavailable'));
       assert.equal(row('kiro').querySelector('.r-sub'), null);
-      // Unavailable is still readable: its definition opens.
+      assert.equal(row('kiro').title, '', 'an available row carries no reason');
+      // Unavailable is still readable: its definition opens, and says why.
       row('grok').click(); await app.flush();
       assert.ok(app.document.querySelector('.editor'), 'an unavailable definition still opens');
+      assert.ok([...app.document.querySelectorAll('.editor .hint')].some((h) => h.textContent?.trim() === 'Unavailable: grok not on the managed PATH'), 'the editor says why');
+      row('kiro').click(); await app.flush();
+      assert.ok(![...app.document.querySelectorAll('.editor .hint')].some((h) => h.textContent?.includes('Unavailable')), 'an available definition shows no reason');
     } finally { await app.close(); }
   });
 }
+
+// Board #84 (owner 2026-11-08 16:04): a harness default keeps its backend.
+// Its editor shows the backend greyed (the server refuses a change too);
+// a custom agent's backend stays a choice.
+test('a harness default shows its backend greyed; a custom agent keeps the choice (#84)', async context => {
+  const app = await (await compiled).mount(context, { props: { visible: true, section: 'agents' }, modules: [rpc({ registryList: async () => ({ agents: listed }) })] });
+  try {
+    await groupedList(app);
+    const row = (name: string) => [...app.document.querySelectorAll<HTMLButtonElement>('.agent-group .side-row')].find((r) => r.querySelector('.r-name')?.textContent === name)!;
+    const backend = () => app.document.querySelector<HTMLButtonElement>('.editor [aria-label="Backend"]')!;
+    row('kiro').click(); await app.flush();
+    assert.equal(backend().disabled, true, 'a harness default stays on its backend');
+    assert.match(backend().textContent ?? '', /kiro/u, 'and shows it');
+    assert.equal(app.document.querySelector<HTMLInputElement>('.editor input.config-input')!.readOnly, true, 'name read-only as before');
+    row('pentester').click(); await app.flush();
+    assert.equal(backend().disabled, false, 'a custom agent can move');
+  } finally { await app.close(); }
+});
+
+// Board #84 round 1 (reviewer note 9, orchestrator ruling note 11): the
+// editor's reason is a statement about the LISTED definition's backend, read
+// from the listed row, never from the draft. A custom agent moved to another
+// backend shows none until saved and re-listed; a report that lands while
+// the editor is open shows it without reopening.
+test('the editor says why only for the listed backend, and follows the list (#84 round 1)', async context => {
+  const grokker = { ...alpha, name: 'grokker', backend: 'grok', group: 'custom', availability: { state: 'unavailable', reason: 'not_found', missing: [] } };
+  const app = await (await compiled).mount(context, { props: { visible: true, section: 'agents' }, modules: [rpc({ registryList: async () => ({ agents: [...listed, grokker] }) })] });
+  try {
+    await groupedList(app);
+    const row = (name: string) => [...app.document.querySelectorAll<HTMLButtonElement>('.agent-group .side-row')].find((r) => r.querySelector('.r-name')?.textContent === name)!;
+    const why = () => [...app.document.querySelectorAll('.editor .hint')].map((h) => h.textContent?.trim()).filter((h) => h?.startsWith('Unavailable'));
+    const pick = async (b: string) => {
+      app.document.querySelector<HTMLButtonElement>('.editor [aria-label="Backend"]')!.click(); await app.flush();
+      [...app.document.querySelectorAll<HTMLButtonElement>('[role=option]')].find((o) => o.textContent?.trim() === b)!.click(); await app.flush();
+    };
+    row('grokker').click(); await app.flush();
+    assert.deepEqual(why(), ['Unavailable: grok not on the managed PATH']);
+    await pick('kiro');
+    assert.deepEqual(why(), [], 'kiro is not what the server found unusable');
+    await pick('grok');
+    assert.deepEqual(why(), ['Unavailable: grok not on the managed PATH'], 'back on the listed backend');
+  } finally { await app.close(); }
+});
+
+test('a report that lands while an editor is open shows its reason there (#84 round 1)', async context => {
+  let landed = false;
+  let release!: () => void;
+  const unknown = listed.map((d) => ({ ...d, availability: { state: 'unknown' } }));
+  const app = await (await compiled).mount(context, {
+    props: { visible: true, section: 'agents' },
+    modules: [rpc({
+      registryList: async () => ({ agents: landed ? listed : unknown }),
+      backendsCheck: () => new Promise<void>((ok) => { release = () => { landed = true; ok(); }; }),
+    })],
+  });
+  try {
+    await groupedList(app);
+    const grok = () => [...app.document.querySelectorAll<HTMLButtonElement>('.agent-group .side-row')].find((r) => r.querySelector('.r-name')?.textContent === 'grok')!;
+    const why = () => [...app.document.querySelectorAll('.editor .hint')].map((h) => h.textContent?.trim()).filter((h) => h?.startsWith('Unavailable'));
+    grok().click(); await app.flush();
+    assert.deepEqual(why(), [], 'unknown says nothing');
+    release();
+    for (let i = 0; i < 12 && !grok().classList.contains('unavailable'); i++) await app.flush();
+    assert.deepEqual(why(), ['Unavailable: grok not on the managed PATH'], 'the open editor follows the re-list');
+  } finally { await app.close(); }
+});
 
 test('an older server names no group: the flat list stays, with no headings (#7)', async context => {
   const app = await (await compiled).mount(context, { props: { visible: true, section: 'agents' }, modules: [rpc()] });

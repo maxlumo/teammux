@@ -112,7 +112,7 @@ pub(crate) fn annotate(agents: Vec<crate::projects::store::RegAgent>, checked: b
     let rows: Vec<Value> = agents
         .into_iter()
         .map(|a| {
-            let default = crate::backends::Backend::parse(&a.name).is_some() && a.backend == a.name;
+            let default = harness_named(&a.name) && a.backend == a.name;
             let availability = agent_availability(&a.backend, checked, &grey);
             let mut v = serde_json::to_value(&a).unwrap_or_else(|_| json!({}));
             if let Some(o) = v.as_object_mut() {
@@ -123,6 +123,13 @@ pub(crate) fn annotate(agents: Vec<crate::projects::store::RegAgent>, checked: b
         })
         .collect();
     json!({ "agents": rows })
+}
+
+/// Whether a definition name is a harness's name, the one test behind the
+/// `default` group and the save rule that keeps a default on its backend
+/// (board #84).
+fn harness_named(name: &str) -> bool {
+    crate::backends::Backend::parse(name).is_some()
 }
 
 /// Whether a def NAMES an input mode. Absent and null both mean "not named"
@@ -171,6 +178,12 @@ pub fn registry_save(def: &Value) -> Result<Value, String> {
             agents::SPAWNABLE_BACKENDS.join("|"),
             agent.backend
         ));
+    }
+    // A harness default stays on its backend (board #84, owner 2026-11-08):
+    // moving it would silently turn it into a custom agent wearing a
+    // harness's name, and that harness would lose its default.
+    if harness_named(&agent.name) && agent.backend != agent.name {
+        return Err(format!("'{0}' is the {0} harness default and stays on {0}", agent.name));
     }
     // Validate the JSON columns now, not at spawn time.
     serde_json::from_str::<Vec<String>>(&agent.skills).map_err(|e| format!("skills must be a JSON array of refs {}", mcp_mask::no_echo(&e)))?;
@@ -561,6 +574,24 @@ mod listing_tests {
             Some("agent 'dsh' cannot start on this server: it runs on dsh, which is missing DEEPSEEK_API_KEY (not set in the login shell's environment). Nothing was started."));
         assert_eq!(agent_refusal(&a("kiro", "kiro"), true, &grey), None);
         assert_eq!(agent_refusal(&a("grok", "grok"), false, &grey), None, "unknown never refuses");
+    }
+
+    /// Board #84 (owner 2026-11-08 16:04): a harness default stays on its
+    /// backend. A save that moves a definition named after a supported
+    /// backend onto another one is refused by name and writes nothing; the
+    /// same name on its own backend saves.
+    #[test]
+    fn a_harness_default_stays_on_its_backend() {
+        let before = registry_get("codex").unwrap();
+        let def = |backend: &str| json!({ "name": "codex", "backend": backend, "model": "", "effort": "", "system": "x", "skills": "[]", "mcp": "[]" });
+        assert_eq!(registry_save(&def("claude")).unwrap_err(), "'codex' is the codex harness default and stays on codex");
+        assert_eq!(registry_get("codex").unwrap().map(|a| a.backend), before.as_ref().map(|a| a.backend.clone()), "a refused save writes nothing");
+        registry_save(&def("codex")).unwrap();
+        assert_eq!(registry_get("codex").unwrap().unwrap().backend, "codex");
+        match before {
+            Some(a) => { registry_save(&serde_json::to_value(&a).unwrap()).unwrap(); }
+            None => { registry_delete("codex").ok(); }
+        }
     }
 
     /// Board #72: a NEW definition has omp's own tools off; a save naming

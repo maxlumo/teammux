@@ -188,3 +188,26 @@ fn an_older_gateway_is_sent_none_of_the_six_definition_calls() {
     }
     assert!(calls.lock().unwrap().is_empty(), "no call reached the older gateway: {:?}", calls.lock().unwrap());
 }
+
+/// Board #84 through the real `tmm` against the real gateway (this file holds
+/// the one such harness): a harness default stays on its backend. Moving
+/// `codex` onto claude is refused in the rule's words and stores nothing; the
+/// same name on its own backend saves.
+#[test]
+fn a_harness_default_cannot_be_saved_onto_another_backend() {
+    let gw = real_gateway();
+    let (ok, out, err) = tmm(gw, &["registry", "save", "--name", "codex", "--backend", "claude", "--system", "x"]);
+    assert!(!ok, "refused: {out}{err}");
+    assert!(err.contains("'codex' is the codex harness default and stays on codex"), "{err}");
+    eprintln!("[#84 evidence] exit 1, stderr: {}", err.trim());
+    let backend = || {
+        let (ok, out, err) = tmm(gw, &["registry", "list", "--output", "json"]);
+        assert!(ok, "{err}");
+        let listed: serde_json::Value = serde_json::from_str(&out).unwrap();
+        listed["agents"].as_array().unwrap().iter().find(|a| a["name"] == "codex").map_or("none".into(), |a| a["backend"].as_str().unwrap().to_string())
+    };
+    assert_ne!(backend(), "claude", "nothing was stored");
+    let (ok, out, err) = tmm(gw, &["registry", "save", "--name", "codex", "--backend", "codex", "--system", "x"]);
+    assert!(ok && out.contains("✓ saved codex"), "{out}{err}");
+    assert_eq!(backend(), "codex");
+}

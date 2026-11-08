@@ -245,13 +245,17 @@ completion).
   page's hairline divider, then **Custom agents** (the saved definitions, in
   their order). Each group has its heading. An agent whose harness this
   server cannot run (its CLI is not installed, or its setup is definitely
-  missing, per the server's last Backends check) is greyed and says why in
-  words; it can still be opened and read, and the roster's start list, the
+  missing, per the server's last Backends check) is greyed in its row, one
+  line high like every other row (board #84, owner 2026-11-08: "你直接灰掉吧。
+  你那里又多写了一行"); the reason in words is the row's tooltip and a hint
+  in its editor. It can still be opened and read, and the roster's start list, the
   start dialog and New project offer no start for it, while the team member
   picker names the reason. A team with such a member is offered no start
   either, saying which member and why, and `tmm spawn --team` refuses it
   whole. Unknown or untested setup, and a failed or absent
-  check, grey nothing. We install and configure nothing. Also
+  check, grey nothing. We install and configure nothing. A harness
+  default keeps its backend: its editor shows the backend greyed, and the
+  server refuses a save that moves it (board #84). Also
   `tmm registry list`, in the same two groups. "Instructions for every agent"
   edits the app-wide `<config>/AGENTS.md` that leads every managed agent's
   system prompt (also `tmm prompt`).
