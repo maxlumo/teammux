@@ -20,12 +20,15 @@
 #                      the host's ~/.pi. Spawned with a model and effort, a turn answered through
 #                      the telemetry, /model and /thinking from the room, a restart that resumes
 #                      the conversation, the user's auth.json and models.json still linked.
+#   live-check codex-limit   board #66: the provider's request-body limit, bisected with unbilled
+#                      requests (a model nobody serves: 404 under the limit, 413 over it), and that
+#                      codex takes `model_auto_compact_token_limit` from a profile file.
 #   live-check codex-picker  board #66: a person opens codex's /new picker in a git repo; a delivery
 #                      sent meanwhile is held (the picker stays open, no worktree), and is typed and
 #                      answered once Escape closes it.
 set -euo pipefail
 check="${1:-smoke}"
-case "$check" in smoke|codex-models|codex-provider|pi|omp-tools|codex-picker) ;; *) echo "live-check: unknown check '$check' (known: smoke, codex-models, codex-provider, pi, omp-tools, codex-picker)" >&2; exit 2 ;; esac
+case "$check" in smoke|codex-models|codex-provider|pi|omp-tools|codex-limit|codex-picker) ;; *) echo "live-check: unknown check '$check' (known: smoke, codex-models, codex-provider, pi, omp-tools, codex-limit, codex-picker)" >&2; exit 2 ;; esac
 
 cfg="$HOME/.config/teammux"
 mkdir -p "$cfg" /work/live
@@ -261,6 +264,53 @@ if [ "$check" = codex-picker ]; then
   n=$(tmm log --project live --limit 20 | grep -c 'single word picked' || true)
   [ "$n" = 1 ] || { echo "live-check: codex-picker: FAIL (the line is in the room $n times)"; rc=1; }
   exit $rc
+fi
+
+if [ "$check" = codex-limit ]; then
+  # Board #66: the provider's request-body limit, measured with UNBILLED requests: a body of N
+  # bytes naming a model no provider serves is refused 400 (invalid model) when the gateway takes
+  # it, 413 when the body is over its limit; the limit is bisected to 64 KiB. Nothing is generated.
+  [ -n "${UST_API_KEY:-}" ] || { echo "live-check: codex-limit: skipped: UST_API_KEY not set"; exit 2; }
+  base=$(sed -n 's/^base_url *= *"\(.*\)"/\1/p' "$HOME/.codex/config.toml" | head -1)
+  [ -n "$base" ] || { echo "live-check: codex-limit: skipped: no base_url in the staged codex config"; exit 2; }
+  # node is in the image (the CLIs run on it); curl is not.
+  status() {
+    node -e 'const [n, url] = process.argv.slice(1);
+      const body = `{"model":"tmm-limit-probe-no-such-model","input":"${"a".repeat(+n)}"}`;
+      fetch(url, { method: "POST", headers: { authorization: `Bearer ${process.env.UST_API_KEY}`, "content-type": "application/json" }, body })
+        .then(async (r) => { require("fs").writeFileSync("/tmp/limit-out", (await r.text()).slice(0, 160)); console.log(r.status); }, (e) => { require("fs").writeFileSync("/tmp/limit-out", String(e.cause ?? e)); console.log("000"); });' "$1" "$base/responses"
+  }
+  # Does codex take `model_auto_compact_token_limit` from a profile FILE, the layer the managed
+  # profile is (`<name>.config.toml`, --profile)? A scratch CODEX_HOME holding this container's copy
+  # of the user's config and a profile with a limit far below one turn's prompt: codex compacts.
+  # The control, the same profile without the key, does not. Two one-word turns each.
+  honoured() {
+    local rc=0
+    for limit in 2000 none; do
+      H=$(mktemp -d); cp "$HOME/.codex/config.toml" "$H/"
+      { echo '# live-check profile'; [ "$limit" = none ] || echo "model_auto_compact_token_limit = $limit"; } > "$H/tmm-limit.config.toml"
+      out=$(cd "$H" && CODEX_HOME="$H" timeout 240 codex exec --profile tmm-limit --skip-git-repo-check "Reply with the single word ready." 2>&1 | tail -2 | tr '\n' ' ')
+      # codex compares the limit before its NEXT request: a second turn on the same chat.
+      out="$out / $(cd "$H" && CODEX_HOME="$H" timeout 240 codex exec --profile tmm-limit --skip-git-repo-check resume --last "Reply with the single word again." 2>&1 | tail -2 | tr '\n' ' ')"
+      n=$(cat "$H"/sessions/*/*/*/*.jsonl 2>/dev/null | grep -c '"type":"compacted"' || true)
+      echo "live-check: codex-limit: profile limit $limit: compactions $n; codex said: ${out:0:160}"
+      case "$limit:$n" in 2000:0) echo "live-check: codex-limit: FAIL (the profile's limit was not taken)"; rc=1 ;; none:[1-9]*) echo "live-check: codex-limit: FAIL (compacted with no limit)"; rc=1 ;; esac
+      rm -rf "$H"
+    done
+    exit $rc
+  }
+  lo=$((1024 * 1024)); hi=$((64 * 1024 * 1024))
+  s=$(status $lo); echo "live-check: codex-limit: $lo bytes -> $s $(head -c 160 /tmp/limit-out)"
+  [ "$s" = 413 ] && { echo "live-check: codex-limit: FAIL (413 already at 1 MiB)"; exit 1; }
+  s=$(status $hi); echo "live-check: codex-limit: $hi bytes -> $s $(head -c 160 /tmp/limit-out)"
+  [ "$s" = 413 ] || { echo "live-check: codex-limit: no 413 up to 64 MiB"; honoured; }
+  while [ $((hi - lo)) -gt 65536 ]; do
+    mid=$(((lo + hi) / 2)); s=$(status $mid)
+    if [ "$s" = 413 ]; then hi=$mid; else lo=$mid; fi
+    echo "live-check: codex-limit: $mid bytes -> $s"
+  done
+  echo "live-check: codex-limit: accepted at $lo bytes, 413 at $hi bytes"
+  honoured
 fi
 
 for b in codex claude; do tmm registry save --name "l$b" --backend "$b" --system "Live check agent. Answer in one short line." >/dev/null; done

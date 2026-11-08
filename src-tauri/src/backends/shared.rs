@@ -127,6 +127,8 @@ pub(crate) fn codex_profile_file() -> String {
 /// written privately into the home, so neither a value nor the model rides
 /// the launch line (non-negotiable 10).
 ///
+/// `model_auto_compact_token_limit` is always set (board #66,
+/// `codex::AUTO_COMPACT_TOKENS`).
 /// `model` and `model_reasoning_effort` are top-level keys, omitted when the
 /// definition leaves them empty: "not set at this layer", and codex's own
 /// config and resume rules decide (measured on 0.162.1, #455: a resumed
@@ -188,6 +190,8 @@ pub(crate) fn codex_profile(defs: &[McpDef], model: &str, effort: &str) -> Strin
     if !effort.trim().is_empty() {
         doc.insert("model_reasoning_effort".into(), T::String(effort.trim().to_string()));
     }
+    // Board #66: compaction before the provider refuses a long chat.
+    doc.insert("model_auto_compact_token_limit".into(), T::Integer(super::codex::AUTO_COMPACT_TOKENS));
     if !servers.is_empty() {
         doc.insert("mcp_servers".into(), T::Table(servers));
     }
@@ -1414,10 +1418,11 @@ mod tests {
         assert_eq!((pg["command"].as_str(), pg["args"][0].as_str()), (Some("mcp-pg"), Some("--stdio")));
         assert_eq!(pg["env"]["API_KEY"].as_str(), Some("SENTINEL-env"), "a stdio env value is a literal table entry");
         assert_eq!(doc["mcp_servers"]["lit"]["http_headers"]["Authorization"].as_str(), Some("Bearer SENTINEL-literal"), "a literal Authorization stays a literal header");
-        // No server and no identity: only the header comment, so a revoked
-        // server leaves nothing.
+        // No server and no identity: the header comment and the compaction
+        // limit only, so a revoked server leaves nothing.
         let empty = codex_profile(&[], "", "");
-        assert!(empty.starts_with('#') && empty.parse::<toml::Table>().unwrap().is_empty(), "{empty}");
+        let keys: Vec<String> = empty.parse::<toml::Table>().unwrap().keys().cloned().collect();
+        assert!(empty.starts_with('#') && keys == ["model_auto_compact_token_limit"], "{empty}");
 
         // Board #455: model and effort are top-level keys of the SAME whole
         // document. Setting, changing or clearing either keeps the MCP tables,
@@ -1438,6 +1443,17 @@ mod tests {
         let revoked = read("gpt-6-luna", "high", &[]);
         assert!(!revoked.contains_key("mcp_servers"), "a revoked server leaves nothing");
         assert_eq!((revoked["model"].as_str(), revoked["model_reasoning_effort"].as_str()), (Some("gpt-6-luna"), Some("high")), "and the identity stays");
+    }
+
+    /// Board #66 item 2: every managed codex profile compacts at 700,000
+    /// input tokens (the 10 MB body limit / 8.7 bytes per token x 0.6,
+    /// orchestrator note 5), whatever else the definition sets.
+    #[test]
+    fn the_managed_codex_profile_compacts_below_the_providers_body_limit() {
+        for (model, effort) in [("", ""), ("gpt-6.1-sol", "high")] {
+            let doc: toml::Table = codex_profile(&[], model, effort).parse().unwrap();
+            assert_eq!(doc["model_auto_compact_token_limit"].as_integer(), Some(700_000), "{doc:?}");
+        }
     }
 
 }

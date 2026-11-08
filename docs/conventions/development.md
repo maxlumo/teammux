@@ -714,6 +714,7 @@ pnpm run test:live:docker codex-models   # board #70: codex's list follows its c
 pnpm run test:live:docker codex-provider   # board #74: a codex chat restarted under another provider comes back fresh (agents-overview.md)
 pnpm run test:live:docker pi             # board #71: a managed pi end to end (agents-overview.md § The pi backend)
 pnpm run test:live:docker omp-tools        # board #72: omp's own tools off by default, on by the switch (agents-overview.md)
+pnpm run test:live:docker codex-limit      # board #66: the provider's body limit, and a profile's compaction limit is taken (config.md)
 pnpm run test:live:docker codex-picker     # board #66: a delivery waits while codex's /new picker is open (hub-composer.md)
 ```
 

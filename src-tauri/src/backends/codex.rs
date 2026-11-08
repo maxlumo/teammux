@@ -680,6 +680,22 @@ pub(crate) fn codex_hooks(notify: &str) -> Value {
 /// submitted unchanged. So a delivery types every `@` as `＠`, as for kiro.
 pub(crate) const AT_OPENS_FILE_PICKER: bool = true;
 
+/// A managed codex compacts its conversation once a request's input reaches
+/// this many tokens (board #66 item 2): `model_auto_compact_token_limit` in
+/// the managed profile (`shared::codex_profile`), so a long chat compacts
+/// before the provider refuses its body. Derived from the provider's
+/// measured limit (orchestrator, #66 note 5): the UST gateway refuses a body
+/// over 10 MB (10,467,328 bytes taken, 10,531,840 refused, `live-check
+/// codex-limit`); the team's codex rollouts ran at most 8.7 bytes per input
+/// token, so 10,467,328 / 8.7 = 1,203,141 tokens, x 0.6 margin = 721,885,
+/// rounded down. Below codex's own threshold for the window (1,050,000
+/// configured, clamped to the catalogue's 872,000), so it takes effect.
+/// Measured on 0.166.0 in the same check: a profile file's limit is taken
+/// (2000: one compaction over two turns; none: no compaction). It does not
+/// address `max_output_tokens` stops: requests succeeded up to 807,802
+/// input tokens, so input size is not shown to cause them.
+pub(crate) const AUTO_COMPACT_TOKENS: i64 = 700_000;
+
 /// Is one of codex's own pickers open on `screen` (board #66, measured on
 /// codex-cli 0.166.0 in the live rig, `live-check codex-picker`)? While one
 /// is open the composer is gone and a typed key answers the picker: a
