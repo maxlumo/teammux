@@ -54,6 +54,18 @@ const PENDING_MAX_AGE_SECS: u64 = 24 * 3600;
 /// `preToolUse` and `postToolUse` arrive milliseconds apart; an agent genuinely
 /// running the same command twice takes longer than this.
 const TOOL_DEDUPE_SECS: u64 = 5;
+/// How many calls of a window's open turn are kept by id (board #87): enough
+/// for dsh's 10 parallel calls per step and then some, bounded so a long turn
+/// cannot grow it.
+const TOOL_IDS_MAX: usize = 16;
+
+/// A tool event's own call identity (board #87): dsh's `toolCallId`,
+/// claude's `tool_use_id`. `post`: the event is the call's result half.
+#[derive(Debug, Clone, Copy)]
+pub struct ToolCall<'a> {
+    pub id: &'a str,
+    pub post: bool,
+}
 
 #[derive(Debug, Clone, Default)]
 struct Rec {
@@ -69,6 +81,13 @@ struct Rec {
     ask: Option<(String, u64)>,
     /// Last hook tool event: (activity line, ts). Work observed inside a turn.
     tool: Option<(String, u64)>,
+    /// The calls of the open turn that named their id (board #87): (id, ts,
+    /// arrival) of each Pre, at most TOOL_IDS_MAX, oldest first. Only a
+    /// Post naming one of these folds into it. Pruned of every call older
+    /// than the newest prompt, stop or ask whenever a tool fact is written,
+    /// so the ids do not outlive their turn. In memory only: after a restart
+    /// a Post finds no id and is written as its own row.
+    tool_ids: Vec<(String, u64, u64)>,
     /// When each fact above ARRIVED, in the order of the durable activity log
     /// (board #249; see `arrival`). Hook timestamps are whole seconds, so a
     /// stop and the next prompt often share one; the old `end >= start` tie
@@ -1374,6 +1393,11 @@ pub fn record_housekeeping_tool(session: &str, window: &str, tool: &str, detail:
 /// Returns the durable row the call was written as (`None`: not written —
 /// the Post half of a call already recorded, or a failed write).
 pub fn record_tool(session: &str, window: &str, tool: &str, detail: &str) -> Option<i64> {
+    record_tool_call(session, window, tool, detail, None)
+}
+
+/// `record_tool` for an event that may name its call (board #87).
+pub fn record_tool_call(session: &str, window: &str, tool: &str, detail: &str, call: Option<ToolCall<'_>>) -> Option<i64> {
     let line = if detail.is_empty() { tool.to_string() } else { format!("{tool} {detail}") };
     let ts = now();
     // Pre and Post of one call are ONE fact (we subscribe to both because a
@@ -1392,13 +1416,26 @@ pub fn record_tool(session: &str, window: &str, tool: &str, detail: &str) -> Opt
     // #86, dsh and any CLI whose Post omits the input sent `bash` after
     // `bash cd …`, and the second line was written as a blank row.
     let event = ("tool", detail.to_string(), tool.to_string(), String::new(), Vec::new());
+    // A call that names its id (board #87) is matched BY THAT ID ONLY: its
+    // Post folds when the Pre with the same id is in the window's open turn,
+    // whatever came between (a parallel call's own facts, a long run past
+    // TOOL_DEDUPE_SECS); a prompt, stop or ask after that Pre still makes the
+    // Post a fact of its own, and an id that matches nothing is never folded
+    // into "the newest" call. A Pre with an id is a new call. An event with
+    // no id keeps the line rules above.
     let half_of = |prev: &str| prev == line || (detail.is_empty() && prev.strip_prefix(tool).is_some_and(|rest| rest.starts_with(' ')));
-    let same_call = |r: &Rec| {
-        let tool_k = r.tool.as_ref().map(|(_, t)| (*t, r.tool_seq));
-        r.tool.as_ref().is_some_and(|(prev, at)| half_of(prev) && ts.saturating_sub(*at) <= TOOL_DEDUPE_SECS)
-            && tool_k >= r.prompt.map(|t| (t, r.prompt_seq))
-            && tool_k >= r.end.as_ref().map(|(_, t)| (*t, r.end_seq))
-            && tool_k >= r.ask.as_ref().map(|(_, t)| (*t, r.ask_seq))
+    let in_turn = |r: &Rec, k: Option<(u64, u64)>| {
+        k >= r.prompt.map(|t| (t, r.prompt_seq))
+            && k >= r.end.as_ref().map(|(_, t)| (*t, r.end_seq))
+            && k >= r.ask.as_ref().map(|(_, t)| (*t, r.ask_seq))
+    };
+    let same_call = |r: &Rec| match call {
+        Some(ToolCall { id, post: true }) => r.tool_ids.iter().find(|(i, _, _)| i == id).is_some_and(|(_, t, q)| in_turn(r, Some((*t, *q)))),
+        Some(ToolCall { post: false, .. }) => false,
+        None => {
+            let tool_k = r.tool.as_ref().map(|(_, t)| (*t, r.tool_seq));
+            r.tool.as_ref().is_some_and(|(prev, at)| half_of(prev) && ts.saturating_sub(*at) <= TOOL_DEDUPE_SECS) && in_turn(r, tool_k)
+        }
     };
     let line_for_rec = line.clone();
     let order = turn_order();
@@ -1407,6 +1444,13 @@ pub fn record_tool(session: &str, window: &str, tool: &str, detail: &str) -> Opt
         r.tool = Some((line_for_rec, ts));
         r.tool_seq = seq;
         fact_seq = seq;
+        let mut ids = std::mem::take(&mut r.tool_ids);
+        ids.retain(|(_, t, q)| in_turn(r, Some((*t, *q))));
+        if let Some(ToolCall { id, post: false }) = call {
+            ids.push((id.to_string(), ts, seq));
+            if ids.len() > TOOL_IDS_MAX { ids.remove(0); }
+        }
+        r.tool_ids = ids;
     }, None)
     .1;
     drop(order);
@@ -3356,6 +3400,63 @@ mod tests {
         record_tool(&c, "w1", "edit", "a");
         record_tool(&c, "w1", "bash", "");
         assert_eq!(rows(&c).len(), 2, "another tool: its own call");
+    }
+
+    /// Board #87 (orchestrator ruling, note 5): a call that names its id
+    /// (dsh's `toolCallId`, claude's `tool_use_id`) folds its Post BY THAT ID:
+    /// sequential and parallel out-of-order calls are one row each, with their
+    /// argument; an ask in between still makes the Post the resume edge; a
+    /// Post whose id matches no Pre is a row of its own, never "the newest".
+    #[test]
+    fn a_post_folds_into_the_pre_with_its_call_id() {
+        let rows = |s: &str| recent_events(s, 0).into_iter().filter(|e| e.kind == "tool").map(|e| (e.tool, e.text)).collect::<Vec<_>>();
+        let row = |t: &str, d: &str| (t.to_string(), d.to_string());
+        let pre = |s: &str, t: &str, d: &str, id: &str| { record_tool_call(s, "w1", t, d, Some(ToolCall { id, post: false })); };
+        let post = |s: &str, t: &str, d: &str, id: &str| { record_tool_call(s, "w1", t, d, Some(ToolCall { id, post: true })); };
+
+        let seq = format!("t87-seq-{}", uuid::Uuid::new_v4());
+        pre(&seq, "bash", "echo a", "c1"); post(&seq, "bash", "echo a", "c1");
+        pre(&seq, "bash", "echo b", "c2"); post(&seq, "bash", "echo b", "c2");
+        assert_eq!(rows(&seq), [row("bash", "echo a"), row("bash", "echo b")], "sequential: one row per call");
+
+        let par = format!("t87-par-{}", uuid::Uuid::new_v4());
+        pre(&par, "bash", "echo a", "ca"); pre(&par, "read", "f.rs", "cb");
+        post(&par, "read", "f.rs", "cb"); post(&par, "bash", "echo a", "ca");
+        assert_eq!(rows(&par), [row("bash", "echo a"), row("read", "f.rs")], "parallel, out of order: two rows, both with arguments");
+
+        let ask = format!("t87-ask-{}", uuid::Uuid::new_v4());
+        record_prompt(&ask, "w1", "run it");
+        pre(&ask, "bash", "npm test", "ck");
+        record_notification(&ask, "w1", "permission_required");
+        assert_eq!(derive(&ask, "w1", 0).state, "waiting");
+        post(&ask, "bash", "npm test", "ck");
+        assert_eq!(derive(&ask, "w1", 0).state, "running", "the Post after an ask is still the resume edge");
+        assert_eq!(rows(&ask).len(), 2, "and is written");
+
+        let unknown = format!("t87-unknown-{}", uuid::Uuid::new_v4());
+        pre(&unknown, "bash", "echo a", "c1");
+        post(&unknown, "bash", "", "c9");
+        assert_eq!(rows(&unknown).len(), 2, "an id that matches nothing is its own row, even beside a same-name call");
+    }
+
+    /// Board #87 rule 3: the ids are bounded per window and do not outlive
+    /// the turn: a Pre older than the window's cap, or one before a stop, no
+    /// longer folds its Post.
+    #[test]
+    fn the_call_ids_are_bounded_and_end_with_the_turn() {
+        let rows = |s: &str| recent_events(s, 0).into_iter().filter(|e| e.kind == "tool").count();
+        let s = format!("t87-cap-{}", uuid::Uuid::new_v4());
+        for i in 0..=TOOL_IDS_MAX { record_tool_call(&s, "w1", "bash", &format!("echo {i}"), Some(ToolCall { id: &format!("c{i}"), post: false })); }
+        assert_eq!(store().lock().unwrap().get(&(s.clone(), "w1".to_string())).unwrap().tool_ids.len(), TOOL_IDS_MAX, "bounded");
+        record_tool_call(&s, "w1", "bash", "echo 0", Some(ToolCall { id: "c0", post: true }));
+        assert_eq!(rows(&s), TOOL_IDS_MAX + 2, "the evicted call's Post is a row of its own");
+
+        let t = format!("t87-stop-{}", uuid::Uuid::new_v4());
+        record_tool_call(&t, "w1", "bash", "echo a", Some(ToolCall { id: "c1", post: false }));
+        record_notification(&t, "w1", "completed");
+        record_tool_call(&t, "w1", "bash", "echo a", Some(ToolCall { id: "c1", post: true }));
+        assert_eq!(rows(&t), 2, "a stop in between: its own fact");
+        assert!(store().lock().unwrap().get(&(t.clone(), "w1".to_string())).unwrap().tool_ids.is_empty(), "the stop's turn left no ids behind");
     }
 
     #[test]

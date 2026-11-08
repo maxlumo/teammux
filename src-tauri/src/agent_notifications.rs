@@ -640,7 +640,9 @@ impl AgentNotificationHub {
                     }
                 } else {
                     // (Under a restore generation, its row is the hold's acceptance too.)
-                    let _ = crate::projects::telemetry::record_tool(&session, &window, &tool, &detail);
+                    let call = tool_call_of(&envelope);
+                    let call = call.as_ref().map(|(id, post)| crate::projects::telemetry::ToolCall { id, post: *post });
+                    let _ = crate::projects::telemetry::record_tool_call(&session, &window, &tool, &detail, call);
                 }
                 // The pane just painted a tool row — the freshest moment to
                 // read its status furniture. Throttled + async inside.
@@ -1351,6 +1353,16 @@ fn tool_event_parts(envelope: &InboxEnvelope) -> Option<(String, String)> {
     Some((tool.to_string(), truncate(detail, MAX_TOOL_DETAIL_CHARS)))
 }
 
+/// The call a tool event names (board #87): its `tool_use_id` (claude's
+/// hooks; dsh's bridge sends its `toolCallId` under that name) and whether
+/// it is the Post half. `None` when it names none: the line rules apply.
+fn tool_call_of(envelope: &InboxEnvelope) -> Option<(String, bool)> {
+    let payload = envelope.payload.as_object()?;
+    let event = payload.get("hook_event_name").or_else(|| payload.get("hookEventName")).and_then(Value::as_str)?;
+    let id = payload.get("tool_use_id").or_else(|| payload.get("toolUseId")).and_then(Value::as_str).filter(|id| !id.is_empty())?;
+    Some((id.to_string(), matches!(event, "PostToolUse" | "postToolUse" | "post_tool_use")))
+}
+
 struct Normalized {
     kind: String,
     agent_session_id: Option<String>,
@@ -1912,6 +1924,25 @@ mod tests {
         .unwrap();
         assert_eq!((tool.as_str(), detail.as_str()), ("bash", "npm test"));
         assert!(normalize(&envelope(json!({"hook_event_name":"SessionStart"}))).is_err());
+    }
+
+    /// Board #87: a tool event that names its call carries the id and its
+    /// half to `record_tool_call`: dsh's bridge sends `tool_use_id` (its
+    /// `toolCallId`), claude's own hooks spell it the same; an event with no
+    /// id, or an empty one, names no call.
+    #[test]
+    fn a_tool_event_names_its_call_by_tool_use_id() {
+        let envelope = |backend: &str, payload: Value| InboxEnvelope {
+            backend: backend.into(), pane_id: "%1".into(), payload, tmm_tmux: None, launch: None, resolved: None, restore: None, produced: None,
+        };
+        let pre = envelope("dsh", json!({"hook_event_name":"PreToolUse","tool_name":"bash","tool_input":{"command":"ls"},"tool_use_id":"call_1"}));
+        let post = envelope("dsh", json!({"hook_event_name":"PostToolUse","tool_name":"bash","tool_input":{"command":"ls"},"tool_use_id":"call_1"}));
+        let claude = envelope("claude", json!({"hook_event_name":"PostToolUse","tool_name":"Bash","tool_input":{"command":"ls"},"tool_use_id":"toolu_01A","tool_response":{}}));
+        assert_eq!(tool_call_of(&pre), Some(("call_1".to_string(), false)));
+        assert_eq!(tool_call_of(&post), Some(("call_1".to_string(), true)));
+        assert_eq!(tool_call_of(&claude), Some(("toolu_01A".to_string(), true)));
+        assert_eq!(tool_call_of(&envelope("pi", json!({"hook_event_name":"PostToolUse","tool_name":"bash"}))), None);
+        assert_eq!(tool_call_of(&envelope("dsh", json!({"hook_event_name":"PostToolUse","tool_name":"bash","tool_use_id":""}))), None);
     }
 
     /// Board #440: a hook's envelope never touches the network, so no auth

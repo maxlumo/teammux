@@ -23,7 +23,8 @@
 //!   both ways). The name is therefore fixed and neutral (`PLUGIN_NAME`).
 //! * `session/event (session, ev)` carries every durable event: `turn/start`,
 //!   `user/message` (`source.kind == "user"` is the prompt), `tool/call`
-//!   `{name, arguments}`, `tool/result`, `assistant/message`
+//!   `{callId, name, arguments}`, `tool/result` `{message: {toolCallId}}`
+//!   (no name, no input: board #87), `assistant/message`
 //!   (`message.content[]` text parts, and the step's `usage`: `inputTokens`,
 //!   `outputTokens`, `cacheReadTokens`, `cacheWriteTokens`, `totalTokens`,
 //!   where input EXCLUDES the cache reads — 11382 + 384 + 70 = 11836),
@@ -142,7 +143,10 @@ use super::shared;
 ///   with a rising `TMM_HOOK_SEQ` the inbox orders by, so nothing is in
 ///   flight when the run ends and the shell's Stop is always last (P1-C);
 /// * the first user-sourced `user/message` of a turn → `UserPromptSubmit`;
-///   `tool/call` → `PreToolUse`; `tool/result` → `PostToolUse`;
+///   `tool/call` → `PreToolUse`; `tool/result` → `PostToolUse` with the
+///   call's own name and input, found by its `toolCallId`, and that id as
+///   `tool_use_id` on both, so the server folds a result into ITS call even
+///   when dsh runs calls in parallel (board #87);
 /// * `assistant/message` text is kept, and `turn/end` WRITES the Stop payload
 ///   (reply + `dsh_reason`) to `$DSH_HOME/tmm/stop.json` — the shell sends it
 ///   when its prompt is back (see `zshrc`), never the plugin: held lines are
@@ -583,6 +587,10 @@ export function apply(ctx, config) {{
   let sid = ''
   let awaitingPrompt = false
   let reply = ''
+  // The turn's calls by id (board #87): dsh's tool/result names only
+  // `message.toolCallId`, so its Post takes the call's name and input from
+  // here; cleared at each turn's start.
+  const calls = new Map()
   let model = ''
   let window = 0
   let used = null
@@ -603,6 +611,7 @@ export function apply(ctx, config) {{
         case 'turn/start':
           awaitingPrompt = true
           reply = ''
+          calls.clear()
           steer?.turnStart(session)
           break
         case 'user/message':
@@ -626,12 +635,21 @@ export function apply(ctx, config) {{
         case 'tool/call': {{
           let input = {{}}
           try {{ input = JSON.parse(d?.arguments ?? '{{}}') }} catch {{}}
-          send({{ hook_event_name: 'PreToolUse', tool_name: d?.name ?? 'tool', tool_input: input, session_id: sid }})
+          const id = typeof d?.callId === 'string' ? d.callId : ''
+          const name = d?.name ?? 'tool'
+          if (id) calls.set(id, {{ name, input }})
+          send({{ hook_event_name: 'PreToolUse', tool_name: name, tool_input: input, tool_use_id: id, session_id: sid }})
           break
         }}
-        case 'tool/result':
-          send({{ hook_event_name: 'PostToolUse', tool_name: 'tool', session_id: sid }})
+        case 'tool/result': {{
+          // A result whose call this turn never saw keeps its id and no name:
+          // the server writes it as its own row, never "the newest" call's.
+          const id = typeof d?.message?.toolCallId === 'string' ? d.message.toolCallId : ''
+          const c = calls.get(id)
+          calls.delete(id)
+          send({{ hook_event_name: 'PostToolUse', tool_name: c?.name ?? 'tool', tool_input: c?.input ?? {{}}, tool_use_id: id, session_id: sid }})
           break
+        }}
         case 'request/context':
           if (typeof d?.model === 'string') model = d.model
           if (count(d?.contextWindow)) window = count(d.contextWindow)
@@ -3158,6 +3176,50 @@ if (at < 0) {
         assert_eq!(stop["dsh_reason"], "completed");
         assert_eq!(std::fs::read_to_string(dir.join("tmm/session")).unwrap(), "session-root-1");
         assert!(dir.join("tmm/prompted").exists(), "the shell must not report the prompt again");
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// Board #87: dsh's tool/result names only `message.toolCallId`. Each
+    /// Post takes ITS call's name and input by that id, also when parallel
+    /// calls finish out of order; both halves carry the id as `tool_use_id`;
+    /// a result whose call the turn never saw keeps its id and no name; a
+    /// new turn forgets the last turn's calls.
+    #[test]
+    fn a_tool_result_carries_its_calls_name_input_and_id() {
+        let call = |id: &str, name: &str, args: &str| json!(["root", {"type":"tool/call","data":{"turn":1,"step":1,"callId":id,"name":name,"arguments":args}}]);
+        let result = |id: &str| json!(["root", {"type":"tool/result","data":{"turn":1,"step":1,"message":{"role":"tool","toolCallId":id,"content":[]}}}]);
+        let events_in = json!([
+            ["root", {"type":"turn/start","data":{"turn":1}}],
+            call("call_a", "bash", "{\"command\": \"echo a\"}"),
+            call("call_b", "read", "{\"path\": \"f.rs\"}"),
+            result("call_b"),
+            result("call_a"),
+            result("call_x"),
+            ["root", {"type":"turn/end","data":{"turn":1,"reason":{"kind":"completed"}}}],
+            ["root", {"type":"turn/start","data":{"turn":2}}],
+            result("call_a"),
+            ["root", {"type":"turn/end","data":{"turn":2,"reason":{"kind":"completed"}}}]
+        ]);
+        let Some((code, _, hooks, dir)) = run_plugin(json!({"requireEnv": ""}), root_and_child(), events_in) else {
+            eprintln!("skipped: no node");
+            return;
+        };
+        assert_eq!(code, Some(0));
+        let view: Vec<(String, String, String, String)> = hooks.iter().map(|h| (
+            h["hook_event_name"].as_str().unwrap_or("").to_string(),
+            h["tool_name"].as_str().unwrap_or("").to_string(),
+            h["tool_input"]["command"].as_str().or_else(|| h["tool_input"]["path"].as_str()).unwrap_or("").to_string(),
+            h["tool_use_id"].as_str().unwrap_or("").to_string(),
+        )).collect();
+        let row = |e: &str, t: &str, i: &str, id: &str| (e.to_string(), t.to_string(), i.to_string(), id.to_string());
+        assert_eq!(view, [
+            row("PreToolUse", "bash", "echo a", "call_a"),
+            row("PreToolUse", "read", "f.rs", "call_b"),
+            row("PostToolUse", "read", "f.rs", "call_b"),
+            row("PostToolUse", "bash", "echo a", "call_a"),
+            row("PostToolUse", "tool", "", "call_x"),
+            row("PostToolUse", "tool", "", "call_a"),
+        ]);
         let _ = std::fs::remove_dir_all(&dir);
     }
 

@@ -26,6 +26,13 @@
 #                      BUSY pi, then into an idle one, each arrive as their own user message with no
 #                      inserted text and no unconfirmed report; a /command stays a command, and a
 #                      two-line delivery keeps its break.
+#   live-check dsh-tools  board #87: a managed dsh 0.2.0-rc.2 against a scripted loopback stand-in
+#                      for the Messages API (a fake key, zero model calls, #412's precedent): two
+#                      sequential bash calls, two bash calls in ONE step (dsh runs bash exclusively),
+#                      then two `read` calls in one step (concurrency-safe: dsh starts both before
+#                      either result, and commits results in model order). dsh's own tool/call and
+#                      tool/result events are printed from its session log, and the activity log
+#                      must hold one row per call, each with its command, and no bare result row.
 #   live-check codex-limit   board #66: the provider's request-body limit, bisected with unbilled
 #                      requests (a model nobody serves: 404 under the limit, 413 over it), and that
 #                      codex takes `model_auto_compact_token_limit` from a profile file.
@@ -35,7 +42,7 @@
 #                      Escape closes it.
 set -euo pipefail
 check="${1:-smoke}"
-case "$check" in smoke|codex-models|codex-provider|pi|pi-tools|pi-paste|omp-tools|codex-limit|codex-picker) ;; *) echo "live-check: unknown check '$check' (known: smoke, codex-models, codex-provider, pi, pi-tools, pi-paste, omp-tools, codex-limit, codex-picker)" >&2; exit 2 ;; esac
+case "$check" in smoke|codex-models|codex-provider|pi|pi-tools|pi-paste|dsh-tools|omp-tools|codex-limit|codex-picker) ;; *) echo "live-check: unknown check '$check' (known: smoke, codex-models, codex-provider, pi, pi-tools, pi-paste, dsh-tools, omp-tools, codex-limit, codex-picker)" >&2; exit 2 ;; esac
 
 cfg="$HOME/.config/teammux"
 mkdir -p "$cfg" /work/live
@@ -53,8 +60,44 @@ if [ -d /stage ]; then
 fi
 
 # Each CLI answers for itself at its pinned version (round 1: omp needs its Bun runtime).
-for c in claude codex omp bun pi; do printf 'live-check: %s --version: %s\n' "$c" "$($c --version 2>&1 | head -1)"; done
+for c in claude codex omp bun pi dsh; do printf 'live-check: %s --version: %s\n' "$c" "$($c --version 2>&1 | head -1)"; done
 
+if [ "$check" = dsh-tools ]; then
+  # The stand-in answers the n-th Messages request with step n of the script: a tool_use block per
+  # call (two blocks in one message = two calls in one step), then the text done-87. It starts
+  # before the gateway, so every pane the gateway's tmux opens inherits the fake key and its URL.
+  cat > /work/stand-in.mjs <<'JS'
+import { createServer } from 'node:http';
+import { appendFileSync, writeFileSync } from 'node:fs';
+const steps = [[['bash', { command: 'echo first-87' }]], [['bash', { command: 'echo second-87' }]],
+  [['bash', { command: 'echo par-a-87' }], ['bash', { command: 'echo par-b-87' }]],
+  [['read', { file_path: '/work/live/a87.txt' }], ['read', { file_path: '/work/live/b87.txt' }]]];
+let n = 0;
+const ev = (t, d) => `event: ${t}\ndata: ${JSON.stringify(d)}\n\n`;
+const srv = createServer((req, res) => {
+  let body = ''; req.on('data', (c) => { body += c; }); req.on('end', () => {
+    const k = n++;
+    appendFileSync('/work/stand-in.log', `${req.method} ${req.url} step ${k}\n`);
+    const out = [ev('message_start', { type: 'message_start', message: { id: `m${k}`, type: 'message', role: 'assistant', model: 'deepseek-flash', content: [], stop_reason: null, usage: { input_tokens: 1, output_tokens: 0 } } })];
+    const calls = steps[k];
+    if (calls) calls.forEach(([name, input], i) => out.push(
+      ev('content_block_start', { type: 'content_block_start', index: i, content_block: { type: 'tool_use', id: `call_${k}_${i}`, name, input: {} } }),
+      ev('content_block_delta', { type: 'content_block_delta', index: i, delta: { type: 'input_json_delta', partial_json: JSON.stringify(input) } }),
+      ev('content_block_stop', { type: 'content_block_stop', index: i })));
+    else out.push(ev('content_block_start', { type: 'content_block_start', index: 0, content_block: { type: 'text', text: '' } }),
+      ev('content_block_delta', { type: 'content_block_delta', index: 0, delta: { type: 'text_delta', text: 'done-87' } }),
+      ev('content_block_stop', { type: 'content_block_stop', index: 0 }));
+    out.push(ev('message_delta', { type: 'message_delta', delta: { stop_reason: calls ? 'tool_use' : 'end_turn' }, usage: { output_tokens: 1 } }), ev('message_stop', { type: 'message_stop' }));
+    const sse = out.join('');
+    res.writeHead(200, { 'content-type': 'text/event-stream', 'content-length': Buffer.byteLength(sse), connection: 'close' });
+    res.end(sse);
+  });
+});
+srv.listen(0, '127.0.0.1', () => writeFileSync('/work/stand-in.port', String(srv.address().port)));
+JS
+  node /work/stand-in.mjs & for _ in $(seq 1 50); do [ -s /work/stand-in.port ] && break; sleep 0.1; done
+  export DEEPSEEK_API_KEY=not-a-key DEEPSEEK_BASE_URL="http://127.0.0.1:$(cat /work/stand-in.port)"
+fi
 server >"$HOME/server.log" 2>&1 &
 for _ in $(seq 1 100); do tmm project list >/dev/null 2>&1 && break; sleep 0.2; done
 tmm project create /work/live --name live >/dev/null
@@ -115,6 +158,72 @@ PY
   [ "$n" = 2 ] || { echo "live-check: pi-tools: FAIL ($n bash rows, expected 2)"; rc=1; }
   [ "$blank" = 0 ] || { echo "live-check: pi-tools: FAIL ($blank blank rows)"; rc=1; }
   if [ $rc = 0 ]; then echo "live-check: pi-tools: PASS"; fi
+  exit $rc
+fi
+
+if [ "$check" = dsh-tools ]; then
+  rc=0
+  printf 'a\n' > /work/live/a87.txt; printf 'b\n' > /work/live/b87.txt
+  tmm registry save --name ld87 --backend dsh --system "Live check agent." >/dev/null
+  tmm spawn ld87 --project live >/dev/null
+  pane() { tmux list-panes -a -F '#{pane_id} #{window_name}' | awk '$2=="ld87"{print $1; exit}'; }
+  # Ready = the managed shell's own prompt `dsh ›` (its ready marker, #38/#53), polled with a deadline.
+  ready() { p=$(pane); [ -n "$p" ] && tmux capture-pane -p -t "$p" | grep -q 'dsh ›'; }
+  for _ in $(seq 1 120); do ready && break; sleep 0.5; done
+  ready && echo "live-check: dsh-tools: dsh is ready (its prompt is painted)" || { echo "live-check: dsh-tools: FAIL (no dsh prompt in 60 s)"; tmux capture-pane -p -t "$(pane)" | tail -5 | sed 's/^/    /'; exit 1; }
+  tmm send --project live "@ld87 run the scripted calls" >/dev/null
+  timeout 120 bash -c "until tmm log --project live --limit 40 | grep -q '] ld87: done-87'; do sleep 1; done" || { echo "live-check: dsh-tools: FAIL (no answer)"; rc=1; tmux capture-pane -p -t "$(pane)" | tail -8 | sed 's/^/    /'; }
+  echo "live-check: dsh-tools: stand-in requests:"; sed 's/^/    /' /work/stand-in.log
+  # AC1: dsh's own events, from its session log (zstd-compressed JSON lines, read with node's zlib):
+  # the keys of each tool/call and tool/result, and the ids that pair them.
+  echo "live-check: dsh-tools: dsh's own tool events (session log):"
+  node - /work/live/.tmm/agents/ld87/dsh/sessions <<'JS' | sed 's/^/    /' || { echo "live-check: dsh-tools: FAIL (the session log could not be read)"; rc=1; }
+const { readdirSync, readFileSync } = require('node:fs');
+const { join } = require('node:path');
+const { zstdDecompressSync } = require('node:zlib');
+// The log is a run of zstd frames (one per flush); each is decompressed on its own.
+const MAGIC = Buffer.from([0x28, 0xb5, 0x2f, 0xfd]);
+const text = (buf) => {
+  const out = [];
+  for (let at = buf.indexOf(MAGIC); at >= 0;) {
+    const next = buf.indexOf(MAGIC, at + 4);
+    try { out.push(zstdDecompressSync(buf.subarray(at, next < 0 ? buf.length : next)).toString()); } catch {}
+    at = next;
+  }
+  return out.join('');
+};
+const walk = (d) => readdirSync(d, { withFileTypes: true }).flatMap((e) => e.isDirectory() ? walk(join(d, e.name)) : [join(d, e.name)]);
+let found = 0;
+for (const f of walk(process.argv[2]).filter((f) => f.endsWith('.jsonl.zstd'))) {
+  for (const line of text(readFileSync(f)).split('\n')) {
+    let e; try { e = JSON.parse(line); } catch { continue; }
+    const t = e?.type ?? e?.event?.type; const d = e?.data ?? e?.event?.data;
+    if ((t === 'tool/call' || t === 'tool/result') && d && typeof d === 'object') {
+      found++;
+      console.log(JSON.stringify({ type: t, keys: Object.keys(d).sort(), step: d.step, callId: d.callId, name: d.name, arguments: d.arguments, 'message.keys': d.message ? Object.keys(d.message).sort() : undefined, 'message.toolCallId': d.message?.toolCallId }));
+    }
+  }
+}
+if (!found) { console.log('no tool events found'); process.exit(1); }
+JS
+  rows_now() { python3 - "$HOME/.config/teammux/state.db" <<'PY'
+import json, sqlite3, sys
+db = sqlite3.connect(sys.argv[1])
+for tool, text, w in db.execute("SELECT tool, text, win FROM activity WHERE kind = 'tool' ORDER BY id"):
+    print(json.dumps({"window": w, "tool": tool, "text": text}))
+PY
+  }
+  want="echo first-87|echo second-87|echo par-a-87|echo par-b-87|/work/live/a87.txt|/work/live/b87.txt"
+  expected() {
+    [ "$(printf '%s\n' "$1" | grep -c '"window": "ld87"' || true)" = 6 ] || return 1
+    printf '%s\n' "$1" | grep -q '"text": ""' && return 1
+    local IFS='|'; for c in $want; do printf '%s\n' "$1" | grep -qF "\"text\": \"$c\"" || return 1; done
+  }
+  # Poll the exact expected state with a deadline (the hook inbox is read asynchronously).
+  for _ in $(seq 1 60); do rows=$(rows_now); expected "$rows" && break; sleep 0.5; done
+  echo "live-check: dsh-tools: tool rows in the activity log:"; printf '%s\n' "$rows" | sed 's/^/    /'
+  expected "$rows" || { echo "live-check: dsh-tools: FAIL (expected one row per call, each with its command, and no bare row)"; rc=1; }
+  if [ $rc = 0 ]; then echo "live-check: dsh-tools: PASS"; fi
   exit $rc
 fi
 

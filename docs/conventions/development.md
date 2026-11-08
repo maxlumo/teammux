@@ -715,6 +715,7 @@ pnpm run test:live:docker codex-provider   # board #74: a codex chat restarted u
 pnpm run test:live:docker pi             # board #71: a managed pi end to end (agents-overview.md § The pi backend)
 pnpm run test:live:docker pi-tools       # board #86: a pi tool call is one row with its argument (agent-status.md)
 pnpm run test:live:docker pi-paste       # board #85: lines carrying `#81` reach a busy and an idle pi whole and alone (agents-overview.md § The pi backend)
+pnpm run test:live:docker dsh-tools      # board #87: a dsh tool call is one row, its result folded by call id (agents-overview.md § dsh)
 pnpm run test:live:docker omp-tools        # board #72: omp's own tools off by default, on by the switch (agents-overview.md)
 pnpm run test:live:docker codex-limit      # board #66: the provider's body limit, and a profile's compaction limit is taken (config.md)
 pnpm run test:live:docker codex-picker     # board #66: a delivery waits while codex's /new picker is open (hub-composer.md)
@@ -723,7 +724,7 @@ pnpm run test:live:docker codex-picker     # board #66: a delivery waits while c
 - **The image** is `docker/validator/Dockerfile`'s `live` target: this
   checkout's `server` and `tmm` built inside, and the CLIs pinned to the
   versions measured on this host: claude 2.1.319, codex-cli 0.166.0, omp
-  18.15.0 (npm), pi 1.5.0 (npm, @earendil-works/pi-coding-agent, board #71), with Bun 1.4.4 for omp (its package's `engines` names
+  18.15.0 (npm), pi 1.5.0 (npm, @earendil-works/pi-coding-agent, board #71), dsh 0.2.0-rc.2 (npm, @deepseek-ai/dsh, board #87; its checks need no key: a loopback stand-in answers it), with Bun 1.4.4 for omp (its package's `engines` names
   `bun >=1.4.4`; round 1, validator-2: without it `omp --version` failed with
   `env: bun: No such file or directory`). Measured in the built image: each
   `--version` answers its pinned version. kiro-cli 2.37.1 and kimi 2.5.1 have no public pinned install
