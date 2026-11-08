@@ -22,6 +22,10 @@ static WAITING: Mutex<BTreeSet<(String, String)>> = Mutex::new(BTreeSet::new());
 /// that no menu is up, so only a successful read without one releases.
 pub(super) fn open(session: &str, window: &str) -> bool {
     let Some(backend) = super::recipe_backend(session, window).filter(|b| b.picker_holds_delivery()) else { return false };
+    #[cfg(test)]
+    if COMPOSER_IN_TEST.with(|c| c.get()) {
+        return false;
+    }
     let screen = crate::tmux::find_window_by_name(session, window)
         .ok_or_else(|| format!("no window '{window}'"))
         .and_then(|pane| crate::tmux::capture_pane_plain(&pane, Some(0)));
@@ -33,6 +37,14 @@ pub(super) fn open(session: &str, window: &str) -> bool {
         WAITING.lock().unwrap().insert((session.to_string(), window.to_string()));
     }
     open
+}
+
+#[cfg(test)]
+thread_local! {
+    /// The delivery tests' fake typing (`delivery::tests::fake`) has no pane,
+    /// so no screen to read: on that thread a codex screen reads as its
+    /// composer (round 3, as #77's `exited::RUNNING_IN_TEST`).
+    pub(crate) static COMPOSER_IN_TEST: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
 }
 
 #[cfg(test)]

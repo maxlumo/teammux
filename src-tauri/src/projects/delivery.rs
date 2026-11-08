@@ -1526,7 +1526,7 @@ mod tests {
     }
 
     pub(super) fn fake() {
-        TYPED.with(|t| *t.borrow_mut() = Some(Vec::new())); crate::projects::exited::RUNNING_IN_TEST.with(|r| r.set(true));
+        TYPED.with(|t| *t.borrow_mut() = Some(Vec::new())); crate::projects::exited::RUNNING_IN_TEST.with(|r| r.set(true)); picker_hold::COMPOSER_IN_TEST.with(|c| c.set(true));
         VERBATIM_UNDER_TURN_LOCK.with(|v| v.borrow_mut().clear());
         REFUSE.with(|r| *r.borrow_mut() = None);
     }
