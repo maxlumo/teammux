@@ -21,7 +21,8 @@
    shared by every entry point.
 5. **Contain backend differences:** each CLI needs its own configuration,
    hook dialect and status-line implementation. Adding a backend must add
-   only one backend file, not another downstream branch.
+   only one backend file, not another downstream branch. The full list of what
+   a new backend must answer is [adding-a-backend.md](adding-a-backend.md).
 6. **Follow external systems' documentation:** tmux, CLIs and SQLite have
    versions and parsing rules. Verify format strings, targets and migration
    semantics against those rules, and record the version in comments.

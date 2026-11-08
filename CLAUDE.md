@@ -123,7 +123,7 @@ Each links to the doc that holds the reason and the details.
 
 ### Design — projects, agents, hub
 - [Projects (declarative workspaces)](docs/design-docs/features/projects.md) · [Agents overview (CLI substrate, hooks, isolated homes, registry)](docs/design-docs/features/agents-overview.md) · [Agent status (derived state, deliveries, vitals, recovery)](docs/design-docs/features/agent-status.md) · [Agent lifecycle](docs/design-docs/features/agent-lifecycle.md) ([中文](docs/design-docs/features/agent-lifecycle.zh.md)) · [Agent notifications (hooks)](docs/design-docs/features/agent-notifications.md)
-- [tmm CLI (the agent's hands)](docs/design-docs/features/tmm-cli.md) · [Agent teams (§ in agents overview)](docs/design-docs/features/agents-overview.md#agent-teams-board-74) · [Hub feed](docs/design-docs/features/hub-feed.md) · [Hub composer](docs/design-docs/features/hub-composer.md) · [Task board](docs/design-docs/features/board.md)
+- [tmm CLI (the agent's hands)](docs/design-docs/features/tmm-cli.md) · [Agent teams (§ in agents overview)](docs/design-docs/features/agents-overview.md#agent-teams-board-74) · [Hub feed](docs/design-docs/features/hub-feed.md) · [Hub composer](docs/design-docs/features/hub-composer.md) · [Task board](docs/design-docs/features/board.md) · [Adding an agent backend (checklist)](docs/guidance/adding-a-backend.md)
 
 ### Conventions, reference, history
 - [Development (commands, dev loop, build gotchas)](docs/conventions/development.md) · [Frontend conventions](docs/conventions/frontend.md) · [Testing](docs/conventions/testing.md)
