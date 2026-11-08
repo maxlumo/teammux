@@ -1387,10 +1387,15 @@ pub fn record_tool(session: &str, window: &str, tool: &str, detail: &str) -> Opt
     // tool-only turn, a Post after an approved ask resumes the turn. Its row
     // is written too (the log must replay it); the feed collapses the
     // consecutive identical row (`feedBlocks`), so the lane still shows one.
+    // "Same call" is the identical line, or (board #86) a Post with NO
+    // argument after the newest call of that tool: pi/omp's extension before
+    // #86, dsh and any CLI whose Post omits the input sent `bash` after
+    // `bash cd …`, and the second line was written as a blank row.
     let event = ("tool", detail.to_string(), tool.to_string(), String::new(), Vec::new());
+    let half_of = |prev: &str| prev == line || (detail.is_empty() && prev.strip_prefix(tool).is_some_and(|rest| rest.starts_with(' ')));
     let same_call = |r: &Rec| {
         let tool_k = r.tool.as_ref().map(|(_, t)| (*t, r.tool_seq));
-        r.tool.as_ref().is_some_and(|(prev, at)| prev == &line && ts.saturating_sub(*at) <= TOOL_DEDUPE_SECS)
+        r.tool.as_ref().is_some_and(|(prev, at)| half_of(prev) && ts.saturating_sub(*at) <= TOOL_DEDUPE_SECS)
             && tool_k >= r.prompt.map(|t| (t, r.prompt_seq))
             && tool_k >= r.end.as_ref().map(|(_, t)| (*t, r.end_seq))
             && tool_k >= r.ask.as_ref().map(|(_, t)| (*t, r.ask_seq))
@@ -3326,6 +3331,31 @@ mod tests {
         // And the status record still carries the newest line either way.
         let st = derive(&session, "w4", 0);
         assert!(st.detail.contains("main.rs"), "got {:?}", st.detail);
+    }
+
+    /// Board #86 (owner 2026-11-08 16:17: "工具调用里很多行是空的"): a Post
+    /// that carries no argument (pi/omp's extension before #86, dsh, any CLI
+    /// whose Post omits the input) is still the Post half of the newest call
+    /// of that tool, so it writes no blank row. A fact in between, or another
+    /// tool, still makes it its own.
+    #[test]
+    fn a_post_without_its_argument_folds_into_its_pre() {
+        let rows = |s: &str| recent_events(s, 0).into_iter().filter(|e| e.kind == "tool").map(|e| (e.tool, e.text)).collect::<Vec<_>>();
+        let a = format!("t86-pair-{}", uuid::Uuid::new_v4());
+        record_tool(&a, "w1", "bash", "cd x");
+        record_tool(&a, "w1", "bash", ""); // the Post half, no input
+        assert_eq!(rows(&a), [("bash".to_string(), "cd x".to_string())], "one call, one row, with its argument");
+
+        let b = format!("t86-stop-{}", uuid::Uuid::new_v4());
+        record_tool(&b, "w1", "bash", "cd x");
+        record_notification(&b, "w1", "completed");
+        record_tool(&b, "w1", "bash", "");
+        assert_eq!(rows(&b).len(), 2, "a stop in between: its own fact");
+
+        let c = format!("t86-other-{}", uuid::Uuid::new_v4());
+        record_tool(&c, "w1", "edit", "a");
+        record_tool(&c, "w1", "bash", "");
+        assert_eq!(rows(&c).len(), 2, "another tool: its own call");
     }
 
     #[test]

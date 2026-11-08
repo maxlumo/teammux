@@ -220,7 +220,7 @@ const TAIL: &str = r#"  pi.on("tool_call", async (event: any, ctx: any) => {
     send({ hook_event_name: "PreToolUse", tool_name: event?.toolName ?? "tool", tool_input: event?.input ?? {}, session_id: sessionId(ctx) });
   });
   pi.on("tool_result", async (event: any, ctx: any) => {
-    send({ hook_event_name: "PostToolUse", tool_name: event?.toolName ?? "tool", session_id: sessionId(ctx) });
+    send({ hook_event_name: "PostToolUse", tool_name: event?.toolName ?? "tool", tool_input: event?.input ?? {}, session_id: sessionId(ctx) });
   });
 }
 "#;
@@ -344,6 +344,24 @@ mod tests {
     fn a_pi_session_start_is_reported_with_its_reason() {
         let Some(h) = replay(Dialect::Pi, json!([["session_start", { "type": "session_start", "reason": "new" }]])) else { return };
         assert_eq!(of(&h, "SessionStart", "source"), ["new"]);
+    }
+
+    /// Board #86: both halves of a tool call carry its input (pi's
+    /// `tool_result` has `event.input`, extensions.md § tool_result), so the
+    /// Post is never a bare tool name; in both dialects (one TAIL).
+    #[test]
+    fn both_halves_of_a_tool_call_carry_its_input() {
+        let input = json!({ "command": "cd x" });
+        for dialect in [Dialect::Pi, Dialect::Omp] {
+            let events = json!([["tool_call", { "toolName": "bash", "input": input }], ["tool_result", { "toolName": "bash", "input": input, "content": [] }]]);
+            let Some(h) = replay(dialect, events) else { return };
+            for event in ["PreToolUse", "PostToolUse"] {
+                let sent: Vec<&Value> = h.iter().filter(|p| p["hook_event_name"] == event).collect();
+                assert_eq!(sent.len(), 1, "{event}");
+                assert_eq!(sent[0]["tool_input"], input, "{event} carries the input");
+                assert_eq!(sent[0]["tool_name"], "bash");
+            }
+        }
     }
 
     /// omp's dialect keeps its own blocks: pi's settle edge and session

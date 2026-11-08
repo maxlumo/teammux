@@ -20,6 +20,8 @@
 #                      the host's ~/.pi. Spawned with a model and effort, a turn answered through
 #                      the telemetry, /model and /thinking from the room, a restart that resumes
 #                      the conversation, the user's auth.json and models.json still linked.
+#   live-check pi-tools   board #86: a managed pi runs two bash calls; the activity log holds one
+#                      tool row per call, each with its command, and no blank (argument-less) row.
 #   live-check codex-limit   board #66: the provider's request-body limit, bisected with unbilled
 #                      requests (a model nobody serves: 404 under the limit, 413 over it), and that
 #                      codex takes `model_auto_compact_token_limit` from a profile file.
@@ -29,7 +31,7 @@
 #                      Escape closes it.
 set -euo pipefail
 check="${1:-smoke}"
-case "$check" in smoke|codex-models|codex-provider|pi|omp-tools|codex-limit|codex-picker) ;; *) echo "live-check: unknown check '$check' (known: smoke, codex-models, codex-provider, pi, omp-tools, codex-limit, codex-picker)" >&2; exit 2 ;; esac
+case "$check" in smoke|codex-models|codex-provider|pi|pi-tools|omp-tools|codex-limit|codex-picker) ;; *) echo "live-check: unknown check '$check' (known: smoke, codex-models, codex-provider, pi, pi-tools, omp-tools, codex-limit, codex-picker)" >&2; exit 2 ;; esac
 
 cfg="$HOME/.config/teammux"
 mkdir -p "$cfg" /work/live
@@ -54,10 +56,10 @@ for _ in $(seq 1 100); do tmm project list >/dev/null 2>&1 && break; sleep 0.2; 
 tmm project create /work/live --name live >/dev/null
 tmm project up live >/dev/null
 
-if [ "$check" = pi ]; then
-  [ -n "${UST_API_KEY:-}" ] || { echo "live-check: pi: skipped: UST_API_KEY not set"; exit 2; }
-  [ -f "$HOME/.codex/config.toml" ] || { echo "live-check: pi: skipped: no UST base URL (codex config not staged)"; exit 2; }
-  rc=0
+# The user's ~/.pi/agent in the owner's provider shape (#71 note 6), for every pi check.
+pi_user() {
+  [ -n "${UST_API_KEY:-}" ] || { echo "live-check: $check: skipped: UST_API_KEY not set"; exit 2; }
+  [ -f "$HOME/.codex/config.toml" ] || { echo "live-check: $check: skipped: no UST base URL (codex config not staged)"; exit 2; }
   A="$HOME/.pi/agent"; mkdir -p "$A"
   base=$(sed -n 's/^base_url *= *"\(.*\)"/\1/p' "$HOME/.codex/config.toml" | head -1)
   cat > "$A/models.json" <<J
@@ -66,6 +68,55 @@ if [ "$check" = pi ]; then
 J
   printf '{"defaultProvider":"ust","defaultModel":"claude-opus-5-5","defaultThinkingLevel":"medium"}\n' > "$A/settings.json"
   printf '{}\n' > "$A/auth.json"
+}
+
+if [ "$check" = pi-tools ]; then
+  pi_user
+  rc=0
+  tmm registry save --name lpt --backend pi --model ust/claude-haiku-5-5 --effort low --system "Live check agent. Do exactly what you are asked." >/dev/null
+  tmm spawn lpt --project live >/dev/null
+  # Ready = pi's footer (its context meter, `%/<n>k`) painted in the pane; polled with a deadline
+  # (process.md section 4, validator #86 note 5), never a guessed sleep.
+  pane() { tmux list-panes -a -F '#{pane_id} #{window_name}' | awk '$2=="lpt"{print $1; exit}'; }
+  ready() { p=$(pane); [ -n "$p" ] && tmux capture-pane -p -t "$p" | grep -qE '%/[0-9]+k'; }
+  for _ in $(seq 1 120); do ready && break; sleep 0.5; done
+  ready && echo "live-check: pi-tools: pi is ready (its footer is painted)" || { echo "live-check: pi-tools: FAIL (pi's footer never painted in 60 s)"; exit 1; }
+  ext=$(grep -rl --include='*.ts' 'PostToolUse' /work/live/.tmm/agents/lpt 2>/dev/null | head -1)
+  grep -q 'hook_event_name: "PostToolUse", tool_name: event?.toolName ?? "tool", tool_input: event?.input' "$ext" \
+    && echo "live-check: pi-tools: the home's extension sends tool_input on PostToolUse ($ext)" \
+    || { echo "live-check: pi-tools: FAIL (the extension's PostToolUse carries no input: $ext)"; rc=1; }
+  tmm send --project live "@lpt Run exactly two bash tool calls, one after the other: first 'echo first-86', then 'echo second-86'. Then reply with the single word done." >/dev/null
+  timeout 180 bash -c "until tmm log --project live --limit 40 | grep -q '] lpt: done'; do sleep 2; done" || { echo "live-check: pi-tools: FAIL (no answer)"; rc=1; }
+  # The hook helpers run detached, so a tool row may land after the Stop: the activity log is
+  # polled for the exact expected state (two bash rows, both commands, no blank) until a 30 s
+  # deadline; a log that never reaches it fails with what it holds.
+  rows_now() { python3 - "$HOME/.config/teammux/state.db" <<'PY'
+import json, sqlite3, sys
+db = sqlite3.connect(sys.argv[1])
+cols = [r[1] for r in db.execute("PRAGMA table_info(activity)")]
+win = "win" if "win" in cols else "window"
+for tool, text, w in db.execute(f"SELECT tool, text, {win} FROM activity WHERE kind = 'tool' ORDER BY id"):
+    print(json.dumps({"window": w, "tool": tool, "text": text}))
+PY
+  }
+  expected() {
+    [ "$(printf '%s\n' "$1" | grep -c '"tool": "bash"' || true)" = 2 ] && ! printf '%s\n' "$1" | grep -q '"text": ""' \
+      && printf '%s\n' "$1" | grep -q '"text": "[^"]*echo first-86' && printf '%s\n' "$1" | grep -q '"text": "[^"]*echo second-86'
+  }
+  for _ in $(seq 1 60); do rows=$(rows_now); expected "$rows" && break; sleep 0.5; done
+  echo "live-check: pi-tools: tool rows in the activity log:"; printf '%s\n' "$rows" | sed 's/^/    /'
+  n=$(printf '%s\n' "$rows" | grep -c '"tool": "bash"' || true)
+  blank=$(printf '%s\n' "$rows" | grep -c '"text": ""' || true)
+  for c in first-86 second-86; do printf '%s\n' "$rows" | grep -q "\"text\": \"[^\"]*echo $c" || { echo "live-check: pi-tools: FAIL (no row with echo $c)"; rc=1; }; done
+  [ "$n" = 2 ] || { echo "live-check: pi-tools: FAIL ($n bash rows, expected 2)"; rc=1; }
+  [ "$blank" = 0 ] || { echo "live-check: pi-tools: FAIL ($blank blank rows)"; rc=1; }
+  if [ $rc = 0 ]; then echo "live-check: pi-tools: PASS"; fi
+  exit $rc
+fi
+
+if [ "$check" = pi ]; then
+  pi_user
+  rc=0
   ok() { echo "live-check: pi: $1"; }; bad() { echo "live-check: pi: FAIL ($1)"; rc=1; }
   all=$(tmm agent backends --models 2>&1 || true); row=$(printf '%s\n' "$all" | grep '^pi ' || true); ok "models: ${row:-none; the whole answer: $all}"
   case "$row" in *"ust/claude-haiku-5-5"*) ;; *) bad "the model list lacks models.json's ids" ;; esac
