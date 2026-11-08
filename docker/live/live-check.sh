@@ -22,6 +22,10 @@
 #                      the conversation, the user's auth.json and models.json still linked.
 #   live-check pi-tools   board #86: a managed pi runs two bash calls; the activity log holds one
 #                      tool row per call, each with its command, and no blank (argument-less) row.
+#   live-check pi-paste  board #85: five lines carrying `#81` and ending in `"..."`. typed into a
+#                      BUSY pi, then into an idle one, each arrive as their own user message with no
+#                      inserted text and no unconfirmed report; a /command stays a command, and a
+#                      two-line delivery keeps its break.
 #   live-check codex-limit   board #66: the provider's request-body limit, bisected with unbilled
 #                      requests (a model nobody serves: 404 under the limit, 413 over it), and that
 #                      codex takes `model_auto_compact_token_limit` from a profile file.
@@ -31,7 +35,7 @@
 #                      Escape closes it.
 set -euo pipefail
 check="${1:-smoke}"
-case "$check" in smoke|codex-models|codex-provider|pi|pi-tools|omp-tools|codex-limit|codex-picker) ;; *) echo "live-check: unknown check '$check' (known: smoke, codex-models, codex-provider, pi, pi-tools, omp-tools, codex-limit, codex-picker)" >&2; exit 2 ;; esac
+case "$check" in smoke|codex-models|codex-provider|pi|pi-tools|pi-paste|omp-tools|codex-limit|codex-picker) ;; *) echo "live-check: unknown check '$check' (known: smoke, codex-models, codex-provider, pi, pi-tools, pi-paste, omp-tools, codex-limit, codex-picker)" >&2; exit 2 ;; esac
 
 cfg="$HOME/.config/teammux"
 mkdir -p "$cfg" /work/live
@@ -147,6 +151,91 @@ if [ "$check" = pi ]; then
   tmm send --project live "@lpi /new" >/dev/null; sleep 6
   ask "reply with the single word fresh" fresh && ok "after /new it answered fresh" || bad "no answer after /new"
   tmm agent list --project live
+  exit $rc
+fi
+
+if [ "$check" = pi-paste ]; then
+  # Board #85: a line typed into pi's editor with `#81` in it opened pi's completion list (`#` is
+  # one of its default triggers), the list followed every later character, the line's final `.`
+  # listed the cwd's dot-entries, and the delivery's Enter accepted `.claude/` instead of
+  # submitting: five lines became one prompt with junk at every junction, all unconfirmed.
+  # Every wait polls the expected state with a deadline (process.md, board #208).
+  rc=0
+  pi_user
+  mkdir -p /work/live/.claude   # the cwd's first dot-entry, as in the incident
+  ok() { echo "live-check: pi-paste: $1"; }; bad() { echo "live-check: pi-paste: FAIL ($1)"; rc=1; }
+  # until <seconds> <what> <command…>: poll the command until it succeeds or the deadline passes.
+  until_ok() { local t=$1 what=$2; shift 2; local end=$((SECONDS + t)); until "$@"; do [ $SECONDS -ge $end ] && { bad "timed out after ${t}s: $what"; return 1; }; sleep 1; done; }
+  H=/work/live/.tmm/agents/lpi
+  pane() { tmux list-panes -a -F '#{pane_id} #{window_name}' | awk '$2=="lpi"{print $1; exit}'; }
+  shot() { echo "live-check: pi-paste: --- screen: $1"; tmux capture-pane -p -t "$(pane)" | grep -v '^\s*$' | tail -12 | sed 's/^/    |/'; }
+  foot() { tmux capture-pane -p -t "$(pane)" 2>/dev/null | grep -E '%/[0-9]+k' | tail -1 | sed 's/  */ /g'; }
+  state() { tmm agent list --project live | sed -n 's/^[0-9]*: lpi \[pi\] \([a-z]*\).*/\1/p'; }
+  is() { [ "$(state)" = "$1" ]; }
+  footer_has() { case "$(foot)" in *"$1"*) return 0 ;; *) return 1 ;; esac; }
+  # The user messages pi recorded, one JSON string per line, from its own session files.
+  users() { { cat "$H"/sessions/*/*.jsonl 2>/dev/null || true; } | node -e 'let t="";process.stdin.on("data",d=>t+=d).on("end",()=>{for(const l of t.split("\n")){if(!l.trim())continue;let e;try{e=JSON.parse(l)}catch{continue}const m=e.message;if(e.type!=="message"||!m||m.role!=="user")continue;const c=typeof m.content==="string"?m.content:(m.content||[]).filter(x=>x.type==="text").map(x=>x.text).join("");console.log(JSON.stringify(c))}})'; }
+  # Delivery rows still waiting for their confirmation (a confirmed row is deleted), read-only.
+  pending() { node --no-warnings -e 'const {DatabaseSync}=require("node:sqlite");const d=new DatabaseSync(process.argv[1],{readOnly:true});console.log(d.prepare("SELECT count(*) AS n FROM deliveries WHERE win = ?").get("lpi").n)' "$cfg/state.db"; }
+  settled() { [ "$(pending)" = 0 ]; }
+  # The rows themselves: id, typed-at and the line's head, one per row.
+  rows() { node --no-warnings -e 'const {DatabaseSync}=require("node:sqlite");const d=new DatabaseSync(process.argv[1],{readOnly:true});for(const r of d.prepare("SELECT id, ts, line FROM deliveries WHERE win = ? ORDER BY id").all("lpi"))console.log(`    row ${r.id} ts=${r.ts} ${String(r.line).slice(0,90)}`)' "$cfg/state.db"; }
+  unconfirmed() { tmm log --project live --limit 200 | grep -c '\[tmm\] unconfirmed lpi' || true; }
+  # The room's reply row naming `$1`, and its recipients (`to`), from the room JSON.
+  reply_to() { tmm log --project live --limit 80 --output json | node -e 'let t="";process.stdin.on("data",d=>t+=d).on("end",()=>{const j=JSON.parse(t);const rows=Array.isArray(j)?j:(j.messages||[]);const r=rows.filter(m=>m.from==="lpi"&&new RegExp("\\b"+process.argv[1]+"\\b").test(m.body||"")).pop();console.log(r?JSON.stringify(r.to):"none")})' "$1"; }
+  # The incident's shape: `#81`, and a last token `` `…"..."`. ``. The quote is text, not a task.
+  line() { printf '[board #81 reply] builder: note %s. Run nothing; reply with the single word %s. Quoted: `tmm board note 81 "..."`.' "$1" "$1"; }
+  # Each marker in exactly one user message, alone, and no message carrying `.claude/`.
+  apart() { # $1 label, $2.. markers
+    local label=$1; shift; local all; all=$(users)
+    for m in "$@"; do
+      n=$(printf '%s\n' "$all" | grep -c "single word $m\\." || true)
+      [ "$n" = 1 ] || bad "$label: '$m' is in $n user messages"
+      if printf '%s\n' "$all" | grep "single word $m\\." | grep -q 'board #81 reply.*board #81 reply'; then bad "$label: '$m' shares its message with another line"; fi
+    done
+    if printf '%s\n' "$all" | grep -q '\.claude/'; then bad "$label: a user message carries .claude/"; fi
+    ok "$label: user messages so far: $(printf '%s\n' "$all" | wc -l)"
+  }
+  tmm registry save --name lpi --backend pi --model ust/claude-haiku-5-5 --effort low --system "Live check agent. Answer in one short line." >/dev/null
+  tmm spawn lpi --project live >/dev/null
+  until_ok 120 "pi's footer (ready)" footer_has '%/' && ok "ready: $(foot)"
+  # BUSY: a turn whose bash tool runs for 40 s; the five lines go in while it is working.
+  tmm send --project live "@lpi run the shell command 'sleep 40' with your bash tool, then reply with the single word slept" >/dev/null
+  until_ok 120 "lpi running" is running && ok "busy: lpi is $(state)"
+  for i in 1 2 3 4 5; do tmm send --project live "@lpi $(line b$i)" >/dev/null; done
+  ok "busy: after the five sends lpi is $(state), $(pending) delivery rows pending:"; rows
+  is running || bad "busy: the five lines were not sent into a running turn"
+  shot "busy, after the five lines"
+  until_ok 240 "every busy delivery confirmed" settled && ok "busy: every delivery row confirmed ($(pending) pending)"
+  until_ok 240 "the busy turn's end" is idle || true
+  ok "busy: reply $(tmm log --project live --limit 40 | grep '] lpi: ' | tail -1 | cut -c1-100)"
+  apart busy b1 b2 b3 b4 b5
+  [ "$(unconfirmed)" = 0 ] && ok "busy: no unconfirmed report" || bad "busy: $(unconfirmed) unconfirmed reports"
+  # IDLE: the same five lines, each to an agent at rest: five turns, five replies, each to its sender.
+  for i in 1 2 3 4 5; do
+    until_ok 120 "lpi idle before i$i" is idle || true
+    tmm send --project live "@lpi $(line i$i)" >/dev/null
+    ok "idle: i$i sent, pending:"; rows
+    until_ok 180 "a reply naming i$i" bash -c "tmm log --project live --limit 60 | grep -q '] lpi: .*\bi$i\b'" || true
+    to=$(reply_to "i$i"); ok "idle: i$i answered, reply to $to, $(pending) rows pending"
+    [ "$to" = '["human"]' ] || bad "idle: the reply naming i$i went to $to, not its sender human"
+  done
+  until_ok 120 "every idle delivery confirmed" settled && ok "idle: every delivery row confirmed ($(pending) pending)"
+  apart idle i1 i2 i3 i4 i5
+  [ "$(unconfirmed)" = 0 ] && ok "idle: no unconfirmed report" || bad "idle: $(unconfirmed) unconfirmed reports"
+  # A /command still reaches pi as a command, and a multi-line delivery keeps its break.
+  until_ok 120 "lpi idle before /thinking" is idle || true
+  tmm send --project live "@lpi /thinking high" >/dev/null
+  until_ok 30 "the footer shows • high" footer_has '• high' && ok "footer after /thinking high: $(foot)"
+  if users | grep -q '/thinking'; then bad "/thinking high became a user message"; fi
+  tmm send --project live "@lpi first line of two
+reply with the single word multi" >/dev/null
+  until_ok 180 "a reply naming multi" bash -c "tmm log --project live --limit 60 | grep -q '] lpi: .*multi'" && ok "the two-line delivery answered multi"
+  users | grep -q 'first line of two\\nreply with the single word multi' && ok "the two-line delivery arrived with its line break" || bad "the two-line delivery lost its line break: $(users | grep 'first line of two')"
+  shot "at the end"
+  echo "live-check: pi-paste: --- the user messages pi recorded:"; users | sed 's/^/    /'
+  tmm log --project live --limit 60 | grep -E 'lpi|unconfirmed' | sed 's/^/    log|/'
+  [ $rc = 0 ] && echo "live-check: pi-paste: PASS"
   exit $rc
 fi
 

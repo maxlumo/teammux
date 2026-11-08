@@ -1180,6 +1180,10 @@ Only the word at the cursor when Enter lands is completed: omp's `Forward to @re
 
 Pinned by `an_omp_delivery_types_no_at_so_its_file_completion_never_takes_the_enter` (real tmux, the real `hub_post` path: a fake CLI whose Enter completes a trailing `@word` instead of submitting; the delivery submits as `＠dev it moves on to ＠reviewer`, its receipt settles, the room keeps `@`; in-test control: `send_command` with `@` is completed) and `spawn::tests::an_agent_typed_at_as_fullwidth_is_told_so_and_no_other_is`.
 
+### A line for pi is pasted, so its completion never takes the Enter (board #85, 2026-11-08)
+
+The one exception to "a single line is typed": `delivery::send_into` pastes every line for a backend whose `Backend::types_by_paste` says so (pi only), through `tmux::paste_text`, the same bracketed-paste door a multi-line line takes. Typed into pi, a `#81` opened its completion list and the delivery's Enter accepted `.claude/` instead of submitting, so consecutive lines merged and none was confirmed. The mechanism, pi's paste path and the live-rig measurement are in agents-overview.md § The pi backend. Escape is not used; it is the interrupt.
+
 ### A typed line's Enter submits in codex: paste-burst is off (board #446, 2026-10-22)
 
 Twice a delivery sat unsubmitted in the reviewer's codex composer, once for ten hours (09:33 → 19:31). One Enter pressed by hand submitted it. All three stuck lines were SINGLE-line and long (542, 593 and 795 characters; what looked like lines in the pane was the composer's soft wrap), and the pane was idle each time. A single line is typed by `tmux::send_command` as one `send-keys -l`, then the 200 ms beat, then a named Enter. Only a line holding `\n` is a bracketed paste.

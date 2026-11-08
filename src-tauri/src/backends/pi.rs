@@ -153,26 +153,20 @@ pub fn sniff_pi(pane: &str) -> Vitals {
     v
 }
 
-/// Is pi's completion menu open on `screen` (board #71, measured on pi
-/// 1.5.0)? It opens under the editor on `@word` (files) and on a typed
-/// `/command` (commands, then their arguments: `/thinking high` showed
-/// `→ high`, `/model ust/claude-sonnet-5-5` showed `→ claude-sonnet-5-5
-/// ust`), and while it is open Enter ACCEPTS the highlighted entry and does
-/// not submit; Escape closes it and leaves the line, and the next Enter
-/// submits (measured). By position, like the footer: the line right under
-/// the editor's bottom rule (the last full-width `─` rule) starts with `→ `.
-pub fn picker_open(screen: &str) -> bool {
-    let lines: Vec<&str> = screen.lines().collect();
-    let is_rule = |l: &str| {
-        let t = l.trim_end();
-        t.chars().count() >= 20 && t.chars().all(|c| c == '─')
-    };
-    lines
-        .iter()
-        .rposition(|l| is_rule(l))
-        .and_then(|r| lines.get(r + 1))
-        .is_some_and(|l| l.trim_start().starts_with("→ "))
-}
+/// A line for pi is PASTED, never typed key by key (board #85, read in pi
+/// 1.5.0's editor, `pi-tui`): typed characters run its completion, whose
+/// default triggers are `@` and `#`, and once a list is open every later
+/// character refreshes it from the token under the cursor. A delivery
+/// carrying `#81` and ending in `` `...`. `` left the list on the cwd's
+/// dot-entries, and its Enter ACCEPTED `.claude/` instead of submitting, so
+/// the next line joined the same prompt and none was confirmed (measured in
+/// orchestrator's pane, 2026-11-08 16:06 and 16:12). A bracketed paste goes
+/// to `Editor.handlePaste`, which cancels any open completion and inserts
+/// the text without starting one; the Enter then submits it
+/// (`submitValue`, which also expands a long paste's `[paste #n]` marker
+/// back to its text). pi turns ?2004 on at start, so `tmux::paste_text`
+/// brackets it. Escape is never used: it is the interrupt.
+pub(crate) const TYPES_BY_PASTE: bool = true;
 
 use serde_json::{json, Value};
 #[cfg(not(any(target_os = "android", target_os = "ios")))]
@@ -481,22 +475,6 @@ mod tests {
         assert_eq!((s["defaultProvider"].as_str(), s["defaultModel"].as_str(), s["defaultThinkingLevel"].as_str()), (Some("ust-openai"), Some("gpt-6-astra"), Some("high")));
         let s = pi_settings(Some(&user), "bare-model", "", &[]);
         assert_eq!((s.get("defaultProvider"), s["defaultModel"].as_str()), (None, Some("bare-model")), "a bare id names no provider");
-    }
-
-    /// The measured menu screens: `→ high` under the bottom rule is open;
-    /// the same screen after Escape, and the idle footer, are not; a `→` in
-    /// the transcript above the editor is not the menu.
-    #[test]
-    fn the_completion_menu_is_read_under_the_editor() {
-        let rule = "─".repeat(60);
-        let open = format!(" Thinking level: high\n{rule}\n/thinking high\n{rule}\n→ high\n/work/live\n0.0%/128k (auto)     claude-haiku-5-5 • low\n");
-        assert!(picker_open(&open));
-        let model = format!("{rule}\n/model ust/claude-sonnet-5-5\n{rule}\n→ claude-sonnet-5-5               ust\n/work/live\n0.0%/128k (auto)     x\n");
-        assert!(picker_open(&model));
-        let closed = format!("{rule}\n/thinking high\n{rule}\n/work/live\n0.0%/128k (auto)     claude-haiku-5-5 • low\n");
-        assert!(!picker_open(&closed));
-        let quoted = format!(" → high was the answer\n{rule}\n\n{rule}\n/work/live\n0.0%/128k (auto)  x\n");
-        assert!(!picker_open(&quoted));
     }
 
     /// Review R1 (#71): pi's own credentials in the home are never deleted.

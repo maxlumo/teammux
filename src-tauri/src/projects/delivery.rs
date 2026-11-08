@@ -1373,14 +1373,14 @@ fn send_into_locked(session: &str, window: &str, target: &str, text: &str) -> Re
     // Enter (board #436 validator P1; limits at `kiro::picker_open`). A
     // delivery never reaches this with an `@` for such a CLI: `type_text`
     // typed it as `＠`.
-    // So does a `/command` into pi (#71): `Backend::picker_guard`.
-    let picker = (text.contains('@') || text.starts_with('/'))
-        .then(|| recipe_mode(session, window).map(|(backend, _)| backend))
-        .flatten()
-        .filter(|backend| backend.picker_guard(text));
+    // A CLI whose typed keys can take the Enter gets every line PASTED (#85,
+    // pi: `Backend::types_by_paste`), and a pasted line gets no guard.
+    let backend = recipe_mode(session, window).map(|(backend, _)| backend);
+    let paste = backend.is_some_and(|b| b.types_by_paste());
+    let picker = backend.filter(|backend| backend.picker_guard(text));
     crate::tmux::with_write_guard(guard, || match picker {
-        None => crate::tmux::send_command(target, text),
-        Some(backend) => crate::tmux::send_command_with(target, text, || {
+        None => crate::tmux::send_command_with(target, text, paste, || Ok(())),
+        Some(backend) => crate::tmux::send_command_with(target, text, paste, || {
             if backend.picker_open(&crate::tmux::capture_pane_plain(target, Some(8)).unwrap_or_default()) {
                 crate::tmux::send_keys(target, "Escape", false)?;
                 std::thread::sleep(std::time::Duration::from_millis(200));

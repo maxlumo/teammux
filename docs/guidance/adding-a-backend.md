@@ -135,14 +135,14 @@ behind each rule live in the linked design sections; this page is the list.
 - [ ] `at_opens_picker`: if `@` opens a file picker, deliveries carry `＠`
       (omp, pi).
 - [ ] Menus: `picker_open` recognises the CLI's OWN menu structure, measured
-      for that CLI (codex: its key-hint row; pi: its arrow-selection furniture;
-      kiro: its own shape). Where `picker_holds_delivery` holds a line while a
+      for that CLI (codex: its key-hint row; kiro: its own shape). Where `picker_holds_delivery` holds a line while a
       menu is open, a screen that cannot be read holds too and a later read
       releases it (#66). Survey every menu the CLI has (`/new`, `/model`, …)
       AND its normal footer, which must not match.
 - [ ] Slash commands: the palette's list (`src/lib/hub/<name>-commands.ts`, read
-      by `offeredCommands`), each typed verbatim; `slash_opens_picker` and
-      `picker_guard` where a command opens a menu. A CLI with no native
+      by `offeredCommands`), each sent verbatim; `picker_guard` where a typed
+      command's `@` opens a menu, or `types_by_paste` where typed keys can take
+      the Enter at all (pi, #85: a paste opens no menu, so it needs no guard). A CLI with no native
       commands names the few the app runs itself (`app_command`, dsh;
       [hub-composer.md](../design-docs/features/hub-composer.md)).
 - [ ] `/model`, the effort change and `/new` sent from the Hub take effect, and

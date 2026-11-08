@@ -1225,14 +1225,16 @@ pub fn pane_in_mode(target: &str) -> Result<bool, String> {
 
 /// 向 pane 发送文本 + Enter
 pub fn send_command(target: &str, command: &str) -> Result<(), String> {
-    send_command_with(target, command, || Ok(()))
+    send_command_with(target, command, false, || Ok(()))
 }
 
 /// `send_command` with one step between the beat and the Enter, run under
 /// the same pane lock: `before_enter` may look at the pane and send a key
 /// (board #436: the kiro picker guard of a verbatim `/command`,
-/// `delivery::send_into`). An error from it sends no Enter.
-pub fn send_command_with(target: &str, command: &str, before_enter: impl FnOnce() -> Result<(), String>) -> Result<(), String> {
+/// `delivery::send_into`). An error from it sends no Enter. `paste` pastes
+/// even a one-line text, for a CLI whose typed keys can take the Enter
+/// (`Backend::types_by_paste`, board #85).
+pub fn send_command_with(target: &str, command: &str, paste: bool, before_enter: impl FnOnce() -> Result<(), String>) -> Result<(), String> {
     // Serialize per pane (board #122): the text→Enter pair below must land
     // whole before another caller's does.
     let lock = pane_send_lock(target);
@@ -1259,6 +1261,8 @@ pub fn send_command_with(target: &str, command: &str, before_enter: impl FnOnce(
         // newline INTO a composer: paste_text wraps the block in ?2004 markers
         // exactly when the pane app asked for them, and an agent TUI inserts
         // the break instead of submitting.
+        paste_text(target, command)?;
+    } else if paste {
         paste_text(target, command)?;
     } else {
         send_keys(target, command, true)?;

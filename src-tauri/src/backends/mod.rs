@@ -502,9 +502,8 @@ impl Backend {
     pub fn picker_open(self, screen: &str) -> bool {
         match self {
             Backend::Kiro => kiro::picker_open(screen),
-            Backend::Pi => pi::picker_open(screen),
             Backend::Codex => codex::picker_open(screen),
-            Backend::Claude | Backend::Grok | Backend::Omp | Backend::Kimi | Backend::Dsh => false,
+            Backend::Claude | Backend::Grok | Backend::Omp | Backend::Pi | Backend::Kimi | Backend::Dsh => false,
         }
     }
 
@@ -518,19 +517,25 @@ impl Backend {
         matches!(self, Backend::Codex)
     }
 
-    /// Does typing a `/command` with arguments open this CLI's completion
-    /// menu, so its Enter accepts a suggestion instead of submitting (board
-    /// #71, measured on pi 1.5.0)? Then a verbatim command gets the same
-    /// one-read picker guard as an `@` (`delivery::send_into`).
-    pub fn slash_opens_picker(self) -> bool {
-        matches!(self, Backend::Pi)
+    /// Is a one-line delivery PASTED into this CLI (bracketed, `tmux::paste_text`)
+    /// instead of typed key by key? pi only (board #85): typed keys drive its
+    /// completion, and an open list takes the delivery's Enter (`pi::TYPES_BY_PASTE`).
+    /// Every other backend types as before.
+    pub fn types_by_paste(self) -> bool {
+        match self {
+            Backend::Pi => pi::TYPES_BY_PASTE,
+            Backend::Kiro | Backend::Claude | Backend::Codex | Backend::Grok | Backend::Omp | Backend::Kimi | Backend::Dsh => false,
+        }
     }
 
     /// Whether `text` typed into this CLI may leave a picker open before its
-    /// Enter: an `@` where `@` opens one (#436), or a `/command` where `/`
-    /// arguments do (#71). Then `delivery::send_into` reads the screen once.
+    /// Enter: an `@` where `@` opens one (#436). Then `delivery::send_into`
+    /// reads the screen once. Never for a CLI whose lines are pasted
+    /// (`types_by_paste`, #85): a paste opens no picker, so there is nothing
+    /// to read and no Escape to send. pi's typed `/command` once had this
+    /// guard (#71); its lines are pasted since #85.
     pub fn picker_guard(self, text: &str) -> bool {
-        (text.contains('@') && self.at_opens_picker()) || (text.starts_with('/') && self.slash_opens_picker())
+        !self.types_by_paste() && text.contains('@') && self.at_opens_picker()
     }
 
     /// For a backend that loses typed text (`loses_busy_input`): is its pane
@@ -1117,14 +1122,24 @@ pub fn newer_than_measured(running: &[u64], m: &Measured) -> bool {
 
 #[cfg(test)]
 mod tests {
-    /// Board #71: a verbatim `/command` into pi gets the picker guard (its
-    /// argument menu takes the Enter, measured on pi 1.5.0); an `@` still
-    /// does wherever `@` opens a picker; prose and other CLIs' commands don't.
+    /// Board #85: pi's deliveries are pasted, because a typed `#` opens its
+    /// completion and the open list takes the Enter. No other backend's path
+    /// changes (a non-goal of #85).
     #[test]
-    fn a_pi_command_and_an_at_get_the_picker_guard() {
+    fn only_pi_types_by_paste() {
         use crate::backends::Backend;
-        assert!(Backend::Pi.picker_guard("/thinking high"));
-        assert!(Backend::Pi.picker_guard("/model ust/claude-sonnet-5-5"));
+        let pasted: Vec<&str> = Backend::ALL.iter().filter(|b| b.types_by_paste()).map(|b| b.name()).collect();
+        assert_eq!(pasted, ["pi"]);
+    }
+
+    /// An `@` gets the picker guard wherever `@` opens a picker (#436);
+    /// prose and commands without one don't. pi's lines are pasted (#85), so
+    /// none of them gets the guard, or its Escape.
+    #[test]
+    fn an_at_gets_the_picker_guard_and_a_pasted_line_none() {
+        use crate::backends::Backend;
+        assert!(!Backend::Pi.picker_guard("/thinking high"));
+        assert!(!Backend::Pi.picker_guard("/goal see @src/x.ts"));
         assert!(!Backend::Codex.picker_guard("/compact"), "codex's slash menu was not measured to take the Enter");
         assert!(Backend::Kiro.picker_guard("/goal see @src/x.ts"));
         assert!(!Backend::Pi.picker_guard("hello"));
