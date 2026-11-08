@@ -62,6 +62,30 @@ fn mention_spans(body: &str) -> Vec<(usize, usize)> {
     out
 }
 
+/// `body` with each address `mention_names` reads mapped through `to`
+/// (board #80): a team text that names its own members, given to a copy of
+/// the team whose members were started under other names. Only whole
+/// addresses change, by the one parser; one inside a backtick code span is
+/// code, not an address, and is kept. `to` answers `None` to keep a name.
+pub fn readdress(body: &str, to: &dyn Fn(&str) -> Option<String>) -> String {
+    let ticks: Vec<usize> = body.match_indices('`').map(|(i, _)| i).collect();
+    let in_code = |at: usize| ticks.chunks(2).any(|p| p.len() == 2 && p[0] < at && at < p[1]);
+    let mut out = String::with_capacity(body.len());
+    let mut at = 0;
+    for (a, b) in mention_spans(body) {
+        if in_code(a) {
+            continue;
+        }
+        if let Some(name) = to(&body[a..b]) {
+            out.push_str(&body[at..a]);
+            out.push_str(&name);
+            at = b;
+        }
+    }
+    out.push_str(&body[at..]);
+    out
+}
+
 /// A body that is a SLASH COMMAND for an agent's CLI (board #274): optionally
 /// one leading `@name` (ASCII word characters, `.`, `-`) or `@all`, then a
 /// first token `/word` — a letter, then letters, digits, `_` or `-` — ending
@@ -577,4 +601,17 @@ mod tests {
         }
         assert_eq!(shown(&line, at_han), line, "inside a multibyte char: no panic, as typed");
     }
+
+    /// Board #80: only whole addresses, by the one parser, and none inside a
+    /// code span.
+    #[test]
+    fn readdress_maps_whole_addresses_and_leaves_code_and_words() {
+        let to = |n: &str| match n { "validator" => Some("validator-2".to_string()), "rev" => Some("rev-2".to_string()), _ => None };
+        assert_eq!(
+            readdress("hands it to @validator; (@rev), me@validator.dev, @validators, `tmm send \"@validator\"`, @human.", &to),
+            "hands it to @validator-2; (@rev-2), me@validator.dev, @validators, `tmm send \"@validator\"`, @human."
+        );
+        assert_eq!(readdress("no addresses", &to), "no addresses");
+    }
+
 }

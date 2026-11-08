@@ -756,7 +756,7 @@ fn team_member_def(workspace: &str, team_path: &str, member: &str, window_name: 
                 .map(|g| {
                     let key = (g.path.clone(), g.member.name.trim().to_string());
                     let w = assigned.get(&key).cloned().unwrap_or_else(|| g.member.name.trim().to_string());
-                    (w, g.member.role.clone(), g.path.clone())
+                    (w, g.member.role.clone(), g.path.clone(), g.member.name.trim().to_string())
                 })
                 .collect();
             super::teams::effective_def(f, base.as_ref(), window_name, &roster)
@@ -1339,7 +1339,7 @@ fn with_joined_block(def: &RegAgent, workspace: &str, root: &str, window_name: &
 
 /// Window name = agent name, uniquified if taken (lead, lead-2, …). The window
 /// name is the agent's identity for telemetry and tmm messages.
-fn uniquify(name: &str, taken: &std::collections::HashSet<&str>) -> Result<String, String> {
+pub(super) fn uniquify(name: &str, taken: &std::collections::HashSet<&str>) -> Result<String, String> {
     if !taken.contains(name) {
         return Ok(name.to_string());
     }
@@ -1469,21 +1469,10 @@ pub fn spawn_team_members(session: &str, team_name: &str, brief: &str, by: &str,
     // Final names first, so every member's prompt can name its teammates.
     let mut taken: std::collections::HashSet<String> = panes.iter().map(|p| p.window_name.clone()).collect();
     taken.extend(homes.values().cloned());
-    let mut roster: Vec<super::teams::RosterEntry> = Vec::new();
-    for f in &flat {
-        let w = match has_home(f) {
-            Some(w) => w,
-            None => {
-                let borrowed: std::collections::HashSet<&str> = taken.iter().map(String::as_str).collect();
-                uniquify(f.member.name.trim(), &borrowed)?
-            }
-        };
-        taken.insert(w.clone());
-        roster.push((w, f.member.role.clone(), f.path.clone()));
-    }
+    let roster = super::teams::final_roster(&flat, taken, &has_home)?;
     let mut spawned = Vec::new();
     let mut errors = Vec::new();
-    for (f, (w, _, path)) in flat.iter().zip(roster.iter()) {
+    for (f, (w, _, path, _)) in flat.iter().zip(roster.iter()) {
         if !wanted(f) {
             continue;
         }
@@ -3806,7 +3795,7 @@ hooks = [ { type = "command", command = "/opt/guard.sh" } ]
         assert!(check_join(&ws_str, "jnteam").unwrap_err().contains("has no member in this project"), "nobody here yet");
         let team = super::super::team_get("jnteam").unwrap().unwrap();
         let flat = super::super::teams::expand(&team, &|n| super::super::team_get(n), SPAWN_CAP).unwrap();
-        let roster: Vec<super::super::teams::RosterEntry> = vec![("lead".into(), "splits the work".into(), "jnteam".into()), ("dev".into(), "implements".into(), "jnteam".into())];
+        let roster: Vec<super::super::teams::RosterEntry> = vec![("lead".into(), "splits the work".into(), "jnteam".into(), "lead".into()), ("dev".into(), "implements".into(), "jnteam".into(), "dev".into())];
         let base = super::super::registry_get("jnbase").unwrap();
         for (f, w) in flat.iter().zip(["lead", "dev"]) {
             let d = super::super::teams::effective_def(f, base.as_ref(), w, &roster).unwrap();
@@ -3891,7 +3880,7 @@ hooks = [ { type = "command", command = "/opt/guard.sh" } ]
         let team = super::super::team_get("mvteam").unwrap().unwrap();
         let flat = super::super::teams::expand(&team, &|n| super::super::team_get(n), SPAWN_CAP).unwrap();
         let base = super::super::registry_get("mvbase").unwrap();
-        let roster: Vec<super::super::teams::RosterEntry> = vec![("lead".into(), "leads".into(), "mvteam".into())];
+        let roster: Vec<super::super::teams::RosterEntry> = vec![("lead".into(), "leads".into(), "mvteam".into(), "lead".into())];
         let d = super::super::teams::effective_def(&flat[0], base.as_ref(), "lead", &roster).unwrap();
         materialize(&super::super::recipe::recipe_section(&agent_home(&ws_str, "lead")), &d, "lead", "proj", &ws_str, "", "", Some("mvteam"), "", "lead", "").unwrap();
         let solo = super::super::registry_get("mvsolo").unwrap().unwrap();
@@ -4135,8 +4124,8 @@ hooks = [ { type = "command", command = "/opt/guard.sh" } ]
             let flat = super::super::teams::expand(&t, &|n| super::super::team_get(n), SPAWN_CAP).unwrap();
             let base = super::super::registry_get("mmbase").unwrap();
             let roster: Vec<super::super::teams::RosterEntry> = vec![
-                ("st".into(), String::new(), "mmteam".into()),
-                ("in".into(), String::new(), "mmteam".into()),
+                ("st".into(), String::new(), "mmteam".into(), "st".into()),
+                ("in".into(), String::new(), "mmteam".into(), "in".into()),
             ];
             for (f, w) in flat.iter().zip(["st", "in"]) {
                 let d = super::super::teams::effective_def(f, base.as_ref(), w, &roster).unwrap();
@@ -4425,8 +4414,8 @@ hooks = [ { type = "command", command = "/opt/guard.sh" } ]
         let team = super::super::team_get("rfteam").unwrap().unwrap();
         let flat = super::super::teams::expand(&team, &|n| super::super::team_get(n), SPAWN_CAP).unwrap();
         let roster: Vec<super::super::teams::RosterEntry> = vec![
-            ("dev-2".into(), "implement the change".into(), "rfteam".into()),
-            ("rev".into(), "review the diff".into(), "rfteam".into()),
+            ("dev-2".into(), "implement the change".into(), "rfteam".into(), "dev".into()),
+            ("rev".into(), "review the diff".into(), "rfteam".into(), "rev".into()),
         ];
         let base = super::super::registry_get("rfbase").unwrap();
         for (f, w) in flat.iter().zip(["dev-2", "rev"]) {
@@ -4482,7 +4471,7 @@ hooks = [ { type = "command", command = "/opt/guard.sh" } ]
         save_team(r#"[{"name":"dev","base":"tpbase","role":"implement"},{"name":"old","base":"tpbase","role":"archive"}]"#);
         let team = super::super::team_get("tpteam").unwrap().unwrap();
         let flat = super::super::teams::expand(&team, &|n| super::super::team_get(n), SPAWN_CAP).unwrap();
-        let roster: Vec<super::super::teams::RosterEntry> = flat.iter().map(|f| (f.member.name.clone(), f.member.role.clone(), f.path.clone())).collect();
+        let roster: Vec<super::super::teams::RosterEntry> = flat.iter().map(|f| (f.member.name.clone(), f.member.role.clone(), f.path.clone(), f.member.name.clone())).collect();
         let base = super::super::registry_get("tpbase").unwrap();
         for f in &flat {
             let d = super::super::teams::effective_def(f, base.as_ref(), &f.member.name, &roster).unwrap();
@@ -4626,8 +4615,8 @@ hooks = [ { type = "command", command = "/opt/guard.sh" } ]
         let team = super::super::team_get("fkteam").unwrap().unwrap();
         let flat = super::super::teams::expand(&team, &|n| super::super::team_get(n), SPAWN_CAP).unwrap();
         let roster: Vec<super::super::teams::RosterEntry> = vec![
-            ("dev".into(), "implement the change".into(), "fkteam".into()),
-            ("rev".into(), "review the diff".into(), "fkteam".into()),
+            ("dev".into(), "implement the change".into(), "fkteam".into(), "dev".into()),
+            ("rev".into(), "review the diff".into(), "fkteam".into(), "rev".into()),
         ];
         let base = super::super::registry_get("fkbase").unwrap();
         for f in &flat {
@@ -4721,7 +4710,7 @@ hooks = [ { type = "command", command = "/opt/guard.sh" } ]
         let flat = super::super::teams::expand(&team, &|n| super::super::team_get(n), SPAWN_CAP).unwrap();
         let f = flat.iter().find(|f| f.member.name.trim() == "rev").unwrap();
         assert_eq!(f.path, "fnouter/fninner");
-        let roster: Vec<super::super::teams::RosterEntry> = vec![("rev".into(), "review the diff".into(), f.path.clone())];
+        let roster: Vec<super::super::teams::RosterEntry> = vec![("rev".into(), "review the diff".into(), f.path.clone(), "rev".into())];
         let base = super::super::registry_get("fnbase").unwrap();
         let d = super::super::teams::effective_def(f, base.as_ref(), "rev", &roster).unwrap();
         materialize(&super::super::recipe::recipe_section(&agent_home(&ws_str, "rev")), &d, "rev", "proj", &ws_str, "", "lead", Some(&f.path), "", "rev", "").unwrap();
@@ -5029,7 +5018,7 @@ hooks = [ { type = "command", command = "/opt/guard.sh" } ]
         let team = super::super::team_get("fgroot").unwrap().unwrap();
         let flat = super::super::teams::expand(&team, &|n| super::super::team_get(n), SPAWN_CAP).unwrap();
         let f = flat.iter().find(|f| f.member.name.trim() == "rev").unwrap();
-        let roster: Vec<super::super::teams::RosterEntry> = vec![("rev".into(), "review the diff".into(), f.path.clone())];
+        let roster: Vec<super::super::teams::RosterEntry> = vec![("rev".into(), "review the diff".into(), f.path.clone(), "rev".into())];
         let base = super::super::registry_get("fgbase").unwrap();
         let d = super::super::teams::effective_def(f, base.as_ref(), "rev", &roster).unwrap();
         materialize(&super::super::recipe::recipe_section(&agent_home(&ws_str, "rev")), &d, "rev", "proj", &ws_str, "", "lead", Some(&f.path), "", "rev", "").unwrap();
@@ -5433,7 +5422,7 @@ hooks = [ { type = "command", command = "/opt/guard.sh" } ]
         .unwrap();
         let team = super::super::team_get("rpteam").unwrap().unwrap();
         let flat = super::super::teams::expand(&team, &|n| super::super::team_get(n), SPAWN_CAP).unwrap();
-        let roster: Vec<super::super::teams::RosterEntry> = vec![("dev-2".into(), "implement the change".into(), "rpteam".into()), ("rev".into(), "review the diff".into(), "rpteam".into())];
+        let roster: Vec<super::super::teams::RosterEntry> = vec![("dev-2".into(), "implement the change".into(), "rpteam".into(), "dev".into()), ("rev".into(), "review the diff".into(), "rpteam".into(), "rev".into())];
         let base = super::super::registry_get("rpbase").unwrap();
         for (f, w) in flat.iter().zip(["dev-2", "rev"]) {
             let d = super::super::teams::effective_def(f, base.as_ref(), w, &roster).unwrap();
@@ -5513,7 +5502,7 @@ hooks = [ { type = "command", command = "/opt/guard.sh" } ]
         let team = super::super::team_get("rbteam").unwrap().unwrap();
         let flat = super::super::teams::expand(&team, &|n| super::super::team_get(n), SPAWN_CAP).unwrap();
         let base = super::super::registry_get("rbbase").unwrap();
-        let roster: Vec<super::super::teams::RosterEntry> = vec![("lead".into(), "leads".into(), "rbteam".into())];
+        let roster: Vec<super::super::teams::RosterEntry> = vec![("lead".into(), "leads".into(), "rbteam".into(), "lead".into())];
         let d = super::super::teams::effective_def(&flat[0], base.as_ref(), "lead", &roster).unwrap();
         materialize(&super::super::recipe::recipe_section(&agent_home(&ws_str, "lead")), &d, "lead", "proj", &ws_str, "", "", Some("rbteam"), "", "lead", "").unwrap();
         let solo = super::super::registry_get("rbsolo").unwrap().unwrap();

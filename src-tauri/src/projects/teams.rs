@@ -183,8 +183,41 @@ pub fn unavailable_member(flat: &[Flat], base_backend: &dyn Fn(&str) -> Option<S
     })
 }
 
-/// One roster line's raw material: final window name, role, nesting path.
-pub type RosterEntry = (String, String, String);
+/// One roster line's raw material: final window name, role, nesting path,
+/// member name (board #80: what the team's own texts call it).
+pub type RosterEntry = (String, String, String, String);
+
+/// Every member's final window name, in `flat` order (board #74): the one
+/// recorded in its home's recipe (`home`), else its member name uniquified
+/// against `taken` (every window and home the project has) and each name
+/// chosen before it. So a team started beside another, or twice, gets
+/// `builder-2`, and every prompt's roster names the windows that will exist.
+pub fn final_roster(flat: &[Flat], mut taken: std::collections::HashSet<String>, home: &dyn Fn(&Flat) -> Option<String>) -> Result<Vec<RosterEntry>, String> {
+    let mut roster = Vec::new();
+    for f in flat {
+        let w = match home(f) {
+            Some(w) => w,
+            None => super::spawn::uniquify(f.member.name.trim(), &taken.iter().map(String::as_str).collect())?,
+        };
+        taken.insert(w.clone());
+        roster.push((w, f.member.role.clone(), f.path.clone(), f.member.name.trim().to_string()));
+    }
+    Ok(roster)
+}
+
+/// A team text as a member started under `roster`'s final names reads it
+/// (board #80): each `@<member>` of THIS team, read in the text's own
+/// sub-team `path`, becomes that member's final name. A name declared once
+/// in the team is found anywhere; one declared in several sub-teams only in
+/// `path`. A team started alone (final = member names) reads unchanged.
+fn readdressed(text: &str, path: &str, roster: &[RosterEntry]) -> String {
+    let to = |name: &str| {
+        let named: Vec<&RosterEntry> = roster.iter().filter(|e| e.3 == name).collect();
+        let here = named.iter().find(|e| e.2 == path);
+        here.or(if named.len() == 1 { named.first() } else { None }).filter(|e| e.0 != name).map(|e| e.0.clone())
+    };
+    crate::address::readdress(text, &to)
+}
 
 /// A team's description as instructions, if it has any: the ONE rule for what a
 /// team's text is, shared by a member's own block, a fork's sub-team line and a
@@ -260,22 +293,24 @@ pub fn effective_def(flat: &Flat, base: Option<&RegAgent>, window_name: &str, ro
     if root != team.name {
         block += &format!(" (a sub-team within \"{root}\": {})", flat.path);
     }
+    // Board #80: the team's texts address members by MEMBER name; this copy's are its final names.
+    let ours = |text: &str, path: &str| readdressed(text, path, roster);
     if let Some(d) = description_of(team) {
-        block += &format!("\n{d}");
+        block += &format!("\n{}", ours(d, &flat.path));
     }
     block += &format!("\n\nYou are \"{window_name}\".");
     if !member.role.trim().is_empty() {
-        block += &format!(" Your role: {}", member.role.trim());
+        block += &format!(" Your role: {}", ours(member.role.trim(), &flat.path));
     }
     for b in &flat.briefs {
-        block += &format!("\nFrom the enclosing team: {b}");
+        block += &format!("\nFrom the enclosing team: {}", ours(b, &flat.path));
     }
     let mates: Vec<String> = roster
         .iter()
-        .filter(|(n, _, _)| n != window_name)
-        .map(|(n, r, p)| {
+        .filter(|(n, _, _, _)| n != window_name)
+        .map(|(n, r, p, _)| {
             let tag = if p != &flat.path { format!(" [{p}]") } else { String::new() };
-            if r.trim().is_empty() { format!("@{n}{tag}") } else { format!("@{n}{tag} — {}", one_line(r)) }
+            if r.trim().is_empty() { format!("@{n}{tag}") } else { format!("@{n}{tag} — {}", one_line(&ours(r, p))) }
         })
         .collect();
     if !mates.is_empty() {
@@ -444,7 +479,7 @@ mod tests {
     fn effective_def_derives_renames_and_names_the_teammates() {
         let t = team(r#"[{"name":"dev","base":"claude","role":"implement the change"},{"name":"rev","base":"claude","role":"review every diff before it merges"}]"#);
         let base = agent("claude", "You are a 10x developer.");
-        let roster: Vec<RosterEntry> = vec![("dev".into(), "implement the change".into(), "dev-squad".into()), ("rev-2".into(), "review every diff before it merges".into(), "dev-squad".into())];
+        let roster: Vec<RosterEntry> = vec![("dev".into(), "implement the change".into(), "dev-squad".into(), "dev".into()), ("rev-2".into(), "review every diff before it merges".into(), "dev-squad".into(), "rev".into())];
         let d = effective_def(&flat_of(&t, 0), Some(&base), "dev", &roster).unwrap();
         assert_eq!(d.name, "dev", "the member name is the identity, not the base's");
         assert_eq!(d.backend, "claude", "everything else is inherited");
@@ -461,7 +496,7 @@ mod tests {
     fn effective_def_nested_member_knows_its_path_briefs_and_tags_other_subteams() {
         let review = named("review", r#"[{"name":"r1","base":"claude","role":"design"}]"#);
         let f = Flat { member: parse_members(&review).unwrap().remove(0), team: review.clone(), path: "dev/review".into(), briefs: vec!["Review what dev moves to review.".into()] };
-        let roster: Vec<RosterEntry> = vec![("lead".into(), "lead".into(), "dev".into()), ("r1".into(), "design".into(), "dev/review".into())];
+        let roster: Vec<RosterEntry> = vec![("lead".into(), "lead".into(), "dev".into(), "lead".into()), ("r1".into(), "design".into(), "dev/review".into(), "r1".into())];
         let d = effective_def(&f, Some(&agent("claude", "")), "r1", &roster).unwrap();
         assert!(d.system.contains("## Your team: \"review\" (a sub-team within \"dev\": dev/review)"));
         assert!(d.system.contains("From the enclosing team: Review what dev moves to review."));
@@ -471,7 +506,7 @@ mod tests {
     #[test]
     fn effective_def_inline_member_ignores_the_inline_name() {
         let t = team(r#"[{"name":"critic","role":"find holes","agent":{"name":"whatever","backend":"grok","system":"Be harsh.","skills":"[\"eli5\"]","mcp":"[\"search\"]"}}]"#);
-        let d = effective_def(&flat_of(&t, 0), None, "critic", &[("critic".into(), "find holes".into(), "dev-squad".into())]).unwrap();
+        let d = effective_def(&flat_of(&t, 0), None, "critic", &[("critic".into(), "find holes".into(), "dev-squad".into(), "critic".into())]).unwrap();
         assert_eq!(d.name, "critic");
         assert_eq!(d.backend, "grok");
         assert!(d.system.starts_with("Be harsh."));
@@ -536,4 +571,60 @@ mod tests {
         assert_eq!(gone, "## Your team: \"dev\"\n\nYou are \"me\". You joined this team when you were started; its definition does not list you.\nYour teammates (address one with `tmm send \"@name …\"`; a [path] marks a different sub-team):\n- @helper",
             "a deleted definition: names only");
     }
+
+    /// Board #80: the same team expanded twice into one project. The second
+    /// copy's members are uniquified (`orchestrator-2`, …), and every address
+    /// of this team in the description, the roles and the roster's role lines
+    /// reaches the second copy's own members; `@human` and code are kept. The
+    /// first copy reads its texts byte for byte as declared.
+    #[test]
+    fn a_second_copy_of_a_team_addresses_only_its_own_members() {
+        let mut t = team(r#"[
+            {"name":"orchestrator","agent":{"name":"","backend":"claude"},"role":"Assign work; @builder builds."},
+            {"name":"builder","agent":{"name":"","backend":"claude"},"role":"Build, then hand it to @validator."},
+            {"name":"validator","agent":{"name":"","backend":"claude"},"role":"Verify; defects go back to @builder, SHIP goes to @orchestrator."}
+        ]"#);
+        t.description = "Flow: @orchestrator assigns, @builder builds, @validator says SHIP; ask @human. Address one with `tmm send \"@builder …\"`.".into();
+        let flat = expand(&t, &|_| Ok(None), 8).unwrap();
+        let first = final_roster(&flat, Default::default(), &|_| None).unwrap();
+        assert_eq!(first.iter().map(|e| e.0.as_str()).collect::<Vec<_>>(), ["orchestrator", "builder", "validator"]);
+        let taken = first.iter().map(|e| e.0.clone()).collect();
+        let second = final_roster(&flat, taken, &|_| None).unwrap();
+        assert_eq!(second.iter().map(|e| e.0.as_str()).collect::<Vec<_>>(), ["orchestrator-2", "builder-2", "validator-2"]);
+
+        let mine = ["orchestrator-2", "builder-2", "validator-2", "human"];
+        for (f, (w, _, _, _)) in flat.iter().zip(&second) {
+            let system = effective_def(f, None, w, &second).unwrap().system;
+            // Every address outside the code span is this copy's member (or the human).
+            let prose = system.split('`').step_by(2).collect::<Vec<_>>().join(" ");
+            for m in crate::address::mention_names(&prose) {
+                assert!(mine.contains(&m.as_str()), "{w} is told to address @{m}:\n{system}");
+            }
+            assert!(system.contains("`tmm send \"@builder …\"`"), "code is code: {system}");
+        }
+        let builder = effective_def(&flat[1], None, "builder-2", &second).unwrap().system;
+        assert!(builder.contains("Flow: @orchestrator-2 assigns, @builder-2 builds, @validator-2 says SHIP; ask @human."), "{builder}");
+        assert!(builder.contains("Your role: Build, then hand it to @validator-2."), "{builder}");
+        assert!(builder.contains("- @validator-2 — Verify; defects go back to @builder-2, SHIP goes to @orchestrator-2."), "{builder}");
+
+        // The first copy, started alone, reads its texts exactly as declared.
+        let alone = effective_def(&flat[1], None, "builder", &first).unwrap().system;
+        assert!(alone.contains(&format!("\n{}\n", t.description)) && alone.contains("Your role: Build, then hand it to @validator."), "{alone}");
+        assert!(alone.contains("- @validator — Verify; defects go back to @builder, SHIP goes to @orchestrator."), "{alone}");
+    }
+
+    /// Board #80: in a nested team a name declared in two sub-teams is read
+    /// in the text's own sub-team; one declared once is found anywhere.
+    #[test]
+    fn a_member_name_in_two_sub_teams_is_read_in_its_own() {
+        let roster: Vec<RosterEntry> = vec![
+            ("dev-2".into(), String::new(), "root/build".into(), "dev".into()),
+            ("dev-3".into(), String::new(), "root/review".into(), "dev".into()),
+            ("lead-2".into(), String::new(), "root".into(), "lead".into()),
+        ];
+        assert_eq!(readdressed("@dev then @lead", "root/review", &roster), "@dev-3 then @lead-2");
+        assert_eq!(readdressed("@dev then @lead", "root/build", &roster), "@dev-2 then @lead-2");
+        assert_eq!(readdressed("@dev", "root", &roster), "@dev", "two candidates and none here: kept");
+    }
+
 }
