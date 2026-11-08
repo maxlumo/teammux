@@ -24,7 +24,7 @@ behind each rule live in the linked design sections; this page is the list.
    decide the new arm's answer on purpose. A quoted backend name in Rust
    source outside `src/backends/` fails `backend_literals_live_only_in_backends`,
    except in tests, the seed fence and a statement marked
-   `// backend-quirk(measured)`
+   `// backend-quirk(measured): …`
    ([§ Backend knowledge lives in one file per backend](../design-docs/features/agents-overview.md)).
 2. **Only documented doors:** environment, config files, hooks or extensions,
    launch flags. Read the CLI's own docs and package source, cite file and line,
