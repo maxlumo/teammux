@@ -538,6 +538,21 @@ mod tests {
         assert_eq!(held_lines(&s, "cx"), [(brief.to_string(), None)], "a new thread: the reset took effect");
     }
 
+    /// Board #66 (orchestrator at integration): a codex reset is gated by the
+    /// one picker hold too. With the harness's composer stub off, the fake
+    /// typing's screen cannot be read, which holds a codex line exactly as an
+    /// open menu does: the reset waits and nothing reaches the pane.
+    #[test]
+    fn a_codex_reset_waits_while_its_screen_is_not_the_composer() {
+        let mut scratch = crate::tmux::Scratch::new("when-idle-codex-menu");
+        let s = scratch.session("s");
+        agent_with_recipe(&scratch, &s, "cx", "codex", "queue");
+        fake();
+        crate::projects::delivery::picker_hold::COMPOSER_IN_TEST.with(|c| c.set(false));
+        assert!(matches!(command_when_idle(&s, "cx", "t", "/clear", "m1"), Ok(WhenIdle::Waiting(_))), "a screen that is not the composer: the reset waits");
+        assert!(typed().is_empty(), "nothing is typed while it waits");
+    }
+
     /// Board #45 AC2: what a restart, a stop and an interrupt do to a held
     /// command. A RESTART keeps a waiting one (typed at the new CLI's idle
     /// edge) and ends a typed one whose effect has not come (its CLI is gone;
