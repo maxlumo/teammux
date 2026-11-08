@@ -17,9 +17,14 @@ behind each rule live in the linked design sections; this page is the list.
 
 1. **One backend file, one enum arm per concern.** All knowledge of the CLI
    lives in `src-tauri/src/backends/<name>.rs`. `enum Backend` in
-   `backends/mod.rs` dispatches every concern through an exhaustive `match`, so
-   the compiler lists each method the new arm must answer. A backend name
-   spelled anywhere else fails `backend_literals_live_only_in_backends`
+   `backends/mod.rs` dispatches each concern from one method. The compiler
+   lists only the methods with an exhaustive `match`; others use a wildcard
+   default or `matches!` (`command_effect`, `current_thread`,
+   `picker_holds_delivery`, `home_worker_env`, …), so read EVERY method and
+   decide the new arm's answer on purpose. A quoted backend name in Rust
+   source outside `src/backends/` fails `backend_literals_live_only_in_backends`,
+   except in tests, the seed fence and a statement marked
+   `// backend-quirk(measured)`
    ([§ Backend knowledge lives in one file per backend](../design-docs/features/agents-overview.md)).
 2. **Only documented doors:** environment, config files, hooks or extensions,
    launch flags. Read the CLI's own docs and package source, cite file and line,
@@ -40,15 +45,18 @@ behind each rule live in the linked design sections; this page is the list.
 ### 2.1 Registration
 
 - [ ] The `Backend` variant, its place in `ALL` and `NAMES`, and its `parse`
-      and `name` arms. Then answer every method the compiler asks for.
+      and `name` arms. Then audit every method in `backends/mod.rs`, including
+      the ones whose wildcard default would silently answer for the new arm.
 - [ ] The `known()` row: the program name the pane really runs, measured from
       `pane_current_command` and `/proc` (pi sets `process.title`, so `pi`; the
       npm codex is `node …/codex`). Status, restore and the not-running state
       (#65 item 3) all read it.
 - [ ] Frontend: the `AGENTS` row and icon in `src/lib/core/agents.ts`,
       `public/assets/<name>.svg`, and the `NAMES` pin in
-      `src/lib/core/backends.source.test.ts`. Colour, efforts and input modes
-      come from the server's `backends_list`; the client's switches
+      `src/lib/core/backends.source.test.ts`, and the colour's value
+      `--backend-<name>` in `src/app.css` (`Backend::describe` sends only the
+      token's NAME). Efforts and input modes come from the server's
+      `backends_list`; the client's switches
       (`FALLBACK_*`, the colour switch in `hub.ts`) are frozen fallbacks for
       older servers, so nothing is added to them.
 - [ ] The scratch environment's `CLI_PROGRAMS` (`scripts/scratch-env.mjs`).
@@ -56,23 +64,30 @@ behind each rule live in the linked design sections; this page is the list.
 ### 2.2 The isolated home and the launch
 
 - [ ] `render_<name>` writes the managed home: the CLI's config-dir variable
-      points at `<ws>/.tmm/agents/<name>/`; the prompt starts with the
+      points inside `<ws>/.tmm/agents/<name>/` (the root for pi and omp,
+      `<home>/codex` for codex, kimi's own subdirectory); the prompt starts with the
       app-wide `AGENTS.md`, then the persona; skills and MCP through the CLI's
       own door ([§ Agents v2](../design-docs/features/agents-overview.md),
       [§ The app-wide instructions lead every prompt](../design-docs/features/agents-overview.md)).
-- [ ] User files the CLI needs (credentials, provider config) are LINKED with
-      `shared::link_user_file`, never copied. Check how the CLI writes each one:
-      in place keeps the link, write-then-rename breaks it (#71 note 8).
-      Credentials use the non-replacing policy, so a login made inside the
-      agent survives every render, and a conflict refuses with both paths and
-      the one step that resolves it (#71 R1).
+- [ ] Each user file the CLI needs (credentials, provider config) follows how
+      that CLI stores it: LINKED with `shared::link_user_file` when the CLI
+      writes it in place and one login must stay one (codex, pi), copied with
+      `shared::copy_private` when the home must own its copy (omp's `agent.db`
+      and `models.yml`, grok's `auth.json`). Check write-then-rename, which
+      breaks a link (#71 note 8). Linked credentials use the non-replacing
+      policy, so a login made inside the agent survives every render, and a
+      conflict refuses with both paths and the one step that resolves it
+      (#71 R1).
 - [ ] Secrets are files only the owner can read, never on the launch line or in
       a log ([§ A definition's secrets](../design-docs/features/agents-overview.md)).
 - [ ] Anything that blocks or phones home at start is switched off through a
       documented setting (pi: `PI_SKIP_VERSION_CHECK=1`, `PI_TELEMETRY=0`,
       project trust).
-- [ ] `set_up_need` and `version_program`: `tmm agent backends` says installed,
-      set up, and how that was judged ([§ Backend readiness](../design-docs/features/agents-overview.md)).
+- [ ] Readiness: `set_up_need`, and `launch_program` (from the `known()` row's
+      launch): `tmm agent backends` says installed, set up, and how that was
+      judged ([§ Backend readiness](../design-docs/features/agents-overview.md)).
+      `version_program` is a separate recovery drift guard; answer it only
+      where screen shapes are version-bound.
 
 ### 2.3 Hooks and status
 
@@ -94,12 +109,15 @@ behind each rule live in the linked design sections; this page is the list.
 
 ### 2.4 Restart, resume, fork, new conversation
 
-- [ ] `resume_exact` and `resume_command`: the exact conversation id first, the
-      directory's latest second, a fresh start last, each with measured flags
-      (pi: `--session-id`, `--continue`).
-- [ ] A conversation the CLI will refuse to resume starts fresh, and the room
-      says why; never a dead shell (#74, codex after a provider switch). Decide
-      from data the CLI wrote itself, gated to the measured version.
+- [ ] `resume_command`: the recipe's dialect, the exact conversation id when
+      known, else the CLI's most-recent resume, with measured flags (pi:
+      `--session-id`, `--continue`). `resume_exact` is the strict door for a
+      restore: `Some` only when the exact id can be resumed, never a fallback
+      to the latest or a fresh start ([projects.md § The strict launch door](../design-docs/features/projects.md)).
+- [ ] A refusal the CLI is MEASURED to make on resume (codex's provider
+      mismatch, #74) starts fresh, and the room says why, never a dead shell.
+      Decide from data the CLI wrote itself, gated to the measured version;
+      every other resume failure behaves as before.
 - [ ] `current_thread`, `new_conversation`, `command_effect`: what a new
       conversation is and how its effect is seen, so
       `tmm send "@x /new" --when-idle` takes effect safely (#45).
@@ -108,18 +126,20 @@ behind each rule live in the linked design sections; this page is the list.
 
 ### 2.5 Delivery and slash commands
 
-- [ ] Input mode: offer steer only where queue and steer were both measured
-      (`switches_input_mode`); otherwise queue
-      ([§ The input mode](../design-docs/features/agents-overview.md)).
+- [ ] Input mode: offer a queue/steer SWITCH only where both were measured
+      (`switches_input_mode`); otherwise the CLI's own behaviour applies and is
+      written down. No switch does not mean queued: Enter steers a busy pi or
+      omp run ([§ The input mode](../design-docs/features/agents-overview.md)).
 - [ ] `loses_busy_input` and `input_ready` if the CLI loses text typed while it
       runs (dsh).
 - [ ] `at_opens_picker`: if `@` opens a file picker, deliveries carry `＠`
       (omp, pi).
-- [ ] Menus: `picker_open` reads a menu by its key-hint row's shape and
-      `picker_holds_delivery` holds a line while one is open; a screen that
-      cannot be read holds too, and a later read releases it (#66). Survey
-      every menu the CLI has (`/new`, `/model`, …) AND its normal footer, which
-      must not match.
+- [ ] Menus: `picker_open` recognises the CLI's OWN menu structure, measured
+      for that CLI (codex: its key-hint row; pi: its arrow-selection furniture;
+      kiro: its own shape). Where `picker_holds_delivery` holds a line while a
+      menu is open, a screen that cannot be read holds too and a later read
+      releases it (#66). Survey every menu the CLI has (`/new`, `/model`, …)
+      AND its normal footer, which must not match.
 - [ ] Slash commands: the palette's list (`src/lib/hub/<name>-commands.ts`, read
       by `offeredCommands`), each typed verbatim; `slash_opens_picker` and
       `picker_guard` where a command opens a menu. A CLI with no native
@@ -130,10 +150,12 @@ behind each rule live in the linked design sections; this page is the list.
 
 ### 2.6 Failure handling
 
-- [ ] Provider failures are classified once: a model id the provider rejects is
-      for a person to fix, and the notice names the model the agent was
-      launched with; a 429 or 5xx stays retryable even when its text mentions a
-      model (`provider_failure`, `model_id_error`, #65 item 2).
+- [ ] Provider failures are classified once (`provider_failure`): a model id
+      the provider rejects is for a person to fix (`shared::model_rejected`),
+      and the notice names the model the agent was launched with
+      (`projects::model_refused::named`); a 429 or 5xx stays retryable even when
+      its text mentions a model (#65 item 2). Separately, `model_id_error` is
+      save-time syntax checking of a model id, where the CLI has a rule (dsh).
 - [ ] `recovery_shapes`, `transient_shape`, `person_paint`: the screens the CLI
       paints when it is stuck, each with the version it was measured on.
 - [ ] Every read that can fail has a stated unknown path (Principle 5) and a
@@ -156,10 +178,14 @@ behind each rule live in the linked design sections; this page is the list.
 
 ### 2.8 Models and effort
 
-- [ ] `model_list` comes from the CLI's own catalogue or the user's config:
-      authoritative only when the source is complete, otherwise suggestions
-      that never refuse a typed id; cached under a digest of its source, never
-      the source text (#70; [§ Model catalogue](../design-docs/features/agents-overview.md)).
+- [ ] `model_list` comes from the CLI's own catalogue or the user's config.
+      Authoritative only where the source is measured to be the CLI's complete
+      catalogue, and an authoritative list that does not fit is an error, not
+      a shorter list (`models::bounded`); otherwise suggestions that never
+      refuse a typed id. When the list depends on a file the user edits, key
+      the cache on that file with `model_list_stamp` / `model_list_stamped`
+      (a digest, never its text; codex, #70); other backends use the cache
+      period ([§ Model catalogue](../design-docs/features/agents-overview.md)).
 - [ ] `effort_values` are the CLI's real levels; a value it would ignore is
       refused at save.
 - [ ] The model lives in the managed config, never on the launch line, except
@@ -175,8 +201,10 @@ behind each rule live in the linked design sections; this page is the list.
 
 - [ ] A live case in `docker/live/live-check.sh` with its `NEED` entry in
       `scripts/live-docker.mjs`, the CLI pinned in `docker/validator/Dockerfile`,
-      and credentials staged inside the rig, never read from the user's home
-      (#71 option B).
+      and credentials staged deliberately: either written by the rig itself
+      (pi, #71 option B) or authorised host files staged read-only
+      (`stagedCredentials`, `liveRunArgs`: codex, claude); never the user's
+      home mounted writable.
 - [ ] Docs in the same commits: an agents-overview section
       `### The <name> backend` with the version measured and its known gaps;
       [backend-map.md](../reference/backend-map.md); the backend lists in
