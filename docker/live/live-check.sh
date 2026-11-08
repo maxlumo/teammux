@@ -20,9 +20,12 @@
 #                      the host's ~/.pi. Spawned with a model and effort, a turn answered through
 #                      the telemetry, /model and /thinking from the room, a restart that resumes
 #                      the conversation, the user's auth.json and models.json still linked.
+#   live-check codex-picker  board #66: a person opens codex's /new picker in a git repo; a delivery
+#                      sent meanwhile is held (the picker stays open, no worktree), and is typed and
+#                      answered once Escape closes it.
 set -euo pipefail
 check="${1:-smoke}"
-case "$check" in smoke|codex-models|codex-provider|pi|omp-tools) ;; *) echo "live-check: unknown check '$check' (known: smoke, codex-models, codex-provider, pi, omp-tools)" >&2; exit 2 ;; esac
+case "$check" in smoke|codex-models|codex-provider|pi|omp-tools|codex-picker) ;; *) echo "live-check: unknown check '$check' (known: smoke, codex-models, codex-provider, pi, omp-tools, codex-picker)" >&2; exit 2 ;; esac
 
 cfg="$HOME/.config/teammux"
 mkdir -p "$cfg" /work/live
@@ -224,6 +227,39 @@ if [ "$check" = codex-provider ]; then
   case "$(pane_cmd)" in bash|zsh|sh|dash) echo "live-check: codex-provider: FAIL (agreeing layers: a shell, not codex)"; rc=1 ;; esac
   if ask gamma; then echo "live-check: codex-provider: agreeing layers: it answered gamma"; else echo "live-check: codex-provider: FAIL (agreeing layers: no answer)"; rc=1; fi
   tmm agent list --project live
+  exit $rc
+fi
+
+if [ "$check" = codex-picker ]; then
+  # Board #66 item 1: codex's own pickers and menus, opened by a person in the pane, and what
+  # a delivery does while one is open. The screens are printed whole: the reading is by structure.
+  [ -f "$HOME/.codex/config.toml" ] || { echo "live-check: codex-picker: skipped: ~/.codex/config.toml not staged"; exit 2; }
+  rc=0
+  # The /new picker asks where the new chat runs, so it shows only in a git repository (orchestrator, 11-05 16:56).
+  git -C /work/live init -q && git -C /work/live -c user.name=live -c user.email=live@rig commit -q --allow-empty -m init
+  tmm registry save --name lcodex --backend codex --system "Live check agent. Answer in one short line." >/dev/null
+  tmm spawn lcodex --project live >/dev/null
+  sleep 20
+  pane=$(tmux list-panes -a -F '#{pane_id} #{window_name}' | awk '$2=="lcodex"{print $1; exit}')
+  shot() { echo "live-check: codex-picker: --- screen: $1"; tmux capture-pane -p -t "$pane" | sed 's/^/    |/'; }
+  shot "idle composer"
+  tmm send --project live "@lcodex reply with the single word ready" >/dev/null
+  timeout 180 bash -c "until tmm log --project live --limit 20 | grep -q '] lcodex: ready'; do sleep 2; done" || { echo "live-check: codex-picker: FAIL (no first answer)"; exit 1; }
+  sleep 2
+  tmux send-keys -t "$pane" -l /new; sleep 1; tmux send-keys -t "$pane" Enter; sleep 3; shot "/new during a conversation"
+  tmux capture-pane -p -t "$pane" | grep -q 'enter select' || { echo "live-check: codex-picker: FAIL (no /new picker to test against)"; exit 1; }
+  # The incident: the stamp's `2026` answered the picker (option 2, a new worktree).
+  tmm send --project live "@lcodex reply with the single word picked" >/dev/null; sleep 6
+  shot "a delivery sent while the /new picker is open"
+  if tmux capture-pane -p -t "$pane" | grep -q 'enter select'; then echo "live-check: codex-picker: the picker is still open, nothing typed into it"; else echo "live-check: codex-picker: FAIL (the picker was answered)"; rc=1; fi
+  if ls -d /work/live/.tmm/agents/lcodex/codex/worktrees/* >/dev/null 2>&1; then echo "live-check: codex-picker: FAIL (a new worktree was created)"; rc=1; fi
+  if tmm log --project live --limit 10 | grep -q '] lcodex: picked'; then echo "live-check: codex-picker: FAIL (answered under the picker)"; rc=1; fi
+  # A person closes it (Escape: back, keeping the current chat); the capture tick types the line.
+  tmux send-keys -t "$pane" Escape
+  if timeout 120 bash -c "until tmm log --project live --limit 10 | grep -q '] lcodex: picked'; do sleep 2; done"; then echo "live-check: codex-picker: after Escape the held line was typed and answered"; else echo "live-check: codex-picker: FAIL (no answer after the picker closed)"; rc=1; fi
+  shot "after Escape"
+  n=$(tmm log --project live --limit 20 | grep -c 'single word picked' || true)
+  [ "$n" = 1 ] || { echo "live-check: codex-picker: FAIL (the line is in the room $n times)"; rc=1; }
   exit $rc
 fi
 

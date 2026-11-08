@@ -680,6 +680,26 @@ pub(crate) fn codex_hooks(notify: &str) -> Value {
 /// submitted unchanged. So a delivery types every `@` as `＠`, as for kiro.
 pub(crate) const AT_OPENS_FILE_PICKER: bool = true;
 
+/// Is one of codex's own pickers open on `screen` (board #66, measured on
+/// codex-cli 0.166.0 in the live rig, `live-check codex-picker`)? While one
+/// is open the composer is gone and a typed key answers the picker: a
+/// delivery typed into `/new`'s "Where should the new conversation run?"
+/// had its `2` (of `2026`) pick "Create new Git worktree", and the rest of
+/// the line became the prompt. By place, never by a phrase anywhere: codex
+/// paints a picker's key hints as the screen's bottom furniture, a line that
+/// starts `enter ` and names `esc` (`enter select · esc back` under `/new`
+/// and `/model`; `enter resume   esc exit   ^c exit …` above one more hint
+/// line under `/resume`), where an open composer paints `? for shortcuts`,
+/// `esc again to edit previous message` or its status line.
+pub fn picker_open(screen: &str) -> bool {
+    screen
+        .lines()
+        .rev()
+        .filter(|l| !l.trim().is_empty())
+        .take(2)
+        .any(|l| l.trim_start().starts_with("enter ") && l.contains("esc "))
+}
+
 #[cfg(not(any(target_os = "android", target_os = "ios")))]
 pub(crate) fn render_codex(
     def: &RegAgent, _name: &str, home: &Path, workspace: &Path, system_prompt: &str,
@@ -1834,4 +1854,18 @@ mod tests {
         assert_eq!(subagent_thread(&parent_stop), None);
         assert_eq!(normalize_kind(parent_stop.as_object().unwrap()), Ok("completed"));
     }
+    #[test]
+    fn a_picker_is_read_by_its_bottom_key_hints_and_a_composer_is_not() {
+        // Screens captured on codex-cli 0.166.0 (live-check codex-picker, #66).
+        let new = "  Worked for 2s • 23:43\n\n  Where should the new conversation run?\n\n\u{203a} 1. Use current Git worktree  Keep using the current working directory\n  2. Create new Git worktree   Create a separate checkout of this repository in\n                               another directory\n\n  enter select · esc back\n\n";
+        let model = "  Select Model and Effort\n\u{203a} 1. GPT-6.1-Sol (current)  Latest workhorse model for coding and everyday work.\n\u{2193}\n  enter select · esc back\n";
+        let resume = " Resume a previous session\n No sessions yet\n\u{2500}\u{2500}\u{2500}\n enter resume   esc exit   ^c exit   tab focus   \u{2190}/\u{2192} option\n ^o comfy   ^t preview   ^e exp   \u{2191}/\u{2193} browse\n";
+        assert!(picker_open(new) && picker_open(model) && picker_open(resume));
+        let idle = "\u{203a} Ask Codex to do anything\n\n  GPT-6.1-Sol high · Context 0% used · /work/live · 01a1\u{2026}\n  ? for shortcuts                                      \u{26a0} 1 warning · f2 to view\n";
+        let after_escape = "\u{203a} Ask Codex to do anything\n\n  GPT-6.1-Sol high · Context 0% used · /work/live · Reply with picked\n  esc again to edit previous message\n";
+        // The picker's own words quoted in the transcript, above a composer.
+        let quoted = "\u{2022} codex paints `enter select · esc back` under a picker\n\n\u{203a} Ask Codex to do anything\n\n  GPT-6.1-Sol high · Context 0% used · /work/live\n  ? for shortcuts\n";
+        assert!(!picker_open(idle) && !picker_open(after_escape) && !picker_open(quoted));
+    }
+
 }

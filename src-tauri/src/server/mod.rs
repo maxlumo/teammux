@@ -640,6 +640,9 @@ mod admit_local_tests {
 #[cfg(all(test, not(any(target_os = "android", target_os = "ios"))))]
 mod exited_hold_tests;
 
+#[cfg(all(test, not(any(target_os = "android", target_os = "ios"))))]
+mod picker_hold_tests;
+
 #[cfg(test)]
 pub(super) mod test_util {
     use super::rpc::Request;

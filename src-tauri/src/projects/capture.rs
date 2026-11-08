@@ -462,6 +462,8 @@ pub async fn capture_loop() {
                 // hook reports (codex's new thread), and its one notice when
                 // none came within the start timeout.
                 super::delivery::check_command_effects();
+                // Board #66: lines held while a codex picker was open, once it closed.
+                super::delivery::release_closed_pickers();
                 // Board #437: an unconfirmed typed line is reported on this
                 // tick too, so it is found without a reader. Report only:
                 // nothing is typed into the target pane or retyped.

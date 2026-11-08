@@ -133,7 +133,7 @@ export function liveRunArgs({ image, env, need = [], check, stage = [] }) {
 }
 
 /** What each check needs to run its turns (the in-container script skips a turn without them). */
-const NEED = { smoke: [], 'codex-models': [], 'codex-provider': [], pi: [], 'omp-tools': [] };
+const NEED = { smoke: [], 'codex-models': [], 'codex-provider': [], pi: [], 'omp-tools': [], 'codex-picker': [] };
 
 async function main(args) {
   const { spawnSync } = await import('node:child_process');

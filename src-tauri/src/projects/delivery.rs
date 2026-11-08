@@ -23,6 +23,8 @@ use std::sync::{Arc, Mutex, OnceLock};
 
 use super::telemetry;
 
+mod picker_hold;
+pub use picker_hold::release as release_closed_pickers;
 mod when_idle;
 pub use when_idle::{accepted_line, cancel_command, check_command_effects, command_session_started, command_when_idle, WhenIdle};
 use when_idle::{end_held_commands, release_command, Ending};
@@ -399,16 +401,14 @@ pub fn input_mode_seen(session: &str, window: &str, pane: &str, screen: &str) ->
 /// from turn state: an app-side end (an interrupt ends the turn before the
 /// shell returns), a lost Stop or an expired receipt clock is not readiness.
 fn strict_occupied(session: &str, window: &str) -> Option<bool> {
-    // A window a restore made and has not seen ready (board #422 round 3)
-    // is occupied for EVERY backend: its pane may still be a shell.
+    // A window a restore made and has not seen ready (board #422 round 3) is occupied for EVERY backend: its pane may still be a shell.
     if super::restore_hold::held(session, window) {
         return Some(true);
     }
-    // A window being restarted (board #38 round 1) is occupied until its
-    // screen PROVES the new CLI ready: its pane may still be the shell the
+    // A window being restarted (board #38 round 1) is occupied until its screen PROVES the new CLI ready: its pane may still be the shell the
     // launch line is typed into (validator: a held line typed there gave
-    // `zsh: bad pattern: [tmm`); so is one whose CLI exited to it (#77).
-    if starting(session, window) || super::exited::not_running(session, window) {
+    // `zsh: bad pattern: [tmm`); so is one whose CLI exited to it (#77), and one whose picker is open (#66).
+    if starting(session, window) || super::exited::not_running(session, window) || picker_hold::open(session, window) {
         return Some(true);
     }
     let (backend, _) = recipe_mode(session, window)?;

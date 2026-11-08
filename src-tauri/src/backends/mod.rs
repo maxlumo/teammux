@@ -495,15 +495,27 @@ impl Backend {
         }
     }
 
-    /// Is this backend's `@` picker open on `screen` (board #436)? Read once
-    /// before the Enter of a verbatim `/command` that still carries `@`
-    /// (`delivery::send_into`); never for a delivery, which types no `@`.
+    /// Is one of this backend's pickers open on `screen` (board #436)? Read
+    /// once before the Enter of a verbatim `/command` that still carries `@`
+    /// (`delivery::send_into`), and, where `picker_holds_delivery`, before
+    /// every delivery (#66).
     pub fn picker_open(self, screen: &str) -> bool {
         match self {
             Backend::Kiro => kiro::picker_open(screen),
             Backend::Pi => pi::picker_open(screen),
-            Backend::Claude | Backend::Codex | Backend::Grok | Backend::Omp | Backend::Kimi | Backend::Dsh => false,
+            Backend::Codex => codex::picker_open(screen),
+            Backend::Claude | Backend::Grok | Backend::Omp | Backend::Kimi | Backend::Dsh => false,
         }
+    }
+
+    /// Does an open picker (`picker_open`) hold this backend's deliveries
+    /// until its composer is back (board #66)? codex: a person opens one in
+    /// the pane (`/new`, `/model`, `/resume`) and a typed line answers it
+    /// (measured on 0.166.0). Not kiro, whose reading is a phrase and was
+    /// measured only as a `/command`'s guard, nor pi, not measured for a
+    /// delivery: theirs type as before.
+    pub fn picker_holds_delivery(self) -> bool {
+        matches!(self, Backend::Codex)
     }
 
     /// Does typing a `/command` with arguments open this CLI's completion
