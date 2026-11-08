@@ -290,8 +290,10 @@ fi
 
 if [ "$check" = codex-limit ]; then
   # Board #66: the provider's request-body limit, measured with UNBILLED requests: a body of N
-  # bytes naming a model no provider serves is refused 400 (invalid model) when the gateway takes
+  # bytes naming a model no provider serves is refused 404 model_not_found when the gateway takes
   # it, 413 when the body is over its limit; the limit is bisected to 64 KiB. Nothing is generated.
+  # Only those two answers are measurements (round 1, validator's note 11: a 502 had been counted
+  # as taken); any other status fails the run.
   [ -n "${UST_API_KEY:-}" ] || { echo "live-check: codex-limit: skipped: UST_API_KEY not set"; exit 2; }
   base=$(sed -n 's/^base_url *= *"\(.*\)"/\1/p' "$HOME/.codex/config.toml" | head -1)
   [ -n "$base" ] || { echo "live-check: codex-limit: skipped: no base_url in the staged codex config"; exit 2; }
@@ -322,14 +324,21 @@ if [ "$check" = codex-limit ]; then
     exit $rc
   }
   lo=$((1024 * 1024)); hi=$((64 * 1024 * 1024))
+  # 404 (taken: the model was looked up) or 413 (refused for size), else the run fails.
+  measured() {
+    case "$1:$(cat /tmp/limit-out)" in
+      404:*model_not_found*) echo taken ;; 413:*) echo over ;;
+      *) echo "live-check: codex-limit: FAIL ($2 bytes -> $1, neither the 404 model_not_found nor a 413: $(head -c 160 /tmp/limit-out))" >&2; echo none ;;
+    esac
+  }
   s=$(status $lo); echo "live-check: codex-limit: $lo bytes -> $s $(head -c 160 /tmp/limit-out)"
-  [ "$s" = 413 ] && { echo "live-check: codex-limit: FAIL (413 already at 1 MiB)"; exit 1; }
+  [ "$(measured "$s" $lo)" = taken ] || { echo "live-check: codex-limit: FAIL (1 MiB not taken)"; exit 1; }
   s=$(status $hi); echo "live-check: codex-limit: $hi bytes -> $s $(head -c 160 /tmp/limit-out)"
-  [ "$s" = 413 ] || { echo "live-check: codex-limit: no 413 up to 64 MiB"; honoured; }
+  case "$(measured "$s" $hi)" in over) ;; taken) echo "live-check: codex-limit: no 413 up to 64 MiB"; honoured ;; *) exit 1 ;; esac
   while [ $((hi - lo)) -gt 65536 ]; do
     mid=$(((lo + hi) / 2)); s=$(status $mid)
-    if [ "$s" = 413 ]; then hi=$mid; else lo=$mid; fi
     echo "live-check: codex-limit: $mid bytes -> $s"
+    case "$(measured "$s" $mid)" in over) hi=$mid ;; taken) lo=$mid ;; *) exit 1 ;; esac
   done
   echo "live-check: codex-limit: accepted at $lo bytes, 413 at $hi bytes"
   honoured
