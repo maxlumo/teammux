@@ -40,6 +40,24 @@ marked.use({
   },
 });
 
+// Code shows `<` and `&` as themselves (board #82, owner 2026-11-08: a reply
+// quoting `"<set>"` showed `&lt;set>`, and `x && y` showed `x &amp;&amp; y`).
+// Every `&` and `<` of the source, code included, is escaped BEFORE marked
+// (`prepare`), because only marked can decide what is code: putting a
+// regex-found "code hole" back raw let `~~~ <img onerror=…> ~~~` and escaped
+// backticks through as live elements (validator P0 on 800644da). So our two
+// entities are undone here, on the text of a token marked HAS made code, and
+// marked's own renderer then encodes it once. One pass, so a literal `&lt;`
+// in the source (ours: `&amp;lt;`) comes back as `&lt;`, never `<`.
+const ourEntities = (text: string) => text.replace(/&(amp|lt);/g, (_m, e: string) => (e === 'amp' ? '&' : '<'));
+const plain = new marked.Renderer();
+marked.use({
+  renderer: {
+    code(token) { return plain.code({ ...token, text: ourEntities(token.text) }); },
+    codespan(token) { return plain.codespan({ ...token, text: ourEntities(token.text) }); },
+  },
+});
+
 // Bounded LRU, not a clear-at-500 Map: past 500 distinct bodies the old bound
 // dropped EVERYTHING mid-render, and every poll re-parsed every message with
 // marked + KaTeX until the cache refilled (review C, 2026-09-03). The feed's

@@ -91,6 +91,14 @@ test('inline code and escapes combined, and code that looks like markup', () => 
   assert.equal(cut(src, p.word('_a_')), '_a_');
 });
 
+test('`<` and `&` inside code map to themselves, and `&amp;` in code is five characters (#82)', () => {
+  const src = 'see `a<b && c` and `&amp;` < d';
+  const p = page(src);
+  assert.equal(cut(src, p.word('a<b && c', 0, 'code')), 'a<b && c');
+  assert.equal(cut(src, p.word('&amp;', 0, 'code')), '&amp;', 'shown as written, mapped unit for unit');
+  assert.equal(cut(src, p.word('< d', 0, 'p')), '< d', 'our own escape in prose still maps');
+});
+
 test('across paragraphs and blocks: the first unit\u2019s source to the last\u2019s', () => {
   const p = page('one two\n\n- item three\n- item four\n\n> quoted five\n> six\n');
   assert.deepEqual(p.select(p.at('two'), p.at('three')), R(1, 5, 3, 13));

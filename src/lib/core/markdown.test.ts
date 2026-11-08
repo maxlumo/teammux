@@ -41,6 +41,44 @@ test('html in agent output stays inert, markdown still renders', () => {
   assert.match(renderMarkdown('a > b'), /a &gt; b|a > b/);
 });
 
+test('code shows `<` and `&` as themselves: one escape, by marked (#82)', () => {
+  // The bug: code went back into the text before our `[&<]` escape, and marked
+  // encodes code text itself, so `<set>` showed as `&lt;set>` and `&&` as
+  // `&amp;&amp;` (owner, 2026-11-08, on a reply quoting `"<set>"`).
+  const span: [string, string][] = [
+    ['`<set>`', '<code>&lt;set&gt;</code>'],
+    ['`<script>`', '<code>&lt;script&gt;</code>'],
+    ['`x && y`', '<code>x &amp;&amp; y</code>'],
+    ['`&amp;`', '<code>&amp;amp;</code>'],
+  ];
+  for (const [src, want] of span) assert.equal(renderMarkdown(`a ${src} b`), `<p>a ${want} b</p>\n`, src);
+  const block = renderMarkdown('```\n<set> <script> && &amp;\n```');
+  assert.equal(block, '<pre><code>&lt;set&gt; &lt;script&gt; &amp;&amp; &amp;amp;\n</code></pre>\n');
+  // Raw HTML stays inert in code too: no `<` reaches the output as a tag.
+  for (const html of [block, ...span.map(([s]) => renderMarkdown(s))]) assert.ok(!/<(?:set|script)/.test(html), html);
+  // Prose beside it keeps its one escape.
+  assert.equal(renderMarkdown('a < b && `<i>`'), '<p>a &lt; b &amp;&amp; <code>&lt;i&gt;</code></p>\n');
+  // An indented block is code to marked too, so it shows its text the same way.
+  assert.equal(renderMarkdown('    x && <y>'), '<pre><code>x &amp;&amp; &lt;y&gt;\n</code></pre>\n');
+  // A literal entity in code is shown as written, never decoded twice.
+  assert.equal(renderMarkdown('`&lt;b&gt;`'), '<p><code>&amp;lt;b&amp;gt;</code></p>\n');
+});
+
+test('what only LOOKS like a code delimiter stays escaped: raw HTML is inert (validator P0 on 800644da, #82)', () => {
+  // A regex cannot decide what marked parses as code; these three are not
+  // code to marked, and a version that put regex-found code back raw
+  // emitted a live <img onerror> for each, in both render modes.
+  const tag = '<img src=x onerror="globalThis.pwned=1">';
+  const cases = [`a ~~~ ${tag} ~~~ b`, '\\`' + tag + '\\`', 'prefix ~~~\n' + tag + '\n~~~ suffix'];
+  for (const src of cases) {
+    for (const spans of [false, true]) {
+      const html = renderMarkdown(src, { spans });
+      assert.ok(!html.includes('<img'), `${JSON.stringify(src)} spans=${spans}: ${html}`);
+      assert.ok(html.includes('&lt;img'), `shown as text: ${html}`);
+    }
+  }
+});
+
 test('markdown/md fences are rendered in rendered view, not shown as source', () => {
   // This is the exact shape used by proj:test seq=52: prose, a quoted tasks.md
   // file, then prose. Raw view bypasses this function and still shows the fence.
