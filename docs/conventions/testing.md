@@ -354,6 +354,8 @@ It is `scripts/target-lock.mjs` (`lockedCommand`): the host's own perl takes a `
 
 **It does not stop a `git commit` in the worktree during a run.** build.rs watches `.git/HEAD`, so a commit mid-run rebuilds and replaces the running test binary (six fake failures on #25: five `Os NotFound` and `build_info`'s head test). Verify a frozen review version: commit before the run, or after it ends.
 
+**A standalone probe links the lib it was built against, not the one `--lib` tests just rebuilt.** `cargo test --lib` rebuilds the TEST harness; the ordinary `libtmux_mobile.rlib` a hand-written `rustc --extern tmux_mobile=…` probe links stays at whatever source last built it. Incident (#81 note 15, 2026-11-08): the validator's production-seam probe reproduced round 0's defect against round 1's tree until `cargo build --no-default-features --lib` rebuilt the rlib; one wasted round. A probe command therefore begins with that build step, in the same isolated invocation.
+
 ## The known failures on this host (board #12)
 
 Every verification on 2026-11-05 rebuilt a clean-main baseline from scratch, about 6 minutes per Rust run, to tell this host's failures from a regression (#2, #3, #6, #7, both validators). This is that baseline, versioned. Compare a branch's isolated run with it instead.

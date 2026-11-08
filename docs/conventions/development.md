@@ -722,6 +722,19 @@ pnpm run test:live:docker codex-limit      # board #66: the provider's body limi
 pnpm run test:live:docker codex-picker     # board #66: a delivery waits while codex's /new picker is open (hub-composer.md)
 ```
 
+- **A new check polls, never sleeps** (process.md § 4, board #208): every
+  state it relies on — the CLI ready, a turn running, a row confirmed, a
+  reply recorded — is read from the pane, the log or state.db with a
+  deadline. The two checks added on 2026-11-08 (#85 `pi-paste`, #86
+  `pi-tools`) first shipped with guessed `sleep`s copied from the older `pi`
+  check and were each returned once for it (retro, #85 note 26); the older
+  check is no exemption.
+- **The rig files are a shared boundary** (`docker/live/live-check.sh`,
+  `scripts/live-docker.mjs`, `docker/validator/Dockerfile`, this list): two
+  tickets that add checks in parallel collide here (#85 vs #86 and #87,
+  2026-11-08: a squash conflict, one rebase). Announce before touching them;
+  whoever lands second rebases.
+
 - **The image** is `docker/validator/Dockerfile`'s `live` target: this
   checkout's `server` and `tmm` built inside, and the CLIs pinned to the
   versions measured on this host: claude 2.1.319, codex-cli 0.166.0, omp
