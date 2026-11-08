@@ -79,6 +79,12 @@ struct InboxEnvelope {
     /// strictly after the reset was typed). `None` for an old-format name.
     #[serde(skip)]
     produced: Option<u128>,
+    /// The same production time at the precision the helper stamped it,
+    /// whole seconds included (board #88: macOS's stock date has no %N), set
+    /// by `consume_file`; `None` only when the name holds no parseable stamp.
+    #[serde(skip)]
+    #[cfg(not(any(target_os = "android", target_os = "ios")))]
+    stamp: Option<crate::projects::delivery::Produced>,
 }
 
 impl InboxEnvelope {
@@ -397,6 +403,10 @@ impl AgentNotificationHub {
         #[cfg_attr(any(target_os = "android", target_os = "ios"), allow(unused_mut))]
         let mut envelope: InboxEnvelope = if oversized { payload::head_envelope(path)? } else { payload::whole_envelope(path)? };
         envelope.produced = produced_ns(path);
+        #[cfg(not(any(target_os = "android", target_os = "ios")))]
+        {
+            envelope.stamp = produced_stamp(path);
+        }
         // Whose pane is this, and does it exist THERE? (board #425) ONE tmux response answers
         // both for this envelope alone, and its result is what every later step uses.
         #[cfg(not(any(target_os = "android", target_os = "ios")))]
@@ -557,6 +567,8 @@ impl AgentNotificationHub {
             if crate::backends::Backend::parse(&envelope.backend).and_then(|b| b.subagent_thread(&envelope.payload)).is_none() {
                 if let Ok((session, window, _)) = envelope.pane() {
                     crate::projects::delivery::command_session_started(&session, &window, envelope.payload.get("source").and_then(Value::as_str), envelope.produced);
+                    // Board #88: pi's ready edge (a backend that declares it).
+                    crate::projects::delivery::session_start_ready(&session, &window, &envelope.pane_id, envelope.stamp);
                 }
             }
             return Ok(());
@@ -1300,6 +1312,19 @@ fn inbox_order(path: &Path) -> (u64, u64, String) {
     (secs, seq, name)
 }
 
+/// The production stamp at its own precision (board #88): `<secs>.<9
+/// digits>` is nanoseconds, a bare `<secs>` (the helper's fallback for a
+/// `date` without %N) whole seconds; anything else is none.
+#[cfg(not(any(target_os = "android", target_os = "ios")))]
+fn produced_stamp(path: &Path) -> Option<crate::projects::delivery::Produced> {
+    if let Some(ns) = produced_ns(path) {
+        return Some(crate::projects::delivery::Produced::Nanos(ns));
+    }
+    let head = path.file_name()?.to_str()?.split('-').next()?;
+    (!head.is_empty() && head.bytes().all(|b| b.is_ascii_digit())).then(|| head.parse().ok()).flatten().map(crate::projects::delivery::Produced::Seconds)
+}
+
+
 /// When the helper PUBLISHED an inbox file, in nanoseconds since the epoch
 /// (board #45), from its name's `<secs>.<9 digits>`; `None` for the older
 /// whole-second shape or anything else: an unknown production time.
@@ -1751,6 +1776,14 @@ mod tests {
         assert_eq!(produced_ns(std::path::Path::new("1755300002.100000000-00000000000000000004-9.json")), Some(1_755_300_002_100_000_000), "with a hook sequence");
         assert_eq!(produced_ns(std::path::Path::new("1755300001-4.json")), None, "old format: unknown");
         assert_eq!(produced_ns(std::path::Path::new("1755300001.N-4.json")), None, "a date without %N: unknown");
+        // Board #88: the stamp at the precision the helper gave, whole seconds included
+        // (the helper's fallback for a `date` without %N, macOS's stock date).
+        use crate::projects::delivery::Produced;
+        assert_eq!(produced_stamp(std::path::Path::new("1755300002.100000000-9.json")), Some(Produced::Nanos(1_755_300_002_100_000_000)));
+        assert_eq!(produced_stamp(std::path::Path::new("1755300001-4.json")), Some(Produced::Seconds(1_755_300_001)), "whole seconds");
+        assert_eq!(produced_stamp(std::path::Path::new("1755300001-00000000000000000004-9.json")), Some(Produced::Seconds(1_755_300_001)), "whole seconds with a hook sequence");
+        assert_eq!(produced_stamp(std::path::Path::new("1755300001.N-4.json")), None, "no parseable stamp");
+        assert_eq!(produced_stamp(std::path::Path::new("x-4.json")), None);
         let _ = std::fs::remove_dir_all(&ns);
         let _ = std::fs::remove_dir_all(&dir);
     }
@@ -1766,6 +1799,7 @@ mod tests {
             resolved: None,
             restore: None,
             produced: None,
+            stamp: None,
         };
         assert_eq!(
             normalize(&envelope(
@@ -1874,6 +1908,7 @@ mod tests {
             resolved: None,
             restore: None,
             produced: None,
+            stamp: None,
         };
         for backend in ["claude", "codex"] {
             assert!(
@@ -1906,6 +1941,7 @@ mod tests {
             resolved: None,
             restore: None,
             produced: None,
+            stamp: None,
         };
         assert!(is_user_prompt_submit(&envelope(
             json!({"hook_event_name":"UserPromptSubmit","prompt":"hi","session_id":"0199-abc"})
@@ -1933,7 +1969,7 @@ mod tests {
     #[test]
     fn a_tool_event_names_its_call_by_tool_use_id() {
         let envelope = |backend: &str, payload: Value| InboxEnvelope {
-            backend: backend.into(), pane_id: "%1".into(), payload, tmm_tmux: None, launch: None, resolved: None, restore: None, produced: None,
+            backend: backend.into(), pane_id: "%1".into(), payload, tmm_tmux: None, launch: None, resolved: None, restore: None, produced: None, stamp: None,
         };
         let pre = envelope("dsh", json!({"hook_event_name":"PreToolUse","tool_name":"bash","tool_input":{"command":"ls"},"tool_use_id":"call_1"}));
         let post = envelope("dsh", json!({"hook_event_name":"PostToolUse","tool_name":"bash","tool_input":{"command":"ls"},"tool_use_id":"call_1"}));
@@ -2396,7 +2432,7 @@ mod tests {
     #[test]
     fn each_measured_backends_provider_failure_normalises_with_its_text() {
         let norm = |backend: &str, payload: Value| {
-            normalize(&InboxEnvelope { backend: backend.into(), pane_id: "%1".into(), payload, tmm_tmux: None, launch: None, resolved: None, restore: None, produced: None }).unwrap()
+            normalize(&InboxEnvelope { backend: backend.into(), pane_id: "%1".into(), payload, tmm_tmux: None, launch: None, resolved: None, restore: None, produced: None, stamp: None }).unwrap()
         };
         let fake = "sk-FAKE0123456789abcdefFAKE0123456789";
         let n = norm("claude", json!({"hook_event_name":"StopFailure","error":"authentication_failed","last_assistant_message":format!("Please run /login · API Error: 401 invalid API key {fake}")}));
@@ -3061,7 +3097,7 @@ mod tests {
         let (s, w) = (format!("quality-{}", uuid::Uuid::new_v4()), "dev");
         let stop = |payload: Value| {
             record_prompt(&s, w, "[tmm chat 2026-10-15 14:00] lead: @dev go on");
-            let envelope = InboxEnvelope { backend: "kiro".into(), pane_id: "%1".into(), payload, tmm_tmux: None, launch: None, resolved: None, restore: None, produced: None };
+            let envelope = InboxEnvelope { backend: "kiro".into(), pane_id: "%1".into(), payload, tmm_tmux: None, launch: None, resolved: None, restore: None, produced: None, stamp: None };
             let n = normalize_in(&envelope, Some(&home)).unwrap();
             record_notification_with(&s, w, &n.kind, n.quality);
             n.quality

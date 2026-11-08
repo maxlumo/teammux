@@ -448,7 +448,8 @@ impl Backend {
     /// The CLI's first-use dialog and ready furniture, from its own file: a
     /// spawn's waiter reads it through the render, and a restart's ready edge
     /// (board #38) reads it here. `None`: no measured ready screen (grok, omp,
-    /// which also do not queue lines behind a turn).
+    /// which also do not queue lines behind a turn; omp 18.15.0 has no
+    /// startup-only submit handler, unlike pi, board #88).
     #[cfg(not(any(target_os = "android", target_os = "ios")))]
     pub(crate) fn startup_confirmation(self) -> Option<shared::StartupConfirmation> {
         match self {
@@ -457,7 +458,8 @@ impl Backend {
             Backend::Claude => claude::startup_confirmation(),
             Backend::Kimi => kimi::startup_confirmation(),
             Backend::Dsh => dsh::startup_confirmation(),
-            Backend::Grok | Backend::Omp | Backend::Pi => None,
+            Backend::Pi => pi::startup_confirmation(),
+            Backend::Grok | Backend::Omp => None,
         }
     }
 
@@ -515,6 +517,16 @@ impl Backend {
     /// delivery: theirs type as before.
     pub fn picker_holds_delivery(self) -> bool {
         matches!(self, Backend::Codex)
+    }
+
+    /// Is this backend's ready edge its own SessionStart, never its screen
+    /// (board #88)? pi only: it paints its footer before it takes an Enter,
+    /// and after a restart into a long session no pre-swap or post-swap paint
+    /// is on screen at all; its SessionStart comes after the swap on both
+    /// paths (`pi::startup_confirmation`). `delivery::session_start_ready`
+    /// releases such a hold.
+    pub fn ready_on_session_start(self) -> bool {
+        matches!(self, Backend::Pi)
     }
 
     /// Is a one-line delivery PASTED into this CLI (bracketed, `tmux::paste_text`)

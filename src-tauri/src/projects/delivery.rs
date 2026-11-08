@@ -96,6 +96,11 @@ fn recipe_mode(session: &str, window: &str) -> Option<(crate::backends::Backend,
 struct StartMark {
     id: String,
     old_pane: Option<String>,
+    /// When this start was marked, in ns since the epoch (board #88): a
+    /// SessionStart produced before it belongs to an earlier CLI. 0 in a mark
+    /// an older build wrote.
+    #[serde(default)]
+    at_ns: u128,
 }
 
 /// The one writer's lock around every read-compare-write of a mark file.
@@ -113,9 +118,9 @@ fn mark_path(session: &str, window: &str) -> Option<std::path::PathBuf> {
 /// mark with no known pane (never "no mark"): the window stays held.
 fn read_mark(path: &std::path::Path) -> Option<StartMark> {
     match std::fs::read_to_string(path) {
-        Ok(t) => Some(serde_json::from_str(&t).unwrap_or(StartMark { id: String::new(), old_pane: None })),
+        Ok(t) => Some(serde_json::from_str(&t).unwrap_or(StartMark { id: String::new(), old_pane: None, at_ns: 0 })),
         Err(e) if e.kind() == std::io::ErrorKind::NotFound => None,
-        Err(_) => Some(StartMark { id: String::new(), old_pane: None }),
+        Err(_) => Some(StartMark { id: String::new(), old_pane: None, at_ns: 0 }),
     }
 }
 
@@ -146,7 +151,8 @@ pub(crate) fn begin_start(session: &str, window: &str, backend: Option<crate::ba
     let _g = marks_lock().lock().unwrap();
     let pane_now = crate::tmux::find_window_by_name(session, window);
     let old_pane = read_mark(&path).and_then(|m| m.old_pane).or(pane_now);
-    let mark = StartMark { id: uuid::Uuid::new_v4().to_string(), old_pane };
+    let at_ns = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map(|d| d.as_nanos()).unwrap_or(0);
+    let mark = StartMark { id: uuid::Uuid::new_v4().to_string(), old_pane, at_ns };
     #[cfg(test)]
     if MARK_WRITE_FAILS.load(std::sync::atomic::Ordering::Relaxed) {
         return Err(format!("'{window}' was not restarted: its starting hold could not be recorded (test)"));
@@ -279,10 +285,70 @@ pub(crate) fn is_starting(session: &str, window: &str) -> bool {
 /// `backend` is the one the start launched, the same its hold was decided on
 /// (board #46 round 2).
 pub(crate) fn watch_start(session: &str, window: &str, backend: Option<crate::backends::Backend>) {
+    watch(session, window, backend, true);
+}
+
+/// A FRESH spawn's watch (board #88: a start is a start, orchestrator's
+/// ruling): the same hold, ready check and timeout path as a restart's, but
+/// the spawn's own waiter (`shared::confirm_startup_prompt`) answers the
+/// first-use prompt and types a Typed brief, so this one sends no key: its
+/// confirmation has no prompt markers and no accept keys. Two waiters
+/// answering one trust prompt would press its keys twice.
+pub(crate) fn watch_spawn(session: &str, window: &str, backend: Option<crate::backends::Backend>) {
+    watch(session, window, backend, false);
+}
+
+fn watch(session: &str, window: &str, backend: Option<crate::backends::Backend>, answers_prompt: bool) {
     let Some(mut confirmation) = backend.and_then(|b| b.startup_confirmation()) else { return };
+    if !answers_prompt {
+        confirmation.markers.clear();
+        confirmation.accept_keys.clear();
+    }
     #[cfg(test)]
     if let Some(t) = *START_TIMEOUT_IN_TEST.lock().unwrap() {
         confirmation.timeout = t;
+    }
+    // A backend whose ready edge is its SessionStart (pi, board #88) is
+    // released by `session_start_ready`, never by its screen: this watch only
+    // keeps the deadline, and says so once if the hold outlives it.
+    // The watch owns ONE start, the mark on disk now (validator note 29,
+    // orchestrator's ruling): it stops silently once that mark is gone or a
+    // newer start's replaced it, and only the owner of a still-present mark
+    // says the deadline passed.
+    if backend.is_some_and(|b| b.ready_on_session_start()) {
+        let Some(path) = mark_path(session, window) else { return };
+        let read = |p: &std::path::Path| { let _g = marks_lock().lock().unwrap(); read_mark(p) };
+        let Some(owned) = read(&path).filter(|m| !m.id.is_empty()) else { return };
+        let (s, w, timeout) = (session.to_string(), window.to_string(), confirmation.timeout);
+        std::thread::spawn(move || {
+            let deadline = std::time::Instant::now() + timeout;
+            loop {
+                if read(&path).as_ref() != Some(&owned) {
+                    return;
+                }
+                if std::time::Instant::now() >= deadline {
+                    break;
+                }
+                std::thread::sleep(std::time::Duration::from_millis(500));
+            }
+            #[cfg(test)]
+            if let Some(hook) = BEFORE_DEADLINE_EFFECT.lock().unwrap().as_ref() {
+                hook();
+            }
+            // The ownership check and what the warning needs are ONE step
+            // (reviewer note 43, orchestrator's ruling): under the marks lock,
+            // the mark must still be the owned one, and its held rows are taken
+            // there; the room line is posted after the lock, from what was
+            // taken. A mark released or replaced meanwhile posts nothing.
+            let taken = {
+                let _g = marks_lock().lock().unwrap();
+                (read_mark(&path).as_ref() == Some(&owned)).then(|| telemetry::held_rows(&s, &w))
+            };
+            if let Some(rows) = taken {
+                report_not_ready(&s, &w, timeout.as_secs(), &rows);
+            }
+        });
+        return;
     }
     let secs = confirmation.timeout.as_secs();
     let (s, w) = (session.to_string(), window.to_string());
@@ -301,10 +367,15 @@ pub(crate) fn watch_start(session: &str, window: &str, backend: Option<crate::ba
 /// with nothing queued was said by nothing; the timeout is the one existing
 /// fact that it never came up.
 fn not_ready_after(session: &str, window: &str, secs: u64) {
+    report_not_ready(session, window, secs, &telemetry::held_rows(session, window));
+}
+
+/// The timeout's record for `rows` (the held lines it was decided on) and its
+/// one room line.
+fn report_not_ready(session: &str, window: &str, secs: u64, rows: &[super::store::DeliveryRow]) {
     let why = format!("{window} has not become ready after {secs} s");
-    let rows = telemetry::held_rows(session, window);
     if !rows.is_empty() {
-        telemetry::record_held_blocked(session, window, &rows, &why);
+        telemetry::record_held_blocked(session, window, rows, &why);
     }
     if let Err(e) = super::rooms::post(&super::rooms::session_room(session), "tmm", &format!("[tmm] {why}")) {
         eprintln!("delivery: {why}, and the room line was not written: {e}");
@@ -344,6 +415,86 @@ pub(crate) fn start_ready(session: &str, window: &str) {
         flush(session, window);
     }
 }
+
+/// When a hook envelope was produced, at the precision its helper stamped it
+/// (board #88, orchestrator's ruling on validator note 30): nanoseconds from
+/// a `date` with `%N`, whole seconds from one without (macOS's stock date).
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum Produced {
+    Nanos(u128),
+    Seconds(u64),
+}
+
+impl Produced {
+    /// Not before `at_ns`, compared at this stamp's own precision.
+    fn not_before(self, at_ns: u128) -> bool {
+        match self {
+            Produced::Nanos(ns) => ns >= at_ns,
+            Produced::Seconds(s) => u128::from(s) >= at_ns / 1_000_000_000,
+        }
+    }
+}
+
+/// pi's ready edge (board #88, orchestrator's ruling): the SessionStart its
+/// own extension sends from `bindExtensions`, which pi runs only after its
+/// real submit handler is set, on a fresh start and on a resume alike. It
+/// releases THIS start's hold when it comes from the window's CURRENT pane
+/// (not the pane an old CLI ran in) and was produced after the hold was
+/// written, at the precision the helper stamped it; the hold is then removed
+/// by compare-and-remove, as `starting` does, and the held lines are
+/// flushed. An envelope with no parseable stamp, and anything else, changes
+/// nothing. A backend whose edge is its screen is never released here.
+pub(crate) fn session_start_ready(session: &str, window: &str, pane_id: &str, produced: Option<Produced>) {
+    if !recipe_backend(session, window).is_some_and(|b| b.ready_on_session_start()) {
+        return;
+    }
+    let Some(path) = mark_path(session, window) else { return };
+    // One critical section, in replace_cli's lock order (reviewer note 45,
+    // orchestrator's ruling): the window boundary first, so no restart can
+    // write a newer mark or replace the pane between this observation and the
+    // retirement; then the marks. The pane is observed, THE mark read, the
+    // event validated against that mark, and only that id removed.
+    let released = {
+        let lock = window_lock(session, window);
+        let _window = lock.lock().unwrap();
+        // The mark as it is BEFORE the pane is looked up (validator note 50): a
+        // start that does not pass the window boundary (a fresh spawn, a Start
+        // after Stop) can still write a newer mark meanwhile, and only this
+        // snapshot may be retired.
+        let snapshot = { let _g = marks_lock().lock().unwrap(); read_mark(&path) };
+        let current = crate::tmux::find_window_by_name(session, window);
+        #[cfg(test)]
+        if let Some(hook) = AFTER_PANE_OBSERVED.lock().unwrap().as_ref() {
+            hook();
+        }
+        let _g = marks_lock().lock().unwrap();
+        match read_mark(&path) {
+            Some(mark)
+                if Some(&mark) == snapshot.as_ref()
+                    && !mark.id.is_empty()
+                    && current.as_deref() == Some(pane_id)
+                    && mark.old_pane.as_deref() != Some(pane_id)
+                    && produced.is_some_and(|p| p.not_before(mark.at_ns)) =>
+            {
+                retire_own(&path, &mark.id)
+            }
+            _ => false,
+        }
+    };
+    if released {
+        flush(session, window);
+    }
+}
+
+/// Test seam: between a pi deadline watch's last poll and its deadline
+/// effect (reviewer note 43's boundary).
+#[cfg(test)]
+pub(crate) static BEFORE_DEADLINE_EFFECT: Mutex<Option<Box<dyn Fn() + Send>>> = Mutex::new(None);
+
+/// Test seam: inside `session_start_ready`'s critical section, after the
+/// pane is observed (reviewer note 45's interleaving).
+#[cfg(test)]
+pub(crate) static AFTER_PANE_OBSERVED: Mutex<Option<Box<dyn Fn() + Send>>> = Mutex::new(None);
 
 /// The backend `window`'s recipe names (board #38: what a restart's ready
 /// edge reads), from the same recipe read as its input mode.

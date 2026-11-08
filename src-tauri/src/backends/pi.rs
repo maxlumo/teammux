@@ -261,7 +261,35 @@ pub(crate) fn render_pi(
             model_flag,
             thinking,
         ),
-        confirmation: None,
+        confirmation: startup_confirmation(),
+    })
+}
+
+/// pi's start hold (board #88, read in pi 1.5.0's
+/// dist/modes/interactive/interactive-mode.js and measured in the live rig).
+/// pi paints its footer BEFORE startup ends: until `init()` swaps
+/// `handleStartupSubmit` for the real submit handler, an Enter puts the line
+/// back in the editor with "Startup is still in progress" (l.717-725,
+/// 2590-2593), and the next line joins it. The swap waits for the terminal's
+/// colours and the managed tools (`ensureTool` fd and rg, l.790-804), which a
+/// fresh home downloads: 6/6 Enters sent during the download were refused.
+/// No paint proves the swap on every path: after a restart into a long
+/// session pi's 24-line screen holds neither its header nor its resource
+/// listing, and the pane keeps no history. So the ready edge is pi's own
+/// SessionStart (`Backend::ready_on_session_start`), which our extension
+/// forwards from `session_start`, emitted by `bindExtensions` after the swap
+/// (agent-session.js:2698 via interactive-mode.js l.806): no screen ever
+/// releases this hold (no ready markers), no trust prompt (pre-seeded), no
+/// accept key. The timeout covers pi's own limits: a 10 s release lookup
+/// plus a 120 s download, the two tools in parallel.
+#[cfg(not(any(target_os = "android", target_os = "ios")))]
+pub(crate) fn startup_confirmation() -> Option<shared::StartupConfirmation> {
+    Some(shared::StartupConfirmation {
+        markers: Vec::new(),
+        ready_markers: Vec::new(),
+        loading: None,
+        accept_keys: Vec::new(),
+        timeout: std::time::Duration::from_secs(180),
     })
 }
 
@@ -475,6 +503,24 @@ mod tests {
         assert_eq!((s["defaultProvider"].as_str(), s["defaultModel"].as_str(), s["defaultThinkingLevel"].as_str()), (Some("ust-openai"), Some("gpt-6-astra"), Some("high")));
         let s = pi_settings(Some(&user), "bare-model", "", &[]);
         assert_eq!((s.get("defaultProvider"), s["defaultModel"].as_str()), (None, Some("bare-model")), "a bare id names no provider");
+    }
+
+    /// Board #88: no screen of pi's releases its start hold, not even the
+    /// footer it paints before it takes an Enter (the rig's pre-download
+    /// frame) nor a finished-looking first start: only its SessionStart does
+    /// (`delivery::session_start_ready`).
+    #[test]
+    fn no_pi_screen_releases_its_start_hold() {
+        let c = startup_confirmation().expect("pi has a start hold");
+        let ready = |screen: &str| crate::backends::shared::startup_already_ready(screen, &c);
+        let rule = "─".repeat(41);
+        let foot = format!("{rule}\n{rule}\n/work/live\n0.0%/128k (auto)                                          claude-haiku-5-5 • low");
+        let head = " ▀▀█  v1.5.0\n █▀ █ escape interrupt · ctrl+c/ctrl+d clear/exit · / commands · ! bash ·\n ctrl+o more";
+        assert!(!ready(&foot), "the footer alone: painted before the swap");
+        assert!(!ready(&format!("{head}\n fd not found. Downloading...\n{foot}")), "downloading");
+        assert!(!ready(&format!("{head}\n[Extensions]\n  tmm-telemetry.ts\n fd installed to /x/bin/fd\n ripgrep installed to /x/bin/rg\n{foot}")), "even a started-looking screen");
+        assert!(crate::backends::Backend::Pi.ready_on_session_start());
+        assert!(!crate::backends::Backend::ALL.iter().any(|b| *b != crate::backends::Backend::Pi && b.ready_on_session_start()), "pi only");
     }
 
     /// Review R1 (#71): pi's own credentials in the home are never deleted.

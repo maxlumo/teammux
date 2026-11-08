@@ -26,6 +26,11 @@
 #                      BUSY pi, then into an idle one, each arrive as their own user message with no
 #                      inserted text and no unconfirmed report; a /command stays a command, and a
 #                      two-line delivery keeps its break.
+#   live-check pi-start  board #88: ten fresh pi agents, each sent one line the moment its pane
+#                      exists (before pi's footer, while its tools download): each line is held
+#                      until pi's SessionStart, then arrives as its own user message, confirmed,
+#                      and is answered; then the tenth, after a 150-line answer, is restarted
+#                      with a line sent during the restart, which arrives once, alone.
 #   live-check dsh-tools  board #87: a managed dsh 0.2.0-rc.2 against a scripted loopback stand-in
 #                      for the Messages API (a fake key, zero model calls, #412's precedent): two
 #                      sequential bash calls, two bash calls in ONE step (dsh runs bash exclusively),
@@ -42,7 +47,7 @@
 #                      Escape closes it.
 set -euo pipefail
 check="${1:-smoke}"
-case "$check" in smoke|codex-models|codex-provider|pi|pi-tools|pi-paste|dsh-tools|omp-tools|codex-limit|codex-picker) ;; *) echo "live-check: unknown check '$check' (known: smoke, codex-models, codex-provider, pi, pi-tools, pi-paste, dsh-tools, omp-tools, codex-limit, codex-picker)" >&2; exit 2 ;; esac
+case "$check" in smoke|codex-models|codex-provider|pi|pi-tools|pi-paste|pi-start|dsh-tools|omp-tools|codex-limit|codex-picker) ;; *) echo "live-check: unknown check '$check' (known: smoke, codex-models, codex-provider, pi, pi-tools, pi-paste, pi-start, dsh-tools, omp-tools, codex-limit, codex-picker)" >&2; exit 2 ;; esac
 
 cfg="$HOME/.config/teammux"
 mkdir -p "$cfg" /work/live
@@ -263,6 +268,65 @@ if [ "$check" = pi ]; then
   exit $rc
 fi
 
+if [ "$check" = pi-start ]; then
+  # Board #88: pi paints its footer before startup ends, and an Enter while its managed tools
+  # download is refused ("Startup is still in progress"); the next line then joins the parked one.
+  # A line sent at launch must wait for pi's ready edge. Every wait polls with a deadline.
+  pi_user
+  rc=0
+  ok() { echo "live-check: pi-start: $1"; }; bad() { echo "live-check: pi-start: FAIL ($1)"; rc=1; }
+  until_ok() { local t=$1 what=$2; shift 2; local end=$((SECONDS + t)); until "$@"; do [ $SECONDS -ge $end ] && { bad "timed out after ${t}s: $what"; return 1; }; sleep 0.2; done; }
+  pane() { tmux list-panes -a -F '#{pane_id} #{window_name}' | awk -v w="$1" '$2==w{print $1; exit}'; }
+  has_pane() { [ -n "$(pane "$1")" ]; }
+  users() { { cat /work/live/.tmm/agents/"$1"/sessions/*/*.jsonl 2>/dev/null || true; } | node -e 'let t="";process.stdin.on("data",d=>t+=d).on("end",()=>{for(const l of t.split("\n")){if(!l.trim())continue;let e;try{e=JSON.parse(l)}catch{continue}const m=e.message;if(e.type!=="message"||!m||m.role!=="user")continue;const c=typeof m.content==="string"?m.content:(m.content||[]).filter(x=>x.type==="text").map(x=>x.text).join("");console.log(JSON.stringify(c))}})'; }
+  pending() { node --no-warnings -e 'const {DatabaseSync}=require("node:sqlite");const d=new DatabaseSync(process.argv[1],{readOnly:true});console.log(d.prepare("SELECT count(*) AS n FROM deliveries WHERE win = ?").get(process.argv[2]).n)' "$cfg/state.db" "$1"; }
+  settled() { [ "$(pending "$1")" = 0 ]; }
+  # A reply row from $1 whose whole body (not the log's first line) holds the word $2.
+  answered() { tmm log --project live --limit 80 --output json | node -e 'let t="";process.stdin.on("data",d=>t+=d).on("end",()=>{const j=JSON.parse(t);const rows=Array.isArray(j)?j:(j.messages||[]);process.exit(rows.some(m=>m.from===process.argv[1]&&new RegExp("\\b"+process.argv[2]+"\\b").test(m.body||""))?0:1)})' "$1" "$2"; }
+  for i in 1 2 3 4 5 6 7 8 9 10; do
+    w=ps$i
+    tmm registry save --name "$w" --backend pi --model ust/claude-haiku-5-5 --effort low --system "Live check agent. Answer in one short line." >/dev/null
+    tmm spawn "$w" --project live >/dev/null & sp=$!
+    until_ok 30 "$w's pane" has_pane "$w" || true
+    screen=$(tmux capture-pane -p -t "$(pane "$w")" 2>/dev/null | grep -c '%/[0-9]*k' || true)
+    tmm send --project live "@$w reply with the single word start$i" >/dev/null
+    wait "$sp"
+    ok "$w: sent at launch (footer painted then: $screen), $(pending "$w") row pending"
+    until_ok 200 "$w's line confirmed" settled "$w" || true
+    until_ok 180 "$w's answer" answered "$w" "start$i" && ok "$w: answered start$i" || true
+    u=$(users "$w")
+    n=$(printf '%s\n' "$u" | grep -c . || true)
+    if [ "$n" = 1 ] && printf '%s\n' "$u" | grep -q "single word start$i\"$"; then ok "$w: one user message, the line alone"; else
+      bad "$w: user messages: $u"
+      echo "live-check: pi-start: --- $w's screen:"; tmux capture-pane -p -S -60 -t "$(pane "$w")" | grep -v '^\s*$' | tail -25 | sed 's/^/    |/'
+      tmm log --project live --limit 40 | grep -E "$w|ready" | sed 's/^/    log|/'
+    fi
+    if tmux capture-pane -p -S -200 -t "$(pane "$w")" | grep -q 'Startup is still in progress'; then bad "$w: pi refused an Enter during startup"; fi
+    tmm log --project live --limit 80 | grep -q "\[tmm\] unconfirmed $w" && bad "$w: unconfirmed" || true
+    [ $i = 10 ] || tmm agent remove "$w" --project live >/dev/null   # the project's cap is 8 agents (spawn::SPAWN_CAP)
+  done
+  # A restart into a session longer than one screen (#88 note 21: pi then shows neither its header
+  # nor its resource listing, and keeps no history), with a line sent while it restarts.
+  w=ps10
+  tmm send --project live "@$w print the numbers 1 to 150, one per line, with no other text" >/dev/null
+  until_ok 240 "$w's long answer" answered "$w" "150" || true
+  before=$(users "$w" | grep -c . || true)
+  tmm agent restart "$w" --project live >/dev/null & sp=$!
+  until_ok 30 "$w restarting" bash -c "[ -f /work/live/.tmm/agents/$w/starting ]" || true
+  tmm send --project live "@$w reply with the single word restarted" >/dev/null
+  ok "$w: sent during the restart, $(pending "$w") row pending"
+  wait "$sp"
+  until_ok 200 "$w's line confirmed after the restart" settled "$w" || true
+  until_ok 180 "$w's answer after the restart" answered "$w" "restarted" && ok "$w: answered restarted" || true
+  lines=$(tmux capture-pane -p -S - -t "$(pane "$w")" | wc -l); ok "$w: pane history after the restart: $lines lines; [Extensions] on it: $(tmux capture-pane -p -S - -t "$(pane "$w")" | grep -c '^\[Extensions\]' || true)"
+  after=$(users "$w")
+  n=$(printf '%s\n' "$after" | grep -c "single word restarted\"$" || true)
+  [ "$n" = 1 ] && [ "$(printf '%s\n' "$after" | grep -c . || true)" = $((before + 1)) ] && ok "$w: the line arrived once, as its own message" || bad "$w: after the restart: $after"
+  tmm log --project live --limit 80 | grep -q "\[tmm\] unconfirmed $w" && bad "$w: unconfirmed" || true
+  [ $rc = 0 ] && echo "live-check: pi-start: PASS"
+  exit $rc
+fi
+
 if [ "$check" = pi-paste ]; then
   # Board #85: a line typed into pi's editor with `#81` in it opened pi's completion list (`#` is
   # one of its default triggers), the list followed every later character, the line's final `.`
@@ -310,7 +374,11 @@ if [ "$check" = pi-paste ]; then
   until_ok 120 "pi's footer (ready)" footer_has '%/' && ok "ready: $(foot)"
   # BUSY: a turn whose bash tool runs for 40 s; the five lines go in while it is working.
   tmm send --project live "@lpi run the shell command 'sleep 40' with your bash tool, then reply with the single word slept" >/dev/null
-  until_ok 120 "lpi running" is running && ok "busy: lpi is $(state)"
+  # Busy is pi's own paint of the running tool (reviewer, #88 note 6), and the bootstrap is its own
+  # user message, before any b-line is sent; `running` is a receipt only.
+  tool_shown() { tmux capture-pane -p -t "$(pane)" | grep -qE '^ *\$ sleep 40'; }
+  until_ok 120 "pi paints the running sleep 40" tool_shown && ok "busy: pi shows '$ sleep 40' running; lpi is $(state)"
+  [ "$(users | grep -c .)" = 1 ] && users | grep -q "then reply with the single word slept\"$" && ok "busy: the bootstrap is its own user message" || bad "busy: the bootstrap is not alone: $(users)"
   for i in 1 2 3 4 5; do tmm send --project live "@lpi $(line b$i)" >/dev/null; done
   ok "busy: after the five sends lpi is $(state), $(pending) delivery rows pending:"; rows
   is running || bad "busy: the five lines were not sent into a running turn"

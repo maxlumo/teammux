@@ -201,7 +201,22 @@ pub fn spawn(req: &SpawnRequest) -> Result<Value, String> {
         let section = super::recipe::recipe_section(&agent_home(&workspace, &window_name));
         materialize(&section, &def, &window_name, req.session, &workspace, req.brief, req.by, req.team.as_deref(), agent_def, req.member, req.from_member)?
     };
-    let launched = launch_window(req, &workspace, &def, &window_name, m)?;
+    // A start is a start (board #88): a fresh spawn holds its window's lines
+    // until the CLI's ready furniture shows, as a restart does
+    // (`delivery::begin_start` before the window exists, so the mark names no
+    // old pane; `watch_spawn` after the launch). A backend with no
+    // confirmation (grok, omp) marks nothing. The spawn's own waiter below
+    // still answers the trust prompt and types a Typed brief.
+    let backend = crate::backends::Backend::parse(&def.backend);
+    let start = super::delivery::begin_start(req.session, &window_name, backend)?;
+    let launched = match launch_window(req, &workspace, &def, &window_name, m) {
+        Ok(v) => v,
+        Err(e) => {
+            super::delivery::start_failed(req.session, &window_name, start.as_deref(), &e);
+            return Err(e);
+        }
+    };
+    super::delivery::watch_spawn(req.session, &window_name, backend);
     if let Err(e) = permit.finish(true) {
         eprintln!("projects: {window_name} launched but its stop mark was not cleared: {e}");
     }
@@ -2902,6 +2917,25 @@ mod tests {
         assert_eq!(after["env"]["ANTHROPIC_MODEL"], "agent-override");
         assert_eq!(after["theme"], "dark");
         assert!(!refresh_hooks(&ws.to_string_lossy(), "cc").unwrap(), "canonical home is a no-op");
+        std::fs::remove_dir_all(&ws).ok();
+    }
+
+    /// Board #88: a spawned pi carries its start hold, so a line sent at
+    /// launch waits for pi's SessionStart; its brief rides the launch line,
+    /// so the hold needs no screen marker. omp 18.15.0 has no startup-only
+    /// submit handler, so it stays without one.
+    #[test]
+    fn a_pi_render_carries_its_ready_edge_and_omp_none() {
+        let ws = crate::config::test_scratch("tmm-pi-ready");
+        let home = ws.join(".tmm/agents/pr");
+        std::fs::create_dir_all(&home).unwrap();
+        let r = crate::backends::pi::render_pi(&def("pi"), "pr", &home, "You are pr.", &[]).unwrap();
+        let c = r.confirmation.expect("pi's render carries its ready edge");
+        assert!(c.ready_markers.is_empty() && crate::backends::Backend::Pi.ready_on_session_start(), "pi's edge is its SessionStart, never a screen");
+        assert!(matches!(crate::backends::Backend::Pi.first_prompt(), crate::backends::FirstPrompt::LaunchLine), "a Typed first prompt would need ready markers");
+        assert!(c.markers.is_empty() && c.accept_keys.is_empty(), "no trust prompt to answer: trust is pre-seeded");
+        assert!(crate::backends::Backend::Pi.startup_confirmation().is_some());
+        assert!(crate::backends::Backend::Omp.startup_confirmation().is_none());
         std::fs::remove_dir_all(&ws).ok();
     }
 

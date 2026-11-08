@@ -7904,6 +7904,213 @@ while True:
         assert!(b.wait(&|| b.submitted("OMPWORD") == 1), "the line is typed: {}", b.screen());
     }
 
+    /// Board #88 (orchestrator's ruling B): pi's hold is released by its own SessionStart and
+    /// nothing else. One from the pane an older CLI ran in, or produced before this start's
+    /// mark, changes nothing; one from the window's current pane, after the mark, releases it
+    /// and the held line is typed once. No screen releases it, ready-looking or not.
+    #[test]
+    fn a_pi_start_is_released_by_its_own_session_start_only() {
+        use crate::backends::Backend;
+        use crate::projects::delivery::Produced;
+        let Some(b) = Booting::new("pi-edge") else { return };
+        let home = b.ws.join(".tmm/agents/dev");
+        crate::projects::spawn::LaunchRecipe {
+            backend: "pi", env: &[], cmd: &Booting::cmd(&b.ws), spawned_by: "", team: None, agent_def: "", member: "", from_member: "", input_mode: "queue",
+        }.write(&home).unwrap();
+        let old = crate::tmux::find_window_by_name(&b.session, "dev").unwrap();
+        let now = || std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap().as_nanos();
+        let secs = |ns: u128| u64::try_from(ns / 1_000_000_000).unwrap();
+        // A whole second before the mark: a stamp from a `date` without %N (macOS) that
+        // cannot be this start's.
+        let before = now() - 1_000_000_000;
+        assert!(crate::projects::delivery::begin_start(&b.session, "dev", Some(Backend::Pi)).unwrap().is_some(), "pi's start is held");
+        let marked = now();
+        b.window(); // the new CLI's pane
+        b.ready(true); // its screen looks ready: that alone releases nothing
+        let new = crate::tmux::find_window_by_name(&b.session, "dev").unwrap();
+        assert_ne!(old, new);
+        b.hold("PIWORD");
+        crate::projects::delivery::flush(&b.session, "dev");
+        crate::projects::delivery::session_start_ready(&b.session, "dev", &old, Some(Produced::Nanos(now())));
+        crate::projects::delivery::session_start_ready(&b.session, "dev", &new, Some(Produced::Nanos(before)));
+        crate::projects::delivery::session_start_ready(&b.session, "dev", &new, Some(Produced::Seconds(secs(before))));
+        crate::projects::delivery::session_start_ready(&b.session, "dev", &new, None);
+        std::thread::sleep(std::time::Duration::from_millis(500));
+        assert!(crate::projects::delivery::is_starting(&b.session, "dev"), "an old pane, an earlier event at either precision, or an unstamped one releases nothing");
+        assert_eq!((b.held(), b.submitted("PIWORD")), (1, 0), "nothing typed: {}", b.screen());
+        // The same second as the mark, at whole-second precision (validator note 30): released.
+        crate::projects::delivery::session_start_ready(&b.session, "dev", &new, Some(Produced::Seconds(secs(marked))));
+        assert!(!crate::projects::delivery::is_starting(&b.session, "dev"), "this start's SessionStart releases it, whole seconds included");
+        assert!(b.wait(&|| b.submitted("PIWORD") == 1), "the held line is typed: {}", b.screen());
+        std::thread::sleep(std::time::Duration::from_millis(500));
+        assert_eq!(b.submitted("PIWORD"), 1, "once");
+        // And a nanosecond stamp after the mark releases a second start.
+        assert!(crate::projects::delivery::begin_start(&b.session, "dev", Some(Backend::Pi)).unwrap().is_some());
+        b.window();
+        let newer = crate::tmux::find_window_by_name(&b.session, "dev").unwrap();
+        crate::projects::delivery::session_start_ready(&b.session, "dev", &newer, Some(Produced::Nanos(now())));
+        assert!(!crate::projects::delivery::is_starting(&b.session, "dev"), "nanosecond stamp after the mark");
+    }
+
+    /// Reviewer note 43, orchestrator's ruling: the ownership check and the deadline effect
+    /// are one step. A is released between its watch's last poll and the effect: no line.
+    #[test]
+    fn a_pi_start_released_at_its_deadline_boundary_posts_nothing() {
+        use crate::backends::Backend;
+        let Some(b) = Booting::new("pi-boundary") else { return };
+        let home = b.ws.join(".tmm/agents/dev");
+        crate::projects::spawn::LaunchRecipe {
+            backend: "pi", env: &[], cmd: &Booting::cmd(&b.ws), spawned_by: "", team: None, agent_def: "", member: "", from_member: "", input_mode: "queue",
+        }.write(&home).unwrap();
+        *crate::projects::delivery::START_TIMEOUT_IN_TEST.lock().unwrap() = Some(std::time::Duration::from_secs(1));
+        struct Reset;
+        impl Drop for Reset { fn drop(&mut self) {
+            *crate::projects::delivery::START_TIMEOUT_IN_TEST.lock().unwrap() = None;
+            *crate::projects::delivery::BEFORE_DEADLINE_EFFECT.lock().unwrap() = None;
+        } }
+        let _reset = Reset;
+        let lines = || rooms::history_page(&project_room(&b.session), None, 100)["messages"].as_array().unwrap().iter()
+            .filter(|m| m["body"].as_str().is_some_and(|t| t.contains("dev has not become ready"))).count();
+        crate::projects::delivery::begin_start(&b.session, "dev", Some(Backend::Pi)).unwrap();
+        b.window();
+        let pane = crate::tmux::find_window_by_name(&b.session, "dev").unwrap();
+        let (session, fired) = (b.session.clone(), std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false)));
+        let f = fired.clone();
+        *crate::projects::delivery::BEFORE_DEADLINE_EFFECT.lock().unwrap() = Some(Box::new(move || {
+            let now = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap().as_nanos();
+            crate::projects::delivery::session_start_ready(&session, "dev", &pane, Some(crate::projects::delivery::Produced::Nanos(now)));
+            f.store(true, std::sync::atomic::Ordering::SeqCst);
+        }));
+        crate::projects::delivery::watch_start(&b.session, "dev", Some(Backend::Pi));
+        assert!((0..80).any(|_| fired.load(std::sync::atomic::Ordering::SeqCst) || { std::thread::sleep(std::time::Duration::from_millis(50)); false }), "the boundary was reached");
+        std::thread::sleep(std::time::Duration::from_millis(500));
+        assert!(!crate::projects::delivery::is_starting(&b.session, "dev"), "A was released at the boundary");
+        assert_eq!(lines(), 0, "and its watch posts nothing");
+    }
+
+    /// Reviewer note 45, orchestrator's ruling: A's SessionStart observes the pane and retires
+    /// its mark in one critical section, in replace_cli's lock order. A restart B that tries to
+    /// replace A between that observation and the retirement waits for it, so A's event (a
+    /// whole-second stamp in B's own second) can never retire B: B stays held, nothing is typed
+    /// until B's own edge, and then once.
+    #[test]
+    fn a_restart_inside_a_pi_release_is_never_released_by_the_old_start() {
+        use crate::backends::Backend;
+        use crate::projects::delivery::Produced;
+        let Some(b) = Booting::new("pi-race") else { return };
+        let home = b.ws.join(".tmm/agents/dev");
+        crate::projects::spawn::LaunchRecipe {
+            backend: "pi", env: &[], cmd: &Booting::cmd(&b.ws), spawned_by: "", team: None, agent_def: "", member: "", from_member: "", input_mode: "queue",
+        }.write(&home).unwrap();
+        struct Reset;
+        impl Drop for Reset { fn drop(&mut self) { *crate::projects::delivery::AFTER_PANE_OBSERVED.lock().unwrap() = None; } }
+        let _reset = Reset;
+        let secs = || std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap().as_secs();
+        crate::projects::delivery::begin_start(&b.session, "dev", Some(Backend::Pi)).unwrap();
+        b.window();
+        let a_pane = crate::tmux::find_window_by_name(&b.session, "dev").unwrap();
+        b.ready(true);
+        // B, a restart, is started from inside A's critical section and must wait for it.
+        let restart: std::sync::Arc<std::sync::Mutex<Option<std::thread::JoinHandle<Option<String>>>>> = Default::default();
+        let (session, ws, slot) = (b.session.clone(), b.ws.clone(), restart.clone());
+        *crate::projects::delivery::AFTER_PANE_OBSERVED.lock().unwrap() = Some(Box::new(move || {
+            let (session, ws) = (session.clone(), ws.clone());
+            *slot.lock().unwrap() = Some(std::thread::spawn(move || {
+                crate::projects::delivery::replace_cli(&session, "dev", Some(Backend::Pi), || {
+                    let _ = std::process::Command::new("tmux").args(["kill-window", "-t", &format!("{session}:dev")]).status();
+                    std::process::Command::new("tmux")
+                        .args(["new-window", "-d", "-t", &session, "-n", "dev", "-c", &ws.to_string_lossy(), &format!("bash -c '{}'", Booting::cmd(&ws))])
+                        .status().map(|_| ()).map_err(|e| e.to_string())
+                }).unwrap()
+            }));
+            std::thread::sleep(std::time::Duration::from_millis(300)); // B is now waiting on the window boundary
+        }));
+        crate::projects::delivery::session_start_ready(&b.session, "dev", &a_pane, Some(Produced::Seconds(secs())));
+        *crate::projects::delivery::AFTER_PANE_OBSERVED.lock().unwrap() = None;
+        let b_id = restart.lock().unwrap().take().unwrap().join().unwrap();
+        assert!(b_id.is_some(), "B wrote its own hold");
+        assert!(crate::projects::delivery::is_starting(&b.session, "dev"), "A's event never retired B's hold");
+        let b_pane = crate::tmux::find_window_by_name(&b.session, "dev").unwrap();
+        assert_ne!(a_pane, b_pane);
+        b.hold("BWORD");
+        crate::projects::delivery::flush(&b.session, "dev");
+        // A's event again, same second, after B: still not B's.
+        crate::projects::delivery::session_start_ready(&b.session, "dev", &a_pane, Some(Produced::Seconds(secs())));
+        std::thread::sleep(std::time::Duration::from_millis(500));
+        assert_eq!((b.held(), b.submitted("BWORD")), (1, 0), "nothing typed until B's own edge: {}", b.screen());
+        crate::projects::delivery::session_start_ready(&b.session, "dev", &b_pane, Some(Produced::Seconds(secs())));
+        assert!(b.wait(&|| b.submitted("BWORD") == 1), "B's own SessionStart types it: {}", b.screen());
+        std::thread::sleep(std::time::Duration::from_millis(500));
+        assert_eq!(b.submitted("BWORD"), 1, "once");
+    }
+
+    /// Validator note 50: a start that does not pass the window boundary (a fresh spawn's or a
+    /// Start-after-Stop's `begin_start`) writes a newer mark between A's pane lookup and its
+    /// retirement: A's event retires nothing, because only the mark it read before the lookup
+    /// may be retired.
+    #[test]
+    fn a_mark_written_during_a_pi_release_is_not_the_one_it_retires() {
+        use crate::backends::Backend;
+        use crate::projects::delivery::Produced;
+        let Some(b) = Booting::new("pi-snap") else { return };
+        let home = b.ws.join(".tmm/agents/dev");
+        crate::projects::spawn::LaunchRecipe {
+            backend: "pi", env: &[], cmd: &Booting::cmd(&b.ws), spawned_by: "", team: None, agent_def: "", member: "", from_member: "", input_mode: "queue",
+        }.write(&home).unwrap();
+        struct Reset;
+        impl Drop for Reset { fn drop(&mut self) { *crate::projects::delivery::AFTER_PANE_OBSERVED.lock().unwrap() = None; } }
+        let _reset = Reset;
+        crate::projects::delivery::begin_start(&b.session, "dev", Some(Backend::Pi)).unwrap();
+        b.window();
+        let pane = crate::tmux::find_window_by_name(&b.session, "dev").unwrap();
+        let session = b.session.clone();
+        // A plain begin_start (no window boundary) right after A's lookup: a newer mark that
+        // keeps A's old pane (begin_start carries it over, validator note 50), so pane and
+        // stamp both pass and only the snapshot tells it apart.
+        *crate::projects::delivery::AFTER_PANE_OBSERVED.lock().unwrap() = Some(Box::new(move || {
+            crate::projects::delivery::begin_start(&session, "dev", Some(Backend::Pi)).unwrap();
+        }));
+        let secs = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap().as_secs();
+        crate::projects::delivery::session_start_ready(&b.session, "dev", &pane, Some(Produced::Seconds(secs + 1)));
+        assert!(crate::projects::delivery::is_starting(&b.session, "dev"), "the newer mark is not retired by A's event");
+    }
+
+    /// Validator note 29, orchestrator's ruling: a pi start's deadline watch owns ONE start.
+    /// A is released and B starts inside A's poll; when A's deadline passes A says nothing,
+    /// and B's own watch reports B once.
+    #[test]
+    fn a_pi_deadline_watch_speaks_only_for_its_own_start() {
+        use crate::backends::Backend;
+        let Some(b) = Booting::new("pi-watch") else { return };
+        let home = b.ws.join(".tmm/agents/dev");
+        crate::projects::spawn::LaunchRecipe {
+            backend: "pi", env: &[], cmd: &Booting::cmd(&b.ws), spawned_by: "", team: None, agent_def: "", member: "", from_member: "", input_mode: "queue",
+        }.write(&home).unwrap();
+        *crate::projects::delivery::START_TIMEOUT_IN_TEST.lock().unwrap() = Some(std::time::Duration::from_secs(2));
+        struct Reset;
+        impl Drop for Reset { fn drop(&mut self) { *crate::projects::delivery::START_TIMEOUT_IN_TEST.lock().unwrap() = None; } }
+        let _reset = Reset;
+        let lines = || rooms::history_page(&project_room(&b.session), None, 100)["messages"].as_array().unwrap().iter()
+            .filter(|m| m["body"].as_str().is_some_and(|t| t == "[tmm] dev has not become ready after 2 s")).count();
+        let now = || std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap().as_nanos();
+        // Start A, its watch, then A's release.
+        crate::projects::delivery::begin_start(&b.session, "dev", Some(Backend::Pi)).unwrap();
+        crate::projects::delivery::watch_start(&b.session, "dev", Some(Backend::Pi));
+        b.window();
+        let a = crate::tmux::find_window_by_name(&b.session, "dev").unwrap();
+        crate::projects::delivery::session_start_ready(&b.session, "dev", &a, Some(crate::projects::delivery::Produced::Nanos(now())));
+        // B starts at once, inside A's 0.5 s poll, and its watch starts later.
+        crate::projects::delivery::begin_start(&b.session, "dev", Some(Backend::Pi)).unwrap();
+        std::thread::sleep(std::time::Duration::from_millis(1000));
+        crate::projects::delivery::watch_start(&b.session, "dev", Some(Backend::Pi));
+        // A's deadline (2 s after A) passes before B's (2 s after B's watch).
+        std::thread::sleep(std::time::Duration::from_millis(1500));
+        assert_eq!(lines(), 0, "A's watch says nothing about B");
+        assert!((0..80).any(|_| lines() == 1 || { std::thread::sleep(std::time::Duration::from_millis(50)); false }), "B's own watch reports B");
+        std::thread::sleep(std::time::Duration::from_millis(1500));
+        assert_eq!(lines(), 1, "exactly once");
+    }
+
     /// The other direction, none → ready screen (omp→dsh, F3): the recipe still says omp, the
     /// start launches a backend with a ready screen, so the hold IS written and a line sent
     /// while the new CLI is not ready is held, never typed into whatever the pane shows.
@@ -8860,6 +9067,51 @@ while True:
         assert_eq!((again["agent_def"].as_str(), again["spawned_by"].as_str()), (Some("rfe"), Some("lead")), "its definition and spawner are what they were: {again}");
         assert!(!ws.join(".tmm/agents/rfe-3").exists() && !ws.join(".tmm/agents/rfe-2-2").exists(), "no second home");
         crate::projects::registry_delete("rfe").ok();
+    }
+
+    /// Board #88: a start is a start. A FRESH spawn of a backend with a ready
+    /// edge (pi) marks its window starting, so a line sent at launch is held
+    /// until the CLI's ready furniture shows (here it never does: no pi in the
+    /// test environment, the pane stays a shell); a backend without one (omp)
+    /// marks nothing, so its lines are typed as before.
+    #[test]
+    fn a_fresh_spawn_holds_its_lines_only_for_a_backend_with_a_ready_edge() {
+        crate::projects::tests::use_test_store();
+        let mut scratch = crate::tmux::Scratch::new("spawn-hold");
+        let session = scratch.session("s");
+        let ws = std::path::PathBuf::from(scratch.path());
+        let created = std::process::Command::new("tmux")
+            .args(["new-session", "-d", "-s", &session, "-n", "lead", "-c", &ws.to_string_lossy(), "cat"])
+            .status()
+            .map(|status| status.success())
+            .unwrap_or(false);
+        if !created {
+            eprintln!("no tmux server — skipping");
+            return;
+        }
+        *crate::projects::delivery::START_TIMEOUT_IN_TEST.lock().unwrap() = Some(std::time::Duration::from_secs(2));
+        struct Reset;
+        impl Drop for Reset { fn drop(&mut self) { *crate::projects::delivery::START_TIMEOUT_IN_TEST.lock().unwrap() = None; } }
+        let _reset = Reset;
+        crate::projects::adopt(&session, Some("spawn-hold-test")).expect("adopt project");
+        for (name, backend) in [("hpi", "pi"), ("homp", "omp")] {
+            crate::projects::registry_save(&serde_json::json!({
+                "name": name, "backend": backend, "model": "", "effort": "", "system": "Hold persona.", "skills": "[]", "mcp": "[]"
+            }))
+            .unwrap();
+            crate::projects::spawn::spawn(&crate::projects::spawn::SpawnRequest { session: &session, agent: name, by: "lead", ..Default::default() }).unwrap();
+        }
+        assert!(crate::projects::delivery::is_starting(&session, "hpi"), "pi's fresh spawn is held until pi is ready");
+        assert!(!crate::projects::delivery::is_starting(&session, "homp"), "omp has no ready edge, so nothing is held");
+        // The hold's deadline path is the restart's: after the timeout the mark
+        // stays and the room says the window never became ready.
+        let said = || rooms::history_page(&project_room(&session), None, 100)["messages"].as_array().unwrap().iter()
+            .any(|m| m["body"].as_str().is_some_and(|t| t == "[tmm] hpi has not become ready after 2 s"));
+        assert!((0..300).any(|_| said() || { std::thread::sleep(std::time::Duration::from_millis(50)); false }), "the stuck start is reported as a restart's is");
+        assert!(crate::projects::delivery::is_starting(&session, "hpi"), "and its lines stay held");
+        for name in ["hpi", "homp"] {
+            crate::projects::registry_delete(name).ok();
+        }
     }
 }
 
