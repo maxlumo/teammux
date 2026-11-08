@@ -696,24 +696,28 @@ pub(crate) const AT_OPENS_FILE_PICKER: bool = true;
 /// input tokens, so input size is not shown to cause them.
 pub(crate) const AUTO_COMPACT_TOKENS: i64 = 700_000;
 
-/// Is one of codex's own pickers open on `screen` (board #66, measured on
-/// codex-cli 0.166.0 in the live rig, `live-check codex-picker`)? While one
-/// is open the composer is gone and a typed key answers the picker: a
-/// delivery typed into `/new`'s "Where should the new conversation run?"
-/// had its `2` (of `2026`) pick "Create new Git worktree", and the rest of
-/// the line became the prompt. By place, never by a phrase anywhere: codex
-/// paints a picker's key hints as the screen's bottom furniture, a line that
-/// starts `enter ` and names `esc` (`enter select · esc back` under `/new`
-/// and `/model`; `enter resume   esc exit   ^c exit …` above one more hint
-/// line under `/resume`), where an open composer paints `? for shortcuts`,
-/// `esc again to edit previous message` or its status line.
+/// Is one of codex's own pickers or menus open on `screen` (board #66,
+/// measured on codex-cli 0.166.0 in the live rig, `live-check
+/// codex-picker`)? While one is open the composer is gone and a typed key
+/// answers it: a delivery typed into `/new`'s "Where should the new
+/// conversation run?" had its `2` (of `2026`) pick "Create new Git
+/// worktree", and the rest of the line became the prompt. By place and
+/// shape, never by a phrase anywhere: codex paints a menu's key hints as the
+/// screen's bottom furniture, a row of `<key> <action>` pairs (joined by
+/// ` · ` or by runs of spaces) one of which is an `esc` action: `enter
+/// select · esc back` (`/new`, `/model`), `space toggle · enter save · esc
+/// save/close` (`/experimental`, round 1: validator's note 10 — a reading by
+/// the first key missed it), `enter resume   esc exit   ^c exit …` above
+/// one more hint line (`/resume`). An open composer ends with `? for
+/// shortcuts`, its status line (pairs, none an `esc` action) or the single
+/// `esc again to edit previous message` (one pair); a running turn's `esc to
+/// interrupt` sits above the composer, never at the bottom.
 pub fn picker_open(screen: &str) -> bool {
-    screen
-        .lines()
-        .rev()
-        .filter(|l| !l.trim().is_empty())
-        .take(2)
-        .any(|l| l.trim_start().starts_with("enter ") && l.contains("esc "))
+    let hints = |line: &str| {
+        let pairs: Vec<&str> = line.split(" \u{b7} ").flat_map(|p| p.split("   ")).map(str::trim).filter(|p| !p.is_empty()).collect();
+        pairs.len() >= 2 && pairs.iter().any(|p| p.starts_with("esc "))
+    };
+    screen.lines().rev().filter(|l| !l.trim().is_empty()).take(2).any(hints)
 }
 
 #[cfg(not(any(target_os = "android", target_os = "ios")))]
@@ -1876,12 +1880,17 @@ mod tests {
         let new = "  Worked for 2s • 23:43\n\n  Where should the new conversation run?\n\n\u{203a} 1. Use current Git worktree  Keep using the current working directory\n  2. Create new Git worktree   Create a separate checkout of this repository in\n                               another directory\n\n  enter select · esc back\n\n";
         let model = "  Select Model and Effort\n\u{203a} 1. GPT-6.1-Sol (current)  Latest workhorse model for coding and everyday work.\n\u{2193}\n  enter select · esc back\n";
         let resume = " Resume a previous session\n No sessions yet\n\u{2500}\u{2500}\u{2500}\n enter resume   esc exit   ^c exit   tab focus   \u{2190}/\u{2192} option\n ^o comfy   ^t preview   ^e exp   \u{2191}/\u{2193} browse\n";
-        assert!(picker_open(new) && picker_open(model) && picker_open(resume));
+        // Round 1 (validator's note 10): /experimental's footer leads with `space`.
+        let experimental = "  Experimental features\n  Loading server experiments\u{2026}\n\n\n  space toggle \u{b7} enter save \u{b7} esc save/close\n";
+        assert!(picker_open(new) && picker_open(model) && picker_open(resume) && picker_open(experimental));
         let idle = "\u{203a} Ask Codex to do anything\n\n  GPT-6.1-Sol high · Context 0% used · /work/live · 01a1\u{2026}\n  ? for shortcuts                                      \u{26a0} 1 warning · f2 to view\n";
         let after_escape = "\u{203a} Ask Codex to do anything\n\n  GPT-6.1-Sol high · Context 0% used · /work/live · Reply with picked\n  esc again to edit previous message\n";
         // The picker's own words quoted in the transcript, above a composer.
         let quoted = "\u{2022} codex paints `enter select · esc back` under a picker\n\n\u{203a} Ask Codex to do anything\n\n  GPT-6.1-Sol high · Context 0% used · /work/live\n  ? for shortcuts\n";
-        assert!(!picker_open(idle) && !picker_open(after_escape) && !picker_open(quoted));
+        // A running turn, with a queued line (validator's menu-guard capture).
+        let busy = "\u{2022} Working (1s \u{2022} esc to interrupt)\n\n\u{2022} Queued follow-up inputs\n  \u{21b3} /auditguard @probe\n    shift+\u{2190} edit last queued message\n\n\u{203a} Ask Codex to do anything\n\n  GPT-6.1-Sol high \u{b7} Context 3% used \u{b7} /work/live\n  ? for shortcuts\n";
+        let quoted_shape = "\u{2022} the footer reads: space toggle \u{b7} enter save \u{b7} esc save/close\n\n\u{203a} Ask Codex to do anything\n\n  GPT-6.1-Sol high \u{b7} Context 0% used \u{b7} /work/live\n  ? for shortcuts                                      \u{26a0} 1 warning \u{b7} f2 to view\n";
+        assert!(!picker_open(idle) && !picker_open(after_escape) && !picker_open(quoted) && !picker_open(busy) && !picker_open(quoted_shape));
     }
 
 }

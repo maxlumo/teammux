@@ -23,9 +23,10 @@
 #   live-check codex-limit   board #66: the provider's request-body limit, bisected with unbilled
 #                      requests (a model nobody serves: 404 under the limit, 413 over it), and that
 #                      codex takes `model_auto_compact_token_limit` from a profile file.
-#   live-check codex-picker  board #66: a person opens codex's /new picker in a git repo; a delivery
-#                      sent meanwhile is held (the picker stays open, no worktree), and is typed and
-#                      answered once Escape closes it.
+#   live-check codex-picker  board #66: the footers of codex's menus are printed; a person opens
+#                      /new's picker in a git repo, then /experimental; a delivery sent while each is
+#                      open is held (the menu stays open, no worktree), and is typed and answered once
+#                      Escape closes it.
 set -euo pipefail
 check="${1:-smoke}"
 case "$check" in smoke|codex-models|codex-provider|pi|omp-tools|codex-limit|codex-picker) ;; *) echo "live-check: unknown check '$check' (known: smoke, codex-models, codex-provider, pi, omp-tools, codex-limit, codex-picker)" >&2; exit 2 ;; esac
@@ -246,6 +247,15 @@ if [ "$check" = codex-picker ]; then
   pane=$(tmux list-panes -a -F '#{pane_id} #{window_name}' | awk '$2=="lcodex"{print $1; exit}')
   shot() { echo "live-check: codex-picker: --- screen: $1"; tmux capture-pane -p -t "$pane" | sed 's/^/    |/'; }
   shot "idle composer"
+  # The menus a person can open: the slash list, then each menu's bottom furniture (round 1:
+  # validator's /experimental footer starts `space toggle`). Escape twice closes any of them.
+  tmux send-keys -t "$pane" -l /; sleep 1; shot "the slash list"; tmux send-keys -t "$pane" Escape; sleep 1; tmux send-keys -t "$pane" C-u; sleep 1
+  for m in /model /experimental /skills /permissions /approvals /mcp /theme /personality /statusline /resume; do
+    tmux send-keys -t "$pane" -l "$m"; sleep 1; tmux send-keys -t "$pane" Enter; sleep 3
+    echo "live-check: codex-picker: --- footer of $m:"; tmux capture-pane -p -t "$pane" | grep -v '^\s*$' | tail -3 | sed 's/^/    |/'
+    tmux send-keys -t "$pane" Escape; sleep 1; tmux send-keys -t "$pane" Escape; sleep 1; tmux send-keys -t "$pane" C-u; sleep 1
+  done
+  shot "after the survey"
   tmm send --project live "@lcodex reply with the single word ready" >/dev/null
   timeout 180 bash -c "until tmm log --project live --limit 20 | grep -q '] lcodex: ready'; do sleep 2; done" || { echo "live-check: codex-picker: FAIL (no first answer)"; exit 1; }
   sleep 2
@@ -263,6 +273,18 @@ if [ "$check" = codex-picker ]; then
   shot "after Escape"
   n=$(tmm log --project live --limit 20 | grep -c 'single word picked' || true)
   [ "$n" = 1 ] || { echo "live-check: codex-picker: FAIL (the line is in the room $n times)"; rc=1; }
+  # Round 1 (validator's note 10): a menu whose footer leads with `space`, not `enter`.
+  sleep 3
+  tmux send-keys -t "$pane" -l /experimental; sleep 1; tmux send-keys -t "$pane" Enter; sleep 3; shot "/experimental opened"
+  tmux capture-pane -p -t "$pane" | grep -q 'esc save/close' || { echo "live-check: codex-picker: FAIL (no /experimental menu to test against)"; exit 1; }
+  tmm send --project live "@lcodex reply with the single word toggled" >/dev/null; sleep 6
+  shot "a delivery sent while /experimental is open"
+  if tmux capture-pane -p -t "$pane" | grep -q 'esc save/close'; then echo "live-check: codex-picker: /experimental is still open, nothing typed into it"; else echo "live-check: codex-picker: FAIL (the /experimental menu was answered)"; rc=1; fi
+  if tmm log --project live --limit 10 | grep -q '] lcodex: toggled'; then echo "live-check: codex-picker: FAIL (answered under /experimental)"; rc=1; fi
+  tmux send-keys -t "$pane" Escape
+  if timeout 120 bash -c "until tmm log --project live --limit 10 | grep -q '] lcodex: toggled'; do sleep 2; done"; then echo "live-check: codex-picker: after Escape on /experimental the held line was typed and answered"; else echo "live-check: codex-picker: FAIL (no answer after /experimental closed)"; rc=1; fi
+  n=$(tmm log --project live --limit 20 | grep -c 'single word toggled' || true)
+  [ "$n" = 1 ] || { echo "live-check: codex-picker: FAIL (the toggled line is in the room $n times)"; rc=1; }
   exit $rc
 fi
 
