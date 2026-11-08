@@ -865,8 +865,9 @@ impl Backend {
     }
 
     /// Repair this backend's on-disk surface in a managed home (hooks,
-    /// settings, channel keys, recipe backfill). Probes for its own files and
-    /// no-ops when the home is not this backend's.
+    /// settings, channel keys, recipe backfill). Called only for the backend
+    /// the home's recipe records (`refresh_hooks`, board #81); a home with no
+    /// recorded backend gets every half, each probing for its own files.
     #[cfg(not(any(target_os = "android", target_os = "ios")))]
     pub fn refresh(
         self,

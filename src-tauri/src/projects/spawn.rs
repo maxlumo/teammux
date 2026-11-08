@@ -2395,12 +2395,34 @@ pub fn refresh_hooks(project_path: &str, window_name: &str) -> Result<bool, Stri
     if notifications.ensure_helper().is_err() {
         return Ok(false);
     }
-    // Each backend repairs its own on-disk surface (board #128): every half
-    // probes for its file(s) and no-ops otherwise, exactly as the inline
-    // branches always did — refresh does not need to know which backend the
-    // home belongs to.
+    // Each backend repairs its own on-disk surface (board #128), and only in
+    // its OWN home: the backend the launch recipe records (board #81). A file
+    // name is no marker: pi's home has a `settings.json` too, and claude's
+    // half, which probes for that name, patched claude's hooks, env and
+    // statusLine into it. Only a home with no recorded backend (no recipe, or
+    // a recipe with no `backend` key: older than 2026-08-18) is still probed by
+    // every half. A recipe that is PRESENT but unreadable or unparseable, or
+    // that names a backend this build does not know, gets NO refresh at all
+    // (validator P1 on 6caba28d; orchestrator's ruling, #81 note 11): probing
+    // a damaged modern home reopened these writes, and the start's own recipe
+    // replay reports the damaged launch.json.
+    let recorded = match super::recipe::recipe_section(&home).read() {
+        Ok(None) => None,
+        Ok(Some(r)) => match r.get("backend") {
+            None => None,
+            Some(v) => match v.as_str().and_then(crate::backends::Backend::parse) {
+                Some(b) => Some(b),
+                None => return Ok(false),
+            },
+        },
+        Err(_) => return Ok(false),
+    };
+    let backends: &[crate::backends::Backend] = match &recorded {
+        Some(b) => std::slice::from_ref(b),
+        None => &crate::backends::Backend::ALL,
+    };
     let mut changed = false;
-    for b in crate::backends::Backend::ALL {
+    for &b in backends {
         changed |= b.refresh(&home, window_name, Path::new(project_path), &notifications)
             .map_err(|e| format!("{window_name}: its configuration could not be refreshed privately, so it is not started: {e}"))?;
     }
@@ -2868,6 +2890,8 @@ mod tests {
             "hooks": {},
             "theme": "dark"
         })).unwrap()).unwrap();
+        // Recorded as claude (board #81): the recorded backend's half runs.
+        std::fs::write(home.join("launch.json"), json!({ "backend": "claude", "cmd": "claude", "env": [] }).to_string()).unwrap();
 
         assert!(refresh_hooks(&ws.to_string_lossy(), "cc").unwrap());
         let read = || -> Value {
@@ -2878,6 +2902,43 @@ mod tests {
         assert_eq!(after["env"]["ANTHROPIC_MODEL"], "agent-override");
         assert_eq!(after["theme"], "dark");
         assert!(!refresh_hooks(&ws.to_string_lossy(), "cc").unwrap(), "canonical home is a no-op");
+        std::fs::remove_dir_all(&ws).ok();
+    }
+
+    /// Board #81: pi's home also has a `settings.json`, and claude's refresh,
+    /// which probed for that file name, patched claude's hooks, env, apiKeyHelper
+    /// and statusLine into it and seeded a `.claude.json` beside it. A home is
+    /// refreshed by the backend its recipe records, and only by that one.
+    #[test]
+    fn refresh_hooks_leaves_a_pi_home_to_pi() {
+        let ws = crate::config::test_scratch("tmm-refresh-pi");
+        let home = ws.join(".tmm/agents/pd");
+        std::fs::create_dir_all(&home).unwrap();
+        let d = def("pi");
+        crate::backends::pi::render_pi(&d, "pd", &home, "You are pd.", &[]).unwrap();
+        std::fs::write(home.join("launch.json"), json!({ "backend": "pi", "cmd": "command pi", "env": [] }).to_string()).unwrap();
+        let rendered = std::fs::read(home.join("settings.json")).unwrap();
+
+        assert!(!refresh_hooks(&ws.to_string_lossy(), "pd").unwrap(), "a freshly rendered pi home needs nothing");
+        assert_eq!(std::fs::read(home.join("settings.json")).unwrap(), rendered, "settings.json is pi's render, byte for byte");
+        let after: Value = serde_json::from_slice(&rendered).unwrap();
+        for key in ["hooks", "env", "apiKeyHelper", "statusLine"] {
+            assert!(after.get(key).is_none(), "no claude key {key}: {after}");
+        }
+        assert!(!home.join(".claude.json").exists(), "no claude state seeded in a pi home");
+        // A damaged recipe or an unknown backend refreshes nothing (#81 note
+        // 11): settings.json stays byte-identical, no claude state appears.
+        for recipe in ["{not json", r#"{"backend":"nope","cmd":"x"}"#, r#"{"backend":7}"#] {
+            std::fs::write(home.join("launch.json"), recipe).unwrap();
+            assert!(!refresh_hooks(&ws.to_string_lossy(), "pd").unwrap(), "{recipe}: nothing refreshed");
+            assert_eq!(std::fs::read(home.join("settings.json")).unwrap(), rendered, "{recipe}: settings.json untouched");
+            assert!(!home.join(".claude.json").exists(), "{recipe}: no claude state");
+        }
+        // A recipe with NO backend key is a pre-2026-08-18 home: every half
+        // still probes it (here claude's, which finds a settings.json).
+        std::fs::write(home.join("launch.json"), r#"{"cmd":"command pi","env":[]}"#).unwrap();
+        assert!(refresh_hooks(&ws.to_string_lossy(), "pd").unwrap(), "the legacy home is probed");
+        assert!(home.join(".claude.json").exists(), "legacy probe-all, as before #81");
         std::fs::remove_dir_all(&ws).ok();
     }
 
