@@ -127,8 +127,9 @@ test('the two-line project ROW is one shared skeleton — Chat and Board wear it
 
 test('the project row yields its wash to the travelling marker — after .side-row.open in the cascade', async () => {
   const css = await readFile(new URL('../../app.css', import.meta.url), 'utf8');
-  const lit = css.indexOf('.side-row.open { background: var(--accent-bg); }');
-  const yields = css.indexOf('.proj-row.open { background: none; }');
+  const lit = css.indexOf('.side-row.open { background: var(--accent-bg); box-shadow: inset 0 0 0 1px var(--accent-line); }');
+  // Board #94: the project row yields the open line too, not only the wash.
+  const yields = css.indexOf('.proj-row.open { background: none; box-shadow: none; }');
   assert.ok(lit > 0 && yields > 0);
   assert.ok(yields > lit, 'equal specificity: the override must come later or the in-place wash wins (codex review, 2026-09-23)');
   assert.match(css, /\.proj-row \{[^}]*position: relative;/u, 'rows paint above the marker');
@@ -155,4 +156,33 @@ test('a tagged row is two lines — identity (.p-top) then source (.p-source), t
   const css = await readFile(new URL('app.css', SRC), 'utf8');
   assert.match(css, /\.p-top \{ display: flex; align-items: baseline; gap: 6px; min-width: 0; \}\n(?:\/\*[\s\S]*?\*\/\n)?\.p-source \{ display: flex; min-width: 0; \}/u,
     'the second line is a flex line beside .p-top in app.css — a shared row atom, not a component rule');
+});
+
+// Board #94 (owner 2026-11-09: "左边的选中的标签没有高亮，导致我不知道现在选中的是
+// 哪一个"): the open row's paint is ONE rule in app.css, the travelling pill's
+// own (wash + inset --accent-line), and that line clears the 3:1 floor for a
+// selected mark against the sidebar's --bg2 in BOTH themes, computed here from
+// the tokens themselves. The wash alone measured 1.23:1 (dark), 1.10:1 (light).
+test('the open side-row is one rule whose accent line clears 3:1 in both themes (#94)', async () => {
+  const css = await readFile(new URL('../../app.css', import.meta.url), 'utf8');
+  const rules = css.match(/^\.side-row\.open \{[^}]*\}/gmu) ?? [];
+  assert.deepEqual(rules, ['.side-row.open { background: var(--accent-bg); box-shadow: inset 0 0 0 1px var(--accent-line); }'], 'one rule, the slide-pill paint');
+  const sources = ['lib/app/Preferences.svelte', 'lib/hub/AgentsPage.svelte'];
+  for (const f of sources) {
+    const text = await readFile(new URL(`../../${f}`, import.meta.url), 'utf8');
+    assert.doesNotMatch(text, /\.side-row\.open\s*\{/u, `${f}: no page-local open paint`);
+  }
+  const theme = (name: string) => /html\[data-theme="(dark|light)"\] \{([\s\S]*?)\n\}/gu;
+  const block = (name: string) => [...css.matchAll(theme(name))].find((m) => m[1] === name)?.[2] ?? '';
+  const token = (b: string, k: string) => new RegExp(`--${k}:\\s*([^;]+);`, 'u').exec(b)?.[1]?.trim() ?? '';
+  const hex = (h: string) => [1, 3, 5].map((i) => parseInt(h.slice(i, i + 2), 16) / 255);
+  const lum = (c: number[]) => { const [r, g, b] = c.map((v) => (v <= 0.04045 ? v / 12.92 : ((v + 0.055) / 1.055) ** 2.4)); return 0.2126 * r! + 0.7152 * g! + 0.0722 * b!; };
+  const ratio = (a: number[], b: number[]) => { const [x, y] = [lum(a), lum(b)].sort((p, q) => q - p); return (x! + 0.05) / (y! + 0.05); };
+  for (const name of ['dark', 'light']) {
+    const b = block(name);
+    const [bg, bg2, accent, line] = ['bg', 'bg2', 'accent', 'accent-line'].map((k) => token(b, k));
+    const mixed = /color-mix\(in srgb, var\(--accent\) (\d+)%, var\(--bg\)\)/u.exec(line!);
+    const lineRgb = mixed ? hex(accent!).map((v, i) => v * Number(mixed[1]) / 100 + hex(bg!)[i]! * (1 - Number(mixed[1]) / 100)) : hex(line === 'var(--accent)' ? accent! : line!);
+    assert.ok(ratio(lineRgb, hex(bg2!)) >= 3, `${name}: the open row's line is ${ratio(lineRgb, hex(bg2!)).toFixed(2)}:1 against --bg2`);
+  }
 });

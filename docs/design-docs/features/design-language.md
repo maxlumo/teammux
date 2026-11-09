@@ -848,8 +848,15 @@ by the contract above, not extended by new page-local overrides.
   by colour, not by a
   frame. Dialog CTAs keep their text chips: a destructive confirm must read
   its consequence.
-- `.side-row` — sidebar list row; hover `--surface2`, open/selected
-  `--accent-bg`.
+- `.side-row` — sidebar list row; hover `--surface2`, open/selected the
+  travelling pill's own paint, `--accent-bg` plus an inset 1px
+  `--accent-line` (one rule in app.css; a `.proj-row` yields both to its
+  sidebar's `.slide-pill.soft`). Board #94 (owner 2026-11-09: "左边的选中的
+  标签没有高亮，导致我不知道现在选中的是哪一个"): the wash alone was 1.23:1
+  (dark) and 1.10:1 (light) against `--bg2`, so the selected Settings
+  category and Agents row could not be told apart; the line is 5.57:1 and
+  3.36:1, above the 3:1 floor for a selected mark (pinned in
+  `ui/sidebar.source.test.ts`, computed from the tokens).
 - A resting CARD on the page canvas (agent cards, the connect card) wears
   `--surface` + 1px `--border`: dark-theme elevation is the surface lift,
   never a black drop shadow alone — `--bg`-on-`--bg` with a black shadow
