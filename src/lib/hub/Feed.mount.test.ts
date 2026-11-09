@@ -84,6 +84,35 @@ test('a path in a tool row opens the Files preview through the same route as a p
   } finally { await app.close(); }
 });
 
+// Board #100 (owner 2026-11-09: "这里的有中文的文件路径，好像有问题"): a path with CJK letters
+// INSIDE it is one link over the whole path, in a tool row and in a message, and it opens that file.
+// A .png reference in a message renders its picture through the server scope (ChatImage), so this
+// fixture runs under one, with a transport that answers nothing.
+const scoped = compileMount(new URL('./Feed.svelte', import.meta.url), [new URL('../core/ws.ts', import.meta.url)], { serverScope: true });
+test('a path with a CJK file name is one link, in a tool row and in a message, and opens that file (#100)', async (context) => {
+  const path = '/tmp/fontctl-preview-f6u3hm48/乐米月萤宋-preview.png';
+  const tool = (ts: number, text: string) => ({ id: ts, ts, window: 'pi-2', kind: 'tool' as const, tool: 'Read', text });
+  const blocks = feedBlocks([{ id: 'r', ts: 100, from: 'pi-2', body: `预览在 ${path}，看一下` }], [tool(10, path)], 'tools', (n) => n);
+  const asked: string[] = [];
+  const app = await (await scoped).mount(context, {
+    props: { selected: 'fixture', roomReady: true, visible: true, blocks, managedNames: ['pi-2'], stepsRows: 8, onpath: (p: string) => asked.push(p),
+      agents: [{ name: 'pi-2', window: 0, managed: true, agent: 'kiro', state: 'idle' }] },
+    setup(window) { window.Element.prototype.getAnimations = () => []; window.HTMLCanvasElement.prototype.getContext = () => null; },
+    modules: [{ getCaps: () => [], onCaps: () => {}, fsDownloadHttp: () => new Promise(() => {}) }],
+  });
+  try {
+    const q = (s: string) => app.document.querySelector<HTMLElement>(s);
+    for (let i = 0; i < 4; i++) await app.flush();
+    q('.bubble .steps .s-head')!.click(); await app.flush();
+    const rowLinks = [...app.document.querySelectorAll<HTMLAnchorElement>('.bubble .steps .st-text a')];
+    assert.deepEqual(rowLinks.map((a) => a.textContent), [path], 'the tool row links the whole path');
+    const bodyLinks = [...app.document.querySelectorAll<HTMLAnchorElement>('.bubble .m-body a')];
+    assert.deepEqual(bodyLinks.map((a) => a.textContent), [path], 'the message links the whole path, not the trailing prose');
+    bodyLinks[0]!.click(); rowLinks[0]!.click(); await app.flush();
+    assert.deepEqual(asked, [path, path], 'both open that file, not its directory');
+  } finally { await app.close(); }
+});
+
 // A standalone tool group has no message bubble around it, so the lane's own listeners are the ONLY door: this is
 // the row that fails when the lane drops its auxclick (the attached run above is caught by the bubble's listener).
 test('a path in a standalone tool group routes on click and on middle click, once each, and prevents the default (#475)', async (context) => {

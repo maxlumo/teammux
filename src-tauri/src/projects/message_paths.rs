@@ -65,6 +65,62 @@ fn is_run(c: char) -> bool {
     c.is_ascii_alphanumeric() || "._@+%~/-".contains(c)
 }
 
+/// A letter or digit of another script that may sit INSIDE a path (board
+/// #100, `WORD_RUN` in path-grammar.ts): not ASCII, Alphabetic or a number,
+/// not CJK punctuation (U+3000-U+303F) or a fullwidth form (U+FF00-U+FFEF).
+fn is_word(c: char) -> bool {
+    !c.is_ascii() && !matches!(c as u32, 0xFF00..=0xFFEF) && (c.is_alphabetic() || c.is_numeric())
+}
+
+/// Does `c` end a URL's MASK? (`isUrlTerminator` in path-grammar.ts, #100
+/// rounds 1-3.) The original terminators: CJK punctuation (U+3000-U+303F
+/// except its letters and numbers, so `〇` is not one) and the fullwidth
+/// forms. A symbol, a CJK or astral letter inside a query is the URL's.
+/// URL TERMINATION, not path-run admission (`is_word`).
+fn url_mask_end(c: char) -> bool {
+    matches!(c as u32, 0xFF00..=0xFFEF) || (matches!(c as u32, 0x3000..=0x303F) && !(c.is_alphabetic() || c.is_numeric()))
+}
+
+/// The path-shaped run lengths at the start of `src`, shortest first
+/// (`takeRuns` in path-grammar.ts, board #100 rounds 0-1): ASCII path
+/// characters, then each run of other letters the path goes on after: any
+/// path character still there once sentence dots are dropped. A run that
+/// ends the token is prose; the longest cut that is a path wins.
+fn take_runs(src: &[char]) -> Vec<usize> {
+    let ascii = |from: usize| src[from..].iter().take_while(|c| is_run(**c)).count();
+    let mut n = ascii(0);
+    if n == 0 {
+        return Vec::new();
+    }
+    let mut cuts = vec![n];
+    loop {
+        let w = src[n..].iter().take_while(|c| is_word(**c)).count();
+        if w == 0 {
+            return cuts;
+        }
+        let after = n + w;
+        // Round 2 (orchestrator note 13): the rest of the token must carry a
+        // PATH SIGNAL, a further `/` or a `.` + an ASCII letter or digit,
+        // sentence dots dropped; a bare letter or digit tail (`第3行`) is prose.
+        let token_len = src[after..].iter().take_while(|c| is_run(**c) || is_word(**c)).count();
+        let mut token: &[char] = &src[after..after + token_len];
+        while let Some(('.', rest)) = token.split_last().map(|(l, r)| (*l, r)) {
+            token = rest;
+        }
+        let signal = token.iter().enumerate().any(|(i, c)| *c == '/' || (*c == '.' && token.get(i + 1).is_some_and(|d| d.is_ascii_alphanumeric())));
+        if !signal {
+            return cuts;
+        }
+        let tail = ascii(after);
+        n = after + tail;
+        cuts.push(n);
+    }
+}
+
+fn take_run(src: &[char]) -> usize {
+    take_runs(src).last().copied().unwrap_or(0)
+}
+
 /// May a path start right after `prev`? The start of the text, whitespace, one
 /// of `( " ' = ,`, or a CJK/fullwidth character.
 fn left_ok(prev: Option<char>) -> bool {
@@ -160,18 +216,17 @@ pub fn match_path(src: &[char], prev: Option<char>) -> Option<PathMatch> {
     if !left_ok(prev) {
         return None;
     }
-    let n = src.iter().take_while(|c| is_run(**c)).count();
-    if n == 0 {
-        return None;
+    for n in take_runs(src).into_iter().rev() {
+        let run: String = src[..n].iter().collect();
+        let (line, col, used) = line_suffix(&src[n..]);
+        let path = if used > 0 { run } else { strip_dots(&run) };
+        if !is_path(&path) {
+            continue;
+        }
+        let suffix: String = src[n..n + used].iter().collect();
+        return Some(PathMatch { raw: format!("{path}{suffix}"), path, line, col });
     }
-    let run: String = src[..n].iter().collect();
-    let (line, col, used) = line_suffix(&src[n..]);
-    let path = if used > 0 { run } else { strip_dots(&run) };
-    if !is_path(&path) {
-        return None;
-    }
-    let suffix: String = src[n..n + used].iter().collect();
-    Some(PathMatch { raw: format!("{path}{suffix}"), path, line, col })
+    None
 }
 
 /// The path an inline code span's WHOLE content is (`codeSpanPath` in
@@ -184,7 +239,7 @@ pub fn code_span_path(content: &[char]) -> Option<PathMatch> {
         return (m.raw.chars().count() == content.len()).then_some(m);
     }
     let body: String = content.iter().collect();
-    if !body.ends_with('/') || !content.iter().all(|c| is_run(*c)) {
+    if !body.ends_with('/') || take_run(content) != content.len() {
         return None;
     }
     let segs: Vec<&str> = body[..body.len() - 1].split('/').collect();
@@ -211,7 +266,7 @@ fn mask_urls(text: &[char]) -> Vec<bool> {
                 while end < text.len() && !js_space(text[end]) {
                     end += 1;
                 }
-                let stop = (k..end).find(|j| is_stop(text[*j])).unwrap_or(end);
+                let stop = (k..end).find(|j| url_mask_end(text[*j])).unwrap_or(end);
                 for m in masked.iter_mut().take(stop).skip(k) {
                     *m = true;
                 }
@@ -643,7 +698,9 @@ fn hole_urls(src: &str) -> String {
     while i < t.len() {
         let c = t[i];
         // A URL starts where a scheme-character run meets `://` (as `mask_urls` reads it): the
-        // scheme begins at the run's first letter, and it ends at a space or a STOP character.
+        // scheme begins at the run's first letter. It OWNS its run up to a space or a URL
+        // terminator (`url_mask_end`), as the renderer's URL token does since #100 round 4: a
+        // code span, a link or a path inside the run is the URL's text, never a reference.
         if scheme(c) && !(i > 0 && scheme(t[i - 1])) {
             let run = t[i..].iter().take_while(|x| scheme(**x)).count();
             let colon = i + run;
@@ -653,7 +710,7 @@ fn hole_urls(src: &str) -> String {
                     while end < t.len() && !js_space(t[end]) {
                         end += 1;
                     }
-                    let stop = (k..end).find(|j| is_stop(t[*j])).unwrap_or(end);
+                    let stop = (k..end).find(|j| url_mask_end(t[*j])).unwrap_or(end);
                     out.extend(&t[i..k]);
                     out.push(URL_HOLE);
                     i = stop;
@@ -844,6 +901,24 @@ mod tests {
             }
         }
         assert!(coded > nulls && nulls > 0, "both kinds of code row were read: {coded} rows, {nulls} null");
+    }
+
+    /// Board #100 round 2: positions in a CJK text are CHARACTER indices; turned
+    /// into byte offsets they land on the path exactly (no split code point).
+    #[test]
+    fn a_cjk_path_s_position_maps_to_its_byte_offset() {
+        for (text, want) in [
+            ("预览在 /tmp/fontctl-preview-f6u3hm48/乐米月萤宋-preview.png，看一下", "/tmp/fontctl-preview-f6u3hm48/乐米月萤宋-preview.png"),
+            ("见 /tmp/a.rs第3行", "/tmp/a.rs"),
+            ("文件在 /tmp/〇号.csv 和 /tmp/文件2026.md", "/tmp/〇号.csv"),
+        ] {
+            let cs = chars(text);
+            let (pos, m) = find_paths(&cs).into_iter().next().expect(text);
+            let byte = text.char_indices().nth(pos).map(|(b, _)| b).unwrap();
+            assert_eq!(m.raw, want, "{text}");
+            assert_eq!(&text[byte..byte + want.len()], want, "{text}: byte offset {byte}");
+            assert_eq!(Some(byte), text.find(want), "{text}");
+        }
     }
 
     #[test]

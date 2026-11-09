@@ -20,7 +20,7 @@
 // `marked` is a singleton, so importing this module once registers it for every
 // renderer (Files preview, Team chat, Chat view).
 import { marked } from 'marked';
-import { STOP, codeSpanPath, firstPathAt, matchPath } from './path-grammar.ts';
+import { STOP, codeSpanPath, firstPathAt, isUrlTerminator, matchPath } from './path-grammar.ts';
 
 /** The ONE href encoder, for two kinds of input (#431 review P1-A).
  * - `'url'`: marked's own `cleanUrl`. It percent-encodes what encodeURI
@@ -93,7 +93,18 @@ marked.use({
         url = url.replace(/[.,;:!?'"]+$/, '');
         // Nothing meaningful past the scheme → let the default tokenizers try.
         if (!/^https?:\/\/.+/.test(url)) return;
-        return { type: 'safeUrl', raw: url, href: url, text: url };
+        // The URL OWNS its whole run (#100 round 4, orchestrator notes 33-35):
+        // the LINK still ends at its first CJK character, but the run goes on
+        // to whitespace or a URL terminator (isUrlTerminator, the paths'
+        // mask), and what lies in it is the URL's text, rendered as text: a
+        // code span, a link or a path there is never lexed as one.
+        let raw = url;
+        if (cut >= 0) {
+          let end = cut;
+          for (const c of m[0].slice(cut)) { if (isUrlTerminator(c)) break; end += c.length; }
+          if (end > cut) raw = m[0].slice(0, end);
+        }
+        return { type: 'safeUrl', raw, href: url, text: url, tail: raw.slice(url.length) };
       },
       // The text is a substring of the (already HTML-escaped) source and goes
       // through unchanged. The href is an ATTRIBUTE: a `"` in the URL would end
@@ -101,7 +112,8 @@ marked.use({
       // exactly as marked's own autolink does. An unencodable URL is text.
       renderer(token: any) {
         const href = encodeHref(token.href);
-        return href === null ? token.text : `<a href="${href}">${token.text}</a>`;
+        const tail = token.tail ?? '';
+        return href === null ? token.text + tail : `<a href="${href}">${token.text}</a>${tail}`;
       },
     },
     // A bare file path (board #431, core/path-grammar.ts) becomes the SAME

@@ -541,9 +541,37 @@ for nothing itself (pinned in `Feed.source.test.ts`).
 - **The grammar** has four forms, each with an optional `:line[:col]`:
   absolute with at least two slashes (`/compact` stays a slash command), `~/…`,
   `./…` / `../…`, and workspace-relative (at least one slash, a file-like last
-  segment, a first segment that is not a domain). Segments are ASCII; a path
-  stops at a CJK or fullwidth character and never starts after a letter,
-  digit, `/`, `.`, `:` or `@`. Dates, fractions, `and/or`, `github.com/a/b.js`
+  segment, a first segment that is not a domain). A path starts with an
+  ASCII character and never after a letter, digit, `/`, `.`, `:` or `@`.
+  Letters of any script may sit INSIDE it (board #100, owner 2026-11-09: "这
+  里的有中文的文件路径，好像有问题": pi-2's tool row
+  `/tmp/fontctl-preview-f6u3hm48/乐米月萤宋-preview.png` linked only
+  `/tmp/fontctl-preview-f6u3hm48/`, so a tap opened the directory): a run of
+  non-ASCII letters or numbers (by Unicode property: Alphabetic or \p{N},
+  so `〇` counts; never punctuation or a fullwidth form) joins the path when
+  the rest of the token carries a PATH SIGNAL, a further `/` or a `.` + an
+  ASCII letter or digit, sentence dots dropped (`中文目录/file.txt`,
+  `报告.pdf`, `报告v1.pdf`, `文件2026.md`, `中文Dir/file.txt`, `〇号.csv`,
+  `~/文档/x.md:12`). A run whose tail is a bare letter or digit, or nothing,
+  is prose in every path form, which is why the old rule stopped at every
+  CJK character: `/foo/bar已更新`, `/foo/bar已更新.`, `/tmp/a.rs第3行`,
+  `~/a.rs第3行` and `src/a.rs第3行` end before the CJK (rounds 1-2,
+  orchestrator notes 7 and 13). CJK punctuation and fullwidth forms always
+  stop a path. A URL LINK still ends at its first CJK character, but its run
+  up to whitespace, CJK punctuation (U+3000-U+303F, its letters and numbers
+  excepted) or a fullwidth form stays the URL's: `?q=中文Dir/file.txt`,
+  `?q=〇号Dir/file.txt`, `?q=𠮷野Dir/file.txt` and `?q=中文☃野Dir/file.txt`
+  link no local path. The URL OWNS that run (round 4, orchestrator notes
+  33-35): the renderer's URL token consumes it, links only up to the first
+  CJK character as before and renders the rest as text, and the Files
+  parser holes the same run, so no emitter (a bare path, a code span, a
+  Markdown link) ever sees inside it: a backticked path or a `[x](docs/x.md)`
+  link glued into the run references nothing (`https://h.dev/a中[x](docs/x.md)`
+  linked `docs/x.md` before this contract), while the same constructs after
+  a space or CJK punctuation are their own. URL termination and path-run
+  admission are two predicates, and both classify whole code points (round
+  3, orchestrator note 20: a symbol had ended the mask, and the TS mask had
+  split the astral `𠮷` into halves). Dates, fractions, `and/or`, `github.com/a/b.js`
   and URL queries are not paths. The rows of `path-grammar.cases.json` are the
   contract, run by the TS test and by #432's Rust twin.
 - **Where it applies:** prose, and an inline code span whose WHOLE content is
@@ -621,8 +649,9 @@ for nothing itself (pinned in `Feed.source.test.ts`).
   not against a `cd` earlier in the same command**: in `cd /other && wc -l
   worlds/uki.js` the second path opens `<project>/worlds/uki.js`, which may
   not be the file the command read. An absolute path is exact. No shell is
-  interpreted and there is no second router; spaces, non-ASCII and redirect
-  boundaries keep the message grammar's existing limits.
+  interpreted and there is no second router; spaces and redirect
+  boundaries keep the message grammar's existing limits, and a CJK name
+  inside a path links whole as in a message (#100).
 
 ### A `#<id>` in a bubble is a door to that issue (board #340, 2026-10-15)
 

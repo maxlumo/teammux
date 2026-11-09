@@ -28,17 +28,27 @@
 //                starts with a letter), and a FIRST segment with no dot unless
 //                it starts with one (`.github/ci.yml` matches,
 //                `github.com/a/b.js` and `v1.2/x.md` do not).
-// Segments are ASCII letters, digits and `. _ - @ + % ~`; `=` is a left
-// boundary, never part of a path (`--manifest-path=src-tauri/Cargo.toml`
-// links `src-tauri/Cargo.toml`). Not supported,
-// on purpose: spaces, non-ASCII segments, `#L12` fragments, and relative
+// Segments are ASCII letters, digits and `. _ - @ + % ~`, and LETTERS of any
+// script INSIDE a path (board #100, owner 2026-11-09: "这里的有中文的文件路径，
+// 好像有问题": `/tmp/fontctl-preview-f6u3hm48/乐米月萤宋-preview.png` linked only
+// up to the CJK file name): a run of non-ASCII letters or digits joins the
+// path when the path goes on right after it, through a `/`, `-` or `_`, or
+// a `.` followed by an ASCII letter or digit (`乐米月萤宋-preview.png`,
+// `中文目录/file.txt`, `报告.pdf`). A run that ENDS the token stays prose,
+// as before: `/foo/bar已更新` is `/foo/bar`, and so is `src/a.rs第3行` (a
+// digit after the run is not the path going on). A path still starts with
+// an ASCII character, and CJK punctuation and fullwidth forms always stop
+// it. `=` is a left boundary, never part of a path
+// (`--manifest-path=src-tauri/Cargo.toml` links `src-tauri/Cargo.toml`).
+// Not supported, on purpose: spaces, `#L12` fragments, and relative
 // directories without `./` in prose (`foo/bar/` is too often prose).
 //
 // A code span is a third context, `codeSpanPath(body)`: its whole content is
 // one of the forms above, or a workspace directory (`lab/out/x/`, #443). A
 // table row's optional `code` field is what `codeSpanPath(input)` returns.
 
-/** Where a bare URL or path ends: CJK and fullwidth characters. Code points
+/** Where a bare URL ends, and where a path ends unless a letter run inside
+ * it is followed by more path (`takeRun`): CJK and fullwidth characters. Code points
  * U+2E80-U+9FFF (CJK radicals through unified ideographs), U+3000-U+303F (CJK
  * punctuation), U+3040-U+30FF (Hiragana, Katakana), U+AC00-U+D7AF (Hangul
  * syllables), U+FF00-U+FFEF (halfwidth and fullwidth forms). Shared with the
@@ -63,6 +73,42 @@ export interface FoundPath extends PathMatch {
 
 const RUN = /^[A-Za-z0-9._@+%~/-]+/u;
 const RUN_CHAR = /[A-Za-z0-9._@+%~/-]/u;
+/** Letters or digits of another script that may sit INSIDE a path (#100):
+ * not ASCII, a letter or a number by Unicode property (Alphabetic, \p{N}:
+ * `〇` is a number), never punctuation and never a fullwidth form. The Rust
+ * twin's `is_word` is the same set. */
+const WORD_CHAR = /(?![\x00-\x7F\uFF00-\uFFEF])[\p{Alphabetic}\p{N}]/u;
+const WORD_RUN = new RegExp(`^(?:${WORD_CHAR.source})+`, 'u');
+
+
+/** The path-shaped runs at the start of `src`, shortest first: ASCII path
+ * characters, then each run of other letters the path goes on after (#100
+ * rounds 0-1, orchestrator note 7): followed by ANY path character that is
+ * still there once sentence dots are dropped (`报告v1.pdf`, `文件2026.md`,
+ * `中文Dir/file.txt`, `乐米月萤宋-preview.png`). A run that ends the token
+ * (`/foo/bar已更新`, `已更新.`) is prose. Every cut is a candidate: the
+ * longest that is a path wins (`src/a.rs第3行` is `src/a.rs`, since
+ * `src/a.rs第3` is not file-like). */
+function takeRuns(src: string): string[] {
+  let out = RUN.exec(src)?.[0] ?? '';
+  if (!out) return [];
+  const cuts = [out];
+  for (;;) {
+    const rest = src.slice(out.length);
+    const word = WORD_RUN.exec(rest)?.[0];
+    if (!word) return cuts;
+    // Round 2 (orchestrator note 13): the rest of the token (path and word
+    // characters, sentence dots dropped) must carry a PATH SIGNAL, a further
+    // `/` or a `.` + an ASCII letter or digit; a bare letter or digit tail
+    // (`第3行`) is prose in every path form.
+    const token = /^(?:[A-Za-z0-9._@+%~/-]|(?![\x00-\x7F\uFF00-\uFFEF])[\p{Alphabetic}\p{N}])*/u.exec(rest.slice(word.length))?.[0] ?? '';
+    const signal = /\/|\.[A-Za-z0-9]/u.test(token.replace(/\.+$/u, ''));
+    if (!signal) return cuts;
+    out += word + (RUN.exec(rest.slice(word.length))?.[0] ?? '');
+    cuts.push(out);
+  }
+}
+const takeRun = (src: string) => takeRuns(src).at(-1) ?? '';
 const LINE = /^:(\d+)(?::(\d+))?/u;
 const FILE_LIKE = /^.+\.[A-Za-z][A-Za-z0-9]{0,9}$/u;
 
@@ -112,15 +158,16 @@ function isPath(p: string): boolean {
  * it ('' at the start of the text). */
 export function matchPath(src: string, prev: string): PathMatch | null {
   if (!leftOk(prev)) return null;
-  const run = RUN.exec(src)?.[0];
-  if (!run) return null;
-  const suffix = LINE.exec(src.slice(run.length));
-  const path = suffix ? run : stripDots(run);
-  if (!isPath(path)) return null;
-  if (!suffix) return { raw: path, path };
-  const out: PathMatch = { raw: path + suffix[0], path, line: Number(suffix[1]) };
-  if (suffix[2] !== undefined) out.col = Number(suffix[2]);
-  return out;
+  for (const run of takeRuns(src).reverse()) {
+    const suffix = LINE.exec(src.slice(run.length));
+    const path = suffix ? run : stripDots(run);
+    if (!isPath(path)) continue;
+    if (!suffix) return { raw: path, path };
+    const out: PathMatch = { raw: path + suffix[0], path, line: Number(suffix[1]) };
+    if (suffix[2] !== undefined) out.col = Number(suffix[2]);
+    return out;
+  }
+  return null;
 }
 
 /** The path an inline code span's WHOLE content is, or null (a span that only
@@ -131,13 +178,30 @@ export function matchPath(src: string, prev: string): PathMatch | null {
 export function codeSpanPath(body: string): PathMatch | null {
   const hit = matchPath(body, '');
   if (hit) return hit.raw === body ? hit : null;
-  if (!body.endsWith('/') || RUN.exec(body)?.[0] !== body) return null;
+  if (!body.endsWith('/') || takeRun(body) !== body) return null;
   const segs = body.slice(0, -1).split('/');
   if (segs.length < 2 || segs.includes('') || !workspaceFirst(segs[0]!)) return null;
   return { raw: body, path: body };
 }
 
 const URL_REGION = /[A-Za-z][A-Za-z0-9+.-]*:\/\/\S*/gu;
+/** Does `c` (one CODE POINT) end a URL's mask? (#100 rounds 1-3,
+ * orchestrator notes 7, 13 and 20.) The ORIGINAL terminators: CJK
+ * punctuation (U+3000-U+303F, except its letters and numbers by category,
+ * so `〇` is not one) and the fullwidth forms. A symbol (`☃`), a CJK letter
+ * or an astral letter (`𠮷`) inside a query is the URL's. This is URL
+ * TERMINATION; `WORD_CHAR` is path-run ADMISSION, a different question. */
+export const isUrlTerminator = (c: string): boolean => {
+  const cp = c.codePointAt(0) ?? 0;
+  return (cp >= 0xFF00 && cp <= 0xFFEF) || (cp >= 0x3000 && cp <= 0x303F && !/[\p{Alphabetic}\p{N}]/u.test(c));
+};
+/** The UTF-16 offset where a URL's mask ends inside `text`, -1 for none:
+ * classified by whole code points (for..of), offsets kept in UTF-16 units. */
+const urlMaskEnd = (text: string): number => {
+  let i = 0;
+  for (const c of text) { if (isUrlTerminator(c)) return i; i += c.length; }
+  return -1;
+};
 
 /** The paths in PLAIN text, in order. URLs (a scheme and `://`, up to
  * whitespace or a STOP character, query and fragment included) are masked
@@ -148,7 +212,7 @@ const URL_REGION = /[A-Za-z][A-Za-z0-9+.-]*:\/\/\S*/gu;
 function* scan(text: string): Generator<FoundPath> {
   const masked = new Uint8Array(text.length);
   for (const m of text.matchAll(URL_REGION)) {
-    const stop = m[0].search(STOP);
+    const stop = urlMaskEnd(m[0]);
     masked.fill(1, m.index, m.index + (stop < 0 ? m[0].length : stop));
   }
   let i = 0;

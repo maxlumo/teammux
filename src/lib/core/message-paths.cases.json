@@ -61,7 +61,7 @@
   {"body": "`https://h.dev/a`[x](docs/x.md)", "feed": ["docs/x.md"], "files": ["docs/x.md"]},
   {"body": "`a/b.md`https://h.dev/?q=[x](r.md)", "feed": ["a/b.md"], "files": ["a/b.md"]},
   {"body": "x https://h.dev/a`b`[y](docs/y.md)", "feed": [], "files": []},
-  {"body": "https://h.dev/a中[x](docs/x.md)", "feed": ["docs/x.md"], "files": ["docs/x.md"]},
+  {"body": "https://h.dev/a中[x](docs/x.md)", "feed": [], "files": [], "why": "#100 round 4 (orchestrator note 35): a link glued inside a URL's run, after its first CJK letter, is part of the URL's text, not a reference (was docs/x.md before the URL-region contract)"},
   {"body": "https://h.dev/a。看 `b/c.md`", "feed": ["b/c.md"], "files": ["b/c.md"]},
   {"body": "\\(https://h.dev/a src/file.rs\\) then docs/ok.md", "feed": ["docs/ok.md"], "files": ["docs/ok.md"]},
   {"body": "\\[https://h.dev/a src/file.rs\\] then docs/ok.md", "feed": ["docs/ok.md"], "files": ["docs/ok.md"]},
@@ -77,5 +77,18 @@
   {"body": "[`lab/out/x/`](https://x.dev)", "feed": [], "files": []},
   {"body": "[`foo/bar/`](docs/a.md)", "feed": ["docs/a.md"], "files": ["docs/a.md"]},
   {"body": "[see `lab/out/x/`][1]\n\n[1]: https://x.dev/", "feed": [], "files": []},
-  {"body": "https://h.dev/?q=`lab/out/x/`", "feed": [], "files": []}
+  {"body": "https://h.dev/?q=`lab/out/x/`", "feed": [], "files": []},
+  { "body": "见 https://example.com/s?q=中文Dir/file.txt", "feed": [], "files": []},
+  { "body": "预览在 /tmp/fontctl-preview-f6u3hm48/乐米月萤宋-preview.png，看一下", "feed": ["/tmp/fontctl-preview-f6u3hm48/乐米月萤宋-preview.png"], "files": ["/tmp/fontctl-preview-f6u3hm48/乐米月萤宋-preview.png"]},
+  { "body": "见src/a.rs第3行和 /tmp/报告v1.pdf", "feed": ["src/a.rs", "/tmp/报告v1.pdf"], "files": ["src/a.rs", "/tmp/报告v1.pdf"]},
+  { "body": "见 /tmp/a.rs第3行 和 ~/a.rs第3行", "feed": ["/tmp/a.rs", "~/a.rs"], "files": ["/tmp/a.rs", "~/a.rs"]},
+  { "body": "见 https://example.com/s?q=〇号Dir/file.txt", "feed": [], "files": []},
+  { "body": "文件在 /tmp/〇号.csv 和 /tmp/文件2026.md", "feed": ["/tmp/〇号.csv", "/tmp/文件2026.md"], "files": ["/tmp/〇号.csv", "/tmp/文件2026.md"]},
+  { "body": "见 https://example.com/s?q=𠮷野Dir/file.txt", "feed": [], "files": []},
+  { "body": "见 https://example.com/s?q=中文☃野Dir/file.txt", "feed": [], "files": []},
+  { "body": "https://h.dev/?q=中文`lab/out/x/`", "feed": [], "files": []},
+  { "body": "https://h.dev/?q=中文[read](lab/out/x.md)", "feed": [], "files": []},
+  { "body": "https://h.dev/?q=中文 `lab/out/x/`", "feed": ["lab/out/x/"], "files": ["lab/out/x/"], "why": "separated by whitespace: the code span is its own"},
+  { "body": "https://h.dev/?q=中文。[read](lab/out/x.md)", "feed": ["lab/out/x.md"], "files": ["lab/out/x.md"], "why": "separated by CJK punctuation: the link is its own"},
+  { "body": "https://h.dev/?q=`lab/out/x/`", "feed": [], "files": []}
 ]
