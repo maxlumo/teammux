@@ -461,7 +461,12 @@ made by `tmm spawn`, not `project create --with-agent`: measured in `gw-a`
 on 2026-10-12, `--with-agent kiro` seeds a plain shell slot (`tmm agent list`
 shows `kiro (shell)`, `managed: false`, no `/work/.tmm/agents/` home), which
 is not what the multi-server pass reads. The image builds
-THIS checkout's web UI, `tmm` and `server` inside the container (`embed-ui`);
+THIS checkout's web UI, `tmm` and `server` inside the container (`embed-ui`),
+as the Dockerfile's `gateway` stage, named by `target: gateway` in
+compose.yaml: compose builds the LAST stage when none is named, and since
+#55 S3 (2026-11-06) that is the live rig, so the smoke's gateways ran
+`live-check` and the run failed reading `config.toml` (measured
+2026-11-09 05:25);
 no host binary, host path or host socket is ever mounted, and the script runs
 no tmux, no systemctl and not the host's `tmm`. The smoke then logs in from the
 host through each published `127.0.0.1` port, which answers with that

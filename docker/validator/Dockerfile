@@ -48,7 +48,7 @@ RUN --mount=type=cache,target=/usr/local/cargo/registry \
     && install -D -t /out src-tauri/target/release/tmm src-tauri/target/release/server
 
 # --- 3. the machine: tmux, the binaries, a fake agent CLI --------------------
-FROM debian:trixie-slim
+FROM debian:trixie-slim AS gateway
 RUN apt-get update \
     && apt-get install -y --no-install-recommends tmux ca-certificates procps git \
     && rm -rf /var/lib/apt/lists/* \

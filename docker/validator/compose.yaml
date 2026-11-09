@@ -25,6 +25,9 @@ x-gateway: &gateway
   build:
     context: ../..
     dockerfile: docker/validator/Dockerfile
+    # The gateway stage by name: the Dockerfile's LAST stage is the live rig
+    # (#55 S3), and compose builds the last stage when no target is named.
+    target: gateway
     # The checkout's public source revision (scripts/e2e-docker.mjs sets them
     # from git; empty = `dev`). The image has no .git, so this is how a build
     # at commit A can differ from a UI built at B (board #368).
