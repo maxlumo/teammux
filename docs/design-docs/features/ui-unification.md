@@ -340,7 +340,7 @@ Agents (no header bar at all, 16px sans h1). Three dialects, one app.
 | class | role |
 |---|---|
 | `.page-head` | THE page header bar: flex, `min-height 42px`, `padding 6px 16px`, `border-bottom: 1px solid var(--border)`, transparent bg; `h1` inside is mono 15px/600 |
-| `.side-row` | sidebar list row (the Hub `.p-row` pattern): flex, `8px 10px`, radius 9px, hover `surface2`, `.open` = `accent-bg`, `.add` = dim |
+| `.side-row` | sidebar list row (the Hub `.p-row` pattern): flex, `8px 10px`, radius 9px, hover `surface2`, `.open` = `--bubble-in` + `--text`, the chat's selected pair (#96), `.add` = dim |
 
 Adoption:
 

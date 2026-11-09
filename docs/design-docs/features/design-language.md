@@ -848,15 +848,26 @@ by the contract above, not extended by new page-local overrides.
   by colour, not by a
   frame. Dialog CTAs keep their text chips: a destructive confirm must read
   its consequence.
-- `.side-row` — sidebar list row; hover `--surface2`, open/selected the
-  travelling pill's own paint, `--accent-bg` plus an inset 1px
-  `--accent-line` (one rule in app.css; a `.proj-row` yields both to its
-  sidebar's `.slide-pill.soft`). Board #94 (owner 2026-11-09: "左边的选中的
-  标签没有高亮，导致我不知道现在选中的是哪一个"): the wash alone was 1.23:1
-  (dark) and 1.10:1 (light) against `--bg2`, so the selected Settings
-  category and Agents row could not be told apart; the line is 5.57:1 and
-  3.36:1, above the 3:1 floor for a selected mark (pinned in
-  `ui/sidebar.source.test.ts`, computed from the tokens).
+- `.side-row` — sidebar list row; hover `--surface2`; open/selected is the
+  CHAT's selected pair, the `--bubble-in` fill the Hub's selected card wears
+  (Roster `.acard.sel`) with `--text` ink, against neighbours in `--text2`
+  (the chat's own pair: a team name rests in `--text2` and is `--text` when
+  chosen; #96 round 1, reviewer note 10: the ink half was missing, every row
+  wore `--text`, measured selected and neighbour both rgb(226,232,240)
+  dark); the fill is ONE rule in app.css beside the resting-ink rule
+  `.side-row:not(.proj-row)` (a project row keeps its ink, its sidebar's
+  travelling marker is the mark there), in every
+  sidebar and at every width (compact Settings' own `--control-surface` open
+  paint from #162 is gone); a `.proj-row` yields it to its sidebar's
+  `.slide-pill.soft`. History: #94 added an inset 1px `--accent-line` to the
+  12%/8% accent wash, because the wash alone was 1.23:1 / 1.10:1 against
+  `--bg2` (owner 2026-11-09 04:16: "左边的选中的标签没有高亮"). The owner
+  rejected the stroke (05:14: "选中的样式应该是背景色的样式吧，不是画一个线条
+  框，要和 chat 风格一致"), so #96 took the chat's fill instead. That fill is
+  1.14:1 (dark) / 1.07:1 (light) against `--bg2`; the 3:1-by-fill floor
+  yielded to "same as chat" (orchestrator, #96 note 2). If it is still too
+  faint on a device, `--bubble-in` itself gets stronger, so chat and
+  sidebar move together; a sidebar-only paint is a second species.
 - A resting CARD on the page canvas (agent cards, the connect card) wears
   `--surface` + 1px `--border`: dark-theme elevation is the surface lift,
   never a black drop shadow alone — `--bg`-on-`--bg` with a black shadow
