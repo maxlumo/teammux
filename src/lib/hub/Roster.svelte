@@ -25,7 +25,7 @@
     roomReady = false, justLoaded = false, rosterBase = null,
     composerText = '', managedNames = [], busyNames = [], interrupting = [],
     stateLabel = (state) => state, detailLabel = (detail) => detail, stateTone = () => undefined,
-    onselect: setRecipient = () => {}, oninterrupt: interrupt = () => {}, onfilter = () => {},
+    onselect: setRecipient = () => {}, oninterrupt: interrupt = () => {}, onfilter = () => {}, onleaveview = () => {},
     /** Hub's one target predicate (#482: the reading-filter lock). A control
      * that would pick a target it refuses is disabled — the dimming made true. */
     targetable = (_target) => true,
@@ -264,9 +264,19 @@
     return () => cardDrags.cancel();
   });
 
+  /** A single click or tap on ANOTHER card while one agent is shown is an
+   * explicit act (board #101, owner 2026-11-09 18:06: "双击选中agent的时候 点击
+   * tab旁边的 agent应该取消选中 状态"): the view is left FIRST, through Hub's one
+   * filter writer, and only then does the card's own meaning run (select a
+   * live one, open a stopped one's menu), so the strip and the target never
+   * disagree (#482). The shown card's own press keeps its meaning. */
+  function leaveViewFor(name) {
+    if (filterAgent && filterAgent !== name) onleaveview();
+  }
   function clickAgent(event, name) {
     if (cardDrags.consumeClick()) return;
     if (!coarsePointer() && event.detail > 1) return;
+    leaveViewFor(name);
     // The recipient's own card: a second click opens its menu (Record only
     // leads), it does not deselect (owner, 2026-09-13: "agent选中卡片时，再次点击
     // 不是取消选中，而且展开选项卡"; board #196). Under All, a click narrows to the card.
@@ -294,6 +304,7 @@
   }
   function stoppedMenu(event, name) {
     if (!coarsePointer() && event.detail > 1) return;
+    leaveViewFor(name);
     oncontext(cardAnchor(event.currentTarget), name, touchInfo(() => offCardInfo(name)));
   }
 
@@ -435,7 +446,6 @@
           onfocusin={() => arm(a.name)} onfocusout={(e) => { if (!e.currentTarget.contains(e.relatedTarget)) disarm(a.name); }}>
           <button type="button" class="agent-select"
             aria-pressed={isAddressed(a.name)}
-            aria-disabled={targetable(a.name) ? undefined : 'true'}
             aria-label={[`${names.shown(a.name)} · ${stateLabel(a.state)}`, a.team, detailLabel(a.detail, a.error), vitalsLine(a.vitals), unread.has(a.name) ? t('hubUnread') : '', mentioned ? t('hubToAlsoHint').replace('{names}', `@${names.shown(a.name)}`) : '', filterAgent === a.name ? t('hubFilterItem') : ''].filter(Boolean).join(' · ')}
             use:hoverInfo={() => cardInfo(a)}
             onclick={(e) => clickAgent(e, a.name)} ondblclick={(e) => focusAgent(e, a.name)}

@@ -6003,13 +6003,11 @@ test('the reading filter selects its agent, and every other target is refused wh
     assert.ok(app.document.querySelector('.cards.filtering'));
     assert.equal(selectedCard(app.document), 'bob', 'showing only bob is talking to bob');
 
-    // Another card: disabled for real, and a click (a keyboard activation is
-    // one) picks nothing. Its double-click is the explicit filter switch (#483).
+    // Another card: since #101 (owner 2026-11-09 18:06) a single click on it is an explicit act, it
+    // leaves the view and selects it (#101's own tests); here only that it is no longer a disabled
+    // control. Every OTHER target choice below stays refused while bob is shown.
     const alice = stripCard(app.document, 'alice').querySelector<HTMLButtonElement>('.agent-select')!;
-    assert.equal(alice.getAttribute('aria-disabled'), 'true');
-    assert.equal(stripCard(app.document, 'bob').querySelector('.agent-select')!.getAttribute('aria-disabled'), null);
-    alice.click(); await app.flush();
-    assert.equal(selectedCard(app.document), 'bob', 'a disabled card takes no target, nor the filter');
+    assert.equal(alice.getAttribute('aria-disabled'), null);
     assert.ok(stripCard(app.document, 'bob').classList.contains('filtered'));
 
     // @all and the team: disabled; the team's name still opens its menu.
@@ -6063,7 +6061,6 @@ test('the reading filter selects its agent, and every other target is refused wh
     f.item(items, 'Show everything')!.click(); await app.flush();
     assert.equal(app.document.querySelector('.cards.filtering'), null);
     assert.equal(selectedCard(app.document), 'bob', 'leaving the view keeps the target');
-    assert.equal(alice.getAttribute('aria-disabled'), null);
     assert.equal(all.getAttribute('aria-disabled'), null);
     alice.click(); await app.flush();
     assert.equal(selectedCard(app.document), 'alice', 'and every target is open again');
@@ -6177,7 +6174,8 @@ test('filtering an already stopped agent locks the same way, and its return sele
     assert.ok(app.document.querySelector('.acard.off[data-agent="bob"].filtered'));
     assert.equal(selectedCard(app.document), '', 'alice is no longer the target: nothing is deliverable');
     assert.match(app.input.getAttribute('placeholder') ?? '', /Showing only bob, who is stopped/u);
-    assert.equal(stripCard(app.document, 'alice').querySelector('.agent-select')!.getAttribute('aria-disabled'), 'true');
+    // #101: another card is a working control while bob is shown (a press leaves the view), not aria-disabled.
+    assert.equal(stripCard(app.document, 'alice').querySelector('.agent-select')!.getAttribute('aria-disabled'), null);
     // Leaving the view while bob is stopped keeps that target: the room, not alice again.
     app.document.querySelector<HTMLButtonElement>('.acard.off[data-agent="bob"] .agent-select')!.click(); await app.flush();
     f.item([...app.document.querySelectorAll<HTMLButtonElement>('.ctx button')], 'Show everything')!.click(); await app.flush();
@@ -6223,19 +6221,21 @@ test('while one agent is shown, showing another moves filter and target together
     await f.showOnly('bob');
     assert.deepEqual([shown(), selectedCard(app.document)], ['bob', 'bob']);
 
-    // Desktop double-click on alice. Its two single clicks come first and must
-    // neither retarget early nor end the filter (review point).
+    // Desktop double-click on alice. Its first click is a single click, which
+    // since #101 leaves the view and selects alice (view and target move
+    // together, never apart: the #482 point); the second is ignored.
     const a = card('alice');
     for (const detail of [1, 2]) {
       a.dispatchEvent(new app.window.MouseEvent('click', { detail, bubbles: true, cancelable: true }));
       await app.flush();
-      assert.deepEqual([shown(), selectedCard(app.document)], ['bob', 'bob'], `after click ${detail}: nothing moved yet`);
+      assert.deepEqual([shown(), selectedCard(app.document)], ['', 'alice'], `after click ${detail}: the view is left, alice selected (#101)`);
     }
     a.dispatchEvent(new app.window.MouseEvent('dblclick', { detail: 2, bubbles: true, cancelable: true }));
     await app.flush();
     assert.deepEqual([shown(), selectedCard(app.document)], ['alice', 'alice'], 'the double-click shows alice and selects her');
     assert.deepEqual(await send('one'), ['@alice one'], 'and the line goes to alice alone');
-    assert.equal(card('bob').getAttribute('aria-disabled'), 'true', 'the lock now holds on alice');
+    assert.equal(f.item(await f.menu('bob'), 'Message')!.disabled, true, 'the lock now holds on alice (another card\u2019s Message is refused)');
+    await f.closeMenu();
 
     // The phone's way: the card menu's "Only its messages", clicked.
     f.item(await f.menu('bob'), 'Only its messages')!.click();
@@ -6243,8 +6243,7 @@ test('while one agent is shown, showing another moves filter and target together
     assert.deepEqual([shown(), selectedCard(app.document)], ['bob', 'bob'], 'the menu switches both');
     assert.deepEqual(await send('two'), ['@bob two']);
 
-    // A bare target change is still refused: a single click, the Message item.
-    card('alice').click(); await app.flush();
+    // A bare target change is still refused: the Message item (#101 made a single card click an explicit act).
     f.item(await f.menu('alice'), 'Message')!.click(); await app.flush();
     assert.deepEqual([shown(), selectedCard(app.document)], ['bob', 'bob'], 'no filter change, no target change');
 
@@ -6283,6 +6282,126 @@ test('while one agent is shown, showing another moves filter and target together
     assert.match(app.input.getAttribute('placeholder') ?? '', /Showing only bob, who is stopped/u);
   } finally { await app.close(); }
 });
+
+// Board #101 (owner 2026-11-09 18:06: "双击选中agent的时候 点击tab旁边的 agent应该取消选中 状态"): while
+// one agent is shown, a single click (or tap) on ANOTHER card is an explicit act: it leaves the view, then
+// selects that card through the one writer (option A, leader's recommendation). The gesture matrix:
+// click / double-click (desktop) and tap / double-tap (touch) x nothing shown / another shown / itself shown
+// x a live / a stopped card. Each row ends with [shown, target, menu open].
+async function matrixFixture(context: TestContext, touch: boolean) {
+  const f = await lockFixture(context);
+  const { app } = f;
+  if (touch) {
+    const media = app.window.matchMedia;
+    app.window.matchMedia = (query: string) => Object.assign(media(query), { matches: query === '(any-pointer: coarse)' });
+  }
+  const shown = () => app.document.querySelector<HTMLElement>('.acard.filtered')?.dataset.agent ?? '';
+  const menuOpen = () => !!app.document.querySelector('.ctx');
+  const state = () => [shown(), selectedCard(app.document), menuOpen()];
+  const button = (name: string) => app.document.querySelector<HTMLButtonElement>(`.acard[data-agent="${name}"] .agent-select`)!;
+  let clock = 20_000;
+  const pointer = (el: Element, type: string, props: Record<string, unknown>) => {
+    const e = new app.window.MouseEvent(type, { bubbles: true, cancelable: true, clientX: 30, clientY: 12 });
+    for (const [k, v] of Object.entries({ pointerType: 'touch', isPrimary: true, ...props })) Object.defineProperty(e, k, { value: v });
+    el.dispatchEvent(e);
+  };
+  /** One press: a desktop click(detail), or a finger tap (pointer events, then click). */
+  const press = async (name: string, detail: number, gap = 500) => {
+    clock += detail > 1 ? 120 : gap;
+    const el = button(name);
+    if (touch) {
+      pointer(el, 'pointerdown', { timeStamp: clock });
+      pointer(el, 'pointerup', { timeStamp: clock + 60 });
+    }
+    el.dispatchEvent(new app.window.MouseEvent('click', { detail, bubbles: true, cancelable: true }));
+    await app.flush();
+  };
+  const single = (name: string) => press(name, 1);
+  const double = async (name: string) => {
+    await press(name, 1);
+    await press(name, 2);
+    button(name).dispatchEvent(new app.window.MouseEvent('dblclick', { detail: 2, bubbles: true, cancelable: true }));
+    await app.flush();
+  };
+  const closeMenu = async () => { if (menuOpen()) { app.window.dispatchEvent(new app.window.KeyboardEvent('keydown', { key: 'Escape', bubbles: true })); await app.flush(); } };
+  const stopBob = async () => {
+    f.setBobLive(false);
+    const before = f.restarts.length;
+    f.item(await f.menu('carol'), 'Restart')!.click();
+    for (let i = 0; i < 12 && f.restarts.length === before; i++) await app.flush();
+    for (let i = 0; i < 8 && app.document.querySelector('.acard.off[data-agent="bob"]') == null; i++) await app.flush();
+    await closeMenu();
+  };
+  const send = async (line: string) => {
+    const before = f.posts.length;
+    await app.text(line);
+    app.send.click();
+    for (let i = 0; i < 8 && f.posts.length === before; i++) await app.flush();
+    return f.posts.slice(before);
+  };
+  return { ...f, state, single, double, closeMenu, stopBob, send, button };
+}
+
+for (const touch of [false, true]) {
+  const how = touch ? 'tap' : 'click';
+  test(`while one agent is shown, a single ${how} on another LIVE card leaves the view and selects it (#101)`, { timeout: 60000 }, async (context) => {
+    const m = await matrixFixture(context, touch);
+    const { app } = m;
+    try {
+      // Nothing shown: a single press selects (unchanged).
+      await m.single('bob');
+      assert.deepEqual(m.state(), ['', 'bob', false], 'nothing shown: it selects');
+      // bob shown (the card menu's way in), a single press on alice.
+      await m.showOnly('bob');
+      assert.deepEqual(m.state(), ['bob', 'bob', false]);
+      assert.equal(m.button('alice').getAttribute('aria-disabled'), null, 'another live card is a working control now');
+      await m.single('alice');
+      assert.deepEqual(m.state(), ['', 'alice', false], 'the view is left and alice selected, one state');
+      assert.equal(m.feedback(), '', 'no refusal, no toast');
+      assert.deepEqual(await m.send('hi'), ['@alice hi'], 'and the line goes to alice');
+      // The shown card's OWN single press still opens its menu (#196), the view stays.
+      await m.double('bob');
+      assert.deepEqual(m.state().slice(0, 2), ['bob', 'bob'], 'double on bob shows bob (#483)');
+      await m.closeMenu();
+      await m.single('bob');
+      assert.deepEqual(m.state(), ['bob', 'bob', true], 'its own card opens its menu');
+      await m.closeMenu();
+      // A double on another card still switches the view to it (#483/#484), whatever its first press did.
+      await m.double('carol');
+      await m.closeMenu();
+      assert.deepEqual(m.state(), ['carol', 'carol', false], 'the double switches the view to carol');
+      // A double on the shown card itself still leaves the view, target kept.
+      await m.double('carol');
+      await m.closeMenu();
+      assert.deepEqual(m.state(), ['', 'carol', false]);
+    } finally { await app.close(); }
+  });
+
+  test(`while one agent is shown, a single ${how} on a STOPPED card leaves the view and opens its menu, no retarget (#101)`, { timeout: 60000 }, async (context) => {
+    const m = await matrixFixture(context, touch);
+    const { app } = m;
+    try {
+      await m.stopBob();
+      await m.showOnly('alice');
+      assert.deepEqual(m.state(), ['alice', 'alice', false]);
+      assert.ok(app.document.querySelector('.acard.off[data-agent="bob"]'), 'bob is a stopped card');
+      await m.single('bob');
+      assert.deepEqual(m.state(), ['', 'alice', true], 'the view is left; the stopped card opens its menu; the target stays');
+      await m.closeMenu();
+      // Showing the STOPPED shown agent: a press on its own card opens its menu and keeps the view.
+      await m.showOnly('carol');
+      await m.double('bob');
+      await m.closeMenu();
+      assert.deepEqual(m.state(), ['bob', '', false], 'a double on the stopped card shows it, nobody targeted (#482 P1-B)');
+      await m.single('bob');
+      assert.deepEqual(m.state(), ['bob', '', true], 'its own card: its menu, the view stays');
+      await m.closeMenu();
+      // From a stopped shown agent, a single press on a live card leaves the view and selects it.
+      await m.single('alice');
+      assert.deepEqual(m.state(), ['', 'alice', false]);
+    } finally { await app.close(); }
+  });
+}
 
 // Board #490 (owner 2026-11-01 22:29: "我点击给哪一条消息回复的时候，agent 要给我自动切换过去，
 // 避免回复不对的情况"): a Reply addresses the message's sender. Before, the sender was
@@ -6449,9 +6568,9 @@ test('a double-tap on a card shows only it on a touch device, as a double-click 
     assert.deepEqual([shown(), selectedCard(app.document), menu()], ['bob', 'bob', false], 'the pair shows only bob; the second tap opened no menu');
     assert.deepEqual(await send('one'), ['@bob one']);
 
-    // Filtering bob, a double-tap on alice: tap 1 refused, the pair switches (#483).
+    // Filtering bob, a double-tap on alice: tap 1 leaves the view and selects alice (#101), the pair shows her (#483).
     await tap('alice', 1);
-    assert.deepEqual([shown(), selectedCard(app.document)], ['bob', 'bob'], 'tap 1 is refused while bob is shown');
+    assert.deepEqual([shown(), selectedCard(app.document)], ['', 'alice'], 'tap 1 leaves the view and selects alice (#101)');
     await tap('alice', 2); // and this time no dblclick at all
     assert.deepEqual([shown(), selectedCard(app.document), menu()], ['alice', 'alice', false]);
     assert.deepEqual(await send('two'), ['@alice two']);

@@ -1047,7 +1047,7 @@ pinned it as intended, and both checks passed against the ruling.
   Reply is not an auto-pick: it is an explicit switch, below (#490).
   No path needs its own gate.
 - The controls derive their state from the same predicate, which makes the
-  dimming true. The cards' select, the team names and the @all command are
+  dimming true. The team names and the @all command are
   `aria-disabled`, never natively `disabled`: each stays focusable, so its menu
   keeps a keyboard and context entry on every engine (review P2-C; the first
   cut disabled @all natively and relied on Chromium passing contextmenu to its
@@ -1057,8 +1057,19 @@ pinned it as intended, and both checks passed against the ruling.
   moves first and then selects it through the writer, which compares against
   the NEW shown agent (#483, owner 2026-10-30: "双击选中了一个 Agent 只看它的时候
   我再双击旁边的 Agent 好像没办法切换过去"; #482 had refused it too, and pinned
-  that as intended). Only a target change that comes with no filter change is
-  refused. The refused
+  that as intended). A single click or tap on ANOTHER card is an explicit act
+  too since #101 (owner 2026-11-09 18:06: "双击选中agent的时候 点击tab旁边的
+  agent应该取消选中 状态"; option A, the leader's recommendation): Roster
+  leaves the view FIRST through Hub's one filter writer (`onleaveview` ->
+  `setFilter('')`), then the card's own meaning runs, a live card selected
+  through `setRecipient`, a stopped one's menu opened with no retarget; so the
+  cards' select is no longer `aria-disabled`, and the view and the target move
+  together, never apart (the #482 point). The shown card's own press keeps
+  its meaning (its menu, #196), and a double-click/double-tap on another card
+  still ends showing it (#483/#484): its first press leaves the view, the
+  double shows it. Only a target change that comes with no filter change is
+  refused (@all, a team, the menus' Message items, Reply's own rule, the
+  spawn and restart auto-picks). The refused
   menu items are disabled. `CommandButton` gained `ariaDisabled` for this.
 - Only target choice is locked. Watch, configure, restart, stop and switching
   the view ("Only its messages" on another card) stay. Leaving the filter is
@@ -1121,11 +1132,14 @@ Considered and rejected (#482 design round): the filter FOLLOWING the target,
 where a tap on another agent moves both and @all or a team ends the filter.
 That has no disabled control, but a mis-tap on @all or a spawn's auto-pick
 still sends to the wrong place while both states agree. It is a different
-product from the one the owner asked for.
+product from the one the owner asked for. #101 took back only the CARD's
+single press (the owner's own words, above): a card is a person's explicit
+choice of one agent, which @all, a team and the auto-picks are not.
 
 `hub-composer.test.ts` pins the predicate and the send check.
 `Hub.mount.test.ts` pins the actual posts and commands: the menu filter, a
-disabled card, @all and its menu, a team, the menus, a restart's pick, the
+card press that leaves the view (#101: click and tap x live and stopped,
+the shown card's own press, the doubles), @all and its menu, a team, the menus, a restart's pick, the
 body, unknown-name, attachment and slash addresses (draft, attachment and
 reply kept), a stopped X both ways in, and leaving the filter. `Hub.source.test.ts` pins that
 the lock sits in the writer and before the send clears anything.

@@ -2903,6 +2903,7 @@
         onallcontext={openAllMenu} onteamcontext={openTeamMenu}
         {stateLabel} {detailLabel} {stateTone} onselect={setRecipient} {targetable} oninterrupt={interrupt}
         onfilter={(name) => { closeCtx(); toggleFilter(name); }}
+        onleaveview={() => setFilter('', 'user')}
         onadd={() => openPicker('add')}
         {moveScope} onmove={(name, team, scope) => moveAgent(name, team, scope.session)}
         oncontext={(at, name, info) => openCtx(at, name, agentItems(name), info)} />
