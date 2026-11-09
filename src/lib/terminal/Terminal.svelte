@@ -44,6 +44,8 @@
   // Max wait for server to echo our resize. If never confirmed (external resize
   // or slow tmux), client falls back to trusting server-reported dimensions.
   const RESIZE_CONFIRM_TIMEOUT_MS = 5000;
+  /** A person signal re-asserts this terminal's fit at most once per this (board #98). */
+  const CLAIM_MS = 1000;
 
   // xterm.js fallback cell size ratios (used when render dimensions unavailable)
   const CELL_W_RATIO = 0.6;
@@ -320,6 +322,8 @@
     });
   });
   let doResizeRef = null;
+  // Set by the main $effect: claim the pane's size on a person signal (board #98).
+  let claimRef = null;
   // Set by the main $effect (its resize timer): withdraws a size not yet sent
   // when the terminal is hidden (board #395).
   let cancelPaneResizeRef = null;
@@ -1271,6 +1275,9 @@
         term?.scrollToBottom();
       }
       doResizeRef?.();
+      // Back on screen is a person signal too: claim the fit against the
+      // newest reported size, even if that frame is not drawn yet (#98).
+      claimRef?.();
       if (lastContent && resumeAtTail) writeToXterm(lastContent, lastCursor);
       term?.refresh(0, term.rows - 1);
 
@@ -1369,11 +1376,25 @@
     // (board #397 review P2-1: the box measured 0, then came back at the
     // SAME width) would send nothing ever: the fit equals the xterm's dims.
     let assertOwed = false;
+    // The newest resize ATTEMPT, the person-signal claim's one record (board
+    // #98 round 4, orchestrator note 39, the design note on the issue): every
+    // queued resize mints it, replacing any older one, with the newest
+    // REPORTED size at queue time and the size it asks for; its state goes
+    // queued -> sent -> accepted | refused, or queued -> withdrawn (hidden).
+    // A reply applies only to the attempt it answers AND only while that is
+    // still the newest; an older attempt's reply neither clears nor
+    // publishes. The person-signal gate reads only this record and the
+    // newest report (`covered`, below). Rounds 1-3 kept several fields
+    // (claimed report, in-flight and queued claims, accepted report, send
+    // id) that one interleaving at a time could set against each other.
+    let attemptSeq = 0, latest = null;
+    const settle = (attempt, state) => { if (latest === attempt) attempt.state = state; };
     function queuePaneResize(cols, rows) {
       pendingCols = cols;
       pendingRows = rows;
       pendingResizeTs = Date.now();
       clearTimeout(resizeSendTimer);
+      const attempt = latest = { id: ++attemptSeq, report: lastCursor, cols, rows, state: 'queued' };
       resizeSendTimer = setTimeout(() => {
         resizeSendTimer = 0;
         // The SEND is the gate (board #395 review P1-a): a size queued while
@@ -1383,7 +1404,8 @@
         // Nor is a size that is not one ever sent (board #397, the #395
         // review's P2): tmux has no 0-column pane.
         if (!visible || !pendingCols || !pendingRows) return;
-        resizePane(target, pendingCols, pendingRows).catch(() => {});
+        resizePane(target, pendingCols, pendingRows).then(() => settle(attempt, 'accepted'), () => settle(attempt, 'refused'));
+        settle(attempt, 'sent'); // (a send the gate stopped stays queued until hiding withdraws it)
       }, 120);
     }
     /** Hidden: a size still waiting to be sent is withdrawn with its pending
@@ -1392,6 +1414,7 @@
       clearTimeout(resizeSendTimer);
       resizeSendTimer = 0;
       pendingCols = 0; pendingRows = 0; pendingResizeTs = 0;
+      if (latest?.state === 'queued') latest.state = 'withdrawn'; // never sent: not a claim
     };
 
     // `assert`: send the size even when it equals ours — another instance of
@@ -1441,6 +1464,46 @@
       if (lastContent) writeToXterm(lastContent, lastCursor);
     }
     doResizeRef = doResize;
+
+    // The client a person is USING owns the pane's size (board #98, owner
+    // 2026-11-09: "右侧的侧边栏正在显示的没有刷新，包括尺寸也不对"). Another client
+    // (the owner's phone on the same pane) sizes tmux to ITS box; a frame
+    // then reports that size and, with no local resize pending, this xterm
+    // adopts it (`_writeToXtermNow`). A visible terminal whose box never
+    // changes had no moment to claim its fit back, so the drawer stayed at
+    // the phone's 55x42 in its 74x53 box, and when the other client was
+    // larger it drew only the top-left of each frame: the newest output sat
+    // outside the box and the drawer looked frozen. Rule (orchestrator, #98
+    // note 4): the next person signal in THIS app (focus, pointerdown,
+    // keydown, the composer included) re-asserts the fit through doResize,
+    // at most once per CLAIM_MS; never from frames alone, so two idle
+    // clients never fight per frame.
+    // The comparison is with the newest REPORTED pane size (round 1,
+    // reviewer notes 16 and 19, orchestrator notes 17 and 20): the renderer
+    // adopts a frame's size only at its next animation frame, and never for
+    // a frame whose text is unchanged (the cursor-only branch), so its
+    // cols/rows can still equal the fit while tmux holds another size.
+    // A report the newest attempt already answers, for this fit, and that
+    // was not refused or withdrawn, is not claimed again (`covered`): a
+    // quiet pane with no newer frame sends nothing more.
+    let claimedAt = 0;
+    const covered = (fit) => !!latest && latest.report === lastCursor && latest.cols === fit.cols && latest.rows === fit.rows
+      && (latest.state === 'queued' || latest.state === 'sent' || latest.state === 'accepted');
+    const reportedDiffers = (fit) => !!(lastCursor?.w && lastCursor?.h) && (lastCursor.w !== fit.cols || lastCursor.h !== fit.rows) && !covered(fit);
+    const onPersonSignal = () => {
+      if (!visible || !term) return;
+      const now = Date.now();
+      if (now - claimedAt < CLAIM_MS) return;
+      const fit = calcFit();
+      if (!fit) return;
+      if (fit.cols === term.cols && fit.rows === term.rows && !reportedDiffers(fit)) return;
+      claimedAt = now;
+      doResize({ assert: true });
+    };
+    claimRef = onPersonSignal;
+    window.addEventListener('focus', onPersonSignal);
+    window.addEventListener('pointerdown', onPersonSignal, { capture: true, passive: true });
+    window.addEventListener('keydown', onPersonSignal, { capture: true });
 
     // Single observer for all container-size changes.
     const resizeObs = new ResizeObserver(() => doResize());
@@ -1629,6 +1692,9 @@
       _pendingContent = null;
       _pendingCursor = null;
       window.removeEventListener('ws-reconnected', onReconnected);
+      window.removeEventListener('focus', onPersonSignal);
+      window.removeEventListener('pointerdown', onPersonSignal, { capture: true });
+      window.removeEventListener('keydown', onPersonSignal, { capture: true });
       window.removeEventListener('keyboard-shift', onKbShift);
       document.removeEventListener('visibilitychange', onVisible);
       termEl.removeEventListener('touchstart', onTouchStart);

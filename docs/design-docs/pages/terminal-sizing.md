@@ -264,6 +264,63 @@ A → B → A is dropped, and the current visit's reply while hidden is recorded
 and drawn on show) and `Terminal.source.test.ts` (each gate where it lives,
 and every `capturePane` reply bound to its lifetime).
 
+### Another client sized the pane: the client in use claims it back (2026-11-09, board #98)
+
+Owner, 2026-11-09 06:06: "chat 对话的时候，右侧的侧边栏正在显示的没有刷新，包括尺寸
+也不对，我经常需要右侧来回切一下不同的 terminal，才好". The owner runs the phone and
+the desktop on the same panes. Measured in the e2e rig (Playwright 1.60.0 driving Chromium 148.0.7778.96, the DOM
+renderer, a pane repainting every 0.4 s with its own `tput` size): with the
+desktop drawer on screen in a 519x908 px box (fit 74x53), a phone context
+opened the same pane on its Terminal page; tmux took the phone's 55x42, the
+drawer's xterm adopted 55x42 from the frames, and both STAYED there after the
+phone left, with no `resize_pane` sent, until a drawer drag or a target
+switch (a remount asserts). Six other sequences (drawer open, chatting and
+composer growth, sidebar fold, project switch, Terminal page and back,
+window resize, drawer drag) were exact. The mechanism: with no local resize
+pending, `_writeToXtermNow` trusts the frame's `cursor.w/h`; the terminal's
+own fit is sent only from `doResize`, which runs on a box change, on show
+and on reconnect, so a visible terminal whose box never changes had no
+moment to claim the pane back. The "not refreshing" look is the same
+cause: frames DO arrive and are drawn (the drawn tick equalled the received
+tick at every step), but when the other client is LARGER the drawer shows
+only the top-left of each frame, and the newest output sits outside its box.
+
+Rule (orchestrator, #98 note 4): the client a person is using owns the
+size. A visible terminal re-asserts its fit through `doResize` on the next
+person signal in this app (window `focus`, `pointerdown`, `keydown`,
+anywhere, the composer included; coming back on screen,
+`visibilitychange`, too), when the fit differs from the NEWEST REPORTED pane
+size (the last frame's `cursor.w/h`) or from its xterm's size, at most once
+per second (`CLAIM_MS`) and once per report (a report already answered is
+not claimed again, so a quiet pane sends nothing more), through
+`doResize({ assert: true })`. Round 1 (reviewer notes 16 and 19): the first
+version compared the fit with the xterm's own cols/rows, but the xterm
+adopts a frame's size only at its next animation frame, and never for a
+frame whose text is unchanged (the cursor-only branch); a signal in that
+gap, or after such a frame, sent nothing and the foreign size stood. A claim counts only once the server ACCEPTED it (round 2,
+validator-2 note 28, orchestrator note 29): a resize that was never sent
+(hidden, withdrawn, no box) or that the server refused leaves the report
+claimable, so the next person signal after the one-second bound tries
+again. Since round 4 (orchestrator notes 39-41) the claim is ONE record,
+the newest resize ATTEMPT: every queued resize, a claim's or a box
+change's, mints it (an id, the newest reported size at queue time, the
+size it asks for) and replaces the older one; its state goes queued ->
+sent -> accepted | refused, or queued -> withdrawn when hiding takes it
+back. A reply applies only to the attempt it answers and only while that
+is still the newest, so an older attempt's reply neither clears nor
+publishes. The person-signal gate reads only that record and the newest
+report: it claims unless the newest attempt asks for this fit, carries
+this report and was not refused or withdrawn. Rounds 1-3 kept several
+fields (a claimed report, in-flight and queued claims, an accepted report,
+a send id) that one interleaving after another set against each other
+(validator-2 notes 28, 33 and 38). Never from frames alone: two idle visible clients would
+otherwise resize the pane against each other at the frame rate; two people
+typing on two clients alternate per interaction at worst. Pinned by
+`Terminal.shared.mount.test.ts` ("another client sized the pane…": frames of
+another size send nothing, the next keydown sends the drawer's fit once and
+the hidden page nothing, a second signal inside a second nothing, a signal
+with nothing to claim nothing; and "a person signal claims the fit against the newest reported size…": a frame received but not drawn, a cursor-only frame with a new size, and a visible resume with an undrawn foreign frame each send the fit once; "a refused claim is not a claim…": a refused resize is claimed again after the bound, an accepted one is not repeated; "an older send's late refusal never undoes a newer accepted send of the same report"; and the round-4 matrix M1-M9: two attempts in every reply order, the same or a newer report, a withdrawal, and the burst bound).
+
 ## Implementation sketch
 
 ```js
