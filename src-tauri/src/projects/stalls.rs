@@ -626,6 +626,8 @@ mod tests {
             started: 0,
             dead_at: 0,
             wake_error: String::new(),
+            dead_stamp: 0,
+            run: String::new(),
         };
         assert!(!task_running_in("p", &[]));
         assert!(task_running_in("p", &[task("p", State::Running)]));

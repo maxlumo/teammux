@@ -426,7 +426,56 @@ prompt read as "run any command as a task".
   tests). The clock is tmux's own `#{pane_dead_time}` — the epoch second of
   the LATEST death; verified on 3.6a: set when the pane dies, EMPTY while it
   is alive again after `respawn-window`, set anew on the next death — so a
-  reused name is never judged by an old death.
+  reused name is never judged by an old death. **Two clocks, one rule**
+  (board #92, 2026-11-08): this host's tmux 3.2a leaves
+  `#{pane_dead_time}` EMPTY for a dead pane (measured: every exited task
+  window, `pane_dead=1`, `remain-on-exit on`), so nothing ever expired and
+  14 finished windows piled up in teammux, ~20 in token-porta. Where tmux
+  gives no death time, the first verb that sees the pane dead stamps the
+  window `@tmm_dead_at` (epoch seconds) and reaps nothing that time; later
+  verbs read the stamp; `tmm task start` (and `--replace`) unsets it before
+  the new command runs, so a reused name is judged by its own death even when
+  the run exits before any verb sees it alive (validator note 5 on #92: the
+  first cut cleared it only on seeing the pane alive, and a quick re-run was
+  reaped by the old stamp); a verb that sees the pane running clears it too
+  (`tasks::death_step`, tmux's time wins when both exist). Every stamp,
+  clear and reap is bound to the RUN it observed and applied by ONE
+  `if-shell -F` that the tmux server evaluates (it serialises every client):
+  the window must still carry that run's `@tmm_run`, its pane pid, and the observed dead/alive
+  state; otherwise nothing is written. A start owns the window by a
+  TRANSITIONAL id (#92 round 4): it writes `@tmm_run = starting:<uuid>`
+  before it touches anything else (clearing the old stamp first let a
+  paused reaper stamp the gap, validator note 27), runs every later write
+  and the `respawn-window -k` through the same native guard on that id, and
+  publishes `<uuid>` last, only over its own `starting:<uuid>` (one
+  `if-shell -F` each, arguments single-quoted for tmux's parser). A reaper
+  never acts on a `starting:` window: in the middle of a start its pane,
+  pid and clock are still the previous run's (reviewer note 34, a fresh
+  reaper killed the window being started). A start that finds another id
+  at any step stops without touching the window and says `a later start
+  took its window before this one finished` (reviewer notes 37 and 39: a
+  late unguarded respawn of the earlier start killed the later run's
+  process). A start that died mid-way leaves `starting:…`; `tmm task list`
+  shows it as `starting`, no TTL reaps it, and the next start replaces it.
+  On a window the start has just CREATED there is nothing to invalidate, so
+  its first write puts the name (`@tmm_task`) and the transitional id
+  together in ONE tmux invocation (`set-option … ; set-option …`): tmux runs
+  a client's command list in one go when nothing in it waits (round 5,
+  orchestrator notes 50-54; an observer polling every window during 150
+  fresh first writes never saw a name without its run id, and saw it at
+  once with two invocations). As a belt, a window with a name but no run
+  id, no command and no start time (a start interrupted before its first
+  writes landed) is `starting` too, and a default start takes it over; a
+  PRE-UPGRADE task, which has its command and start time and only lacks the
+  run id, is an ordinary task and the TTL reaps it.
+  Reviewer note 17 on #92: a reaper in
+  one `tmm` process could stamp or kill a run another process had just
+  started in the same window; `@tmm_started` alone is whole seconds and
+  cannot tell two quick runs apart (note 20). Measured on 3.2a: `#{&&:…}` and
+  `#{==:…}` evaluate in `if-shell -F`; `display -t` of a killed pane still
+  exits 0, so a reap is confirmed from `list-panes`. Measured in the isolated runner on
+  tmux 3.2a with TTL 0: `tmm task start` stamped the finished window and the
+  next `tmm task list` reaped it.
 - **Every `tmm task` verb reaps at its door**, ONE mechanism, local, no
   daemon/timer/file, working with the server down: `tasks::reap_expired`
   closes windows that carry `@tmm_task`, are `pane_dead`, and died more than

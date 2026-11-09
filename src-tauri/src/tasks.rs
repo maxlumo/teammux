@@ -52,6 +52,17 @@ const OPT_WAKE: &str = "@tmm_wake_cmd";
 /// `tmm task status|list|logs` say it. A dead pane's tty is closed, so the
 /// hook cannot print into the pane itself (measured, tmux 3.6a).
 const OPT_WAKE_ERR: &str = "@tmm_wake_err";
+/// When a `tmm task` verb first saw the pane dead, unix seconds (board #92):
+/// the death clock on a tmux whose `#{pane_dead_time}` is empty (3.2a, this
+/// host). Cleared when the pane runs again.
+const OPT_DEAD_AT: &str = "@tmm_dead_at";
+/// A fresh id per run (board #92 round 2, reviewer note 20, orchestrator
+/// note 21): written by every `start` before the command runs, so a guarded
+/// stamp or reap can tell one run from the next even within one second.
+const OPT_RUN: &str = "@tmm_run";
+/// A run id's prefix while `start` is still preparing the window (board #92
+/// round 4, orchestrator's rule note 35): no reaper acts on such a window.
+const STARTING: &str = "starting:";
 const WAKE_HOOK: &str = "run-shell -b \"#{E:@tmm_wake_cmd}\"";
 
 /// How long a FINISHED task's window outlives its process before a `tmm task`
@@ -118,6 +129,11 @@ pub struct Task {
     pub dead_at: u64,
     /// Why its `--wake` could not be sent (board #275); empty otherwise.
     pub wake_error: String,
+    /// `@tmm_dead_at` (board #92): unix seconds when a verb first saw it dead,
+    /// 0 when unstamped.
+    pub dead_stamp: u64,
+    /// `@tmm_run`: this run's id, empty for a window an older build started.
+    pub run: String,
 }
 
 impl Task {
@@ -126,6 +142,9 @@ impl Task {
     }
 
     pub fn state_str(&self) -> String {
+        if self.is_starting() {
+            return "starting".into();
+        }
         match &self.state {
             State::Running => "running".into(),
             State::Exited(code) => format!("exited:{code}"),
@@ -135,6 +154,20 @@ impl Task {
 
     pub fn is_running(&self) -> bool {
         matches!(self.state, State::Running)
+    }
+
+    /// `start` is still preparing this window, or died doing so (round 4).
+    pub fn is_starting(&self) -> bool {
+        self.run.starts_with(STARTING) || self.is_abandoned_start()
+    }
+
+    /// A start that died before its first writes landed (board #92 round 5,
+    /// orchestrator notes 50-54): `@tmm_task` but no run id, no command and
+    /// no start time. A PRE-UPGRADE task has its command and start time (only
+    /// the run id is new), so it is an ordinary task with the ordinary death
+    /// clock and is reaped by the TTL.
+    pub fn is_abandoned_start(&self) -> bool {
+        self.run.is_empty() && self.cmd.is_empty() && self.started == 0
     }
 
     /// Seconds since start, or `None` when the start time is unknown — which is
@@ -174,6 +207,8 @@ fn list_format() -> String {
         format!("#{{{OPT_STARTED}}}"),
         "#{pane_dead_time}".to_string(),
         format!("#{{{OPT_WAKE_ERR}}}"),
+        format!("#{{{OPT_DEAD_AT}}}"),
+        format!("#{{{OPT_RUN}}}"),
         format!("#{{{OPT_CMD}}}"),
     ]
     .join(SEP)
@@ -186,9 +221,10 @@ pub fn ttl_secs() -> u64 {
 }
 
 /// Close every task window whose process died more than the TTL ago (board
-/// #206). Only windows carrying `@tmm_task` (that is all `list` returns) and
-/// only dead ones with a reported death time — a running task is never
-/// touched, nor a plain window that happens to be dead. `except` shields the
+/// #206), by the one death clock (`death_step`, board #92). Only windows
+/// carrying `@tmm_task` (that is all `list` returns) and only dead ones — a
+/// running task is never touched (only a stale stamp is cleared), nor a
+/// plain window that happens to be dead. `except` shields the
 /// verb's own target so `logs`/`status`/`rm` on an expired task still answer;
 /// callers reap AFTER their own work. Returns what was closed.
 pub fn reap_expired(except: Option<&str>) -> Vec<Task> {
@@ -196,17 +232,151 @@ pub fn reap_expired(except: Option<&str>) -> Vec<Task> {
     let now = unix_now();
     let mut reaped = Vec::new();
     for t in list() {
-        if t.is_running() || t.dead_at == 0 || Some(t.name.as_str()) == except {
-            continue;
+        let shielded = Some(t.name.as_str()) == except;
+        let step = death_step(t.is_starting(), t.is_running(), t.dead_at, t.dead_stamp, now, ttl);
+        #[cfg(test)]
+        if !matches!(step, DeathStep::Nothing | DeathStep::Wait) {
+            if let Some(hook) = BEFORE_REAP_MUTATION.lock().unwrap().as_ref() {
+                hook(&t.name);
+            }
         }
-        if now.saturating_sub(t.dead_at) < ttl {
-            continue;
-        }
-        if tmux::kill_window(&t.pane).is_ok() {
-            reaped.push(t);
+        match step {
+            DeathStep::Clear => { let _ = if_same_run(&t, false, &format!("set-option -w -u -t {} {OPT_DEAD_AT}", t.pane)); }
+            DeathStep::Stamp => { let _ = if_same_run(&t, true, &format!("set-option -w -t {} {OPT_DEAD_AT} {now}", t.pane)); }
+            DeathStep::Reap if !shielded => {
+                let _ = if_same_run(&t, true, &format!("kill-window -t {}", t.pane));
+                // Gone is read from the pane list: on tmux 3.2a `display -t`
+                // of a killed pane still exits 0 (measured).
+                let alive = tmux::run_tmux(&["list-panes", "-a", "-F", "#{pane_id}"]).map(|o| o.lines().any(|l| l == t.pane)).unwrap_or(true);
+                if !alive {
+                    reaped.push(t);
+                }
+            }
+            DeathStep::Reap | DeathStep::Wait | DeathStep::Nothing => {}
         }
     }
     reaped
+}
+
+/// A fresh window's first write (round 5): its task name and its start's
+/// transitional run id, in ONE tmux invocation.
+fn publish_fresh(pane: &str, name: &str, transitional: &str) -> Result<()> {
+    tmux::run_tmux(&["set-option", "-w", "-t", pane, OPT_TASK, name, ";", "set-option", "-w", "-t", pane, OPT_RUN, transitional])
+        .map(|_| ())
+        .map_err(Error::Tmux)
+}
+
+/// Run one tmux command for the start that owns the window by its
+/// transitional id `tr` (board #92 round 4, orchestrator note 40): one native
+/// `if-shell -F` on `@tmm_run == tr`, then the id is read back; another id
+/// means a later start took the window, and the caller stops. Each argument
+/// is single-quoted for tmux's parser (measured on 3.2a: quotes, `$`, `;`,
+/// `#{}`, `~`, braces, backslashes and newlines round-trip).
+fn guarded(pane: &str, tr: &str, name: &str, argv: &[&str]) -> Result<()> {
+    let command = argv.iter().map(|a| tmux_quote(a)).collect::<Vec<_>>().join(" ");
+    let cond = format!("#{{==:#{{{OPT_RUN}}},{tr}}}");
+    tmux::run_tmux(&["if-shell", "-F", "-t", pane, &cond, &command]).map_err(Error::Tmux)?;
+    owned_by(pane, tr, name)
+}
+
+/// The window's run id is `id`, else a later start owns it.
+fn owned_by(pane: &str, id: &str, name: &str) -> Result<()> {
+    if read_run(pane)? == id { Ok(()) } else { Err(superseded(name)) }
+}
+
+fn read_run(pane: &str) -> Result<String> {
+    tmux::run_tmux(&["display-message", "-p", "-t", pane, &format!("#{{{OPT_RUN}}}")])
+        .map(|s| s.trim().to_string())
+        .map_err(Error::Tmux)
+}
+
+fn superseded(name: &str) -> Error {
+    Error::Invalid(format!("task '{name}': a later start took its window before this one finished; it is that start's now"))
+}
+
+/// `s` as ONE word for tmux's command parser: single quotes, an embedded `'`
+/// written as `'"'"'` (adjacent quoted parts join, as in sh).
+fn tmux_quote(s: &str) -> String {
+    format!("'{}'", s.replace('\'', "'\"'\"'"))
+}
+
+/// Run `command` only if the window still holds the RUN `t` observed, in the
+/// state it was observed in (board #92 round 2, reviewer notes 17 and 20,
+/// orchestrator's rules 19 and 21): its run id `@tmm_run` (a whole-second
+/// `@tmm_started` cannot tell two quick runs apart) and its pane pid are the
+/// observed ones, and it is dead (`dead`) or alive (`!dead`). One `if-shell
+/// -F` evaluated by the tmux server, which serialises every client, so a
+/// `tmm task start` in another process that reuses the window between our
+/// look and our write leaves the replacement unstamped and unkilled. No lock
+/// of ours, no daemon, no wait. Measured on tmux 3.2a: `#{&&:…}` and
+/// `#{==:…}` evaluate in `if-shell -F`.
+fn if_same_run(t: &Task, dead: bool, command: &str) -> std::result::Result<String, String> {
+    let cond = format!(
+        "#{{&&:#{{==:#{{{OPT_RUN}}},{}}},#{{&&:#{{==:#{{pane_pid}},{}}},#{{==:#{{pane_dead}},{}}}}}}}",
+        t.run, t.pid, if dead { 1 } else { 0 }
+    );
+    tmux::run_tmux(&["if-shell", "-F", "-t", &t.pane, &cond, command])
+}
+
+/// Test seam: inside `start`, right after the new run id is written and
+/// before anything else (validator note 27's boundary).
+#[cfg(test)]
+pub(crate) static AFTER_RUN_ID: std::sync::Mutex<Option<Box<dyn Fn(&str) + Send>>> = std::sync::Mutex::new(None);
+
+/// Call a `start` seam without holding its lock: the hook is taken out for
+/// the call and put back after, so a hook that runs another `start` (which
+/// passes the same seam) neither deadlocks nor recurses.
+#[cfg(test)]
+fn seam(slot: &std::sync::Mutex<Option<Box<dyn Fn(&str) + Send>>>, pane: &str) {
+    let hook = slot.lock().unwrap().take();
+    if let Some(hook) = hook {
+        hook(pane);
+        let mut back = slot.lock().unwrap();
+        if back.is_none() { *back = Some(hook); }
+    }
+}
+
+/// Test seam: inside `start`, right before its guarded respawn (reviewer
+/// note 39's boundary).
+#[cfg(test)]
+pub(crate) static BEFORE_RESPAWN: std::sync::Mutex<Option<Box<dyn Fn(&str) + Send>>> = std::sync::Mutex::new(None);
+
+/// Test seam: inside `start`, after the respawn and before the final id is
+/// published (reviewer note 37's boundary).
+#[cfg(test)]
+pub(crate) static BEFORE_PUBLISH: std::sync::Mutex<Option<Box<dyn Fn(&str) + Send>>> = std::sync::Mutex::new(None);
+
+/// Test seam: after the reaper observed a task and decided to change it,
+/// before its guarded write (reviewer note 17's interleaving).
+#[cfg(test)]
+pub(crate) static BEFORE_REAP_MUTATION: std::sync::Mutex<Option<Box<dyn Fn(&str) + Send>>> = std::sync::Mutex::new(None);
+
+/// What the reaper does with one task window (board #92): ONE death clock,
+/// tmux's `#{pane_dead_time}` when it reports one (3.6a), else the
+/// `@tmm_dead_at` stamp the first verb that saw the pane dead wrote (3.2a
+/// reports nothing). A dead, unstamped pane is stamped now and is not reaped
+/// this time; a pane running again loses its stamp, so a respawn starts a
+/// new death clock. A window in the middle of a start (a transitional run
+/// id, board #92 round 4) is never acted on: its pane, pid and clock may
+/// still be the previous run's.
+#[derive(Debug, PartialEq, Eq)]
+pub(crate) enum DeathStep { Nothing, Clear, Stamp, Wait, Reap }
+
+pub(crate) fn death_step(starting: bool, running: bool, dead_at: u64, stamp: u64, now: u64, ttl: u64) -> DeathStep {
+    if starting {
+        return DeathStep::Nothing;
+    }
+    if running {
+        return if stamp > 0 { DeathStep::Clear } else { DeathStep::Nothing };
+    }
+    let clock = if dead_at > 0 { dead_at } else { stamp };
+    if clock == 0 {
+        DeathStep::Stamp
+    } else if now.saturating_sub(clock) >= ttl {
+        DeathStep::Reap
+    } else {
+        DeathStep::Wait
+    }
 }
 
 /// The task called `name`, wherever it lives.
@@ -247,8 +417,11 @@ pub fn start(
         .map(|p| p.to_string_lossy().to_string())
         .unwrap_or_default();
 
+    // A fresh window has nothing to invalidate; a reused one does.
+    let mut fresh = false;
     let pane = match find(name) {
-        Some(t) if t.is_running() && !replace => {
+        // An abandoned start (round 5) is taken over, never refused.
+        Some(t) if t.is_running() && !replace && !t.is_starting() => {
             return Err(Error::Invalid(format!(
                 "task '{name}' is already running in {} (pid {}) — stop it, or pass --replace",
                 t.target(),
@@ -262,29 +435,67 @@ pub fn start(
             // If the old window will not go, starting a second one would make
             // the task exist twice — the one thing the registry promises not to.
             tmux::kill_window(&t.pane).map_err(Error::Tmux)?;
+            fresh = true;
             create_window(&session, name, &cwd)?
         }
-        None => create_window(&session, name, &cwd)?,
+        None => { fresh = true; create_window(&session, name, &cwd)? }
     };
 
+    // A TRANSITIONAL run id FIRST (board #92 rounds 2-4; validator note 27,
+    // orchestrator's rules notes 28 and 35): before anything else of the
+    // window is touched, so from the first mutation on no reaper guard bound
+    // to the previous run (`if_same_run`) can pass, and a reaper that looks
+    // now (new id, old dead pane, old clock: reviewer note 34) does nothing
+    // (`death_step`). The final id is published after the respawn.
+    let run = uuid::Uuid::new_v4().to_string();
+    let transitional = format!("{STARTING}{run}");
+    if fresh {
+        // A window this start just made (round 5, orchestrator notes 50 and
+        // 52): its name and the transitional id are published in ONE tmux
+        // invocation, so no reader sees one without the other. tmux runs a
+        // client's command list in one go when no command in it waits (the
+        // client queue runs until an item blocks), and `set-option` never
+        // does; measured on 3.2a by `a_fresh_start_publishes_its_name_and_
+        // its_transition_together`. A reused window already carries its
+        // name, so the transitional id stays its first write.
+        publish_fresh(&pane, name, &transitional)?;
+    } else {
+        set_opt(&pane, OPT_RUN, &transitional)?;
+    }
+    #[cfg(test)]
+    seam(&AFTER_RUN_ID, &pane);
+    // Every later mutation belongs to THIS start (reviewer note 39,
+    // orchestrator note 40): each runs through the native guard on our
+    // transitional id, and the first one that finds another id means a later
+    // start owns the window; this one stops without touching it.
+    let own = |argv: &[&str]| guarded(&pane, &transitional, name, argv);
     let now = unix_now();
-    set_opt(&pane, "remain-on-exit", "on")?;
-    set_opt(&pane, OPT_TASK, name)?;
-    set_opt(&pane, OPT_CMD, &cmd)?;
-    set_opt(&pane, OPT_STARTED, &now.to_string())?;
+    own(&["set-option", "-w", "-t", &pane, "remain-on-exit", "on"])?;
+    own(&["set-option", "-w", "-t", &pane, OPT_TASK, name])?;
+    own(&["set-option", "-w", "-t", &pane, OPT_CMD, &cmd])?;
+    own(&["set-option", "-w", "-t", &pane, OPT_STARTED, &now.to_string()])?;
     // The wake hook is set or cleared on EVERY start: a reused window must not
     // keep a previous run's hook. Measured on tmux 3.6a: `pane-died` fires
     // once per death with the status or signal, and not for a command that
     // `respawn -k` replaces.
     // A new run starts clean: an earlier run's recorded wake failure is
     // cleared on EVERY start, with or without --wake (validator 09:54).
-    let _ = tmux::run_tmux(&["set-option", "-w", "-u", "-t", &pane, OPT_WAKE_ERR]);
+    own(&["set-option", "-w", "-u", "-t", &pane, OPT_WAKE_ERR])?;
+    // A new run is a new life (board #92 round 1, validator note 7): a reused
+    // window's death stamp is cleared BEFORE the command runs, so a run that
+    // exits before any verb sees it alive is never judged by the old death.
+    // It must not fail silently: a stale stamp would reap the new run's
+    // output at once, so a start that cannot clear it is refused.
+    own(&["set-option", "-w", "-u", "-t", &pane, OPT_DEAD_AT])?;
     match wake {
         Some(shell) => {
-            tmux::run_tmux(&["set-option", "-p", "-t", &pane, OPT_WAKE, shell]).map_err(Error::Tmux)?;
-            tmux::run_tmux(&["set-hook", "-p", "-t", &pane, "pane-died", WAKE_HOOK]).map_err(Error::Tmux)?;
+            own(&["set-option", "-p", "-t", &pane, OPT_WAKE, shell])?;
+            own(&["set-hook", "-p", "-t", &pane, "pane-died", WAKE_HOOK])?;
         }
-        None => clear_wake(&pane),
+        None => {
+            own(&["set-hook", "-p", "-u", "-t", &pane, "pane-died"])?;
+            own(&["set-option", "-p", "-u", "-t", &pane, OPT_WAKE])?;
+        }
     }
     let pairs: Vec<String> = env.iter().map(|(k, v)| format!("{k}={v}")).collect();
     let mut args = vec!["respawn-window", "-k"];
@@ -292,7 +503,19 @@ pub fn start(
         args.extend(["-e", pair.as_str()]);
     }
     args.extend(["-t", pane.as_str(), cmd.as_str()]);
-    tmux::run_tmux(&args).map_err(Error::Tmux)?;
+    #[cfg(test)]
+    seam(&BEFORE_RESPAWN, &pane);
+    own(&args)?;
+    // The run is complete: publish its final id, only over our own
+    // transitional one, through the same guard (reviewer note 37): a later
+    // start that already wrote its own transition keeps it, and this one
+    // reports that (orchestrator note 38).
+    #[cfg(test)]
+    seam(&BEFORE_PUBLISH, &pane);
+    let cond = format!("#{{==:#{{{OPT_RUN}}},{transitional}}}");
+    let publish = ["set-option", "-w", "-t", &pane, OPT_RUN, &run].map(tmux_quote).join(" ");
+    tmux::run_tmux(&["if-shell", "-F", "-t", &pane, &cond, &publish]).map_err(Error::Tmux)?;
+    owned_by(&pane, &run, name)?;
 
     find(name).ok_or_else(|| Error::Tmux(format!("started '{name}' but it vanished from tmux")))
 }
@@ -564,7 +787,7 @@ fn join_cmd(argv: &[String]) -> String {
 /// (no `@tmm_task`) or rows tmux truncated.
 fn parse_line(line: &str) -> Option<Task> {
     let f: Vec<&str> = line.split(SEP).collect();
-    if f.len() < 12 || f[0].is_empty() {
+    if f.len() < 14 || f[0].is_empty() {
         return None;
     }
     let state = if f[4] != "1" {
@@ -586,9 +809,11 @@ fn parse_line(line: &str) -> Option<Task> {
         started: f[8].parse().unwrap_or(0),
         dead_at: f[9].parse().unwrap_or(0),
         wake_error: f[10].to_string(),
+        dead_stamp: f[11].parse().unwrap_or(0),
+        run: f[12].to_string(),
         // The command can contain the separator only if a user put it there;
         // rejoin so it survives round-tripping regardless.
-        cmd: f[11..].join(SEP),
+        cmd: f[13..].join(SEP),
     })
 }
 
@@ -664,11 +889,11 @@ mod tests {
     }
 
     /// Field order: task, session, window, pane, dead, status, signal, pid,
-    /// started, dead_time, wake_error, cmd.
+    /// started, dead_time, wake_error, dead_stamp, run, cmd.
     #[test]
     fn parses_a_running_task() {
         let t = parse_line(&row(&[
-            "dev", "tmux", "3", "%518", "0", "", "", "4242", "1700000000", "", "", "npm run dev",
+            "dev", "tmux", "3", "%518", "0", "", "", "4242", "1700000000", "", "", "", "", "npm run dev",
         ]))
         .expect("row is a task");
         assert_eq!(t.name, "dev");
@@ -688,7 +913,7 @@ mod tests {
     #[test]
     fn parses_exit_code_of_a_finished_task() {
         let t = parse_line(&row(&[
-            "build", "tmm-tasks", "1", "%9", "1", "7", "", "0", "0", "1700000900", "", "cargo build",
+            "build", "tmm-tasks", "1", "%9", "1", "7", "", "0", "0", "1700000900", "", "", "", "cargo build",
         ]))
         .expect("row is a task");
         assert_eq!(t.state, State::Exited(7));
@@ -702,7 +927,7 @@ mod tests {
     #[test]
     fn a_signal_death_is_not_an_exit_code() {
         let t = parse_line(&row(&[
-            "x", "s", "1", "%1", "1", "", "kill", "0", "0", "1700000000", "", "sleep 30",
+            "x", "s", "1", "%1", "1", "", "kill", "0", "0", "1700000000", "", "", "", "sleep 30",
         ]))
         .unwrap();
         assert_eq!(t.state, State::Killed("kill".into()));
@@ -710,23 +935,393 @@ mod tests {
         assert!(!t.is_running());
     }
 
+    /// Board #92: ONE death clock, tmux's when it reports one, else the stamp
+    /// the first verb that saw the pane dead wrote; a running pane loses its
+    /// stamp. Literal times: death at 1000, TTL 60.
+    #[test]
+    fn the_death_clock_is_tmux_s_or_the_first_verb_s_stamp() {
+        assert_eq!(death_step(false, false, 1000, 0, 1059, 60), DeathStep::Wait, "3.6a: tmux's clock, inside the TTL");
+        assert_eq!(death_step(false, false, 1000, 0, 1060, 60), DeathStep::Reap, "3.6a: TTL after tmux's death time");
+        assert_eq!(death_step(false, false, 0, 0, 1060, 60), DeathStep::Stamp, "3.2a: dead and unstamped is stamped, not reaped");
+        assert_eq!(death_step(false, false, 0, 1000, 1059, 60), DeathStep::Wait, "stamped, inside the TTL");
+        assert_eq!(death_step(false, false, 0, 1000, 1060, 60), DeathStep::Reap, "stamped more than TTL ago");
+        assert_eq!(death_step(false, false, 1000, 500, 1059, 60), DeathStep::Wait, "tmux's clock wins over a stamp");
+        assert_eq!(death_step(false, true, 0, 1000, 5000, 60), DeathStep::Clear, "running again: the stamp is cleared");
+        assert_eq!(death_step(false, true, 0, 0, 5000, 60), DeathStep::Nothing, "a running task is never touched");
+        assert_eq!(death_step(true, false, 0, 1000, 5000, 60), DeathStep::Nothing, "mid-start (round 4): an expired clock is not acted on");
+        assert_eq!(death_step(true, false, 0, 0, 5000, 60), DeathStep::Nothing, "mid-start: no stamp either");
+        assert_eq!(death_step(true, true, 0, 1000, 5000, 60), DeathStep::Nothing, "mid-start: no clear either");
+        let t = parse_line(&row(&["x", "s", "1", "%1", "1", "0", "", "0", "0", "", "", "1700000100", "", "c"])).unwrap();
+        assert_eq!((t.dead_at, t.dead_stamp), (0, 1700000100), "the stamp rides along as its own field");
+    }
+
+    /// Board #92 round 2 (reviewer note 17, orchestrator note 19): an old
+    /// reaper paused after observing a dead run, while the same name is
+    /// restarted (another tmm process, here the hook) and its new run exits at
+    /// once, never stamps nor kills the replacement on resume: the guarded
+    /// write re-checks the observed run at the tmux server. Both decisions:
+    /// the stamp (no death time on 3.2a) and the reap (an expired stamp).
+    #[test]
+    fn a_paused_reaper_never_stamps_or_kills_a_run_that_replaced_the_one_it_saw() {
+        let session = "tmm-test-race";
+        let name = format!("tmm-test-race-{}", std::process::id());
+        let sh = |c: &str| -> Vec<String> { vec!["sh".into(), "-c".into(), c.into()] };
+        let wait_dead = |n: &str| {
+            for _ in 0..30 {
+                if find(n).is_some_and(|t| !t.is_running()) { return; }
+                std::thread::sleep(std::time::Duration::from_millis(100));
+            }
+        };
+        struct Reset;
+        impl Drop for Reset { fn drop(&mut self) { *BEFORE_REAP_MUTATION.lock().unwrap() = None; } }
+        let _reset = Reset;
+        for (case, old_stamp) in [("stamp", None), ("reap", Some("1"))] {
+            start(&name, &sh("echo old-run"), Some(session), true, None, &[]).expect("old run");
+            wait_dead(&name);
+            let old = find(&name).expect("old window");
+            if let Some(v) = old_stamp { set_opt(&old.pane, OPT_DEAD_AT, v).unwrap(); }
+            let fired = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
+            let (n, f) = (name.clone(), fired.clone());
+            *BEFORE_REAP_MUTATION.lock().unwrap() = Some(Box::new(move |seen: &str| {
+                if seen != n || f.swap(true, std::sync::atomic::Ordering::SeqCst) { return; }
+                let sh = |c: &str| -> Vec<String> { vec!["sh".into(), "-c".into(), c.into()] };
+                start(&n, &sh("echo new-run"), Some("tmm-test-race"), true, None, &[]).expect("the name is reused meanwhile");
+                for _ in 0..30 {
+                    if find(&n).is_some_and(|t| !t.is_running()) { break; }
+                    std::thread::sleep(std::time::Duration::from_millis(100));
+                }
+            }));
+            std::env::remove_var(TTL_ENV);
+            let reaped = reap_expired(None);
+            *BEFORE_REAP_MUTATION.lock().unwrap() = None;
+            assert!(fired.load(std::sync::atomic::Ordering::SeqCst), "{case}: the reaper paused at its write");
+            assert!(!reaped.iter().any(|t| t.name == name), "{case}: the replacement is not reaped");
+            let now = find(&name).expect("the replacement's window stays");
+            assert_eq!(now.pane, old.pane, "{case}: the same window was reused");
+            assert_ne!(now.pid, old.pid, "{case}: a new run");
+            assert!(!now.run.is_empty() && !old.run.is_empty() && now.run != old.run, "{case}: each run has its own id ({} vs {})", old.run, now.run);
+            eprintln!("{case}: old started {} new started {} (same second: {})", old.started, now.started, old.started == now.started);
+            assert_eq!(now.dead_stamp, 0, "{case}: no stamp from the old observation: {now:?}");
+            assert!(logs(&name, 20, None).unwrap().contains("new-run"), "{case}: its output stays");
+        }
+        let _ = remove(&name);
+        let _ = tmux::kill_session(session);
+    }
+
+    /// Board #92 round 4 (reviewer note 34, orchestrator's rule note 35): a
+    /// FRESH reaper that looks at the window in the middle of a start (new
+    /// id, old dead pane, old expired stamp) sees a transitional run and does
+    /// nothing; the start completes, with its final id, and keeps its output.
+    #[test]
+    fn a_fresh_reaper_in_the_middle_of_a_start_leaves_the_window_alone() {
+        let session = "tmm-test-midstart";
+        let name = format!("tmm-test-midstart-{}", std::process::id());
+        let sh = |c: &str| -> Vec<String> { vec!["sh".into(), "-c".into(), c.into()] };
+        let wait_dead = || {
+            for _ in 0..30 {
+                if find(&name).is_some_and(|t| !t.is_running()) { return; }
+                std::thread::sleep(std::time::Duration::from_millis(100));
+            }
+        };
+        struct Reset;
+        impl Drop for Reset { fn drop(&mut self) { *AFTER_RUN_ID.lock().unwrap() = None; std::env::remove_var(TTL_ENV); } }
+        let _reset = Reset;
+        start(&name, &sh("echo old-run"), Some(session), true, None, &[]).expect("old run");
+        wait_dead();
+        let old = find(&name).expect("old run listed");
+        tmux::run_tmux(&["set-option", "-w", "-t", &old.pane, OPT_DEAD_AT, "1"]).expect("an expired death stamp");
+        let seen = std::sync::Arc::new(std::sync::Mutex::new(Vec::<(String, String)>::new()));
+        let record = seen.clone();
+        let target = name.clone();
+        *AFTER_RUN_ID.lock().unwrap() = Some(Box::new(move |_pane: &str| {
+            // A new reaper, TTL 0, observing NOW.
+            std::env::set_var(TTL_ENV, "0");
+            let reaped = reap_expired(None);
+            std::env::remove_var(TTL_ENV);
+            let now = find(&target).map(|t| (t.run.clone(), t.state_str()));
+            record.lock().unwrap().push((format!("reaped {}", reaped.len()), format!("{now:?}")));
+        }));
+        let started = start(&name, &sh("echo new-run"), Some(session), true, None, &[]);
+        *AFTER_RUN_ID.lock().unwrap() = None;
+        let seen = seen.lock().unwrap().clone();
+        assert_eq!(seen.len(), 1, "the hook ran once");
+        assert!(seen[0].0 == "reaped 0", "the mid-start reaper reaped nothing: {seen:?}");
+        assert!(seen[0].1.contains("starting:") && seen[0].1.contains("\"starting\""), "listed as starting, transitional id: {seen:?}");
+        let started = started.expect("the start completes");
+        assert!(!started.run.is_empty() && !started.run.starts_with(STARTING), "the final id is published: {}", started.run);
+        wait_dead();
+        let t = find(&name).expect("the new run's window stays");
+        assert_eq!(t.run, started.run);
+        assert_eq!(t.dead_stamp, 0, "no stamp inherited");
+        assert!(logs(&name, 20, None).unwrap().contains("new-run"));
+        let _ = remove(&name);
+        let _ = tmux::kill_session(session);
+    }
+
+    /// Reviewer note 37: a start whose window a LATER start took over (its
+    /// own transition written) before the first published its final id
+    /// leaves the later transition untouched.
+    #[test]
+    fn a_stale_finalizer_leaves_a_newer_transition_untouched() {
+        let session = "tmm-test-publish";
+        let name = format!("tmm-test-publish-{}", std::process::id());
+        let sh = |c: &str| -> Vec<String> { vec!["sh".into(), "-c".into(), c.into()] };
+        struct Reset;
+        impl Drop for Reset { fn drop(&mut self) { *BEFORE_PUBLISH.lock().unwrap() = None; } }
+        let _reset = Reset;
+        let newer = format!("{STARTING}newer-start");
+        let write = newer.clone();
+        *BEFORE_PUBLISH.lock().unwrap() = Some(Box::new(move |pane: &str| {
+            tmux::run_tmux(&["set-option", "-w", "-t", pane, OPT_RUN, &write]).expect("the later start's transition");
+        }));
+        let first = start(&name, &sh("sleep 5"), Some(session), true, None, &[]);
+        *BEFORE_PUBLISH.lock().unwrap() = None;
+        let err = first.expect_err("the earlier start reports it lost the window").to_string();
+        assert!(err.contains("a later start took its window"), "{err}");
+        assert_eq!(find(&name).unwrap().run, newer);
+        let _ = remove(&name);
+        let _ = tmux::kill_session(session);
+    }
+
+    /// Reviewer note 39, orchestrator note 40: start A paused right before its
+    /// respawn while start B of the same name runs to completion; A resumes,
+    /// finds B's id, reports superseded, and B's PROCESS survives (same pid,
+    /// running, its final id), not only B's id.
+    #[test]
+    fn an_earlier_start_resuming_before_its_respawn_leaves_the_later_run_running() {
+        let session = "tmm-test-interleave";
+        let name = format!("tmm-test-interleave-{}", std::process::id());
+        let sh = |c: &str| -> Vec<String> { vec!["sh".into(), "-c".into(), c.into()] };
+        struct Reset;
+        impl Drop for Reset { fn drop(&mut self) { *BEFORE_RESPAWN.lock().unwrap() = None; } }
+        let _reset = Reset;
+        start(&name, &sh("true"), Some(session), true, None, &[]).expect("a first run makes the window");
+        let b_seen = std::sync::Arc::new(std::sync::Mutex::new(None::<Task>));
+        let record = b_seen.clone();
+        let (n, s) = (name.clone(), session.to_string());
+        let once = std::sync::atomic::AtomicBool::new(false);
+        *BEFORE_RESPAWN.lock().unwrap() = Some(Box::new(move |_pane: &str| {
+            // B, the later start, runs whole while A waits here; B passes its
+            // own seam straight through (the seam's lock is held, so it is
+            // not taken again, see `seam` in start).
+            if once.swap(true, std::sync::atomic::Ordering::SeqCst) { return; }
+            let b = start(&n, &["sh".into(), "-c".into(), "echo B; sleep 30".into()], Some(&s), true, None, &[]).expect("B starts");
+            *record.lock().unwrap() = Some(b);
+        }));
+        let a = start(&name, &sh("echo A"), Some(session), true, None, &[]);
+        let err = a.expect_err("A reports it lost the window").to_string();
+        assert!(err.contains("a later start took its window"), "{err}");
+        let b = b_seen.lock().unwrap().clone().expect("B ran inside the seam");
+        let now = find(&name).expect("B's window");
+        assert!(now.is_running(), "B's process still runs: {now:?}");
+        assert_eq!(now.pid, b.pid, "the same process B started: A's respawn never ran");
+        assert_eq!(now.run, b.run, "B's final id");
+        assert!(now.cmd.contains("echo B") && !now.cmd.contains("echo A"), "B's command, not A's: {}", now.cmd);
+        let _ = stop(&name, false);
+        let _ = remove(&name);
+        let _ = tmux::kill_session(session);
+    }
+
+    /// Round 5 (orchestrator notes 50-54): a fresh window's name and its
+    /// transitional id land together. An observer polling every window
+    /// while 150 fresh windows get their first write never sees a name
+    /// without a run id (measured on this tmux).
+    #[test]
+    fn a_fresh_start_publishes_its_name_and_its_transition_together() {
+        let session = "tmm-test-pair";
+        let cwd = { let d = crate::config::test_scratch("tmm-task-cwd"); std::fs::create_dir_all(&d).unwrap(); d.to_string_lossy().to_string() };
+        tmux::ensure_session(session, &cwd).unwrap();
+        let stop = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
+        let seen = std::sync::Arc::new(std::sync::Mutex::new((0usize, Vec::<String>::new())));
+        let (st, sn) = (stop.clone(), seen.clone());
+        let observer = std::thread::spawn(move || {
+            while !st.load(std::sync::atomic::Ordering::SeqCst) {
+                if let Ok(out) = tmux::run_tmux(&["list-windows", "-t", session, "-F", &format!("#{{{OPT_TASK}}}|#{{{OPT_RUN}}}")]) {
+                    let mut g = sn.lock().unwrap();
+                    g.0 += 1;
+                    for l in out.lines() {
+                        let (task, run) = l.split_once('|').unwrap_or((l, ""));
+                        if !task.is_empty() && run.is_empty() { g.1.push(l.to_string()); }
+                    }
+                }
+            }
+        });
+        for i in 0..150 {
+            let name = format!("pair-{i}");
+            let pane = create_window(session, &name, &cwd).unwrap();
+            publish_fresh(&pane, &name, &format!("{STARTING}{i}")).unwrap();
+        }
+        stop.store(true, std::sync::atomic::Ordering::SeqCst);
+        observer.join().unwrap();
+        let (reads, split) = seen.lock().unwrap().clone();
+        assert!(reads > 20, "the observer read the windows {reads} times");
+        assert!(split.is_empty(), "a name without its run id was seen: {split:?}");
+        let _ = tmux::kill_session(session);
+    }
+
+    /// Round 5 (reviewer note 55, orchestrator note 54): a fresh window that
+    /// got only its NAME (a start interrupted right after its first write,
+    /// as an older order could leave it) is listed as starting, never as
+    /// running or absent, and a default start takes it over. A PRE-UPGRADE
+    /// task (name, command and start time, no run id) is an ordinary task:
+    /// finished, the TTL reaps it.
+    #[test]
+    fn an_abandoned_fresh_start_is_listed_and_taken_over_and_a_legacy_task_is_still_reaped() {
+        let session = "tmm-test-abandon";
+        let name = format!("tmm-test-abandon-{}", std::process::id());
+        let cwd = { let d = crate::config::test_scratch("tmm-task-cwd"); std::fs::create_dir_all(&d).unwrap(); d.to_string_lossy().to_string() };
+        tmux::ensure_session(session, &cwd).unwrap();
+        let pane = create_window(session, &name, &cwd).unwrap();
+        set_opt(&pane, OPT_TASK, &name).unwrap();
+        let t = find(&name).expect("an abandoned start is listed");
+        assert_eq!(t.state_str(), "starting", "{t:?}");
+        assert!(t.is_running(), "(its pane is the fresh shell)");
+        std::env::set_var(TTL_ENV, "0");
+        assert!(!reap_expired(None).iter().any(|r| r.name == name), "never reaped");
+        std::env::remove_var(TTL_ENV);
+        let started = start(&name, &["sh".into(), "-c".into(), "echo taken".into()], Some(session), false, None, &[]).expect("a default start takes it over");
+        assert!(!started.is_starting() && !started.run.is_empty());
+        let _ = remove(&name);
+
+        // A pre-upgrade finished task: name, command and start time; no run id.
+        let legacy = format!("tmm-test-legacy-{}", std::process::id());
+        let lp = create_window(session, &legacy, &cwd).unwrap();
+        set_opt(&lp, "remain-on-exit", "on").unwrap();
+        set_opt(&lp, OPT_TASK, &legacy).unwrap();
+        set_opt(&lp, OPT_CMD, "sh -c true").unwrap();
+        set_opt(&lp, OPT_STARTED, &unix_now().to_string()).unwrap();
+        tmux::run_tmux(&["respawn-pane", "-k", "-t", &lp, "true"]).unwrap();
+        for _ in 0..30 { if find(&legacy).is_some_and(|t| !t.is_running()) { break; } std::thread::sleep(std::time::Duration::from_millis(100)); }
+        let t = find(&legacy).expect("listed");
+        assert!(!t.is_starting() && t.run.is_empty(), "a legacy task is not a start: {t:?}");
+        std::env::set_var(TTL_ENV, "0");
+        let first = reap_expired(None);
+        let second = reap_expired(None);
+        std::env::remove_var(TTL_ENV);
+        assert!(first.iter().chain(second.iter()).any(|r| r.name == legacy), "reaped by the TTL (stamp, then reap on 3.2a)");
+        let _ = tmux::kill_session(session);
+    }
+
+    /// A start that died mid-way leaves a transitional id: the TTL never
+    /// reaps it, `list` names it `starting`, and the next start replaces it.
+    #[test]
+    fn a_transitional_window_is_never_reaped_and_the_next_start_replaces_it() {
+        let session = "tmm-test-transit";
+        let name = format!("tmm-test-transit-{}", std::process::id());
+        let sh = |c: &str| -> Vec<String> { vec!["sh".into(), "-c".into(), c.into()] };
+        start(&name, &sh("true"), Some(session), true, None, &[]).expect("a run");
+        for _ in 0..30 { if find(&name).is_some_and(|t| !t.is_running()) { break; } std::thread::sleep(std::time::Duration::from_millis(100)); }
+        let t = find(&name).unwrap();
+        tmux::run_tmux(&["set-option", "-w", "-t", &t.pane, OPT_RUN, &format!("{STARTING}abandoned")]).unwrap();
+        tmux::run_tmux(&["set-option", "-w", "-t", &t.pane, OPT_DEAD_AT, "1"]).unwrap();
+        std::env::set_var(TTL_ENV, "0");
+        let reaped = reap_expired(None);
+        std::env::remove_var(TTL_ENV);
+        assert!(!reaped.iter().any(|r| r.name == name), "a transitional window is not reaped");
+        let t = find(&name).expect("still listed");
+        assert_eq!(t.state_str(), "starting");
+        let again = start(&name, &sh("echo again"), Some(session), true, None, &[]).expect("the next start");
+        assert!(!again.run.starts_with(STARTING), "replaced by a final id");
+        let _ = remove(&name);
+        let _ = tmux::kill_session(session);
+    }
+
+    /// Board #92 round 3 (validator note 27, orchestrator note 28): a reaper
+    /// paused between its observation of the OLD run and its guarded write,
+    /// resuming at the start boundary right after the new run id is written
+    /// (and before the old stamp is cleared), can neither stamp nor kill:
+    /// its guard names the old run. Both paths, stamp and reap.
+    #[test]
+    fn a_reaper_resuming_at_the_start_boundary_cannot_touch_the_new_run() {
+        let session = "tmm-test-boundary";
+        let name = format!("tmm-test-boundary-{}", std::process::id());
+        let sh = |c: &str| -> Vec<String> { vec!["sh".into(), "-c".into(), c.into()] };
+        let wait_dead = || {
+            for _ in 0..30 {
+                if find(&name).is_some_and(|t| !t.is_running()) { return; }
+                std::thread::sleep(std::time::Duration::from_millis(100));
+            }
+        };
+        struct Reset;
+        impl Drop for Reset { fn drop(&mut self) { *AFTER_RUN_ID.lock().unwrap() = None; } }
+        let _reset = Reset;
+        for case in ["stamp", "reap"] {
+            start(&name, &sh("echo old-run"), Some(session), true, None, &[]).expect("old run");
+            wait_dead();
+            let observed = find(&name).expect("the reaper's observation of the old run");
+            let (seen, c) = (observed.clone(), case);
+            *AFTER_RUN_ID.lock().unwrap() = Some(Box::new(move |_pane: &str| {
+                // The paused reaper resumes HERE, with its old observation.
+                let cmd = if c == "stamp" { format!("set-option -w -t {} {OPT_DEAD_AT} 1", seen.pane) } else { format!("kill-window -t {}", seen.pane) };
+                let _ = if_same_run(&seen, true, &cmd);
+            }));
+            start(&name, &sh("echo new-run"), Some(session), true, None, &[]).expect("the name is reused");
+            *AFTER_RUN_ID.lock().unwrap() = None;
+            wait_dead();
+            let now = find(&name).expect(&format!("{case}: the new run's window stays"));
+            assert_eq!(now.pane, observed.pane, "{case}: same window");
+            assert_ne!(now.run, observed.run, "{case}: a new run id");
+            assert_eq!(now.dead_stamp, 0, "{case}: the old observation left no stamp: {now:?}");
+            std::env::remove_var(TTL_ENV);
+            assert!(!reap_expired(None).iter().any(|t| t.name == name), "{case}: not reaped by the default TTL");
+            assert!(logs(&name, 20, None).unwrap().contains("new-run"), "{case}: its output stays");
+        }
+        let _ = remove(&name);
+        let _ = tmux::kill_session(session);
+    }
+
+    /// Board #92 round 1 (validator note 7): a name reused for a run that
+    /// exits at once is judged by ITS death, never the old run's stamp. Real
+    /// tmux (3.2a in the isolated runner): the old window carries an expired
+    /// stamp; the new run finishes before any verb sees it alive; with the
+    /// default TTL the reaper keeps its window and output.
+    #[test]
+    fn a_reused_name_is_never_judged_by_the_old_run_s_stamp() {
+        let session = "tmm-test-reuse";
+        let name = format!("tmm-test-reuse-{}", std::process::id());
+        let sh = |c: &str| -> Vec<String> { vec!["sh".into(), "-c".into(), c.into()] };
+        let wait_dead = || {
+            for _ in 0..30 {
+                if find(&name).is_some_and(|t| !t.is_running()) { return; }
+                std::thread::sleep(std::time::Duration::from_millis(100));
+            }
+        };
+        start(&name, &sh("echo old-run"), Some(session), true, None, &[]).expect("old run starts");
+        wait_dead();
+        let old = find(&name).expect("the old run's window");
+        set_opt(&old.pane, OPT_DEAD_AT, "1").expect("an old, long-expired stamp");
+        start(&name, &sh("echo new-run"), Some(session), true, None, &[]).expect("the name is reused");
+        wait_dead();
+        let new = find(&name).expect("the new run's window");
+        assert_eq!(new.pane, old.pane, "the same window is reused");
+        assert_eq!(new.dead_stamp, 0, "the start cleared the old stamp: {new:?}");
+        std::env::remove_var(TTL_ENV);
+        let reaped = reap_expired(None);
+        assert!(!reaped.iter().any(|t| t.name == name), "the new run is not reaped by the old death");
+        let kept = find(&name).expect("its window and output stay");
+        assert!(kept.dead_at > 0 || kept.dead_stamp > 1, "and it now carries its own death clock: {kept:?}");
+        assert!(logs(&name, 20, None).expect("logs read").contains("new-run"), "the new run's output is readable");
+        let _ = remove(&name);
+        let _ = tmux::kill_session(session);
+    }
+
     #[test]
     fn ignores_windows_that_are_not_tasks() {
         // A plain window: @tmm_task is empty.
-        assert!(parse_line(&row(&["", "tmux", "1", "%1", "0", "", "", "1", "0", "", "", ""])).is_none());
+        assert!(parse_line(&row(&["", "tmux", "1", "%1", "0", "", "", "1", "0", "", "", "", "", ""])).is_none());
         assert!(parse_line("garbage").is_none());
     }
 
     #[test]
     fn dead_pane_without_a_status_is_not_reported_as_success() {
-        let t = parse_line(&row(&["x", "s", "1", "%1", "1", "", "", "0", "0", "", "", "c"])).unwrap();
+        let t = parse_line(&row(&["x", "s", "1", "%1", "1", "", "", "0", "0", "", "", "", "", "c"])).unwrap();
         assert_eq!(t.state, State::Exited(-1));
     }
 
     #[test]
     fn command_containing_the_separator_round_trips() {
         let t = parse_line(&row(&[
-            "x", "s", "1", "%1", "0", "", "", "1", "0", "", "", "echo <TMM_SEP> hi",
+            "x", "s", "1", "%1", "0", "", "", "1", "0", "", "", "", "", "echo <TMM_SEP> hi",
         ]))
         .unwrap();
         assert_eq!(t.cmd, "echo <TMM_SEP> hi");
@@ -858,10 +1453,20 @@ mod tests {
             if both_dead { break; }
         }
         let dead = find(&done).expect("done is still registered");
-        assert!(!dead.is_running() && dead.dead_at > 0, "tmux reports the death time: {dead:?}");
+        assert!(!dead.is_running(), "{dead:?}");
+        let version = tmux::run_tmux(&["-V"]).unwrap_or_default();
+        eprintln!("tasks reap test on {} (pane_dead_time: {})", version.trim(), if dead.dead_at > 0 { "reported" } else { "empty" });
 
         std::env::set_var(TTL_ENV, "0");
-        let reaped = reap_expired(Some(&shielded));
+        // Board #92: on a tmux that reports no death time (3.2a) the first
+        // verb STAMPS the dead pane and reaps nothing; the next one reaps it.
+        // Where tmux reports it (3.6a) the first verb reaps.
+        let mut reaped = reap_expired(Some(&shielded));
+        if dead.dead_at == 0 {
+            assert!(reaped.is_empty(), "an unstamped death is stamped, not reaped");
+            assert!(find(&done).is_some_and(|t| t.dead_stamp > 0), "the first verb stamps it");
+            reaped = reap_expired(Some(&shielded));
+        }
         std::env::remove_var(TTL_ENV);
         let names: Vec<&str> = reaped.iter().map(|t| t.name.as_str()).collect();
         assert_eq!(names, vec![done.as_str()], "only the expired, unshielded task");
