@@ -14,7 +14,23 @@ through a shell command, including servers added seconds ago.
 Native MCP configs load when your CLI starts, so adding a server normally
 means a restart. The `tmm mcp` subtree reads its config file on EVERY call:
 add a server, and the next command already has it. It works identically from
-every backend (kiro, claude, codex, grok) because it is just a shell command.
+every backend (kiro, claude, codex, grok, omp, pi, kimi, dsh) because it is just a shell command.
+
+## Where MCP configuration lives (three places, one question each)
+
+Ask "who is this for?" and the place follows:
+
+| place | command | who reads it | when it takes effect |
+|---|---|---|---|
+| **Central definitions** | `tmm mcp list` / `save` / `delete` | agent DEFINITIONS reference them by name (`tmm registry save --mcp '["web-search"]'`); values show as `<set>`, never printed | the next start of an agent whose definition names them |
+| **An agent's definition** (`mcp` field) | `tmm registry save --mcp '[…]'`, the Hub's agent editor | the agent's own CLI, natively: rendered into its isolated home at every start (claude/pi `mcp.json`, kiro agent json, codex `-c`) | that agent's next start |
+| **The project's `.tmm/mcp.json`** | `tmm mcp servers` / `tools` / `schema` / `call` / `add` | ONLY `tmm mcp call` and friends, from any agent in this project; seeded from the agents' definitions at spawn by merge, so a server stays here until someone deletes it | the very next `tmm mcp` call |
+
+So `tmm mcp list` and `tmm mcp servers` answer different questions: "which
+definitions exist centrally" versus "which servers can I `tmm mcp call` right
+now in this project". A server you `tmm mcp add` is callable at once through
+this skill but is NOT in your CLI's native tools; to make it native, put it in
+the agent's definition (or a central def the definition names) and restart.
 
 ## The progressive ladder — pull only the tier you need
 

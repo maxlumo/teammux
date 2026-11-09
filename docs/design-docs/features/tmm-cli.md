@@ -300,6 +300,18 @@ final shape:
   Its niche is what native cannot do: per-call config reads, so `tmm mcp add`
   makes a server callable on the NEXT command with no restart, uniformly on
   every backend.
+- **Three places, named for their reader** (board #83, owner 2026-11-09:
+  the layering is acceptable, make it easier for an agent to understand):
+  central definitions (`tmm mcp list|save|delete`, for agent DEFINITIONS to
+  name), an agent's definition `mcp` field (rendered natively into its home
+  at start, the CLI's own tools), and the project's `.tmm/mcp.json` (read only
+  by `tmm mcp servers|tools|schema|call|add`, seeded from the agents'
+  definitions by MERGE at spawn and never pruned, so a server stays until
+  deleted — the 2026-11-08 `kiro-web-search` leftover). `tmm mcp list` and
+  `tmm mcp servers` therefore answer different questions; the mcp-cli SKILL
+  carries the table that says which, and that an `add`ed server is callable
+  through the skill but not native until it is in a definition and the agent
+  restarts.
 
 The subtree itself is the second purely-local one (like `task`, dispatched
 before `Config::load()`):
