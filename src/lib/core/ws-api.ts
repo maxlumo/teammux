@@ -594,6 +594,14 @@ export function createWsApi(connection: Connection) {
    * taken or reserved with the reason, and an older one answers -32601. */
   const hubAgentRename = (session: string, agent: string, label: string | null) =>
     call<AgentLabel>('hub_agent_rename', { session, agent, label });
+  /** Board #95: remove every member of a team here; the definition stays.
+   * `{ removed: {name, joined}[], refused: {name, error}[] }`. `only` retries
+   * those names; `preview` (round 1) only answers who WOULD go,
+   * `{ members: {name, joined, running}[] }`, from the server's one
+   * membership rule, and changes nothing. */
+  const hubTeamRemove = (session: string, team: string, opts: { only?: string[]; preview?: boolean } = {}) =>
+    call<{ removed?: { name: string; joined?: boolean }[]; refused?: { name: string; error: string }[]; not_confirmed?: string[]; members?: { name: string; joined?: boolean; running?: boolean }[] }>(
+      'hub_team_remove', { session, team, ...(opts.only ? { only: opts.only } : {}), ...(opts.preview ? { preview: true } : {}) }, 180000);
   /** Align a team with its CURRENT definition (board #286): restart the
    * members it still has, spawn those it gained, stop those it dropped. */
   const hubTeamRestart = (session: string, team: string, only?: string[]) =>
@@ -733,7 +741,7 @@ export function createWsApi(connection: Connection) {
     hubUnread, hubRead, systemStatus, hubArchive, hubAgents, boardList, boardCounts,
     boardGet, boardSave, boardNote, boardDelete, boardBlock, hubActivity, hubSpawn, hubSpawnTeam,
     hubAgentStop, hubAgentRemove, hubAgentInterrupt, hubAgentInputMode, hubAgentSetTeam, hubAgentRestart, hubAgentFork, hubAgentRename,
-    hubTeamRestart, registryList, registrySave, registryDelete, globalPromptGet,
+    hubTeamRestart, hubTeamRemove, registryList, registrySave, registryDelete, globalPromptGet,
     globalPromptSet, teamsList, teamsSave, teamsDelete, backendsList, backendsCheck, modelsList, skillsList,
     skillsSave, skillsDelete, skillsRefresh, skillsRead, skillsImport, skillsFiles,
     skillsFile, mcpList, mcpSave, mcpDelete, fsDownloadHttp, fsPreviewBase,
@@ -790,7 +798,7 @@ export const RPC_KIND = {
   boardSave: 'write', boardNote: 'write', boardDelete: 'write', boardBlock: 'write',
   hubActivity: 'read', hubSpawn: 'write', hubSpawnTeam: 'write',
   hubAgentStop: 'write', hubAgentRemove: 'write', hubAgentInterrupt: 'write', hubAgentInputMode: 'write', hubAgentSetTeam: 'write',
-  hubAgentRestart: 'write', hubAgentFork: 'write', hubAgentRename: 'write', hubTeamRestart: 'write',
+  hubAgentRestart: 'write', hubAgentFork: 'write', hubAgentRename: 'write', hubTeamRestart: 'write', hubTeamRemove: 'write',
   registryList: 'read', registrySave: 'write', registryDelete: 'write',
   globalPromptGet: 'read', globalPromptSet: 'write',
   teamsList: 'read', teamsSave: 'write', teamsDelete: 'write',

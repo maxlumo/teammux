@@ -29,6 +29,8 @@ export interface GroupScope {
    * that joined at runtime. A team restart aligns the team with its
    * definition, which does not list them; a team stop still stops them. */
   kept: string[];
+  /** The target is a TEAM (not All): only a team can be removed (#95). */
+  team?: boolean;
 }
 
 export function groupScope(
@@ -44,10 +46,10 @@ export function groupScope(
     ? [...stopped]
     : team ? stopped.filter((name) => teamRoot(stoppedTeams[name]) === team) : [];
   const kept = team ? agents.filter((a) => a.joined && live.includes(a.name)).map((a) => a.name) : [];
-  return { live, busy, stopped: idle, kept };
+  return { live, busy, stopped: idle, kept, team: !!team };
 }
 
-export type GroupVerb = 'interrupt' | 'restart' | 'start' | 'stop';
+export type GroupVerb = 'interrupt' | 'restart' | 'start' | 'stop' | 'remove';
 
 export interface GroupAction {
   verb: GroupVerb;
@@ -61,8 +63,10 @@ export interface GroupAction {
 
 /** The verbs in the menu's order — rising consequence, destructive last (the
  * agent menu's rule, owner 2026-08-25). A verb with nobody to act on is not
- * offered at all. Remove is never a group verb: it deletes homes, and stays
- * a per-agent decision. */
+ * offered at all. Remove is a TEAM's verb only (board #95, owner 2026-11-09:
+ * "整个 team 我没办法在界面上全部 remove 掉"): every member, running or stopped,
+ * always confirmed, and last; All never removes everyone. It runs as ONE
+ * server step (`hub_team_remove`), not this client loop. */
 export function groupActions(scope: GroupScope): GroupAction[] {
   const out: GroupAction[] = [];
   const kept = scope.kept ?? [];
@@ -71,6 +75,8 @@ export function groupActions(scope: GroupScope): GroupAction[] {
   if (restart.length) out.push({ verb: 'restart', names: restart, confirm: scope.busy.some((name) => restart.includes(name)), danger: false });
   if (scope.stopped.length) out.push({ verb: 'start', names: scope.stopped, confirm: false, danger: false });
   if (scope.live.length) out.push({ verb: 'stop', names: scope.live, confirm: true, danger: true });
+  const members = [...scope.live, ...scope.stopped];
+  if (scope.team && members.length) out.push({ verb: 'remove', names: members, confirm: true, danger: true });
   return out;
 }
 

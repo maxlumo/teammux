@@ -871,6 +871,40 @@ fn dispatch_hub(req: &Request, notifications: Option<&crate::agent_notifications
             Ok(v)
         }
 
+        // Remove a whole team (board #95): every member it has here, through
+        // the per-agent remove, one room line per member removed. The team's
+        // definition stays. `only` retries the names a previous run refused.
+        "hub_team_remove" => {
+            let team = param(p, "team")?;
+            // `only` is checked at the door (round 1, validator-2 note 9):
+            // absent is the whole team; present, it must be a non-empty list
+            // of names. Anything else refuses before any change, never
+            // widened to the whole team.
+            let only: Option<Vec<String>> = match p.get("only") {
+                None | Some(serde_json::Value::Null) => None,
+                Some(serde_json::Value::Array(a)) if !a.is_empty() && a.iter().all(|v| v.as_str().is_some_and(|s| !s.is_empty())) => {
+                    Some(a.iter().filter_map(|v| v.as_str().map(str::to_string)).collect())
+                }
+                Some(_) => return Err(RpcError::InvalidParams("'only' must be a non-empty list of member names".into())),
+            };
+            // `preview` too (round 2, validator-2 note 15): absent, null or a
+            // boolean; anything else refuses, never falls through to a remove.
+            let preview = match p.get("preview") {
+                None | Some(serde_json::Value::Null) => false,
+                Some(serde_json::Value::Bool(b)) => *b,
+                Some(_) => return Err(RpcError::InvalidParams("'preview' must be true or false".into())),
+            };
+            if preview {
+                return crate::projects::team_remove_preview(session, team).map_err(RpcError::InvalidParams);
+            }
+            let v = crate::projects::team_remove(session, team, only.as_deref()).map_err(RpcError::InvalidParams)?;
+            for m in v["removed"].as_array().cloned().unwrap_or_default() {
+                let name = m["name"].as_str().unwrap_or("");
+                let _ = rooms::post(&room, name, &format!("[tmm] removed {name} — team {team} removed"));
+            }
+            Ok(v)
+        }
+
         // Fork a RUNNING managed agent (board #383): a new agent with the source's
         // effective definition, a fresh home and a fresh conversation. The
         // source is only read. The room shows who it was forked from.
@@ -8605,6 +8639,210 @@ while True:
         assert_eq!(start_agent_with(&session, "dev", permit, clean_cli, fallback(false, false)), Ok(true));
         assert!(!stopped());
 
+    }
+
+    /// Board #95 (owner 2026-11-09: "整个 team 我没办法在界面上全部 remove 掉"): a
+    /// team is removed in ONE call, the per-agent remove applied to every
+    /// member it has here, running or stopped, a runtime joiner included
+    /// (and said so); a solo agent and the team's DEFINITION are untouched;
+    /// a member whose remove refuses is reported by name, the others go.
+    #[test]
+    fn a_team_remove_removes_every_member_reports_each_and_keeps_the_definition() {
+        crate::projects::tests::use_test_store();
+        let pid = std::process::id();
+        let session = format!("tmm-tremove-{pid}");
+        let team = format!("tremove{pid}");
+        let ws = crate::config::test_scratch("tmm-tremove-ws");
+        let recipe = |name: &str, team: &str, member: &str| {
+            let home = ws.join(".tmm/agents").join(name);
+            std::fs::create_dir_all(&home).unwrap();
+            std::fs::write(home.join("launch.json"), serde_json::json!({ "backend": "kiro", "cmd": "sleep 600", "agent_def": "", "team": team, "member": member }).to_string()).unwrap();
+            home
+        };
+        let running = recipe("lead", &team, "lead");
+        let stopped = recipe("dev", &team, "dev");
+        let joiner = recipe("helper", &team, "");
+        let solo = recipe("solo", "", "");
+        crate::projects::teams_save(&serde_json::json!({ "name": team, "description": "", "members": serde_json::json!([
+            { "name": "lead", "agent": { "name": "", "backend": "kiro", "model": "", "effort": "", "system": "x", "skills": "[]", "mcp": "[]" } },
+            { "name": "dev", "agent": { "name": "", "backend": "kiro", "model": "", "effort": "", "system": "x", "skills": "[]", "mcp": "[]" } },
+        ]).to_string() })).unwrap();
+        let cwd = ws.to_string_lossy().to_string();
+        assert!(crate::tmux::new_session(&session, Some(&cwd), Some("sleep 600")).is_ok());
+        crate::tmux::rename_window(&format!("{session}:^"), "anchor").unwrap();
+        for w in ["lead", "helper", "solo"] { crate::tmux::new_named_window(&session, w, &cwd).unwrap(); }
+        crate::projects::adopt(&session, Some("tremove")).unwrap();
+        let id = crate::projects::project_for_session(&session).unwrap().unwrap().id;
+
+        let r = handle_hub_request(&req("hub_team_remove", serde_json::json!({ "session": session, "team": team })), None);
+        assert!(r.error.is_none(), "{:?}", r.error.map(|e| e.message));
+        let result = r.result.unwrap();
+        let names = |k: &str| result[k].as_array().unwrap().iter().map(|v| v["name"].as_str().unwrap().to_string()).collect::<Vec<_>>();
+        assert_eq!(names("removed"), vec!["dev", "helper", "lead"], "{result}");
+        assert_eq!(names("refused"), Vec::<String>::new(), "{result}");
+        assert_eq!(result["removed"].as_array().unwrap().iter().find(|v| v["name"] == "helper").unwrap()["joined"], true, "the joiner is said so");
+        for (w, home) in [("lead", &running), ("dev", &stopped), ("helper", &joiner)] {
+            assert!(window_of_agent(&session, w).is_none(), "{w}: its window is closed");
+            assert!(!home.exists(), "{w}: its home is deleted");
+        }
+        assert!(window_of_agent(&session, "solo").is_some() && solo.exists(), "a solo agent is untouched");
+        assert!(crate::projects::team_get(&team).is_ok_and(|t| t.is_some()), "the team's definition stays");
+        // Nobody left: a second remove says so instead of reporting success.
+        let again = handle_hub_request(&req("hub_team_remove", serde_json::json!({ "session": session, "team": team })), None);
+        assert!(again.error.as_ref().is_some_and(|e| e.message.contains("no members")), "{:?}", again.result);
+
+        let _ = crate::projects::delete(&id);
+        crate::projects::teams_delete(&team).ok();
+        let _ = std::fs::remove_dir_all(&ws);
+    }
+
+    /// Board #95 round 1 (validator-2 note 9, orchestrator note 10): a
+    /// malformed `only` refuses at the door and changes nothing; a member
+    /// whose home cannot be deleted is REFUSED with the reason, keeps its
+    /// home and marker, and a retry of only that member removes it; the
+    /// preview lists every member, a stopped joiner included, and changes
+    /// nothing.
+    #[test]
+    #[cfg(unix)]
+    fn a_team_remove_refuses_bad_narrowing_and_a_home_it_could_not_delete_stays_retryable() {
+        use std::os::unix::fs::PermissionsExt;
+        crate::projects::tests::use_test_store();
+        let pid = std::process::id();
+        let session = format!("tmm-tremove1-{pid}");
+        let team = format!("tremove1{pid}");
+        let ws = crate::config::test_scratch("tmm-tremove1-ws");
+        let agents = ws.join(".tmm/agents");
+        let recipe = |name: &str, member: &str| {
+            let home = agents.join(name);
+            std::fs::create_dir_all(&home).unwrap();
+            std::fs::write(home.join("launch.json"), serde_json::json!({ "backend": "kiro", "cmd": "sleep 600", "agent_def": "", "team": team, "member": member }).to_string()).unwrap();
+            std::fs::write(home.join("notes.txt"), "x").unwrap();
+            home
+        };
+        let a = recipe("a", "a");
+        let c = recipe("c", "c");
+        let j = recipe("j", ""); // a STOPPED runtime joiner
+        // Round 3 (validator-2 note 24): a NESTED member, its recipe holding
+        // the full path the launcher writes, and a look-alike team.
+        let nested = agents.join("n");
+        std::fs::create_dir_all(&nested).unwrap();
+        std::fs::write(nested.join("launch.json"), serde_json::json!({ "backend": "kiro", "cmd": "sleep 600", "agent_def": "", "team": format!("{team}/sub"), "member": "n" }).to_string()).unwrap();
+        let other = agents.join("o");
+        std::fs::create_dir_all(&other).unwrap();
+        std::fs::write(other.join("launch.json"), serde_json::json!({ "backend": "kiro", "cmd": "sleep 600", "agent_def": "", "team": format!("{team}x"), "member": "o" }).to_string()).unwrap();
+        let cwd = ws.to_string_lossy().to_string();
+        assert!(crate::tmux::new_session(&session, Some(&cwd), Some("sleep 600")).is_ok());
+        crate::tmux::rename_window(&format!("{session}:^"), "anchor").unwrap();
+        crate::tmux::new_named_window(&session, "a", &cwd).unwrap();
+        crate::projects::adopt(&session, Some("tremove1")).unwrap();
+        let id = crate::projects::project_for_session(&session).unwrap().unwrap().id;
+        let call = |params: serde_json::Value| handle_hub_request(&req("hub_team_remove", params), None);
+
+        // The door: nothing malformed is widened to the whole team.
+        for only in [serde_json::json!("a"), serde_json::json!([]), serde_json::json!([1]), serde_json::json!(["a", 2]), serde_json::json!(["stranger"])] {
+            let r = call(serde_json::json!({ "session": session, "team": team, "only": only }));
+            assert!(r.error.is_some(), "only = {only} refuses: {:?}", r.result);
+        }
+        // Round 2 (validator-2 note 15): a malformed `preview` refuses too.
+        for preview in [serde_json::json!("true"), serde_json::json!(1), serde_json::json!({})] {
+            let r = call(serde_json::json!({ "session": session, "team": team, "preview": preview }));
+            assert!(r.error.is_some(), "preview = {preview} refuses: {:?}", r.result);
+        }
+        assert!(a.join("launch.json").exists() && c.exists() && j.exists() && window_of_agent(&session, "a").is_some(), "and nothing was changed");
+
+        // The preview: every member, the stopped joiner said so, nothing changed.
+        let pv = call(serde_json::json!({ "session": session, "team": team, "preview": true })).result.unwrap();
+        let rows = pv["members"].as_array().unwrap();
+        assert_eq!(rows.iter().map(|m| m["name"].as_str().unwrap()).collect::<Vec<_>>(), vec!["a", "c", "j", "n"], "the nested member is listed, the look-alike team's is not: {pv}");
+        assert_eq!(rows.iter().find(|m| m["name"] == "j").unwrap()["joined"], true);
+        assert_eq!(rows.iter().find(|m| m["name"] == "a").unwrap()["running"], true);
+        assert!(window_of_agent(&session, "a").is_some() && c.exists(), "a preview changes nothing");
+
+        // c's home cannot be deleted: its parent refuses writes (as measured).
+        // Only c is narrowed, so a and j are not involved.
+        std::fs::set_permissions(&agents, std::fs::Permissions::from_mode(0o500)).unwrap();
+        let r = call(serde_json::json!({ "session": session, "team": team, "only": ["c"] }));
+        std::fs::set_permissions(&agents, std::fs::Permissions::from_mode(0o700)).unwrap();
+        let result = r.result.unwrap();
+        assert_eq!(result["removed"], serde_json::json!([]), "{result}");
+        assert_eq!(result["refused"][0]["name"], "c", "{result}");
+        assert!(result["refused"][0]["error"].as_str().unwrap().contains("could not be deleted"), "{result}");
+        assert!(c.join("launch.json").exists() && c.join("notes.txt").exists(), "the home is kept whole, marker included");
+        // The retry of only c now succeeds.
+        let r = call(serde_json::json!({ "session": session, "team": team, "only": ["c"] })).result.unwrap();
+        assert_eq!(r["removed"][0]["name"], "c", "{r}");
+        assert!(!c.exists(), "gone on the retry");
+        assert!(!std::fs::read_dir(&agents).unwrap().flatten().any(|e| e.file_name().to_string_lossy().starts_with(".removing-")), "nothing left aside");
+
+        // Round 2 (validator-2 note 15): a delete that fails LATE, after the
+        // contents and the marker went, leaves a member a retry can find.
+        let late = recipe("late", "late");
+        *crate::projects::managed::test_seam::LATE_FAIL.lock().unwrap() = Some("late".into());
+        let r = call(serde_json::json!({ "session": session, "team": team, "only": ["late"] })).result.unwrap();
+        *crate::projects::managed::test_seam::LATE_FAIL.lock().unwrap() = None;
+        assert_eq!(r["refused"][0]["name"], "late", "{r}");
+        assert!(r["refused"][0]["error"].as_str().unwrap().contains("only partly deleted") && r["refused"][0]["error"].as_str().unwrap().contains("marker was put back"), "it says what happened: {r}");
+        assert!(late.join("launch.json").exists(), "the marker is back under its name");
+        assert!(!late.join("notes.txt").exists(), "(its data did go: the error says partly)");
+        let pv = call(serde_json::json!({ "session": session, "team": team, "preview": true })).result.unwrap();
+        assert!(pv["members"].as_array().unwrap().iter().any(|m| m["name"] == "late"), "still listed: {pv}");
+        let r = call(serde_json::json!({ "session": session, "team": team, "only": ["late"] })).result.unwrap();
+        assert_eq!(r["removed"][0]["name"], "late", "the retry finishes it: {r}");
+        assert!(!late.exists());
+
+        // The whole team, its sub-team included; the look-alike team stays.
+        let r = call(serde_json::json!({ "session": session, "team": team })).result.unwrap();
+        let mut gone: Vec<&str> = r["removed"].as_array().unwrap().iter().map(|m| m["name"].as_str().unwrap()).collect();
+        gone.sort_unstable();
+        assert_eq!(gone, vec!["a", "j", "n"], "{r}");
+        assert!(!nested.exists(), "the nested member's home is gone with its root");
+        assert!(other.join("launch.json").exists(), "a team whose name merely starts the same is not touched");
+
+        let _ = crate::projects::delete(&id);
+        let _ = std::fs::remove_dir_all(&ws);
+    }
+
+    /// Board #95 round 7 (reviewer note 47, orchestrator note 48): a confirm
+    /// authorizes exactly the members it listed. A member that joined the team
+    /// after the preview is NOT removed by `only: <the confirmed names>`, and is
+    /// reported `not_confirmed`, its home intact.
+    #[test]
+    fn a_confirmed_remove_takes_only_the_listed_members_and_names_a_newcomer() {
+        crate::projects::tests::use_test_store();
+        let pid = std::process::id();
+        let session = format!("tmm-tremove7-{pid}");
+        let team = format!("tremove7{pid}");
+        let ws = crate::config::test_scratch("tmm-tremove7-ws");
+        let recipe = |name: &str| {
+            let home = ws.join(".tmm/agents").join(name);
+            std::fs::create_dir_all(&home).unwrap();
+            std::fs::write(home.join("launch.json"), serde_json::json!({ "backend": "kiro", "cmd": "sleep 600", "agent_def": "", "team": team, "member": name }).to_string()).unwrap();
+            home
+        };
+        let (a, b) = (recipe("a"), recipe("b"));
+        let cwd = ws.to_string_lossy().to_string();
+        assert!(crate::tmux::new_session(&session, Some(&cwd), Some("sleep 600")).is_ok());
+        crate::projects::adopt(&session, Some("tremove7")).unwrap();
+        let id = crate::projects::project_for_session(&session).unwrap().unwrap().id;
+        // The preview the person confirmed listed a and b; c joins before Confirm.
+        let c = recipe("c");
+        let r = handle_hub_request(&req("hub_team_remove", serde_json::json!({ "session": session, "team": team, "only": ["a", "b"] })), None).result.unwrap();
+        let names = |k: &str| r[k].as_array().unwrap().iter().map(|v| v["name"].as_str().or(v.as_str()).unwrap().to_string()).collect::<Vec<_>>();
+        assert_eq!(names("removed"), vec!["a", "b"], "{r}");
+        assert_eq!(names("not_confirmed"), vec!["c"], "the newcomer is named, not removed: {r}");
+        assert!(!a.exists() && !b.exists() && c.join("launch.json").exists(), "c's home is intact");
+        // Round 8 (validator-2 note 58): the newcomer comes from the SAME
+        // membership read; a later read failing cannot hide it.
+        let (d, e) = (recipe("d"), recipe("e"));
+        *crate::projects::managed::read_seam::AFTER.lock().unwrap() = Some((ws.join(".tmm/agents"), 1));
+        let r = handle_hub_request(&req("hub_team_remove", serde_json::json!({ "session": session, "team": team, "only": ["c"] })), None);
+        *crate::projects::managed::read_seam::AFTER.lock().unwrap() = None;
+        let r = r.result.expect("one read, which succeeded");
+        let left: Vec<&str> = r["not_confirmed"].as_array().unwrap().iter().map(|v| v.as_str().unwrap()).collect();
+        assert_eq!(left, vec!["d", "e"], "{r}");
+        assert!(d.exists() && e.exists());
+        let _ = crate::projects::delete(&id);
+        let _ = std::fs::remove_dir_all(&ws);
     }
 
     /// Board #422 (validator I9): a team restart that drops a member STOPS it

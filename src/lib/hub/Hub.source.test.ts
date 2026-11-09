@@ -215,7 +215,8 @@ test('Back keeps the original priority and current live guards in one dispatcher
     contextMenu: 'if (ctxAt) { closeCtx(); return true; }',
     // #461: an open turn preview (hover, scrub or keyboard) is the top-most thing a Back can peel after a menu.
     turnRail: 'if (feedView?.closeTurnRail()) return true;',
-    action: 'if (!pendingAct) return false; if (!acting) pendingAct = null; return true;',
+    // #95 round 6: the confirm is closed through its one writer, which moves the confirm epoch.
+    action: 'if (!pendingAct) return false; if (!acting) setConfirm(null); return true;',
     trash: 'if (!trashAsk) return false; if (!purging) trashAsk = null; return true;',
     // #382: closing the picker also clears its Join (closePicker).
     picker: 'if (pickerOpen) { closePicker(); return true; }',
@@ -940,4 +941,11 @@ test('Rename an agent is one card-menu item opening the shared Dialog with the s
   assert.doesNotMatch(dialog, /style=|style:|\d+px/u, 'no inline style, no raw px');
   assert.doesNotMatch(source, /\.rename-input\s*\{/u, 'and no CSS of its own');
   assert.match(source, /const \{ addTeamMessageListener, removeTeamMessageListener, addAgentRenamedListener, removeAgentRenamedListener \} = scope\.runtime\.connection;/u, 'the push stream from the connection, like the room');
+});
+
+// #95 round 6 (orchestrator note 41): the shared confirm has ONE writer, which moves its epoch.
+test('the shared confirm is written only through setConfirm, which moves the one epoch (#95)', () => {
+  const writes = [...source.matchAll(/(?<!let )\bpendingAct = /gu)].length;
+  assert.equal(writes, 1, 'pendingAct is assigned only inside setConfirm');
+  assert.match(source, /const setConfirm = \(act\) => \{ confirmEpoch\+\+; pendingAct = act; \};/u);
 });

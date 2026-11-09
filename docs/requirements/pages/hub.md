@@ -192,7 +192,21 @@ completion).
   brings the team in line with its current definition: members removed from
   it are stopped (their homes kept), members added to it are started, and the
   rest restart (board #286). A team's menu also opens its configuration.
-  Removing agents stays per agent.
+  A team's menu ends with **Remove team (N agents)**, after Configure (board
+  #95, owner 2026-11-09: "整个 team 我没办法在界面上全部 remove 掉"): every member
+  it has here, running or stopped, a runtime joiner too. The confirm lists
+  exactly who goes, as the server counts them (a preview: stopped members
+  and joiners included, a joiner marked), says each member is stopped, its
+  slot forgotten and its home deleted, and that the team's definition stays
+  (it can be started again from the empty-room preset). Confirm removes
+  exactly the members it listed (round 7): one that joined the team after
+  the list was read is left and named afterwards ("not listed in the
+  confirmation, not removed"); removing the team again includes it. A member
+  that refuses is named with its reason in the confirm, and a retry runs
+  only it.
+  A home that cannot be deleted stays a member: a parent that refuses
+  changes nothing, and a delete that fails part-way puts the home's marker
+  back and says so, so the retry finds it and finishes. All has no Remove.
   The empty-room preset lists configured teams as
   one-tap starts beside the single agents, and the "Start a team" picker
   offers them above the ad-hoc pick (the brief applies to every member).

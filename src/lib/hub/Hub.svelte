@@ -78,7 +78,7 @@
   // lives on the connection, the calls on the api — both from the one read.
   const {
     projectList, projectUp, projectDown, projectDelete, projectArchive, projectCreate, projectRename, listSessionsWithPanes,
-    hubPost, hubCommand, hubAgentRename, modelsList, boardList, hubAgentSetTeam, hubLog, hubLogAround, hubSearch, hubFiles, hubRooms, hubUnread, hubRead, hubAgents, fsCwd, hubSpawn, hubSpawnTeam, teamsList, hubAgentStop, hubAgentRestart, hubAgentFork, hubTeamRestart, hubActivity, hubAgentRemove, hubAgentInterrupt, hubAgentInputMode, registryList,
+    hubPost, hubCommand, hubAgentRename, modelsList, boardList, hubAgentSetTeam, hubLog, hubLogAround, hubSearch, hubFiles, hubRooms, hubUnread, hubRead, hubAgents, fsCwd, hubSpawn, hubSpawnTeam, teamsList, hubAgentStop, hubAgentRestart, hubAgentFork, hubTeamRestart, hubTeamRemove, hubActivity, hubAgentRemove, hubAgentInterrupt, hubAgentInputMode, registryList,
   } = scope.runtime.api;
   const { addTeamMessageListener, removeTeamMessageListener, addAgentRenamedListener, removeAgentRenamedListener } = scope.runtime.connection;
   // What this server's login says it can do (board #377 caps). Moving a
@@ -504,6 +504,7 @@
    * once — it may not land later, and it stops suppressing this room's
    * markSeen now. */
   async function selectProject(session, claim = 0) {
+    confirmEpoch++; // a visit makes every pending group preview stale (#95)
     if (jumpIntent && jumpIntent !== claim) { const n = jumpIntent; jumpIntent = 0; centre.consume(n); }
     // A room-scoped answer belongs to the room it was asked in: any room change closes the
     // search box, except the one made by the jump the box itself owns (board #432).
@@ -1801,8 +1802,18 @@
     // {n} how many agents the confirm covers.
     groupStop:    { title: 'hubGroupStopTitle',    note: 'hubGroupStopNote',    go: 'hubStop',    icon: 'stop' },
     groupRestart: { title: 'hubGroupRestartTitle', note: 'hubGroupRestartNote', go: 'hubRestart', icon: 'refresh' },
+    // Board #95: the whole team, homes included; its definition stays.
+    groupRemove:  { title: 'hubGroupRemoveTitle',  note: 'hubGroupRemoveNote',  go: 'hubRemove',  icon: 'trash' },
   };
   let pendingAct = $state(null);   // { kind: keyof ACT_COPY, name, session }
+  /** The shared confirm's ONE epoch (#95 rounds 4-6, orchestrator notes 30,
+   * 35 and 41): every open, replace or close of the confirm (`setConfirm`,
+   * the only writer of `pendingAct`, whatever produced it: a group gesture,
+   * an agent's or a project's askAction, a cancel, a back gesture), every
+   * group gesture and every project visit move it. A late reply (the team
+   * Remove preview) applies only while the epoch it captured is current. */
+  let confirmEpoch = 0;
+  const setConfirm = (act) => { confirmEpoch++; pendingAct = act; };
   let acting = $state(false);
   let actionError = $state(''), purgeError = $state(''), purging = $state(false);
   let actionReadError = $state(''), actionRefreshing = $state(false);
@@ -1819,7 +1830,7 @@
     // frozen here; the dialog names the server beside the project.
     const row = where ?? rows.find(r => r.project.session === session);
     actionError = '';
-    pendingAct = { kind, name, session, projectId: row?.project.id, closed: !row?.live, api: where?.api ?? null, server: where?.server ?? null };
+    setConfirm({ kind, name, session, projectId: row?.project.id, closed: !row?.live, api: where?.api ?? null, server: where?.server ?? null });
   };
   async function refreshActionView(afterMutation = false) {
     if (actionRefreshing && !afterMutation) return;
@@ -1863,6 +1874,19 @@
         }
       } else if (kind === 'remove') {
         await hubAgentRemove(session, name);
+      } else if (kind === 'groupRemove') {
+        // ONE server step for the members the confirm LISTED (round 7: a
+        // confirm authorizes exactly its set, `only`); a retry runs only the
+        // ones that refused, and each refusal is named (#95).
+        const r = await hubTeamRemove(session, act.team, { only: [...act.names] });
+        const refused = r.refused ?? [];
+        // A member that joined after the preview was left; say so (round 7).
+        if (r.not_confirmed?.length) act.notConfirmed = r.not_confirmed;
+        if (refused.length) {
+          act.names = refused.map((e) => e.name);
+          act.retry = true;
+          throw new Error(t('hubGroupFailedNames').replace('{names}', refused.map((e) => `${e.name} (${e.error})`).join(', ')));
+        }
       } else if (kind === 'groupStop' || kind === 'groupRestart') {
         // Every member once; a retry after a partial failure runs only the
         // ones that failed — a success is never repeated (board #258).
@@ -1883,7 +1907,14 @@
       return;
     } finally { if (alive) acting = false; }
     if (!alive || pendingAct !== act) return;
-    pendingAct = null;
+    setConfirm(null);
+    // Members that joined after the preview were not removed (#95 round 7):
+    // the one feedback slot names them and says how to include them.
+    if (act.notConfirmed?.length) {
+      const token = commandFeedbackLifetime.begin();
+      commandFeedbackAnchor = composer?.feedbackAnchor() ?? null;
+      commandFeedbackLifetime.update(token, { kind: 'error', message: t('hubTeamRemoveNotConfirmed').replace('{names}', act.notConfirmed.join(', ')) });
+    }
     if (generation !== selectionGeneration) return;
     // Another server's project: its own Hub's list refresh will show the
     // change; this Hub's rooms are untouched.
@@ -1990,6 +2021,7 @@
    * feedback slot, and nothing that succeeded is retried. */
   async function groupVerb(action, target, label, session = selected) {
     if (!session || session !== selected || acting || !action.names.length) return;
+    const epoch = ++confirmEpoch;
     if (action.verb === 'interrupt') {
       // The same visible failure list as the other group verbs (validator,
       // orchestrator 04:17): a member whose interrupt failed is named.
@@ -2002,10 +2034,33 @@
       });
       return;
     }
+    if (action.verb === 'remove') {
+      // The confirm lists exactly who the server would remove, joiners and
+      // stopped members included (#95 round 1): one membership rule, the
+      // server's, read before anything is asked.
+      if (purging) return;
+      actionError = '';
+      const team = targetTeam(target);
+      const feedbackToken = commandFeedbackLifetime.begin();
+      commandFeedbackAnchor = composer?.feedbackAnchor() ?? null;
+      // The gesture's identity (rounds 4-5, validator-2 notes 29 and 34;
+      // code-quality.md §1.4): the reply applies only while no later group
+      // gesture, cancel or project visit has moved the epoch; an older
+      // reply landing later is a no-op, never a swap under the person.
+      const current = () => epoch === confirmEpoch && selected === session && !acting;
+      try {
+        const { members = [] } = await hubTeamRemove(session, team, { preview: true });
+        if (!current()) return;
+        setConfirm({ kind: 'groupRemove', name: label, session, team, names: members.map((m) => m.name), joined: members.filter((m) => m.joined).map((m) => m.name) });
+      } catch (e) {
+        if (current()) commandFeedbackLifetime.update(feedbackToken, { kind: 'error', message: String(e?.message ?? e) });
+      }
+      return;
+    }
     if (action.confirm) {
       if (purging) return;
       actionError = '';
-      pendingAct = { kind: action.verb === 'stop' ? 'groupStop' : 'groupRestart', name: label, session, names: [...action.names], team: targetTeam(target) };
+      setConfirm({ kind: action.verb === 'stop' ? 'groupStop' : 'groupRestart', name: label, session, names: [...action.names], team: targetTeam(target) });
       return;
     }
     const feedbackToken = commandFeedbackLifetime.begin();
@@ -2048,9 +2103,11 @@
       restart: scope === 'all' ? 'hubAllRestart' : 'hubTeamRestart',
       start: 'hubGroupStart',
       stop: scope === 'all' ? 'hubAllStop' : 'hubTeamStop',
+      remove: 'hubTeamRemove',
     };
-    const icons = { interrupt: 'stop', restart: 'refresh', start: 'refresh', stop: 'stop' };
+    const icons = { interrupt: 'stop', restart: 'refresh', start: 'refresh', stop: 'stop', remove: 'trash' };
     return groupActions(groupScope(target, agents, stopped, stoppedTeams)).map((action) => ({
+      verb: action.verb,
       label: t(words[action.verb]).replace('{n}', String(action.names.length)),
       icon: icons[action.verb],
       warn: action.verb === 'interrupt',
@@ -2237,12 +2294,17 @@
         ? { label: t('hubRecordOnly'), icon: 'chat', disabled: !targetable(''), onselect: () => { if (current() && recipient === target) setRecipient(''); } }
         : { label: t('hubTalkToTeam'), icon: 'chat', disabled: !targetable(target), onselect: () => { if (current()) setRecipient(target); } },
     ];
+    const verbs = groupItems(target, 'team', team, session).map((item) => ({
+      ...item, onselect: () => { if (current()) return item.onselect(); },
+    }));
+    // Remove team is the LAST row, after Configure (#95 round 1): rising
+    // consequence, the destructive verb at the end.
+    const remove = verbs.filter((item) => item.verb === 'remove');
     return [
       ...talk,
-      ...groupItems(target, 'team', team, session).map((item) => ({
-        ...item, onselect: () => { if (current()) return item.onselect(); },
-      })),
+      ...verbs.filter((item) => item.verb !== 'remove'),
       ...(openAgentConfig ? [{ label: t('hubTeamConfig'), icon: 'gear', onselect: () => openAgentConfig(team, 'team') }] : []),
+      ...remove,
     ];
   }
 
@@ -2292,7 +2354,7 @@
       backLayers.register('lightbox', () => { if (shotView) { closeShot(); return true; } return false; }),
       backLayers.register('contextMenu', () => { if (ctxAt) { closeCtx(); return true; } return false; }),
       backLayers.register('turnRail', () => { if (feedView?.closeTurnRail()) return true; return false; }),
-      backLayers.register('action', () => { if (!pendingAct) return false; if (!acting) pendingAct = null; return true; }),
+      backLayers.register('action', () => { if (!pendingAct) return false; if (!acting) setConfirm(null); return true; }),
       backLayers.register('trash', () => { if (!trashAsk) return false; if (!purging) trashAsk = null; return true; }),
       backLayers.register('picker', () => { if (pickerOpen) { closePicker(); return true; } return false; }),
       // The dialog peels its own steps first, exactly as in Sessions and as
@@ -2894,9 +2956,9 @@
   <ConfirmDialog open={!!pendingAct} busy={acting} compact={compact}
     error={actionError} confirmIcon={pendingAct ? ACT_COPY[pendingAct.kind].icon : 'check'}
     title={pendingAct ? t(ACT_COPY[pendingAct.kind].title).replace('{name}', pendingAct.server ? `${pendingAct.name} · ${pendingAct.server}` : (pendingAct.kind === 'stop' || pendingAct.kind === 'remove') ? names.shown(pendingAct.name) : pendingAct.name).replace('{n}', String(pendingAct.names?.length ?? '')) : ''}
-    note={pendingAct ? t(ACT_COPY[pendingAct.kind].note) : ''}
+    note={pendingAct ? t(ACT_COPY[pendingAct.kind].note) + (pendingAct.kind === 'groupRemove' ? ' ' + t('hubGroupRemoveWho').replace('{names}', pendingAct.names.map((n) => names.shown(n) + (pendingAct.joined?.includes(n) ? t('hubJoinedMark') : '')).join(', ')) : '') : ''}
     confirmLabel={pendingAct ? t(ACT_COPY[pendingAct.kind].go) : ''}
-    onconfirm={runAction} oncancel={() => (pendingAct = null)} />
+    onconfirm={runAction} oncancel={() => setConfirm(null)} />
 
   <!-- One context menu for every subject above: right-click on the desktop, long
        press on a phone. -->

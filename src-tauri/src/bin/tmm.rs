@@ -162,6 +162,9 @@ USAGE (human or agent — self-management):
                                       model, effort, mode, prompt, skills, MCP, team): fresh home,
                                       fresh conversation; the source is untouched
   tmm agent remove <name>             eject it: stop + forget its slot + delete its home
+  tmm agent remove --team <team>      the same for every member of a team here, running or
+                                      stopped, a runtime joiner too; the team's definition
+                                      stays (start it again with tmm spawn --team) (#95)
   tmm agent rename <name> <label>     show and address it as <label> in this project; its window,
                     [--reset]         home and TMM_AGENT keep the physical name, old names still
                                       reach it (#20); --reset shows the physical name again
@@ -1428,6 +1431,26 @@ async fn main() {
                 }
             }
         }
+        // Board #95: remove a whole TEAM, the team menu's "Remove team": every
+        // member it has in this project, one server step; the definition stays.
+        ("agent", rest) if rest.first().map(String::as_str) == Some("remove") && flags.contains_key("team") => {
+            let session = need_project(&ctx);
+            let Some(team) = flags.get("team").cloned().flatten().filter(|t| !t.trim().is_empty()) else {
+                fail(EXIT_USAGE, "--team needs a team name: tmm agent remove --team <team>");
+            };
+            if rest.len() > 1 {
+                fail(EXIT_USAGE, "remove one agent OR a team: tmm agent remove <name> | tmm agent remove --team <team>");
+            }
+            let r = rpc(&ctx, "hub_team_remove", json!({ "session": session, "team": team })).await;
+            if ctx.json {
+                println!("{r}");
+            } else {
+                let (out, err) = team_remove_text(&r);
+                for l in out { println!("{l}"); }
+                for l in &err { eprintln!("{l}"); }
+                if !err.is_empty() { std::process::exit(1); }
+            }
+        }
         // Board #383: a new agent from a running one, no parameters (CLI/UI parity
         // with the card's Fork). `--as` names it; otherwise the source's name,
         // uniquified.
@@ -2609,6 +2632,22 @@ fn has_address(body: &str) -> bool {
     !tmux_mobile::address::mention_names(body).is_empty()
 }
 
+/// What `tmm agent remove --team` prints (board #95): who was removed, a
+/// joiner said so, then one stderr line per member that refused.
+fn team_remove_text(r: &Value) -> (Vec<String>, Vec<String>) {
+    let team = r["team"].as_str().unwrap_or("?");
+    let removed: Vec<String> = r["removed"].as_array().map(|a| a.iter().map(|m| {
+        let n = m["name"].as_str().unwrap_or("?");
+        if m["joined"].as_bool() == Some(true) { format!("{n} (joined at runtime)") } else { n.to_string() }
+    }).collect()).unwrap_or_default();
+    let mut out = Vec::new();
+    if !removed.is_empty() {
+        out.push(format!("✓ removed team {team}: {} — its definition stays", removed.join(", ")));
+    }
+    let err = r["refused"].as_array().map(|a| a.iter().map(|e| format!("tmm: {}: not removed — {}", e["name"].as_str().unwrap_or("?"), e["error"].as_str().unwrap_or("?"))).collect()).unwrap_or_default();
+    (out, err)
+}
+
 /// `--flag value` / `--flag` / `-f` → map; the rest are positionals.
 /// `--as` of `tmm agent fork` (board #383, reviewer P2): ABSENT means the name is
 /// picked; present, it must carry a non-empty name. `--as` with no value, or an
@@ -2900,7 +2939,7 @@ const VERB_FLAGS: &[VerbFlags] = &[
     VerbFlags { key: "agent backends", ctx: true, flags: &["test", "models"] },
     VerbFlags { key: "agent stop", ctx: true, flags: &[] },
     VerbFlags { key: "agent restart", ctx: true, flags: &["team", "only"] },
-    VerbFlags { key: "agent remove", ctx: true, flags: &[] },
+    VerbFlags { key: "agent remove", ctx: true, flags: &["team"] },
     VerbFlags { key: "agent interrupt", ctx: true, flags: &[] },
     VerbFlags { key: "agent mode", ctx: true, flags: &[] },
     VerbFlags { key: "agent team", ctx: true, flags: &[] },
@@ -4202,6 +4241,20 @@ fn managed_names(agents: &Value) -> Vec<String> {
 
 #[cfg(test)]
 mod tests {
+    /// Board #95: `tmm agent remove --team` names each member removed (a
+    /// joiner said so) and each refusal on stderr, so nothing half-done is
+    /// silent.
+    #[test]
+    fn a_team_remove_prints_who_went_and_who_refused() {
+        let r = json!({ "team": "dev-pi", "removed": [{ "name": "lead", "joined": false }, { "name": "helper", "joined": true }],
+            "refused": [{ "name": "dev", "error": "its window did not close" }] });
+        let (out, err) = team_remove_text(&r);
+        assert_eq!(out, vec!["✓ removed team dev-pi: lead, helper (joined at runtime) — its definition stays".to_string()]);
+        assert_eq!(err, vec!["tmm: dev: not removed — its window did not close".to_string()]);
+        let (out, err) = team_remove_text(&json!({ "team": "t", "removed": [], "refused": [{ "name": "a", "error": "x" }] }));
+        assert!(out.is_empty() && err.len() == 1);
+    }
+
     /// Board #7: `tmm registry list` prints the Agents page's two groups and
     /// greys an unavailable agent in words, with the readiness reason.
     #[test]

@@ -30,8 +30,9 @@ test('a team covers only its members, nested sub-teams included, stopped ones by
     'restart:lead,dev:ask',
     'start:qa:go',
     'stop:lead,dev:ask',
+    'remove:lead,dev,qa:ask',
   ]);
-  assert.deepEqual(verbs('team:ops'), ['restart:other:go', 'start:ops2:go', 'stop:other:ask']);
+  assert.deepEqual(verbs('team:ops'), ['restart:other:go', 'start:ops2:go', 'stop:other:ask', 'remove:other,ops2:ask']);
 });
 
 // Board #382 (orchestrator's ruling): an agent that JOINED a team at runtime
@@ -44,10 +45,11 @@ test('a team stop includes a joined agent; a team restart leaves it as it is (#3
     'restart:lead,dev:ask',
     'start:qa:go',
     'stop:lead,dev,helper:ask',
+    'remove:lead,dev,helper,qa:ask',
   ]);
   const onlyHelperBusy = joined.map((a) => ({ ...a, state: a.name === 'helper' ? 'running' : 'idle' }));
   assert.ok(verbs('team:squad', onlyHelperBusy).includes('restart:lead,dev:go'), 'a busy joiner is not a reason to ask: the restart does not touch it');
-  assert.deepEqual(verbs('team:squad', [{ name: 'helper', managed: true, team: 'squad', joined: true, state: 'idle' }], []), ['stop:helper:ask'],
+  assert.deepEqual(verbs('team:squad', [{ name: 'helper', managed: true, team: 'squad', joined: true, state: 'idle' }], []), ['stop:helper:ask', 'remove:helper:ask'],
     'only joiners running: nothing to restart');
   assert.ok(verbs('all', joined).includes('restart:lead,dev,solo,other,helper:ask'), 'All is not a team: it restarts everyone');
 });
@@ -74,4 +76,15 @@ test('runGroup tries every member once and reports only the failures, in order',
   assert.deepEqual(failed, ['b', 'd']);
   assert.deepEqual(calls.sort(), ['a', 'b', 'c', 'd'], 'a failure does not stop the others; nothing is retried');
   assert.deepEqual(await runGroup([], async () => {}), []);
+});
+
+// Board #95 (owner 2026-11-09: "整个 team 我没办法在界面上全部 remove 掉"): a TEAM
+// offers Remove, last (the highest consequence), over every member it has,
+// running or stopped, and always asks; All never does.
+test('a team offers Remove over all its members, last and confirmed; All does not (#95)', () => {
+  const acts = groupActions(groupScope('team:squad', agents, stopped, stoppedTeams));
+  const remove = acts.at(-1)!;
+  assert.deepEqual({ verb: remove.verb, names: remove.names, confirm: remove.confirm, danger: remove.danger }, { verb: 'remove', names: ['lead', 'dev', 'qa'], confirm: true, danger: true });
+  assert.ok(!groupActions(groupScope('all', agents, stopped)).some((a) => a.verb === 'remove'), 'removing everyone is not a menu row');
+  assert.deepEqual(verbs('team:squad', [], ['qa']), ['start:qa:go', 'remove:qa:ask'], 'a team with nobody running can still be removed');
 });

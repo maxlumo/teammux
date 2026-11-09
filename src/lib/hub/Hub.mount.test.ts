@@ -3754,7 +3754,7 @@ test('a team with nobody running stays in the roster; its name opens Start and C
     assert.equal(app.document.querySelectorAll('.acard.off[data-agent="qa"]').length, 1, 'never twice');
     group.querySelector<HTMLButtonElement>('.team-label')!.click();
     await app.flush();
-    assert.deepEqual(app.labels(), ['Start stopped (2)', 'Configure team'], 'not a destination: no talk row, nothing to stop');
+    assert.deepEqual(app.labels(), ['Start stopped (2)', 'Configure team', 'Remove team (2 agents)'], 'not a destination: no talk row, nothing to stop; still removable, last (#95)');
     await app.pick('Start stopped (2)');
     for (let i = 0; i < 10 && !teamCalls.length; i++) await app.flush();
     assert.deepEqual(teamCalls, [['fixture', 'squad']], 'one alignment with the current definition');
@@ -3777,13 +3777,204 @@ test('a team name menu is scoped to its members, stopped ones by their recipe te
   try {
     const team = app.document.querySelector<HTMLButtonElement>('.roster-cluster[data-team="squad"] .team-label')!;
     await app.contextmenu(team);
-    assert.deepEqual(app.labels(), ['Message team', 'Interrupt team', 'Restart team (2)', 'Start stopped (1)', 'Stop team (2)', 'Configure team']);
+    assert.deepEqual(app.labels(), ['Message team', 'Interrupt team', 'Restart team (2)', 'Start stopped (1)', 'Stop team (2)', 'Configure team', 'Remove team (3 agents)'], 'Remove is the last row, after Configure (#95 round 1)');
     await app.pick('Start stopped (1)');
     for (let i = 0; i < 10 && !restarts.length; i++) await app.flush();
     assert.deepEqual(restarts, ['qa'], 'only the team\'s stopped member, never loner or solo');
     await app.contextmenu(team);
     await app.pick('Configure team');
     assert.deepEqual(opened, [['squad', 'team']]);
+  } finally { await app.close(); }
+});
+
+// Board #95 (owner 2026-11-09: "整个 team 我没办法在界面上全部 remove 掉"): the
+// team menu's last row removes the whole team in ONE server step, after a
+// confirm that lists exactly who goes (the server's preview: a stopped
+// joiner included and said so) and that the definition stays; a member that
+// refuses is named and a retry runs only it (round 1, validator-2 note 9).
+test('Remove team confirms who goes from the server, runs one server step, names a refusal and retries only it (#95)', { timeout: 60000 }, async (context) => {
+  const calls: unknown[][] = [];
+  const previews: unknown[][] = [];
+  const perAgent: string[] = [];
+  let refuse = true;
+  const app = await groupFixture(context, {
+    hubAgents: async () => ({
+      agents: [
+        { name: 'lead', window: 0, managed: true, agent: 'kiro', state: 'idle', team: 'squad' },
+        { name: 'dev', window: 1, managed: true, agent: 'kiro', state: 'idle', team: 'squad/sub' },
+        { name: 'solo', window: 2, managed: true, agent: 'codex', state: 'idle' },
+      ],
+      stopped_teams: { qa: 'squad' },
+    }),
+    hubAgentRemove: async (_s: string, name: string) => { perAgent.push(name); return {}; },
+    hubTeamRemove: async (session: string, team: string, opts: { only?: string[]; preview?: boolean } = {}) => {
+      if (opts.preview) {
+        previews.push([session, team]);
+        return { members: [{ name: 'dev' }, { name: 'helper', joined: true }, { name: 'lead', running: true }, { name: 'qa' }] };
+      }
+      calls.push(opts.only ? [session, team, opts.only] : [session, team]);
+      const refused = refuse ? [{ name: 'dev', error: 'its home could not be deleted (kept as it was)' }] : [];
+      refuse = false;
+      return { team: 'squad', removed: [{ name: 'lead' }, { name: 'helper', joined: true }, { name: 'qa' }], refused };
+    },
+  }, () => {});
+  try {
+    const team = app.document.querySelector<HTMLButtonElement>('.roster-cluster[data-team="squad"] .team-label')!;
+    await app.contextmenu(team);
+    assert.deepEqual(app.labels().slice(-2), ['Configure team', 'Remove team (3 agents)'], `Remove is the last row, after Configure: ${app.labels()}`);
+    await app.pick('Remove team (3 agents)');
+    for (let i = 0; i < 10 && !app.document.querySelector('.dlg[role=alertdialog]'); i++) await app.flush();
+    assert.deepEqual(previews, [['fixture', 'squad']], 'the confirm asks the server who goes');
+    assert.equal(calls.length, 0, 'and nothing is removed before the confirm');
+    const dlg = () => app.document.querySelector('.dlg[role=alertdialog]');
+    assert.match(dlg()?.querySelector('h2')?.textContent ?? '', /Remove team squad \(4 agents\)\?/u, 'the count is the server\u2019s');
+    const note = dlg()?.textContent ?? '';
+    assert.match(note, /deletes their homes/u, 'it names what goes');
+    assert.match(note, /team definition stays/u, 'and that the definition stays');
+    assert.match(note, /Removes: dev, helper \(joined at runtime\), lead, qa\./u, 'every member listed, the stopped joiner said so');
+    dlg()!.querySelector<HTMLButtonElement>('.primary')!.click();
+    for (let i = 0; i < 10 && !app.document.querySelector('.dlg-error'); i++) await app.flush();
+    assert.equal(JSON.stringify(calls), JSON.stringify([['fixture', 'squad', ['dev', 'helper', 'lead', 'qa']]]), 'one server step, for exactly the members the confirm listed (round 7)');
+    assert.deepEqual(perAgent, [], 'not a per-member client loop');
+    assert.match(app.document.querySelector('.dlg-error')?.textContent ?? '', /dev \(its home could not be deleted \(kept as it was\)\)/u, 'the refusal is named with its reason');
+    dlg()!.querySelector<HTMLButtonElement>('.primary')!.click();
+    for (let i = 0; i < 10 && dlg(); i++) await app.flush();
+    assert.equal(JSON.stringify(calls), JSON.stringify([['fixture', 'squad', ['dev', 'helper', 'lead', 'qa']], ['fixture', 'squad', ['dev']]]), 'the retry runs only the member that refused');
+    assert.equal(dlg(), null);
+  } finally { await app.close(); }
+});
+
+// #95 round 4 (validator-2 note 29): a preview reply belongs to its gesture. Remove red, then
+// Remove blue; blue's reply lands first, red's later: the confirm stays blue's.
+test('an older team\u2019s preview landing late never replaces the newer Remove confirm (#95 round 4)', { timeout: 60000 }, async (context) => {
+  const waiting: Record<string, (v: unknown) => void> = {};
+  const app = await groupFixture(context, {
+    hubAgents: async () => ({
+      agents: [
+        { name: 'r1', window: 0, managed: true, agent: 'kiro', state: 'idle', team: 'red' },
+        { name: 'r2', window: 1, managed: true, agent: 'kiro', state: 'idle', team: 'red' },
+        { name: 'b1', window: 2, managed: true, agent: 'kiro', state: 'idle', team: 'blue' },
+        { name: 'b2', window: 3, managed: true, agent: 'kiro', state: 'idle', team: 'blue' },
+      ],
+      stopped_teams: {},
+    }),
+    hubTeamRemove: (_s: string, team: string, opts: { preview?: boolean } = {}) =>
+      opts.preview ? new Promise((ok) => { waiting[team] = ok; }) : Promise.resolve({ removed: [], refused: [] }),
+  });
+  try {
+    for (let i = 0; i < 30 && !app.document.querySelector('.roster-cluster[data-team="blue"] .team-label'); i++) await app.flush();
+    const pick = async (team: string) => {
+      await app.contextmenu(app.document.querySelector(`.roster-cluster[data-team="${team}"] .team-label`)!);
+      await app.pick('Remove team (2 agents)');
+    };
+    await pick('red');
+    await pick('blue');
+    const title = () => app.document.querySelector('.dlg[role=alertdialog] h2')?.textContent ?? '';
+    waiting.blue!({ members: [{ name: 'b1' }, { name: 'b2' }] });
+    for (let i = 0; i < 10 && !title(); i++) await app.flush();
+    assert.match(title(), /Remove team blue/u, 'the newer gesture opens its confirm');
+    waiting.red!({ members: [{ name: 'r1' }, { name: 'r2' }] });
+    for (let i = 0; i < 6; i++) await app.flush();
+    assert.match(title(), /Remove team blue/u, 'the older reply is a no-op');
+  } finally { await app.close(); }
+});
+
+// #95 round 5 (validator-2 note 34, orchestrator note 35): the preview's epoch moves on ANY later group
+// gesture, a cancel, or a project visit. A newer Stop confirm stays; after a room cycle nothing opens.
+test('a pending Remove preview goes stale on a later group gesture and on a project visit (#95 round 5)', { timeout: 60000 }, async (context) => {
+  const waiting: ((v: unknown) => void)[] = [];
+  const app = await groupFixture(context, {
+    projectList: async () => ({ projects: [
+      { project: { id: 'fixture', name: 'Fixture', session: 'fixture', path: '/fixture' }, live: true, slots: [] },
+      { project: { id: 'other', name: 'Other', session: 'other', path: '/other' }, live: true, slots: [] },
+    ] }),
+    hubAgents: async () => ({
+      agents: [
+        { name: 'r1', window: 0, managed: true, agent: 'kiro', state: 'idle', team: 'red' },
+        { name: 'r2', window: 1, managed: true, agent: 'kiro', state: 'idle', team: 'red' },
+        { name: 'b1', window: 2, managed: true, agent: 'kiro', state: 'idle', team: 'blue' },
+        { name: 'b2', window: 3, managed: true, agent: 'kiro', state: 'idle', team: 'blue' },
+      ],
+      stopped_teams: {},
+    }),
+    hubTeamRemove: (_s: string, _t: string, opts: { preview?: boolean } = {}) =>
+      opts.preview ? new Promise((ok) => { waiting.push(ok); }) : Promise.resolve({ removed: [], refused: [] }),
+  });
+  try {
+    for (let i = 0; i < 30 && !app.document.querySelector('.roster-cluster[data-team="blue"] .team-label'); i++) await app.flush();
+    const menu = async (team: string, item: string) => {
+      await app.contextmenu(app.document.querySelector(`.roster-cluster[data-team="${team}"] .team-label`)!);
+      await app.pick(item);
+    };
+    const title = () => app.document.querySelector('.dlg[role=alertdialog] h2')?.textContent ?? '';
+    // 1. Remove red, then Stop blue: the Stop confirm is the newer gesture.
+    await menu('red', 'Remove team (2 agents)');
+    await menu('blue', 'Stop team (2)');
+    for (let i = 0; i < 6; i++) await app.flush();
+    assert.match(title(), /Stop 2 agents \(blue\)/u);
+    waiting.shift()!({ members: [{ name: 'r1' }, { name: 'r2' }] });
+    for (let i = 0; i < 6; i++) await app.flush();
+    assert.match(title(), /Stop 2 agents \(blue\)/u, 'the older Remove preview does not replace the Stop confirm');
+    app.document.querySelector<HTMLButtonElement>('.dlg[role=alertdialog] .ghost, .dlg[role=alertdialog] button:not(.primary)')!.click();
+    for (let i = 0; i < 6; i++) await app.flush();
+    assert.equal(title(), '', 'cancelled');
+    // 2. Remove red, then visit another project and come back: nothing opens.
+    await menu('red', 'Remove team (2 agents)');
+    const row = (name: string) => [...app.document.querySelectorAll<HTMLElement>('.proj-row')].find((r) => r.textContent?.includes(name))!;
+    row('Other').querySelector<HTMLElement>('button, .p-name')!.click();
+    for (let i = 0; i < 10; i++) await app.flush();
+    row('Fixture').querySelector<HTMLElement>('button, .p-name')!.click();
+    for (let i = 0; i < 10; i++) await app.flush();
+    waiting.shift()!({ members: [{ name: 'r1' }, { name: 'r2' }] });
+    for (let i = 0; i < 6; i++) await app.flush();
+    assert.equal(title(), '', 'a preview from before the visit opens nothing');
+  } finally { await app.close(); }
+});
+
+// #95 round 6 (validator-2 note 40, orchestrator note 41): the epoch belongs to the shared confirm, so an
+// INDIVIDUAL agent's confirm opened after a pending team preview is never replaced by that late preview.
+test('an individual agent confirm opened after a team Remove preview is never replaced by it (#95 round 6)', { timeout: 60000 }, async (context) => {
+  const waiting: ((v: unknown) => void)[] = [];
+  const app = await groupFixture(context, {
+    hubTeamRemove: (_s: string, _t: string, opts: { preview?: boolean } = {}) =>
+      opts.preview ? new Promise((ok) => { waiting.push(ok); }) : Promise.resolve({ removed: [], refused: [] }),
+  });
+  try {
+    const title = () => app.document.querySelector('.dlg[role=alertdialog] h2')?.textContent ?? '';
+    await app.contextmenu(app.document.querySelector('.roster-cluster[data-team="squad"] .team-label')!);
+    const remove = app.labels().find((l) => l?.startsWith('Remove team'))!;
+    await app.pick(remove);
+    await openCardMenu(app, 'solo');
+    await app.pick('Stop');
+    for (let i = 0; i < 6 && !title(); i++) await app.flush();
+    assert.match(title(), /Stop solo\?/u, 'the individual confirm is open');
+    waiting.shift()!({ members: [{ name: 'lead' }, { name: 'dev' }, { name: 'qa' }] });
+    for (let i = 0; i < 6; i++) await app.flush();
+    assert.match(title(), /Stop solo\?/u, 'the late team preview does not replace it');
+  } finally { await app.close(); }
+});
+
+// #95 round 7 (reviewer note 47, orchestrator note 48): Confirm sends exactly the names the confirm listed, and a
+// member that joined after the preview is reported, not removed.
+test('Confirm removes exactly the previewed members and names one that joined after the preview (#95 round 7)', { timeout: 60000 }, async (context) => {
+  const calls: unknown[] = [];
+  const app = await groupFixture(context, {
+    hubTeamRemove: async (_s: string, _t: string, opts: { only?: string[]; preview?: boolean } = {}) => {
+      if (opts.preview) return { members: [{ name: 'lead' }, { name: 'dev' }] };
+      calls.push(JSON.parse(JSON.stringify(opts)));
+      return { team: 'squad', removed: [{ name: 'lead' }, { name: 'dev' }], refused: [], not_confirmed: ['late'] };
+    },
+  });
+  try {
+    await app.contextmenu(app.document.querySelector('.roster-cluster[data-team="squad"] .team-label')!);
+    await app.pick(app.labels().find((l) => l?.startsWith('Remove team'))!);
+    for (let i = 0; i < 10 && !app.document.querySelector('.dlg[role=alertdialog]'); i++) await app.flush();
+    app.document.querySelector<HTMLButtonElement>('.dlg[role=alertdialog] .primary')!.click();
+    for (let i = 0; i < 10 && !calls.length; i++) await app.flush();
+    assert.deepEqual(calls, [{ only: ['lead', 'dev'] }], 'the first call carries exactly the confirmed names');
+    for (let i = 0; i < 10 && !app.document.body.textContent?.includes('late'); i++) await app.flush();
+    assert.match(app.document.body.textContent ?? '', /late/u, 'the newcomer is named');
+    assert.match(app.document.body.textContent ?? '', /not removed/u, 'as not removed');
   } finally { await app.close(); }
 });
 

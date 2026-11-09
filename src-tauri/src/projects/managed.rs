@@ -31,6 +31,100 @@ pub fn agent_remove(session: &str, agent: &str) -> Result<Value, String> {
     spawn::with_allocation(|| agent_remove_now(session, agent))
 }
 
+/// Is a recipe's team path `path` the team `root` or a sub-team of it? By
+/// whole path segments: `squad/sub` is in `squad`, `squadron` is not.
+fn in_team_tree(path: &str, root: &str) -> bool {
+    path == root || path.strip_prefix(root).is_some_and(|rest| rest.starts_with('/'))
+}
+
+/// Test seam (board #95 round 8, validator-2 note 58): fail every read of
+/// one agents directory after the first N.
+#[cfg(test)]
+pub(crate) mod read_seam {
+    use std::path::{Path, PathBuf};
+    pub static AFTER: std::sync::Mutex<Option<(PathBuf, usize)>> = std::sync::Mutex::new(None);
+    pub fn fail_this(dir: &Path) -> bool {
+        let mut g = AFTER.lock().unwrap();
+        match g.as_mut() {
+            Some((d, n)) if dir.starts_with(&*d) => { if *n == 0 { true } else { *n -= 1; false } }
+            _ => false,
+        }
+    }
+}
+
+/// The members `team_remove` would remove (board #95 round 1): the confirm
+/// lists exactly these, joiners and stopped ones included, and nothing is
+/// changed. `running` is whether its window is live.
+pub fn team_remove_preview(session: &str, team: &str) -> Result<Value, String> {
+    let (project, members) = team_members(session, team, None)?;
+    let ws = Some(project.path.as_str());
+    let live: Vec<String> = crate::tmux::list_panes(session).map(|p| p.into_iter().map(|p| p.window_name).collect()).unwrap_or_default();
+    let rows: Vec<Value> = members.iter().map(|n| json!({ "name": n, "joined": joined_team(ws, n).is_some(), "running": live.contains(n) })).collect();
+    Ok(json!({ "session": session, "team": team, "members": rows }))
+}
+
+/// The managed agents of the project whose recipe names `team`, narrowed by
+/// `only`; none is an error. A name in `only` that is not a member is an
+/// error too: a retry that names someone else must not pass silently.
+fn team_members(session: &str, team: &str, only: Option<&[String]>) -> Result<(crate::projects::store::Project, Vec<String>), String> {
+    team_members_read(session, team, only).map(|(p, m, _)| (p, m))
+}
+
+/// `team_members` plus every member the one read found (`only` ignored).
+fn team_members_read(session: &str, team: &str, only: Option<&[String]>) -> Result<(crate::projects::store::Project, Vec<String>, Vec<String>), String> {
+    let project = project_for_session(session)?.ok_or_else(|| format!("no project for session '{session}'"))?;
+    let ws = Some(project.path.as_str());
+    // A nested member's recipe records its FULL path (`squad/sub`, the
+    // launcher's SpawnRequest.team), so the team and every sub-team under it
+    // are members (round 3, validator-2 note 24, orchestrator note 25).
+    let all: Vec<String> = managed_names_in(&project.path)?.into_iter().filter(|n| team_of(ws, n).is_some_and(|t| in_team_tree(&t, team))).collect();
+    if let Some(o) = only {
+        if let Some(stranger) = o.iter().find(|n| !all.contains(n)) {
+            return Err(format!("'{stranger}' is not a member of team '{team}' in project '{}'", project.name));
+        }
+    }
+    let members: Vec<String> = all.iter().filter(|n| only.is_none_or(|o| o.contains(n))).cloned().collect();
+    if members.is_empty() {
+        return Err(format!("team '{team}' has no members in project '{}'", project.name));
+    }
+    Ok((project, members, all))
+}
+
+/// Remove a whole TEAM from a project (board #95, owner 2026-11-09: "整个
+/// team 我没办法在界面上全部 remove 掉"): the per-agent remove applied to every
+/// managed agent whose recipe names `team` or a sub-team of it (a nested
+/// member's recipe records its full path, `squad/sub`), running or stopped,
+/// so a sub-team goes with its root; a runtime joiner is a member too and is
+/// reported `joined`. The team's DEFINITION is
+/// not touched (declaration is truth: it can be started again). Every member
+/// is tried once; `removed` and `refused` name each, and a remove whose home
+/// could not be deleted is refused with that said, never reported as done.
+/// `only` (a retry) narrows to those names.
+pub fn team_remove(session: &str, team: &str, only: Option<&[String]>) -> Result<Value, String> {
+    let (project, members, all) = team_members_read(session, team, only)?;
+    let ws = Some(project.path.as_str());
+    // A confirm authorizes exactly the names it listed (round 7, reviewer note
+    // 47, orchestrator note 48): a member the team has now but `only` does not
+    // name (it joined after the preview) is left alone and reported. From the
+    // SAME membership read as `members` (round 8, validator-2 note 58): a
+    // second read that failed had been taken as "no others".
+    let not_confirmed: Vec<String> = all.into_iter().filter(|n| !members.contains(n)).collect();
+    let mut removed = Vec::new();
+    let mut refused = Vec::new();
+    for name in &members {
+        let joined = joined_team(ws, name).is_some();
+        match agent_remove(session, name) {
+            Ok(v) if v["home_error"].is_string() => {
+                let why = v["home_error"].as_str().unwrap_or_default();
+                refused.push(json!({ "name": name, "error": format!("stopped and its slot forgotten, but {why}") }));
+            }
+            Ok(_) => removed.push(json!({ "name": name, "joined": joined })),
+            Err(e) => refused.push(json!({ "name": name, "error": e })),
+        }
+    }
+    Ok(json!({ "session": session, "team": team, "removed": removed, "refused": refused, "not_confirmed": not_confirmed }))
+}
+
 fn agent_remove_now(session: &str, agent: &str) -> Result<Value, String> {
     // Before anything is looked up or killed: the name is about to be a
     // `remove_dir_all` target under `.tmm/agents/`, and `managed_home` would
@@ -74,13 +168,68 @@ fn agent_remove_now(session: &str, agent: &str) -> Result<Value, String> {
     with_store(|store| store.forget_person_paints(session, agent))?;
     // The v3 workspace entry (a symlink into the home, board #207) goes with it.
     crate::backends::kiro::remove_workspace_entry(std::path::Path::new(&project.path), agent);
-    let home_removed = home.is_some_and(|h| std::fs::remove_dir_all(h).is_ok());
+    let home_error = home.as_deref().and_then(|h| remove_home(h).err());
+    let home_removed = home.is_some() && home_error.is_none();
     Ok(json!({
         "session": session,
         "agent": agent,
         "slot_removed": slot_removed,
         "home_removed": home_removed,
+        "home_error": home_error,
     }))
+}
+
+/// Delete an agent's home, or leave it an agent that a retry can remove
+/// (board #95 rounds 1-2, validator-2 notes 9 and 15, orchestrator note 16).
+/// The home is renamed aside first, which needs the same write permission as
+/// removing it from its parent, so a parent that refuses changes nothing.
+/// A delete that then fails part-way (it may already have taken the marker
+/// and data) puts what is left back under its name and writes the marker
+/// (`launch.json`, read before anything was touched) back, so the member is
+/// still listed, still of its team, and a retry finishes the delete. The
+/// error says what happened. `remove_dir_all` in place had deleted the
+/// marker and then failed on the directory, leaving a nameless husk that was
+/// reported removed and that no retry could find.
+fn remove_home(home: &std::path::Path) -> Result<(), String> {
+    let parent = home.parent().ok_or_else(|| format!("{} has no parent", home.display()))?;
+    let name = home.file_name().map(|n| n.to_string_lossy().to_string()).unwrap_or_default();
+    let marker: Option<Value> = std::fs::read_to_string(home.join("launch.json")).ok().and_then(|t| serde_json::from_str(&t).ok());
+    let aside = parent.join(format!(".removing-{name}-{}", uuid::Uuid::new_v4().simple()));
+    std::fs::rename(home, &aside).map_err(|e| format!("its home {} could not be deleted (nothing was changed): {e}", home.display()))?;
+    #[cfg(test)]
+    let deleted = test_seam::delete(&aside);
+    #[cfg(not(test))]
+    let deleted = std::fs::remove_dir_all(&aside);
+    let Err(e) = deleted else { return Ok(()) };
+    if let Err(b) = std::fs::rename(&aside, home) {
+        return Err(format!("its home {} could not be deleted ({e}); what is left is at {} and could not be put back ({b})", home.display(), aside.display()));
+    }
+    // Written back through the recipe door, the one writer of a recipe.
+    match (marker, home.join("launch.json").exists()) {
+        (Some(recipe), false) => match super::recipe::update_recipe(home, |r| *r = Some(recipe)) {
+            Ok(()) => Err(format!("its home {} was only partly deleted ({e}); its marker was put back, so it is still a member and a retry finishes the delete", home.display())),
+            Err(w) => Err(format!("its home {} was only partly deleted ({e}) and its marker could not be put back ({w}): remove the directory by hand", home.display())),
+        },
+        _ => Err(format!("its home {} could not be deleted ({e}); it is still a member and a retry finishes the delete", home.display())),
+    }
+}
+
+/// Test seam (board #95 round 2): a delete that fails AFTER it removed the
+/// home's contents, marker included, leaving the directory itself, the late
+/// failure validator-2 injected at the final rmdir.
+#[cfg(test)]
+pub(crate) mod test_seam {
+    pub static LATE_FAIL: std::sync::Mutex<Option<String>> = std::sync::Mutex::new(None);
+    pub fn delete(aside: &std::path::Path) -> std::io::Result<()> {
+        let name = aside.file_name().map(|n| n.to_string_lossy().to_string()).unwrap_or_default();
+        let fail = LATE_FAIL.lock().unwrap().as_ref().is_some_and(|n| name.starts_with(&format!(".removing-{n}-")));
+        if !fail { return std::fs::remove_dir_all(aside); }
+        for entry in std::fs::read_dir(aside)?.flatten() {
+            let p = entry.path();
+            if p.is_dir() { std::fs::remove_dir_all(&p)?; } else { std::fs::remove_file(&p)?; }
+        }
+        Err(std::io::Error::other("injected: the final rmdir failed"))
+    }
 }
 
 /// Stop every process that holds `home` through a backend's
@@ -674,6 +823,10 @@ pub fn deliver_chat_line_found(session: &str, target_name: &str, line: &str) -> 
 /// (`all`, `human`) is never an expansion result, whatever is on disk.
 pub fn managed_names_in(workspace: &str) -> Result<Vec<String>, String> {
     let agents = std::path::Path::new(workspace).join(".tmm").join("agents");
+    #[cfg(test)]
+    if read_seam::fail_this(&agents) {
+        return Err(format!("the project's agents ({}) cannot be listed: injected", agents.display()));
+    }
     let entries = match std::fs::read_dir(&agents) {
         Ok(entries) => entries,
         Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(Vec::new()),

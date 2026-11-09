@@ -91,6 +91,9 @@ tmm agent interrupt|stop|restart|remove <name>
 tmm agent restart --team <team> [--only a,b]   align a team with its definition (#286); --only restarts those
                                      members alone, so a re-defined member (a new backend, #46) takes effect and
                                      nobody else is restarted; a name the team lacks fails (exit 1), no --only name is usage
+tmm agent remove --team <team>       remove every member of a team in this project, running or stopped, a runtime
+                                     joiner too (#95): one hub_team_remove; prints who went and, on stderr, each
+                                     member that refused (exit 1); the team's DEFINITION stays (tmm spawn --team)
 tmm agent mode <name> queue|steer    kiro only: its Ctrl+S, this session (#271)
 tmm agent fork <name> [--as <new>]   a NEW agent from a running one's definition (#383)
 tmm agent rename <name> <label>      show and address it as <label> in this project; the window, home and
