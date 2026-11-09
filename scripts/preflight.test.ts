@@ -8,7 +8,7 @@
 import assert from 'node:assert/strict';
 import test, { after } from 'node:test';
 import { spawnSync } from 'node:child_process';
-import { existsSync, mkdtempSync, mkdirSync, readFileSync, realpathSync, rmSync, symlinkSync, writeFileSync } from 'node:fs';
+import { existsSync, mkdtempSync, mkdirSync, readFileSync, readlinkSync, realpathSync, rmSync, symlinkSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { fileURLToPath } from 'node:url';
@@ -238,6 +238,44 @@ test('android-apk: no APK at all → refused with the gradle build dir redirect 
   assert.equal(r.status, 1);
   assert.match(r.stderr, /no APK at .*app-universal-release\.apk — check the gradle build dir redirect/u);
   assert.doesNotMatch(r.stderr, /unsigned/u);
+});
+
+// Owner, 2026-11-09: a signed APK is kept under temp/android/ named by its
+// commit, and latest.apk always points at the newest one.
+test('android-apk: a signed APK in a git checkout is copied to temp/android/app-universal-release-<sha>.apk and latest.apk is re-pointed at it; a modified tracked file adds -dirty', () => {
+  const apkRel = join('app', 'build', releaseRel, 'app-universal-release.apk');
+  const { at, android } = checkout('kept', [apkRel]);
+  writeFileSync(join(android, apkRel), 'first build');
+  const git = (...args: string[]) => spawnSync('git', ['-C', at, '-c', 'user.name=t', '-c', 'user.email=t@t', ...args], { encoding: 'utf8', stdio: ['ignore', 'pipe', 'pipe'] });
+  git('init', '-q');
+  writeFileSync(join(at, 'tracked.txt'), 'a\n');
+  git('add', 'tracked.txt');
+  git('commit', '-q', '-m', 'x');
+  const sha = git('rev-parse', '--short=8', 'HEAD').stdout.trim();
+  const temp = join(at, 'temp', 'android');
+
+  const r = postflight(at, emptyHome);
+  assert.equal(r.status, 0, r.stderr);
+  assert.equal(readFileSync(join(temp, `app-universal-release-${sha}.apk`), 'utf8'), 'first build');
+  assert.equal(readlinkSync(join(temp, 'latest.apk')), `app-universal-release-${sha}.apk`, 'relative link, so the directory can move');
+  assert.ok(r.stderr.includes(`kept: ${join(temp, `app-universal-release-${sha}.apk`)}`), r.stderr);
+
+  // The same commit with a modified tracked file: a separate -dirty copy, and latest.apk follows it.
+  writeFileSync(join(at, 'tracked.txt'), 'b\n');
+  writeFileSync(join(android, apkRel), 'second build');
+  const s = postflight(at, emptyHome);
+  assert.equal(s.status, 0, s.stderr);
+  assert.equal(readFileSync(join(temp, `app-universal-release-${sha}-dirty.apk`), 'utf8'), 'second build');
+  assert.equal(readFileSync(join(temp, `app-universal-release-${sha}.apk`), 'utf8'), 'first build', 'the clean copy is untouched');
+  assert.equal(readFileSync(join(temp, 'latest.apk'), 'utf8'), 'second build');
+});
+
+test('android-apk: a signed APK outside any git checkout is reported but not kept (no commit to name it by)', () => {
+  const { at } = checkout('kept-nogit', [join('app', 'build', releaseRel, 'app-universal-release.apk')]);
+  const r = postflight(at, emptyHome); // `base` is under tmpdir, outside any git checkout
+  assert.equal(r.status, 0, r.stderr);
+  assert.doesNotMatch(r.stderr, /kept:/u);
+  assert.ok(!existsSync(join(at, 'temp')), 'no temp/ directory is created');
 });
 
 test('android-apk: a dangling app/build symlink is re-pointed at the cache dir holding the APK, then passes', () => {

@@ -261,7 +261,13 @@ already held they fail fast and print the owning PIDs instead of half-starting
 (a second vite instance corrupts the dep-optimizer cache → blank page on every
 open client). `build:android` ends with a postflight that re-points this
 machine's gradle build-dir symlink at THIS checkout's output and prints the real
-APK path. It computes the target rather than guessing: a global gradle init
+APK path; a signed APK is also copied to the checkout's gitignored
+`temp/android/app-universal-release-<commit>[-dirty].apk`, and
+`temp/android/latest.apk` is re-pointed at it (owner, 2026-11-09: one path that
+always means the newest build; gradle overwrites one fixed file per build, so
+without the copy the previous APK is gone and nothing names the commit). A
+worktree keeps its own `temp/`; the release copies the owner installs live in the
+launch checkout's. It computes the target rather than guessing: a global gradle init
 script redirects `build/` to
 `~/.cache/builds/gradle-builds/<dirname>-<md5(gradle root abs path)[:12]>/`, so
 the slug is a pure function of the path. Two failure modes, and the second is

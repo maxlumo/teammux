@@ -25,6 +25,12 @@
 //    real `app/build` directory, left alone here. The postflight then only
 //    insists that the APK exists at the in-project path; an `-unsigned` one
 //    there is reported as the missing signing key it is (board #17).
+//    A signed APK is then KEPT: copied to this checkout's gitignored
+//    `temp/android/app-universal-release-<commit>[-dirty].apk`, and
+//    `temp/android/latest.apk` is re-pointed at that copy (owner, 2026-11-09:
+//    "能不能有软链接永远指向最新的"). gradle overwrites one fixed path per
+//    build, so without the copy the previous APK is gone and nothing says
+//    which commit the current one came from.
 //
 //    Two ways the symlink goes wrong, and the second one is the nasty one:
 //    - DANGLING (cache pruned, or the path canonicalizes differently under the
@@ -48,7 +54,7 @@
 //
 // Zero dependencies; runs everywhere node does.
 import { execSync, spawnSync } from 'node:child_process';
-import { existsSync, readlinkSync, realpathSync, unlinkSync, symlinkSync, readdirSync, statSync, lstatSync } from 'node:fs';
+import { existsSync, readlinkSync, realpathSync, unlinkSync, symlinkSync, readdirSync, statSync, lstatSync, copyFileSync, mkdirSync, renameSync } from 'node:fs';
 import { basename, dirname, join, resolve } from 'node:path';
 import { createHash } from 'node:crypto';
 import { fileURLToPath } from 'node:url';
@@ -126,6 +132,34 @@ function newestAppBuildDir(apkRel) {
   }
 }
 
+/** `<short sha>` of this checkout's HEAD, `-dirty` appended when a tracked
+ *  file is modified; null when `root` is not a git checkout (then nothing is
+ *  kept: a name that does not say the commit is worth nothing). */
+function buildLabel() {
+  const git = (args) => spawnSync('git', ['-C', root, ...args], { encoding: 'utf8', stdio: ['ignore', 'pipe', 'ignore'] });
+  const head = git(['rev-parse', '--short=8', 'HEAD']);
+  if (head.status !== 0) return null;
+  const dirty = git(['status', '--porcelain', '--untracked-files=no']);
+  return head.stdout.trim() + (dirty.status === 0 && dirty.stdout.trim() ? '-dirty' : '');
+}
+
+/** Copy the signed APK to `temp/android/app-universal-release-<label>.apk` and
+ *  point `temp/android/latest.apk` (a relative symlink, replaced atomically) at
+ *  it. Returns both paths, or null when there is no label. */
+function keepApk(apk) {
+  const label = buildLabel();
+  if (!label) return null;
+  const dir = join(root, 'temp/android');
+  mkdirSync(dir, { recursive: true });
+  const name = `app-universal-release-${label}.apk`;
+  copyFileSync(apk, join(dir, name));
+  const latest = join(dir, 'latest.apk');
+  const tmp = join(dir, `.latest.apk.${process.pid}`);
+  symlinkSync(name, tmp);
+  renameSync(tmp, latest);
+  return { copy: join(dir, name), latest };
+}
+
 if (mode === 'android-apk') {
   const androidRoot = join(root, 'src-tauri/gen/android');
   const link = join(androidRoot, 'app/build');
@@ -152,6 +186,11 @@ if (mode === 'android-apk') {
     const apk = join(link, apkRel);
     if (existsSync(apk)) {
       console.error(`📦 APK: ${apk}`);
+      const kept = keepApk(apk);
+      if (kept) {
+        console.error(`📦 kept: ${kept.copy}`);
+        console.error(`   latest: ${kept.latest} -> ${basename(kept.copy)}`);
+      }
       process.exit(0);
     }
     // Board #17: gradle names a release APK it could not sign
