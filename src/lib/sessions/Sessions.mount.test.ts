@@ -16,6 +16,8 @@ function rpc(extra: Record<string, (...args: any[]) => unknown> = {}) {
     listSessionsWithPanes: async () => ({ sessions: [{ name: 'alpha', windows: 2 }],
       panes: [pane(0), pane(1)] }),
     projectList: async () => ({ projects: [] }), hubRooms: async () => ({ rooms: {} }),
+    // Board #91: the search's label table and its rename push.
+    addAgentRenamedListener: () => {}, removeAgentRenamedListener: () => {},
     ...extra,
   };
 }

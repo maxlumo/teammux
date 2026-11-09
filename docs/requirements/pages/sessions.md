@@ -73,7 +73,9 @@ Left-to-right:
 Default: collapsed for every session. Shown when:
 - The session has > 1 window AND the user taps the session row once, OR
 - A search query is active AND the session matches but some panes match
-  more specifically (search auto-expands).
+  more specifically (search auto-expands). The search matches a renamed
+  agent's label as well as its window name (board #91); the rows themselves
+  show no window name, so they are unchanged.
 
 Each pane row shows: `W.P` index (monospace, accent) · `current_command` ·
 `cwd segment` · AI icon (if any) · `⋯` menu (Kill window, confirmed).

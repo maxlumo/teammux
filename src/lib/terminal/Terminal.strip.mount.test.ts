@@ -19,7 +19,7 @@ const compiled = compileMount(new URL('./TerminalStrip.test.svelte', import.meta
 type Frame = { id?: number; method: string; params?: Record<string, unknown> };
 
 /** The server's end: plain-token auth, and a tmux with a mutable window list. */
-function socketClass(win: DOMWindow, windows: number[]) {
+function socketClass(win: DOMWindow, windows: number[], agent: number | null = null) {
   return class {
     static CONNECTING = 0; static OPEN = 1; static CLOSING = 2; static CLOSED = 3;
     url: string; readyState = 0; binaryType = '';
@@ -29,6 +29,7 @@ function socketClass(win: DOMWindow, windows: number[]) {
     onmessage: ((e: { data: unknown }) => void) | null = null;
     constructor(url: string) {
       this.url = url;
+      (win as unknown as { __sock: unknown }).__sock = this;
       win.queueMicrotask(() => { this.readyState = 1; this.onopen?.(); this.deliver({ server_nonce: '00'.repeat(16) }); });
     }
     deliver(msg: unknown) {
@@ -39,17 +40,19 @@ function socketClass(win: DOMWindow, windows: number[]) {
       const frame = JSON.parse(text) as Frame;
       if (frame.method === 'auth') { this.deliver({ result: { authenticated: true, machine_id: 'm-a', hostname: 'a.host' } }); return; }
       if (frame.id == null) return;
-      const pane = (w: number) => ({ session: 'app', window: w, pane: 0, window_name: `w${w}`, current_command: 'zsh', current_path: '/', width: 80, height: 24, active: w === 0, pane_title: '' });
+      const pane = (w: number) => ({ session: 'app', window: w, pane: 0, window_name: w === agent ? 'kiro-2' : `w${w}`, current_command: w === agent ? 'kiro-cli' : 'zsh', ...(w === agent ? { agent: 'kiro' } : {}), current_path: '/', width: 80, height: 24, active: w === 0, pane_title: '' });
       if (frame.method === 'new_window') windows.push(Math.max(...windows) + 1);
+      // Board #91: the project's label table, as #69's project_list carries it.
       const result = frame.method === 'capture_pane' ? { output: '' }
-        : frame.method === 'list_panes' ? windows.map(pane) : {};
+        : frame.method === 'list_panes' ? windows.map(pane)
+        : frame.method === 'project_list' ? { projects: [{ project: { id: 'p1', session: 'app', name: 'app' }, slots: [], live: true, labels: agent == null ? [] : [{ agent: 'kiro-2', label: (win as unknown as { __label?: string }).__label ?? 'ops', aliases: [] }] }] } : {};
       this.deliver({ id: frame.id, result });
     }
     close() { this.readyState = 3; }
   };
 }
 
-async function mount(context: TestContext, opts: { tag?: string; phone?: boolean } = {}) {
+async function mount(context: TestContext, opts: { tag?: string; phone?: boolean; agent?: number } = {}) {
   const windows = [0, 1];
   const app = await (await compiled).mount(context, {
     modules: [],
@@ -60,7 +63,7 @@ async function mount(context: TestContext, opts: { tag?: string; phone?: boolean
       win.localStorage.setItem('tmux_servers', JSON.stringify([{ id: 'a', name: 'alpha', address: 'ws://a:9899', token: 'tokA', machineId: 'm-a', named: true }]));
       win.Element.prototype.getAnimations = () => [];
       Object.defineProperty(win, 'crypto', { configurable: true, value: { getRandomValues: (a: Uint8Array) => a } });
-      (win as unknown as { WebSocket: unknown }).WebSocket = socketClass(win, windows);
+      (win as unknown as { WebSocket: unknown }).WebSocket = socketClass(win, windows, opts.agent ?? null);
     },
   });
   const host = (app.window as unknown as { __strip: { dial(): Promise<{ ok: boolean }>; show(): void; retarget(t: string): void; setTag(n: string | null): void; setPhone(on: boolean): void; target: string; switches: string[] } }).__strip;
@@ -168,3 +171,30 @@ for (const phone of [true, false]) {
     assert.equal(stack.querySelector('h1.win-title')?.textContent, 'app');
   });
 }
+
+// Board #91 (owner 2026-11-09: "terminal 里边对于 agent 重命名，它的名字好像还
+// 没有替换"): a renamed agent's window tab shows its label by the Hub's one
+// reading (names.ts); the hover card keeps the physical window name; a rename
+// pushed while the page is open re-labels the tab without a reload.
+test('#91: a renamed agent\u2019s tab shows its label and follows a rename push', async (context) => {
+  const { app, flushAll, tabs } = await mount(context, { agent: 1 });
+  assert.deepEqual(tabs().map((t) => t.textContent?.trim()), ['0:zsh', '1:ops'], 'the label, from project_list');
+  const sock = (app.window as unknown as { __sock: { deliver(m: unknown): void } }).__sock;
+  sock.deliver({ method: 'agent_renamed', params: { session: 'app', agent: 'kiro-2', label: 'deploy', aliases: ['ops'] } });
+  await flushAll();
+  assert.deepEqual(tabs().map((t) => t.textContent?.trim()), ['0:zsh', '1:deploy'], 'a rename re-labels the open tab');
+  sock.deliver({ method: 'agent_renamed', params: { session: 'other', agent: 'kiro-2', label: 'elsewhere', aliases: [] } });
+  await flushAll();
+  assert.deepEqual(tabs().map((t) => t.textContent?.trim()), ['0:zsh', '1:deploy'], 'another session\u2019s rename is not this one\u2019s');
+});
+
+// #91 round 3 (reviewer note 23, orchestrator note 24): a rename made while
+// the socket was down sends no push; the reconnect door re-reads the labels.
+test('#91: after a reconnect the tab shows a rename made while disconnected, without a push', async (context) => {
+  const { app, flushAll, tabs } = await mount(context, { agent: 1 });
+  assert.deepEqual(tabs().map((t) => t.textContent?.trim()), ['0:zsh', '1:ops']);
+  (app.window as unknown as { __label?: string }).__label = 'deploy';
+  app.window.dispatchEvent(new app.window.CustomEvent('ws-reconnected', { detail: { serverId: 'a' } }));
+  await flushAll();
+  assert.deepEqual(tabs().map((t) => t.textContent?.trim()), ['0:zsh', '1:deploy'], 'the strip follows the re-read');
+});

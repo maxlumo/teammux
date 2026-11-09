@@ -37,6 +37,7 @@
   import { writeTerminalFrame } from './terminal-frame.ts';
   import { createKeyQueue, pasteOrFallback } from './terminal-input.ts';
   import { openExternalUrl } from '../core/external-links.ts';
+  import { watchLabels } from '../hub/session-labels.svelte.ts';
 
   // Timing constants
   const WINDOW_LIST_POLL_MS = 5000;
@@ -72,6 +73,9 @@
   const scope = useServerScope();
   const runtime = scope?.runtime ?? null;
   if (!runtime) throw new Error('Terminal needs a server scope');
+  // A renamed agent's window tab shows its label (board #91), by the Hub's
+  // one reading (names.ts); the hover card keeps the physical window name.
+  const labels = watchLabels(runtime);
   const { subscribe, unsubscribe, addPaneOutputListener, removePaneOutputListener, addPaneClosedListener, removePaneClosedListener } = runtime.connection;
   const { sendKeys, pasteText, listPanes, capturePane, resizePane, newWindow } = runtime.api;
   // The chip bar's layout menu is the shared `ui/ContextMenu`, anchored to
@@ -1867,7 +1871,7 @@
                 }
               }}>
               {#if wAgent}<img class="win-tab-icon" src={wAgent.icon} alt="" />{/if}
-              <span class="win-tab-name strip-label">{`${w.window}:${wAgent ? w.window_name : (w.current_command || w.window_name)}`}</span>
+              <span class="win-tab-name strip-label">{`${w.window}:${wAgent ? labels.names(w.session).shown(w.window_name) : (w.current_command || w.window_name)}`}</span>
             </button>
           {/each}
           <span class="slide-pill tab" aria-hidden="true">

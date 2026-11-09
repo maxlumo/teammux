@@ -23,6 +23,9 @@
   import { moveMs } from '../ui/motion.ts';
   import ScopeNote, { type ScopeNoteSpec } from '../app/ScopeNote.svelte';
   import { sessionHasAgent, paneAgent, AGENTS } from '../core/agents.ts';
+  import { watchLabels } from '../hub/session-labels.svelte.ts';
+  import { paneMatches as searchMatches } from './session-search.ts';
+  import { NO_LABELS } from '../hub/names.ts';
   // `onPick` lets the host close its slide-over after a choice — this list is
   // Terminal's sidebar now, not a page that navigates away by itself.
   // `chips`: the MRU quick-switch strip at the top. It earns its place when
@@ -405,29 +408,21 @@
     return active ? [active, ...rest] : rest;
   });
 
-  // Filter list by query. Matches against: session name, window name,
-  // current_command, current_path, AI tag. Case-insensitive.
+  // Filter list by query. Matches against: session name, window name and
+  // its agent label (#91), current_command, current_path, AI tag.
+  // Case-insensitive.
   function sessionMatches(s: TmuxSession, q: string) {
     if (!q) return true;
     const ql = q.toLowerCase();
     if (s.name.toLowerCase().includes(ql)) return true;
     const ps = panes[s.name] || [];
-    return ps.some(p =>
-      (p.current_command || '').toLowerCase().includes(ql) ||
-      (p.window_name || '').toLowerCase().includes(ql) ||
-      (p.current_path || '').toLowerCase().includes(ql) ||
-      (paneAgent(p)?.tag || '').toLowerCase().includes(ql)
-    );
+    return ps.some(p => paneMatches(p, q));
   }
+  // Board #91 (S1): a renamed agent is found by its label too, by the one
+  // reading (names.ts); nothing shown changes.
+  const labels = runtime ? watchLabels(runtime) : null;
   function paneMatches(p: TmuxPane, q: string) {
-    if (!q) return true;
-    const ql = q.toLowerCase();
-    return (
-      (p.current_command || '').toLowerCase().includes(ql) ||
-      (p.window_name || '').toLowerCase().includes(ql) ||
-      (p.current_path || '').toLowerCase().includes(ql) ||
-      (paneAgent(p)?.tag || '').toLowerCase().includes(ql)
-    );
+    return searchMatches(p, q, labels?.names(p.session) ?? NO_LABELS, paneAgent(p)?.tag || '');
   }
   // Sessions that a project already declares are shown by the Projects section
   // above, with their windows and their up/down control. Repeating them here

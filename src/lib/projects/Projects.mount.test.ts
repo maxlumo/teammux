@@ -9,7 +9,7 @@ type App = Awaited<ReturnType<Awaited<typeof compiled>['mount']>>;
 const rows = ['alpha', 'beta'].map(name => ({ project: { id: name, name, session: name, path: `/fixture/${name}` },
   slots: [], live: true }));
 function rpc(extra: Record<string, (...args: any[]) => unknown> = {}) {
-  return { projectList: async () => ({ projects: rows }), hubRooms: async () => ({ rooms: {} }), ...extra };
+  return { projectList: async () => ({ projects: rows }), hubRooms: async () => ({ rooms: {} }), addAgentRenamedListener: () => {}, removeAgentRenamedListener: () => {}, ...extra };
 }
 async function ask(app: App, kind: 'down' | 'archive') {
   for (let i = 0; i < 8 && !app.document.querySelector('.proj'); i++) await app.flush();
