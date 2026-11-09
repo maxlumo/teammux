@@ -963,7 +963,7 @@ The integration checkout merges a branch only after reviewer CLEAR and
 validator SHIP of ONE tip. `tmm merge <issue> <branch> --expect <that tip>`
 does the rest, run in that checkout:
 - reads the issue and binds the repository, the target and the branch tip;
-- squash-merges with `git merge-tree --write-tree`;
+- squash-merges with `git merge-tree --write-tree` (git 2.38+), or on an older git (this host's 2.34.1) a rebased branch's own tree or a temporary-index three-way merge (tmm-cli.md § tmm merge, #89);
 - proves the squash diff is byte-for-byte the branch diff;
 - commits with the configured author and the branch's own Co-authored-by
   trailers;

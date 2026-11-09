@@ -284,16 +284,26 @@ fn whitespace_drift_next_to_a_hunk_refuses_where_stable_patch_id_would_match() {
     r.commit("main: spaces for the tab");
     let old = r.rev("main");
     let base = r.git(&["merge-base", "main", "feat"]);
-    let mt = r.git(&["merge-tree", "--write-tree", &old, &tip]);
-    let stable = |a: &str, b: &str| {
-        let d = Git { root: r.root.clone() }.bytes(&["diff", a, b]).unwrap();
-        String::from_utf8_lossy(&Git { root: r.root.clone() }.piped(&["patch-id", "--stable"], &d).unwrap()).split_whitespace().next().unwrap().to_string()
-    };
-    assert_eq!(stable(&base, &tip), stable(&old, mt.lines().next().unwrap()), "the control: --stable cannot tell these apart");
     let mut io = Rec::new();
-    let rep = run(&r.opts(&tip), &mut io);
-    assert_eq!(rep.kind, Kind::Refused);
-    assert!(rep.line.contains("not byte-for-byte the branch diff") && rep.line.contains("rebase the branch"), "{}", rep.line);
+    if has_write_tree(&r.git(&["version"])) {
+        // The merge-tree door (git >= 2.38) merges the file and the diff
+        // equality refuses; pinned only where the command exists (#89).
+        let mt = r.git(&["merge-tree", "--write-tree", &old, &tip]);
+        let stable = |a: &str, b: &str| {
+            let d = Git { root: r.root.clone() }.bytes(&["diff", a, b]).unwrap();
+            String::from_utf8_lossy(&Git { root: r.root.clone() }.piped(&["patch-id", "--stable"], &d).unwrap()).split_whitespace().next().unwrap().to_string()
+        };
+        assert_eq!(stable(&base, &tip), stable(&old, mt.lines().next().unwrap()), "the control: --stable cannot tell these apart");
+        let rep = run(&r.opts(&tip), &mut io);
+        assert_eq!(rep.kind, Kind::Refused);
+        assert!(rep.line.contains("not byte-for-byte the branch diff") && rep.line.contains("rebase the branch"), "{}", rep.line);
+    } else {
+        // The temporary-index door (git 2.34.1) leaves a file both sides
+        // changed unmerged, so it refuses earlier, as a conflict (#89).
+        let rep = run(&r.opts(&tip), &mut io);
+        assert_eq!(rep.kind, Kind::Refused);
+        assert!(rep.line.contains("the merge has conflicts (\"a.txt\")") && rep.line.contains("rebase the branch"), "{}", rep.line);
+    }
     assert_eq!(r.rev("main"), old);
     assert!(io.notes.is_empty());
 }
@@ -809,4 +819,103 @@ fn a_target_moved_after_the_re_read_is_never_overwritten() {
     assert!(rep.line.contains("the swap reported an error") && rep.line.contains("neither OLD") && !rep.line.contains("Nothing was merged"), "{}", rep.line);
     assert_eq!(std::fs::read(r.root.join(".git/index")).unwrap(), index_before, "the index is byte-identical");
     assert!(r.read("b.txt").is_none() && r.read("a.txt") == a_before, "the worktree is untouched");
+}
+
+/// Board #89: the door is chosen once, by whether git has `merge-tree
+/// --write-tree` (2.38+) and, without it, by whether the branch is on top of
+/// the target already.
+#[test]
+fn the_squash_tree_door_follows_the_git_version_and_the_merge_base() {
+    assert!(!has_write_tree("git version 2.34.1"));
+    assert!(!has_write_tree("git version 2.37.7 (Apple Git-139)"));
+    assert!(has_write_tree("git version 2.38.0"));
+    assert!(has_write_tree("git version 2.50.1"));
+    assert!(has_write_tree("git version 3.0.0"));
+    assert!(!has_write_tree("not git"));
+    assert_eq!(tree_door(true, "b", "b"), TreeDoor::MergeTree, "nothing changes where merge-tree exists");
+    assert_eq!(tree_door(true, "b", "o"), TreeDoor::MergeTree);
+    assert_eq!(tree_door(false, "b", "b"), TreeDoor::OwnTree, "a rebased branch is its own tree");
+    assert_eq!(tree_door(false, "b", "o"), TreeDoor::TempIndex);
+}
+
+/// Board #89: a branch NOT on top of main (main moved on in another file)
+/// merges on every git: here, on 2.34.1, through a temporary index; the
+/// checkout's index is never the one written before the swap.
+#[test]
+fn a_branch_main_moved_past_in_another_file_merges() {
+    let r = Repo::new("merge-moved");
+    let tip = r.feature(&[("b.txt", "bee\n", "b\n")]);
+    r.write("c.txt", "sea\n");
+    let old = r.commit("main: c");
+    assert_ne!(r.git(&["merge-base", "main", "feat"]), old, "not rebased");
+    let index = std::fs::read(r.root.join(".git/index")).unwrap();
+    let mut o = r.opts(&tip);
+    o.dry_run = true;
+    let rep = run(&o, &mut Rec::new());
+    assert_eq!(rep.kind, Kind::Planned, "{}", rep.line);
+    assert_eq!(std::fs::read(r.root.join(".git/index")).unwrap(), index, "the dry run wrote no index");
+    let rep = run(&r.opts(&tip), &mut Rec::new());
+    assert_eq!(rep.kind, Kind::Landed, "{}", rep.line);
+    assert_eq!(r.git(&["rev-parse", "main~1"]), old, "squashed onto the moved main");
+    assert_eq!((r.read("b.txt").as_deref(), r.read("c.txt").as_deref()), (Some("bee\n"), Some("sea\n")));
+    assert_eq!(r.git(&["diff", "main~1", "main"]), r.git(&["diff", &r.git(&["merge-base", "main~1", &tip]), &tip]), "the squash is the branch diff");
+    assert!(!r.root.join(".git").read_dir().unwrap().flatten().any(|e| e.file_name().to_string_lossy().starts_with("tmm-merge-tree-index")), "no temporary index left");
+}
+
+/// Board #89: a content conflict refuses with today's words, and neither the
+/// index bytes nor any file changes.
+#[test]
+fn a_content_conflict_refuses_and_changes_no_index_or_file() {
+    let r = Repo::new("merge-conflict");
+    let tip = r.feature(&[("a.txt", "one\n\ttwo\nthree\nfour\nFEAT\nsix\n", "feat five\n")]);
+    r.write("a.txt", "one\n\ttwo\nthree\nfour\nMAIN\nsix\n");
+    let old = r.commit("main five");
+    let index = std::fs::read(r.root.join(".git/index")).unwrap();
+    let rep = run(&r.opts(&tip), &mut Rec::new());
+    assert_eq!(rep.kind, Kind::Refused);
+    assert!(rep.line.contains("the merge has conflicts (\"a.txt\"); rebase the branch first."), "{}", rep.line);
+    assert_eq!(r.rev("main"), old);
+    assert_eq!(std::fs::read(r.root.join(".git/index")).unwrap(), index, "index bytes unchanged");
+    assert_eq!(r.read("a.txt").as_deref(), Some("one\n\ttwo\nthree\nfour\nMAIN\nsix\n"), "files unchanged");
+    assert!(!r.root.join(".git").read_dir().unwrap().flatten().any(|e| e.file_name().to_string_lossy().starts_with("tmm-merge-tree-index")), "no temporary index left");
+}
+
+/// Board #89 round 1 (validator note 7, orchestrator's rule note 9): a verbatim
+/// patch-id is asked for only on a git that has it (2.39+).
+#[test]
+fn a_verbatim_patch_id_is_asked_for_only_where_git_has_it() {
+    assert!(!has_verbatim_patch_id("git version 2.34.1"));
+    assert!(!has_verbatim_patch_id("git version 2.38.5"));
+    assert!(has_verbatim_patch_id("git version 2.39.0"));
+    assert!(has_verbatim_patch_id("git version 2.50.1"));
+    assert!(!has_verbatim_patch_id("not git"));
+}
+
+/// A child that exits before reading its input closes the pipe: the writer
+/// reads that as the child's answer (its exit code), never as an error.
+#[test]
+fn a_child_that_exits_before_reading_its_input_is_answered_by_its_exit_code() {
+    let r = Repo::new("merge-epipe");
+    let big = vec![b'x'; 8 * 1024 * 1024]; // far beyond any pipe buffer
+    let o = Git::run_in(&r.root, &["version"], Some(&big)).expect("a closed pipe is not an error");
+    assert_eq!(o.code, 0, "git version exited without reading, and said so with its code");
+    assert!(String::from_utf8_lossy(&o.stdout).starts_with("git version "));
+}
+
+/// The validator's reproduction (#89 note 7): a large rebased branch (a
+/// 20000-line file) merges on this git, dry run and real; before, the
+/// unsupported patch-id exited early and the branch diff hit a broken pipe.
+#[test]
+fn a_large_rebased_branch_merges_dry_and_real() {
+    let r = Repo::new("merge-large");
+    let text: String = (0..20000).map(|i| format!("line {i}\n")).collect();
+    let tip = r.feature(&[("big.txt", &text, "big\n")]);
+    assert_eq!(r.git(&["merge-base", "main", "feat"]), r.rev("main"), "rebased");
+    let mut o = r.opts(&tip);
+    o.dry_run = true;
+    let rep = run(&o, &mut Rec::new());
+    assert_eq!(rep.kind, Kind::Planned, "{}", rep.line);
+    let rep = run(&r.opts(&tip), &mut Rec::new());
+    assert_eq!(rep.kind, Kind::Landed, "{}", rep.line);
+    assert_eq!(r.read("big.txt").as_deref(), Some(text.as_str()));
 }

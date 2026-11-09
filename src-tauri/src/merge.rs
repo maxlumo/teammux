@@ -173,7 +173,16 @@ impl Git {
         let mut child = c.spawn().map_err(|e| format!("git could not start: {e}"))?;
         if let Some(bytes) = input {
             let mut stdin = child.stdin.take().ok_or("git stdin")?;
-            stdin.write_all(bytes).map_err(|e| format!("git stdin: {e}"))?;
+            // A child that exits before reading all of its input closes the
+            // pipe (EPIPE): that is the child's answer, read from its exit
+            // code below, never an error of ours (board #89: `patch-id
+            // --verbatim` on git 2.34 exited on its usage line, and a large
+            // diff then refused the whole merge as "git stdin: Broken pipe").
+            match stdin.write_all(bytes) {
+                Ok(()) => {}
+                Err(e) if e.kind() == std::io::ErrorKind::BrokenPipe => {}
+                Err(e) => return Err(format!("git stdin: {e}")),
+            }
         }
         let o = child.wait_with_output().map_err(|e| format!("git: {e}"))?;
         Ok(Out { code: o.status.code().unwrap_or(-1), stdout: o.stdout, stderr: String::from_utf8_lossy(&o.stderr).trim().to_string() })
@@ -614,7 +623,10 @@ struct Bound {
     trailers: Vec<String>,
     message: String,
     diff_len: usize,
-    patch_id: String,
+    /// `git patch-id --verbatim` of the branch diff, a label for the record and
+    /// the report; `None` on a git without `--verbatim` (2.34.1 has only
+    /// --stable/--unstable, board #89). Diff equality never depends on it.
+    patch_id: Option<String>,
     added: Vec<Vec<u8>>,
 }
 
@@ -687,17 +699,10 @@ fn bind(o: &Options, repo: &Repo) -> Result<Bound, String> {
         return Err("tracked files have changes here; commit or move them first.".into());
     }
     // The merge, computed without touching the checkout.
-    let mt = git.run(&["merge-tree", "--write-tree", "--name-only", "--no-messages", "-z", &old, &src], None)?;
-    let records = z_records(&mt.stdout);
-    match mt.code {
-        0 => {}
-        1 => {
-            let paths: Vec<String> = records.iter().skip(1).map(|p| show(p)).collect();
-            return Err(format!("the merge has conflicts ({}); rebase the branch first.", paths.join(", ")));
-        }
-        _ => return Err(format!("git merge-tree failed (git 2.38 or newer is needed): {}", first_line(&mt.stderr))),
-    }
-    let tree = records.first().map(|t| String::from_utf8_lossy(t).trim().to_string()).unwrap_or_default();
+    // The git version, read ONCE: it picks the squash-tree door and whether a
+    // verbatim patch-id is asked for (board #89).
+    let version = git.text(&["version"])?;
+    let tree = squash_tree(&git, &git_dir, &version, &base, &old, &src)?;
     // A submodule change is not supported in v1.
     for side in [(&base, &src), (&old, &tree)] {
         let raw = git.text(&["diff", "--raw", "--no-renames", "--no-abbrev", side.0, side.1])?;
@@ -718,7 +723,12 @@ fn bind(o: &Options, repo: &Repo) -> Result<Bound, String> {
             ab(&git, &old), ab(&git, &base)
         ));
     }
-    let patch_id = String::from_utf8_lossy(&git.piped(&["patch-id", "--verbatim"], &branch_diff)?).split_whitespace().next().unwrap_or("").to_string();
+    let patch_id = if has_verbatim_patch_id(&version) {
+        let pid = git.run(&["patch-id", "--verbatim"], Some(&branch_diff))?;
+        (pid.code == 0).then(|| String::from_utf8_lossy(&pid.stdout).split_whitespace().next().unwrap_or("").to_string()).filter(|p| !p.is_empty())
+    } else {
+        None
+    };
     // Trailers: the branch's own Co-authored-by values, oldest first, once.
     let mut trailers: Vec<String> = Vec::new();
     for c in &commits {
@@ -738,6 +748,111 @@ fn bind(o: &Options, repo: &Repo) -> Result<Bound, String> {
     // Paths as git stores them: raw `-z` records, never quoted or lossy text.
     let added = z_records(&git.bytes(&["diff", "-z", "--name-only", "--no-renames", "--diff-filter=A", &old, &tree])?);
     Ok(Bound { root, git_dir, target, old, src_ref, src, base, commits, tree, author: (name, email), trailers, message, diff_len: branch_diff.len(), patch_id, added })
+}
+
+/// How the squash tree is computed (board #89). `merge-tree --write-tree`
+/// exists from git 2.38; this host runs 2.34.1, where every merge of 2026-11-08
+/// was refused and done by hand. Without it: a branch whose merge base IS the
+/// target head (rebased, fast-forwardable) squashes to its own tree, and any
+/// other branch is merged three-way in a temporary index.
+#[derive(Debug, PartialEq, Eq)]
+pub(crate) enum TreeDoor {
+    MergeTree,
+    OwnTree,
+    TempIndex,
+}
+
+/// The ONE choice of door: merge-tree wherever git has it (nothing changes
+/// there), else by whether the branch is already on top of the target.
+pub(crate) fn tree_door(has_write_tree: bool, base: &str, old: &str) -> TreeDoor {
+    if has_write_tree {
+        TreeDoor::MergeTree
+    } else if base == old {
+        TreeDoor::OwnTree
+    } else {
+        TreeDoor::TempIndex
+    }
+}
+
+/// Does this `git version` line name a git with `merge-tree --write-tree`
+/// (2.38 or newer)? An unreadable line answers no: the fallback doors work on
+/// every git.
+pub(crate) fn has_write_tree(version: &str) -> bool {
+    git_at_least(version, (2, 38))
+}
+
+/// Does this git have `patch-id --verbatim` (2.39 or newer)? Below it no
+/// patch-id is asked for at all (orchestrator's rule on #89: nothing optional
+/// is attempted against a git that cannot run it).
+pub(crate) fn has_verbatim_patch_id(version: &str) -> bool {
+    git_at_least(version, (2, 39))
+}
+
+/// The `git version` line's major.minor against `min`; an unreadable line
+/// answers no.
+fn git_at_least(version: &str, min: (u32, u32)) -> bool {
+    let v = version.trim().strip_prefix("git version ").unwrap_or("");
+    let mut parts = v.split(|c: char| !c.is_ascii_digit()).filter(|p| !p.is_empty()).map(|p| p.parse::<u32>().unwrap_or(0));
+    match (parts.next(), parts.next()) {
+        (Some(major), Some(minor)) => (major, minor) >= min,
+        _ => false,
+    }
+}
+
+/// The squash tree of `src` onto `old` (merge base `base`), never touching
+/// the checkout's index or files. A conflict refuses with the paths.
+fn squash_tree(git: &Git, git_dir: &Path, version: &str, base: &str, old: &str, src: &str) -> Result<String, String> {
+    let conflicts = |paths: Vec<String>| format!("the merge has conflicts ({}); rebase the branch first.", paths.join(", "));
+    match tree_door(has_write_tree(version), base, old) {
+        TreeDoor::MergeTree => {
+            let mt = git.run(&["merge-tree", "--write-tree", "--name-only", "--no-messages", "-z", old, src], None)?;
+            let records = z_records(&mt.stdout);
+            match mt.code {
+                0 => Ok(records.first().map(|t| String::from_utf8_lossy(t).trim().to_string()).unwrap_or_default()),
+                1 => Err(conflicts(records.iter().skip(1).map(|p| show(p)).collect())),
+                _ => Err(format!("git merge-tree failed: {}", first_line(&mt.stderr))),
+            }
+        }
+        // Nothing to merge: the target head is the base, so the squash IS the
+        // branch's tree (diff equality still checks it below).
+        TreeDoor::OwnTree => git.text(&["rev-parse", "--verify", &format!("{src}^{{tree}}")]),
+        // A three-way read-tree into a PRIVATE index (`-i`: the work tree is
+        // not consulted), then write-tree. `--aggressive` resolves the
+        // trivial cases merge-tree also resolves (a removal on one side, the
+        // same addition on both); anything else read-tree leaves unmerged is a
+        // content-level conflict and refuses, as merge-tree's do.
+        TreeDoor::TempIndex => {
+            let index = git_dir.join(format!("tmm-merge-tree-index-{}", std::process::id()));
+            let _ = std::fs::remove_file(&index);
+            let result = (|| {
+                let rt = Git::run_with(&git.root, &["read-tree", "-m", "-i", "--aggressive", base, old, src], None, Some(&index))?;
+                if rt.code != 0 {
+                    return Err(format!("git read-tree failed: {}", first_line(&rt.stderr)));
+                }
+                let un = Git::run_with(&git.root, &["ls-files", "-u", "-z"], None, Some(&index))?;
+                if un.code != 0 {
+                    return Err(format!("git ls-files -u failed: {}", first_line(&un.stderr)));
+                }
+                let mut paths: Vec<String> = Vec::new();
+                for rec in z_records(&un.stdout) {
+                    let path = rec.iter().position(|b| *b == b'\t').map(|t| show(&rec[t + 1..])).unwrap_or_default();
+                    if !paths.contains(&path) {
+                        paths.push(path);
+                    }
+                }
+                if !paths.is_empty() {
+                    return Err(conflicts(paths));
+                }
+                let wt = Git::run_with(&git.root, &["write-tree"], None, Some(&index))?;
+                if wt.code != 0 {
+                    return Err(format!("git write-tree failed: {}", first_line(&wt.stderr)));
+                }
+                Ok(String::from_utf8_lossy(&wt.stdout).trim().to_string())
+            })();
+            let _ = std::fs::remove_file(&index);
+            result
+        }
+    }
 }
 
 fn tracked_set(git: &Git, rev: &str) -> Result<std::collections::HashSet<Vec<u8>>, String> {
@@ -851,11 +966,14 @@ pub fn run(o: &Options, io: &mut dyn Io) -> Report {
         Err(e) => return refuse(lock, format!("{e}, so the paths the merge adds cannot be confirmed free.")),
     }
     let trailers = if b.trailers.is_empty() { "none".to_string() } else { b.trailers.join("; ") };
-    let pid12 = &b.patch_id[..b.patch_id.len().min(12)];
+    let pid12 = match &b.patch_id {
+        Some(p) => format!("patch-id --verbatim {}", &p[..p.len().min(12)]),
+        None => "no patch-id --verbatim on this git".to_string(),
+    };
     let Some(mut lock) = lock else {
         let line = format!(
             "tmm merge --dry-run #{}: {} at {} ({} commits on {}) would squash onto {} at {}; author {} <{}>; trailers: {trailers}; \
-             branch diff = squash diff, byte-exact ({} bytes, patch-id --verbatim {pid12}). No ref, index or file was changed and no note was posted.",
+             branch diff = squash diff, byte-exact ({} bytes, {pid12}). No ref, index or file was changed and no note was posted.",
             o.issue, b.src_ref, ab(&git, &b.src), b.commits.len(), ab(&git, &b.base), b.target, ab(&git, &b.old), b.author.0, b.author.1, b.diff_len
         );
         let mut j = facts(&b);
@@ -1008,7 +1126,7 @@ pub fn run(o: &Options, io: &mut dyn Io) -> Report {
     let text = if outcome.0 == Kind::Landed {
         format!(
             "tmm merge #{}: {} at {} ({} commits on {}) squashed onto {} as {}, parent {}; author {} <{}>; trailers: {trailers}; \
-             branch diff = squash diff, byte-exact ({} bytes, patch-id --verbatim {pid12}). Tip locked by --expect {}; the gates were confirmed by {}, not checked by this command. Not pushed or deployed; the branch is kept.",
+             branch diff = squash diff, byte-exact ({} bytes, {pid12}). Tip locked by --expect {}; the gates were confirmed by {}, not checked by this command. Not pushed or deployed; the branch is kept.",
             o.issue, b.src_ref, ab(&git, &b.src), b.commits.len(), ab(&git, &b.base), b.target, ab(&git, &new), ab(&git, &b.old), b.author.0, b.author.1,
             b.diff_len, o.expect, o.operator
         )
