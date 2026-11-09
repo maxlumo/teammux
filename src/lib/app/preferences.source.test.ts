@@ -30,7 +30,7 @@ test('the category exists only where Agents is not a page of its own', () => {
   // Four rows on the phone (owner, 2026-09-02: "把 team agent mcp skill 分开几个
   // 二级设置页面吧"), each the REAL page narrowed by `section` — since
   // 2026-09-05 as their own labelled AGENT group.
-  assert.match(source, /\.\.\.\(showAgents \? \[\{\s*id: 'agent', label: \(\) => t\('settingsGroupAgent'\), rows: \[\s*\{ id: 'agents', label: \(\) => t\('agentsTitle'\) \},\s*\{ id: 'teams', label: \(\) => t\('teamsTitle'\) \},\s*\{ id: 'skills', label: \(\) => t\('skillsTitle'\) \},\s*\{ id: 'mcp', label: \(\) => t\('mcpTitle'\) \},\s*\.\.\.\(backendsCap\.shown \? \[\{ id: 'backends', label: \(\) => t\('backendsTitle'\) \}\] : \[\]\),\s*\],\s*\}\] : \[\]\)/u,
+  assert.match(source, /\.\.\.\(showAgents \? \[\{\s*id: 'agent', label: \(\) => t\('settingsGroupAgent'\), rows: \[\s*\{ id: 'agents', label: \(\) => t\('agentsTitle'\) \},\s*\{ id: 'teams', label: \(\) => t\('teamsTitle'\) \},\s*\{ id: 'skills', label: \(\) => t\('skillsTitle'\) \},\s*\{ id: 'mcp', label: \(\) => t\('mcpTitle'\) \},\s*\{ id: 'backends', label: \(\) => t\('backendsTitle'\) \},\s*\],\s*\}\] : \[\]\)/u,
     'four rows, each labelled with its section’s own name, in one AGENT group, and a fifth, Backends, only where the server can run the check (board #492)');
   // ③a: one instance per MEMBER, each narrowed by its own last category.
   assert.match(source, /<AgentsPage\s+section=\{sectionOf\(g\.runtime\)\}/u, 'the one instance is narrowed by the category, never copied');
@@ -52,8 +52,9 @@ test('the category exists only where Agents is not a page of its own', () => {
   assert.match(source, /!showAgents && AGENT_TABS\.includes\(tab\)/u);
   // Board #492 (P1-B): a stored Backends tab on a server KNOWN to lack the
   // check leaves through the same correction; caps unknown keeps it.
-  assert.match(source, /\(tab === 'backends' && !backendsCap\.shown\)/u);
-  assert.match(source, /const backendsCap = watchBackendsCap\(\(\) => guestShown\);/u, 'the shown guest\u2019s cap, by the one shown-predicate');
+  // Board #90: the Backends page is the harness defaults' page on every
+  // server; only its readiness check depends on the cap, inside the page.
+  assert.doesNotMatch(source, /backendsCap/u, 'Settings no longer gates the Backends row');
   assert.match(source, /untrack\(\(\) => selectTab\('appearance', undefined, undefined, false\)\)/u,
     '#156: capability corrections use the exit guard without opening a drill');
 });

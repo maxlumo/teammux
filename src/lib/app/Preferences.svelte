@@ -28,7 +28,6 @@
   import { listDropAt, railDropIndex, railDropOffset } from './nav-order.ts';
   import { createPressDrag } from '../ui/press-drag.ts';
   import AgentsPage from '../hub/AgentsPage.svelte';
-  import { watchBackendsCap } from '../hub/backends-cap.svelte.ts';
   import ServerScope from './ServerScope.svelte';
 
   let {
@@ -194,9 +193,9 @@
    *  the REAL AgentsPage narrowed to one section, so the desktop page and the
    *  four phone pages cannot drift apart. */
   const AGENT_TABS = ['agents', 'teams', 'skills', 'mcp', 'backends'];
-  // The fifth, Backends (board #492), only where the shown guest's server can
-  // run the check: the same shown-predicate as the desktop category.
-  const backendsCap = watchBackendsCap(() => guestShown);
+  // The fifth, Backends (board #492; since #90 the harness defaults' page):
+  // on every server, like the desktop category; only its readiness CHECK
+  // depends on the server's cap, inside the page.
   // A stored 'terminal' (the category retired 2026-09-25) falls through to
   // Appearance, where its rows now live.
   const validStoredTab = storedTab === 'connection' || storedTab === 'about' || storedTab === 'shortcuts' || storedTab === 'notifications' || storedTab === 'chat' || (storedTab != null && AGENT_TABS.includes(storedTab));
@@ -288,7 +287,7 @@
         { id: 'teams', label: () => t('teamsTitle') },
         { id: 'skills', label: () => t('skillsTitle') },
         { id: 'mcp', label: () => t('mcpTitle') },
-        ...(backendsCap.shown ? [{ id: 'backends', label: () => t('backendsTitle') }] : []),
+        { id: 'backends', label: () => t('backendsTitle') },
       ],
     }] : []),
   ]);
@@ -513,7 +512,7 @@
   }
 
   $effect(() => {
-    if ((!showShortcuts && tab === 'shortcuts') || (!showAgents && AGENT_TABS.includes(tab)) || (tab === 'backends' && !backendsCap.shown)) {
+    if ((!showShortcuts && tab === 'shortcuts') || (!showAgents && AGENT_TABS.includes(tab))) {
       // A capability correction uses the same exit guard, without drilling.
       untrack(() => selectTab('appearance', undefined, undefined, false));
     }

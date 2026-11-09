@@ -34,10 +34,10 @@ test('the desktop config page has THREE levels: categories | rows | editor (boar
   // their own column, so an open editor no longer REPLACES them — the list
   // stays beside what it selected. Compact keeps the two-level drill; the
   // phone's Settings sections keep their sidebar-of-rows shape.
-  // Backends (board #492) is a category without a roster, so it has no rows column.
-  assert.match(source, /class:with-rows=\{!section && cat !== 'backends'\}/u, 'the third column exists only on the desktop page');
+  // Backends has a roster since board #90 (one row per harness), so every category has the rows column.
+  assert.match(source, /class:with-rows=\{!section\}/u, 'the third column exists only on the desktop page');
   assert.match(source, /<aside class="cat-rows config-navigation">/u, 'the rows column is its own shared configuration navigation');
-  assert.match(source, /\{#if !section && cat !== 'backends'\}[\s\S]{0,900}?<aside class="cat-rows config-navigation">/u, 'and renders only without a section');
+  assert.match(source, /\{#if !section\}[\s\S]{0,900}?<aside class="cat-rows config-navigation">/u, 'and renders only without a section');
   assert.match(source, /\{@render rows\(cat\)\}/u, 'the ONE rows snippet feeds it — no second list dialect');
   // The global instructions have no roster, only the one document.
   assert.match(source, /class:open=\{!!editingGlobal\} onclick=\{startGlobal\}[\s\S]{0,120}?AGENTS\.md/u,
@@ -131,19 +131,24 @@ test('the editable description preview keeps the body role and full touch target
 });
 
 test('entity errors use the same readable alert atom as Settings (#156)', () => {
-  assert.equal((source.match(/class="err config-error appear" role="alert"/gu) ?? []).length, 7);
+  // Nine: the seven editors and front pages, plus the Backends return
+  // destination's two (#90 round 2: the desktop front page, the section's rows).
+  assert.equal((source.match(/class="err config-error appear" role="alert"/gu) ?? []).length, 9);
   assert.doesNotMatch(source, /\.err \{/u, 'no private error frame or low-contrast ink');
 });
 
 test('the Agents list groups use the shared atoms, and every spawn surface reads the one availability reader (#7)', async () => {
-  // Headings are the shared .side-h, the divider is the --border hairline,
-  // no literal colour.
-  assert.match(source, /<div class="agent-group" class:divided=\{id === 'custom'\} role="group" aria-label=\{t\(label\)\}>\s*<div class="side-h">\{t\(label\)\}<\/div>/u);
-  assert.match(source, /\.agent-group\.divided \{ border-top: 1px solid var\(--border\);/u);
+  // Board #90: the two groups, their headings and divider are removed whole;
+  // the Agents list is the custom agents, the harness defaults are the
+  // Backends rows, which wear the ONE status dot (stateDotColor, .live-dot).
+  assert.doesNotMatch(source, /agent-group|agentsGroup(Defaults|Custom)/u, 'no group markup, no hidden variant');
+  assert.match(source, /\{#each \(listErrors\.agents \? \[\] : customAgents\(defs\)\) as d \(d\.name\)\}\{@render agentRow\(d\)\}\{\/each\}/u);
+  assert.match(source, /harnessRows\(backends, defs\)/u, 'the Backends rows come from the one helper');
+  assert.match(source, /class="h-dot" class:live-dot=\{stateIsLive\(dot\)\} style:background=\{stateDotColor\(dot\)\}/u);
   // Board #84: one line high, the reason as the row's title; no second line.
   assert.match(source, /class:unavailable=\{!!why\} title=\{why \|\| undefined\}/u);
   assert.doesNotMatch(source, /r-why|r-dot/u, 'the second line and its dot are removed whole');
-  const block = /\/\* Board #7: the two groups[\s\S]*?\.side-row\.unavailable \.ava[^}]*\}/u.exec(source)?.[0] ?? '';
+  const block = /\/\* An unavailable row keeps its name in full ink[\s\S]*?\.h-dot[^}]*\}/u.exec(source)?.[0] ?? '';
   assert.ok(block, 'the group CSS block');
   assert.doesNotMatch(block, /#[0-9a-f]{3,8}\b|rgb\(|font-size:/iu, 'tokens only: no literal colour, no raw font size');
   // validator-2 S1 (round 1): an unavailable thing dims with the ONE disabled
@@ -193,7 +198,7 @@ test('the Agents list groups use the shared atoms, and every spawn surface reads
     assert.doesNotMatch(body, /setTimeout|setInterval|poll\(/u, `${file}: ${name} waits once, it never polls`);
   }
   // English and Chinese strings exist for every new key.
-  for (const key of ['agentsGroupDefaults', 'agentsGroupCustom', 'agentsUnavailable', 'agentsUnavailableMissing', 'teamsUnavailable', 'teamsUnavailableMissing']) {
+  for (const key of ['backendsNoDefault', 'backendsNoCheck', 'agentsUnavailable', 'agentsUnavailableMissing', 'teamsUnavailable', 'teamsUnavailableMissing']) {
     assert.equal(i18n.match(new RegExp(`\\b${key}:`, 'gu'))?.length, 2, key);
   }
 });

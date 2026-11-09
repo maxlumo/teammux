@@ -246,11 +246,33 @@ export function clock(at: number): string {
 export type Availability = { state?: string; reason?: string | null; missing?: string[] };
 type Listed = { name: string; backend: string; group?: string; availability?: Availability };
 
-/** The harness defaults and the custom agents, each in the server's order;
- * null for an older server that names no group (its flat list stays). */
-export function agentGroups<T extends Listed>(defs: T[]): { defaults: T[]; custom: T[] } | null {
-  if (!defs.some((d) => typeof d.group === 'string')) return null;
-  return { defaults: defs.filter((d) => d.group === 'default'), custom: defs.filter((d) => d.group !== 'default') };
+/** THE client predicate for "a harness default" (board #90 round 1,
+ * orchestrator's ruling on validator note 7): the server's `group` when it
+ * names one, else its own rule (registry::annotate), the definition named
+ * after its backend. `defs` is the list it came from (grouped or not). */
+export function isHarnessDefault(def: Listed, defs: Listed[]): boolean {
+  return defs.some((d) => typeof d.group === 'string') ? def.group === 'default' : def.name === def.backend;
+}
+
+/** The custom agents: the Agents page lists only these (board #90); the
+ * harness defaults live on the Backends page. */
+export function customAgents<T extends Listed>(defs: T[]): T[] {
+  return defs.filter((d) => !isHarnessDefault(d, defs));
+}
+
+/** The Backends page's rows (board #90): one per backend, in the server's
+ * order (backends_list), each with its harness default, or null when the
+ * registry holds none (a definition removed by hand). */
+export function harnessRows<T extends Listed>(backends: string[], defs: T[]): { backend: string; def: T | null }[] {
+  const defaults = defs.filter((d) => isHarnessDefault(d, defs));
+  return backends.map((backend) => ({ backend, def: defaults.find((d) => d.backend === backend && d.name === backend) ?? defaults.find((d) => d.backend === backend) ?? null }));
+}
+
+/** A harness row's status dot, in the one dot language: available at rest,
+ * unavailable the amber a person acts on, anything not decided neutral. */
+export function availabilityDot(def: Listed | null): 'idle' | 'waiting' | 'shell' {
+  const s = def?.availability?.state;
+  return s === 'available' ? 'idle' : s === 'unavailable' ? 'waiting' : 'shell';
 }
 
 /** Why this agent cannot start on this server, or null. Only the server's

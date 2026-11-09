@@ -233,17 +233,17 @@ completion).
   not draw fails a source test instead of rendering a blank box.
   On the desktop the Agents page is a category page like Settings: the
   sidebar lists Instructions for every agent · Agents · Teams · Skills · MCP
-  servers (with counts) · Backends (only on a server that announces the
-  `backends_check` cap, board #492), the main column shows the chosen category's rows
+  servers (with counts) · Backends (on every server since board #90; only
+  its readiness check needs the `backends_check` cap, board #492), the main column shows the chosen category's rows
   and a "+" in its head, and picking a row opens its editor there (the
   chosen category persists). On the phone each category is its own Settings
   page (`section`) whose list IS the screen.
-  The Agents list has two groups (board #7, owner 2026-11-05: "kiro claude
-  codex dsh omp 这些可以认为是每个 harness 默认 agent，下边再加一个分割线，是
-  我们自己定义的 agent"), on the desktop and the phone alike: **Harness
-  defaults** (one per supported backend, in the fixed default order), the
-  page's hairline divider, then **Custom agents** (the saved definitions, in
-  their order). Each group has its heading. An agent whose harness this
+  The Agents list is the **custom agents** only (the saved definitions, in
+  their order; its count counts them). The **harness defaults**, one per
+  supported backend, are the Backends page's rows (board #90, owner
+  2026-11-09: "和 harness 合到一起就行。这相当于是配置它 backend 的默认配
+  置"; before, board #7 showed them as a first group on the Agents list, with
+  a heading and a divider, removed whole). An agent whose harness this
   server cannot run (its CLI is not installed, or its setup is definitely
   missing, per the server's last Backends check) is greyed in its row, one
   line high like every other row (board #84, owner 2026-11-08: "你直接灰掉吧。
@@ -259,8 +259,17 @@ completion).
   `tmm registry list`, in the same two groups. "Instructions for every agent"
   edits the app-wide `<config>/AGENTS.md` that leads every managed agent's
   system prompt (also `tmm prompt`).
-  Backends (board #492) has no rows and no editor: the section itself is the
-  main column. It says, per agent CLI on THIS server, whether it is
+  Backends (board #90) lists one row per harness, in the server's backend
+  order: its icon, its name and its availability in the one status-dot
+  language (at rest when available, amber when the server found it
+  unusable, neutral when not known), the reason in words as the row's
+  title. A row opens that harness's DEFAULT DEFINITION in the agent editor
+  (backend fixed and greyed, name read-only, model, effort, skills, MCP and
+  input mode editable, saved through `registry_save`), with that harness's
+  readiness facts above the fields; a backend with no default definition on
+  the server is a disabled row that says so. Beside the rows, the desktop
+  page's main column (and a Settings section that is not stacked) shows the
+  readiness check for every CLI (board #492): it says, per agent CLI on THIS server, whether it is
   installed (version and the program's path, selectable), set up and
   answering, each fact a status dot in the one dot language plus words, with
   the fix where the fix is known (install on the managed PATH, set a variable

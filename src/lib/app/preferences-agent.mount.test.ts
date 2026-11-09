@@ -403,7 +403,7 @@ test('only a shown, free guest is visible: a request waits while its guest is hi
 // server announces `backends_check`; a stored tab on a server known to lack
 // it leaves through the existing correction.
 const rows = (app: App) => [...app.document.querySelectorAll('.preferences > .sidebar .side-row')].map((b) => b.textContent?.trim());
-test('Settings shows Backends only where the server can run the check, and a stored Backends tab falls back (#492)', async context => {
+test('Settings shows Backends on every server; only where it can run the check does opening it run one Refresh (#492, #90)', async context => {
   const checks: string[] = [];
   const serve = (caps: string[] | undefined) => ({ ...rpc, getCaps: () => caps,
     backendsCheck: async () => { checks.push('refresh'); return { backends: [], scope: 'default', baseline: null }; } });
@@ -429,8 +429,8 @@ test('Settings shows Backends only where the server can run the check, and a sto
   });
   try {
     for (let i = 0; i < 8; i++) await app.flush();
-    assert.ok(!rows(app).includes('Backends'), 'a server known to lack the check has no row');
-    assert.equal(app.window.localStorage.getItem('tmux_settings_tab'), 'appearance', 'the stored tab leaves through the existing correction');
-    assert.deepEqual(checks, ['refresh'], 'and nothing is asked of that server');
+    assert.ok(rows(app).includes('Backends'), 'board #90: the harness defaults\u2019 page is there on any server');
+    assert.equal(app.window.localStorage.getItem('tmux_settings_tab'), 'backends', 'the stored tab stays');
+    assert.deepEqual(checks, ['refresh'], 'and nothing is asked of a server that cannot check');
   } finally { await app.close(); }
 });

@@ -25,7 +25,9 @@
   import { untrack } from 'svelte';
   import { clock, factDot, hintKey, mergeFact, mergeRow, reasonKey, readRefresh, readTest, refreshFailed, rowHints, testFailed, testable } from './backends-view.ts';
 
-  let { runtime, active = false, cap = 'unknown', head = true, tag = null, icon = () => '', onBack = null, onReport = null } = $props();
+  // `only` (board #90): one harness's facts, inside its default definition's
+  // editor; the check and its Refresh are the same, the list shows that row.
+  let { runtime, active = false, cap = 'unknown', head = true, tag = null, icon = () => '', onBack = null, onReport = null, only = null } = $props();
 
   let report = $state.raw(null);   // { backends, baseline, at }: the last Refresh answer
   let tested = $state.raw(null);   // { name, set_up, answers, at }: a Test since that Refresh
@@ -134,7 +136,7 @@
   }
 
   /** The rows shown: the last Refresh, with a later Test's facts on its row. */
-  const rows = $derived((report?.backends ?? []).map((b) => (tested && b.name === tested.name
+  const rows = $derived((report?.backends ?? []).filter((b) => !only || b.name === only).map((b) => (tested && b.name === tested.name
     ? { ...b, set_up: tested.set_up, answers: tested.answers } : b)));
   const refreshDidFail = $derived(failure?.action === 'refresh');
   const failureHint = $derived(failure?.code ? hintKey(failure.code) : null);
@@ -195,9 +197,10 @@
     </div>
   </div>
 {/if}
-<div class="backends subtle-scroll">
+<div class="backends subtle-scroll" class:embedded={!!only}>
   <div class="config-form">
-    <p class="config-note">{t('backendsScope')}</p>
+    {#if !only}<p class="config-note">{t('backendsScope')}</p>{/if}
+    {#if cap === 'absent'}<p class="config-note">{t('backendsNoCheck')}</p>{/if}
     <div class="b-bar">
       <p class="config-note b-status" class:config-error={refreshDidFail || needsUpdate} role="status">
         {status}{#if report && (cap === 'unknown' || refreshDidFail)}{' '}{fill('backendsShowingFrom', { time: clock(report.at) })}{/if}
@@ -235,6 +238,9 @@
 
 <style>
   .backends { flex: 1; min-height: 0; overflow-y: auto; --config-pref-value: var(--config-editor-width); }
+  /* Inside the editor's own scroller (board #90): part of the form, no second scroll. */
+  .backends.embedded { flex: none; overflow: visible; }
+  .backends.embedded .config-form { padding: 0; }
   .b-bar { display: flex; align-items: center; gap: var(--config-field-gap); flex-wrap: wrap; }
   .b-status { flex: 1 1 200px; min-width: 0; margin: 0; overflow-wrap: anywhere; }
   .backends p { margin: 0; }

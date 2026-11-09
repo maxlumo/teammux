@@ -13,7 +13,7 @@
   import { scrollFade } from '../core/scrollFade.ts';
   import { t } from '../core/i18n.svelte.ts';
   import { renderMarkdown } from '../core/markdown.ts';
-  import { backendColor as colorOf } from '../hub/hub.ts';
+  import { backendColor as colorOf, stateDotColor, stateIsLive } from '../hub/hub.ts';
   import { moveMs, revealMs } from '../ui/motion.ts';
   import { hoverInfo } from '../ui/hover.ts';
   import Select from '../ui/Select.svelte';
@@ -27,7 +27,7 @@
   import BackendsSection from './BackendsSection.svelte';
   import { FAILED_MODELS, NO_MODELS, defaultLabel, readModels } from './models-view.ts';
   import { watchBackendsCap } from './backends-cap.svelte.ts';
-  import { agentGroups, firstReport, settleAvailability, unavailableText } from './backends-view.ts';
+  import { availabilityDot, customAgents, firstReport, harnessRows, isHarnessDefault, settleAvailability, unavailableText } from './backends-view.ts';
 
   // The backends a registry agent can run on and the effort levels each
   // accepts come from the SERVER (`backends_list`, board #130) — the client
@@ -73,34 +73,29 @@
     teams: { label: 'teamsTitle', hint: 'settingsTeamsHint', add: 'teamsNew', start: (x) => startTeam(x) },
     skills: { label: 'skillsTitle', hint: 'settingsSkillsHint', add: 'skillsNew', start: (x) => startSkill(x) },
     mcp: { label: 'mcpTitle', hint: 'settingsMcpHint', add: 'mcpNew', start: (x) => startMcp(x) },
-    // Backend readiness (board #492): no roster and no editor, only the
-    // check's own section in the main column.
+    // Backends (board #90, owner 2026-11-09: "和 harness 合到一起就行"): one
+    // row per harness, which opens its default definition; nothing is added
+    // here, so no "+". The readiness check is the main column's front page.
     backends: { label: 'backendsTitle', hint: 'settingsBackendsHint' },
   };
-  // Shown only on a server that can run the check: THE shown-predicate the
-  // phone's Settings row reads too (backends-view.ts). A reconnect (caps
-  // unknown) keeps it; a server known to lack it has no entry.
+  // Whether the server can run the readiness CHECK (backends-view.ts). Since
+  // board #90 it gates only the check: the Backends category is always there,
+  // because its rows are the harness defaults, which every server lists.
   const backendsCap = watchBackendsCap(() => guardOwner);
   // omp's own-tools switch (#72) only where the server keeps it; one known to lack it says so.
   let caps = $state(guardOwner?.connection?.getCaps?.());
   $effect(() => { const off = guardOwner?.connection?.onCaps?.((c) => { caps = c; }); return typeof off === 'function' ? off : undefined; });
   const CATS = $derived([
     { id: 'global', label: 'agentsGlobal', hint: 'settingsGlobalHint', count: null },
-    { id: 'agents', label: 'agentsTitle', hint: 'settingsAgentsHint', count: () => String(defs.length) },
+    { id: 'agents', label: 'agentsTitle', hint: 'settingsAgentsHint', count: () => String(customAgents(defs).length) },
     { id: 'teams', label: 'teamsTitle', hint: 'settingsTeamsHint', count: () => String(teams.length) },
     { id: 'skills', label: 'skillsTitle', hint: 'settingsSkillsHint', count: () => String(skills.length) },
     { id: 'mcp', label: 'mcpTitle', hint: 'settingsMcpHint', count: () => String(mcps.length) },
-    ...(backendsCap.shown ? [{ id: 'backends', label: 'backendsTitle', hint: 'settingsBackendsHint', count: null }] : []),
+    { id: 'backends', label: 'backendsTitle', hint: 'settingsBackendsHint', count: null },
   ]);
   const storedCat = typeof localStorage !== 'undefined' ? localStorage.getItem(CAT_KEY) : null;
   let cat = $state(storedCat && storedCat in CAT_META ? storedCat : 'agents');
   let categoryOpen = $state(false);
-  // A stored or chosen Backends category on a server KNOWN to lack the check
-  // goes where an invalid stored category goes (P1-B). It has no editor, so
-  // no leave guard is involved; the stored choice stays for a server that has it.
-  $effect(() => {
-    if (!backendsCap.shown && cat === 'backends') untrack(() => { cat = 'agents'; });
-  });
   function pickCat(id) {
     if (cat === id) { categoryOpen = true; return; }
     requestLeave(() => {
@@ -153,7 +148,7 @@
   // reason is the server's statement about that row's backend, so it shows
   // only while the draft is still on it, and follows every re-list.
   const listedEditing = $derived(editing && !isNew ? defs.find((d) => d.name === editing.name) ?? null : null);
-  const harnessDefault = $derived(listedEditing?.group === 'default');
+  const harnessDefault = $derived(!!listedEditing && isHarnessDefault(listedEditing, defs));
   const editingWhy = $derived(listedEditing && listedEditing.backend === editing.backend ? unavailableText(listedEditing, t) : '');
   // One editor at a time across the three kinds.
   let editingSkill = $state(null);
@@ -198,9 +193,21 @@
   // The Backends section is ENTERED when it is on screen: the phone's section,
   // or the desktop category with its column showing (a stacked pane shows it
   // only once opened). Each entry runs its one Refresh (BackendsSection).
+  // Board #90: the check is the category's front page on the desktop, and
+  // inside a harness default's editor (that harness's facts only), so at most
+  // one section is mounted and each entry is one Refresh.
   const showsBackends = $derived(section === 'backends' || (!section && cat === 'backends'));
-  const backendsDrill = $derived(!section && (paneMode === 'stacked' || compactViewport));
-  const backendsActive = $derived(visible && showsBackends && (!!section || !backendsDrill || categoryOpen));
+  // The front page is on screen beside the rows: the wide desktop page, or a
+  // section (Settings) that is not stacked; a stacked pane and the phone show
+  // the rows alone, and the check then runs when a harness opens.
+  // ONE layout decision (board #90 round 3, orchestrator's rule note 28):
+  // whether the main column's front page is what the person sees beside the
+  // rows. It decides both where the check runs and where a save's result is
+  // said: the front page when it is on screen, else the rows (a reduced or
+  // stacked desktop pane, the phone).
+  const backendsFront = $derived(!compactViewport && (section ? paneMode !== 'stacked' : paneMode === 'wide'));
+  const backendsActive = $derived(visible && showsBackends && !drilled && backendsFront);
+  const harnessActive = $derived(visible && harnessDefault);
   let original = $state('');
   let pendingOperation = $state('');
   const saving = $derived(!!pendingOperation);
@@ -375,7 +382,7 @@
       if (pendingExit) { keepEditing(); return true; }
       if (pending) { pending = null; return true; }
       if (drilled) { requestLeave(closeAll); return true; }
-      if (!section && categoryOpen && (paneMode === 'stacked' || (cat === 'backends' && backendsDrill))) { categoryOpen = false; return true; }
+      if (!section && categoryOpen && paneMode === 'stacked') { categoryOpen = false; return true; }
       return false;
     });
   });
@@ -817,7 +824,14 @@
       // refused while the discard question waited (reviewer P2).
       if (refusedFor('agent')) return;
       closeAll();
-      if (!section) { cat = 'agents'; categoryOpen = true; try { localStorage.setItem(CAT_KEY, 'agents'); } catch {} }
+      // The editor's category is the one its row lives in (board #90 round
+      // 1): Backends for a harness default, Agents for a custom agent, so the
+      // person's return destination is where they came from.
+      if (!section) {
+        const home = def && isHarnessDefault(def, defs) ? 'backends' : 'agents';
+        cat = home; categoryOpen = true;
+        try { localStorage.setItem(CAT_KEY, home); } catch {}
+      }
       isNew = !def;
       // Preserve unknown references and inline MCP objects while editing the
       // choices currently present in the shared catalogs.
@@ -917,26 +931,34 @@
         <span class="r-backend">AGENTS.md</span>
       </button>
       {/if}
-      <!-- Board #7 (owner 2026-11-05): harness defaults, the divider, then
-           the custom agents, as registry_list groups them; an older server
-           names no group and keeps its flat list. An unavailable agent is
-           greyed and says why in words; its definition still opens. -->
-      {@const groups = listErrors.agents ? null : agentGroups(defs)}
-      {#if groups}
-        {#each [['default', 'agentsGroupDefaults', groups.defaults], ['custom', 'agentsGroupCustom', groups.custom]] as [id, label, list] (id)}
-          <div class="agent-group" class:divided={id === 'custom'} role="group" aria-label={t(label)}>
-            <div class="side-h">{t(label)}</div>
-            {#each list as d (d.name)}{@render agentRow(d)}{/each}
-          </div>
-        {/each}
-      {:else}
-        {#each (listErrors.agents ? [] : defs) as d (d.name)}{@render agentRow(d)}{/each}
-      {/if}
+      <!-- Board #90: custom agents only; the harness defaults are the
+           Backends page's rows. An unavailable agent is greyed and says why in
+           words; its definition still opens (#7, #84). -->
+      {#each (listErrors.agents ? [] : customAgents(defs)) as d (d.name)}{@render agentRow(d)}{/each}
       {#if !listErrors.agents}
       <button class="side-row add" onclick={() => startEdit(null)}>
         <Icon name="plus" size={13} />{t('agentsNew')}
       </button>
       {/if}
+      {/if}
+
+      <!-- Backends (board #90): one row per harness, in the server's order:
+           its icon, its name, its availability in the one dot language, and
+           the reason in words as the row's title (#84). The row opens the
+           harness default's editor, whose backend stays fixed. -->
+      {#if kind === 'backends'}
+      {#if listErrors.agents}<p class="hint over" role="alert">{listErrors.agents}</p>{/if}
+      {#if !backendsFront && error}<div class="err config-error appear" role="alert">{error}</div>{/if}
+      {#each (listErrors.agents ? [] : harnessRows(backends, defs)) as h (h.backend)}
+        {@const why = h.def ? unavailableText(h.def, t) : t('backendsNoDefault')}
+        {@const dot = availabilityDot(h.def)}
+        <button class="side-row harness" class:open={!!h.def && editing?.name === h.def.name && !isNew} class:unavailable={!!h.def && !!unavailableText(h.def, t)}
+          title={why || undefined} disabled={!h.def} onclick={() => h.def && startEdit(h.def)}>
+          {#if backendIcon(h.backend)}<img class="ava" src={backendIcon(h.backend)} alt="" />{:else}<span class="ava" style:background={backendColor(h.backend)}>{h.backend.slice(0, 1).toUpperCase()}</span>{/if}
+          <span class="r-name">{h.backend}</span>
+          <span class="h-dot" class:live-dot={stateIsLive(dot)} style:background={stateDotColor(dot)} aria-hidden="true"></span>
+        </button>
+      {/each}
       {/if}
 
       <!-- Agent TEAMS (board #74): a named set of the agents above, each with
@@ -978,8 +1000,7 @@
       {/if}
 {/snippet}
 
-<div class="agents-root config-compact config-entity" bind:this={rootEl} class:editing={drilled} class:with-rows={!section && cat !== 'backends'}
-  class:bare-cat={!section && cat === 'backends'} class:solo={section === 'backends'}
+<div class="agents-root config-compact config-entity" bind:this={rootEl} class:editing={drilled} class:with-rows={!section}
   class:reduced={paneMode === 'reduced'} class:stacked={paneMode === 'stacked'} class:category-open={categoryOpen}
   class:drill-fwd={drillAnim === 'fwd'} class:drill-back={drillAnim === 'back'}>
   <aside class="sidebar config-navigation">
@@ -1004,7 +1025,7 @@
     </div>
   </aside>
 
-  {#if !section && cat !== 'backends'}
+  {#if !section}
     <!-- The desktop's SECOND level (board #94: "右侧拆分成两级"): the chosen
          category's rows are their own column, so an open editor no longer
          REPLACES them — the list stays beside what it selected, the same
@@ -1308,6 +1329,12 @@
     {:else if editing}
       <div class="editor config-form"><fieldset class="config-fields" disabled={saving || removing} aria-busy={saving}>
         {#if error}<div class="err config-error appear" role="alert">{error}</div>{/if}
+        {#if harnessDefault}
+          <!-- Board #90: a harness is its readiness and its default definition,
+               on one page: this harness's facts, then the definition. -->
+          <BackendsSection runtime={guardOwner} active={harnessActive} cap={backendsCap.state} head={false} only={editing.backend}
+            onReport={(r) => { readiness = r; void reload(); }} icon={backendIcon} />
+        {/if}
 
         <label class="config-field"><span class="config-field-label">{t('agentsName')}</span>
           <input class="config-input" bind:value={editing.name} readonly={!isNew} placeholder="reviewer" />
@@ -1370,8 +1397,13 @@
         </div>
       </fieldset></div>
     {:else if showsBackends}
+      <!-- A harness editor returns here (board #90): its post-save result
+           (#411: saved but not applied, or not confirmed) is the same alert
+           the other categories' front page shows, here when this front page is
+           on screen (backendsFront), else above the harness rows. -->
+      {#if backendsFront && error}<div class="err config-error appear" role="alert">{error}</div>{/if}
       <BackendsSection runtime={guardOwner} active={backendsActive} cap={backendsCap.state} head={!section} onReport={(r) => { readiness = r; void reload(); }}
-        tag={scope?.tag} icon={backendIcon} onBack={backendsDrill ? () => categoryOpen = false : null} />
+        tag={scope?.tag} icon={backendIcon} />
     {:else if !section}
       <!-- Desktop, nothing being edited: the rows live in their own column
            now (board #94), so the main column is the category's front page —
@@ -1446,19 +1478,6 @@
   }
   @media (prefers-reduced-motion: reduce) {
     .agents-root.drill-fwd .mid, .agents-root.drill-back .sidebar { animation: none; }
-  }
-  /* Backends (board #492) has no roster column: on the desktop it is the
-     categories beside the section, and a stacked pane drills to it like a
-     category's rows; the phone's section is the section alone. */
-  .agents-root.solo { grid-template-columns: minmax(0, 1fr); }
-  .agents-root.solo .sidebar { display: none; }
-  .agents-root.solo:not(.editing) .mid, .agents-root.reduced.bare-cat:not(.editing) .mid { display: flex; }
-  .agents-root.stacked.bare-cat.category-open:not(.editing) .sidebar { display: none; }
-  .agents-root.stacked.bare-cat.category-open:not(.editing) .mid { display: flex; }
-  @media (max-width: 760px) {
-    .agents-root.bare-cat:not(.category-open):not(.editing) .mid { display: none; }
-    .agents-root.bare-cat.category-open:not(.editing) .sidebar { display: none; }
-    .agents-root.bare-cat.category-open:not(.editing) .mid { display: flex; }
   }
 
   .sidebar { position: relative; background: var(--bg2); border-right: 1px solid var(--border); display: flex; flex-direction: column; min-height: 0; }
@@ -1560,14 +1579,13 @@
   .team-row { align-items: flex-start; }
   .r-col { display: flex; flex-direction: column; min-width: 0; gap: 1px; }
   .r-sub { font-family: var(--font-mono); font-size: var(--fs-sub); color: var(--text2); overflow-wrap: anywhere; }
-  /* Board #7: the two groups of the Agents list. The headings are the shared
-     .side-h; the custom group opens with the page's one hairline (--border).
-     An unavailable row keeps its name in full ink (it is still opened and
+  /* An unavailable row keeps its name in full ink (it is still opened and
      read), greys its identity marks and stays one line high (board #84,
      owner 2026-11-08); the words saying why are its title and a hint in its
-     editor, not a second line. */
-  .agent-group.divided { border-top: 1px solid var(--border); margin-top: 6px; padding-top: 2px; }
+     editor, not a second line. A harness row (board #90) carries the one
+     status dot (stateDotColor), at rest when available. */
   .side-row.unavailable .ava, .side-row.unavailable .r-backend { opacity: var(--control-disabled-opacity); }
+  .h-dot { flex: none; width: 7px; height: 7px; border-radius: 50%; transition: background var(--t-fast); }
   @media (max-width: 760px) {
     .member-head { min-height: 72px; }
     .member-summary { grid-template-columns: 34px minmax(0, 1fr) auto; min-height: 72px; padding: 10px 8px 10px 10px; }

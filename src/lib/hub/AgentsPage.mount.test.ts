@@ -747,6 +747,61 @@ test('a save the server could not apply to running agents is said on the page, a
   }
 });
 
+// Board #90 round 2 (reviewer note 19, orchestrator note 21): a harness
+// default saved from Backends returns to Backends, and the #411 outcome is
+// said there, in the one alert, on the desktop page and on a compact section.
+test('a harness default saved from Backends says there what running agents did not apply (#411, #90 round 2)', async context => {
+  for (const layout of ['desktop', 'reduced', 'compact'] as const) {
+    let unapplied = true;
+    const app = await (await compiled).mount(context, {
+      props: layout === 'compact' ? { visible: true, section: 'backends' } : { visible: true },
+      modules: [rpc({
+        registryList: async () => ({ agents: listed }),
+        registrySave: async () => (unapplied ? { ok: true, name: 'kiro', unapplied: [
+          { project: '/work/teammux', window: 'kiro-1', definition: 'kiro', kind: 'failed', error: 'permission denied' },
+          { project: '/work/other', window: 'kiro-2', definition: '', kind: 'unknown', error: 'its recipe is not readable' },
+        ] } : { ok: true, name: 'kiro' }),
+      })],
+      setup(window) {
+        // Reduced (round 3, validator note 27): an 850px desktop page, under
+        // sidebar + rows + editor (960), so the main column is hidden once the
+        // editor closes and the rows column is the return surface.
+        if (layout === 'reduced') Object.defineProperty(window.HTMLElement.prototype, 'clientWidth', { configurable: true, get() { return this.classList?.contains('agents-root') ? 850 : 0; } });
+        if (layout !== 'compact') { window.localStorage.setItem('tmux_agents_cat', 'backends'); return; }
+        const match = window.matchMedia;
+        window.matchMedia = query => Object.assign(match(query), { matches: query === '(max-width: 760px)' });
+      },
+    });
+    try {
+      for (const round of [1, 2]) {
+        unapplied = round === 1;
+        await listedRows(app, true);
+        harnessRow(app, 'kiro').click(); await app.flush();
+        await text(app, `Edited persona ${round}`);
+        command(app, 'Save').click();
+        for (let i = 0; i < 10; i++) await app.flush();
+        assert.equal(app.document.querySelector('.editor'), null, `${layout}: the editor closed, nothing rolled back`);
+        assert.ok(harnessRow(app, 'kiro'), `${layout}: back on the harness rows`);
+        // The visible return surface (reviewer note 22): the desktop page's
+        // main column; on a compact section the rows list (the sidebar), since
+        // .mid is hidden there once the editor closes, so .mid holds none.
+        if (layout === 'reduced') assert.ok(app.document.querySelector('.agents-root.reduced'), 'the pane is reduced');
+        const shown = { desktop: 'main.mid [role=alert]', reduced: '.cat-rows [role=alert]', compact: '.sidebar [role=alert]' }[layout];
+        const alert = app.document.querySelector(shown)?.textContent ?? '';
+        if (layout !== 'desktop') assert.equal(app.document.querySelector('main.mid [role=alert]'), null, `${layout}: no copy in the hidden column`);
+        else assert.equal(app.document.querySelector('.cat-rows [role=alert]'), null, 'one alert on the desktop page');
+        if (round === 1) {
+          assert.match(alert, /Saved, but running agents still use the old settings/u, layout);
+          assert.match(alert, /kiro-1 \(teammux\): permission denied/u, 'names the window, its project and the reason');
+          assert.match(alert, /application not confirmed[\s\S]*kiro-2 \(other\): its recipe is not readable/u, 'unconfirmed is told apart');
+        } else {
+          assert.equal(alert, '', `${layout}: a save every running agent took stays quiet`);
+        }
+      }
+    } finally { await app.close(); }
+  }
+});
+
 test('a save every running agent took shows no alert (#411)', async context => {
   const app = await (await compiled).mount(context, {
     props: { visible: true },
@@ -938,6 +993,16 @@ test('a new successful read after a refusal reopens the kind, and clears only th
   } finally { await app.close(); }
 });
 
+// Board #7 (owner 2026-11-05 05:43): harness defaults, the one divider, then
+// custom agents; an agent whose harness this server cannot run is greyed,
+// says why in words, and still opens. Grouping and availability are the
+// server's (registry_list); this pins how the page shows them.
+const listed = [
+  { ...alpha, name: 'kiro', backend: 'kiro', group: 'default', availability: { state: 'available' } },
+  { ...alpha, name: 'grok', backend: 'grok', group: 'default', availability: { state: 'unavailable', reason: 'not_found', missing: [] } },
+  { ...alpha, name: 'dsh', backend: 'dsh', group: 'default', availability: { state: 'unavailable', reason: 'not_found', missing: [] } },
+  { ...alpha, name: 'pentester', backend: 'kiro', group: 'custom', availability: { state: 'available' } },
+];
 // ── Backends (board #492 phase 2): the category, the phone section, and the
 // one shown-predicate over the server's `backends_check` cap. ──────────────
 const KIRO_ROW = {
@@ -952,6 +1017,7 @@ function capsServer(initial: string[] | undefined) {
   const watchers: ((caps: string[] | undefined) => void)[] = [];
   const checks: string[] = [];
   const modules = rpc({
+    registryList: async () => ({ agents: listed }),
     getCaps: () => now,
     onCaps: (cb: (caps: string[] | undefined) => void) => { watchers.push(cb); },
     backendsCheck: async (test?: string) => { checks.push(test ?? 'refresh'); return { backends: [KIRO_ROW], scope: 'default', baseline: null }; },
@@ -965,32 +1031,37 @@ function capsServer(initial: string[] | undefined) {
 }
 const categories = (app: App) => [...app.document.querySelectorAll('.sidebar .side-row .r-name')].map((n) => n.textContent);
 const settle = async (app: App) => { for (let i = 0; i < 8; i++) await app.flush(); };
+const harnessNames = (app: App) => [...app.document.querySelectorAll('.side-row.harness .r-name')].map((n) => n.textContent);
+const harnessRow = (app: App, name: string) => [...app.document.querySelectorAll<HTMLButtonElement>('.side-row.harness')].find((r) => r.querySelector('.r-name')?.textContent === name)!;
 
-test('desktop: Backends is a category only on a server that announces the check, and opening it runs one Refresh (#492)', async context => {
+test('desktop: Backends is a category on every server; the check runs only where announced, one Refresh on entry (#492, #90)', async context => {
   const old = capsServer([]);
   let app = await (await compiled).mount(context, { props: { visible: true }, modules: [old.modules] });
   try {
     await settle(app);
-    assert.ok(!categories(app).includes('Backends'), 'a server known to lack it has no entry');
-    assert.deepEqual(old.checks, []);
+    assert.deepEqual(categories(app).slice(-2), ['MCP servers', 'Backends'], 'board #90: the harness defaults\u2019 page is there on any server');
+    const row = [...app.document.querySelectorAll<HTMLButtonElement>('.sidebar .side-row')].find((b) => b.textContent?.includes('Backends'))!;
+    row.click(); await settle(app);
+    assert.deepEqual(old.checks, [], 'a server known to lack the check is never asked');
+    assert.ok(harnessNames(app).includes('kiro'), 'its rows are the harness defaults');
+    assert.match(app.document.querySelector('main.mid')?.textContent ?? '', /cannot check whether the CLIs are ready/u, 'and the check says it is not there');
   } finally { await app.close(); }
   const current = capsServer(['mcp_masked', 'backends_check']);
   app = await (await compiled).mount(context, { props: { visible: true }, modules: [current.modules] });
   try {
     await settle(app);
-    assert.deepEqual(categories(app).slice(-2), ['MCP servers', 'Backends'], 'the sixth category, after MCP');
     assert.deepEqual(current.checks, [], 'the page\u2019s mount runs no check');
     const row = [...app.document.querySelectorAll<HTMLButtonElement>('.sidebar .side-row')].find((b) => b.textContent?.includes('Backends'))!;
     row.click(); await settle(app);
-    assert.deepEqual(current.checks, ['refresh'], 'entering the section runs its one Refresh');
-    assert.equal(app.document.querySelector('.cat-rows'), null, 'no roster column: the section is the main column');
-    assert.match(app.document.querySelector('main.mid')?.textContent ?? '', /kiro[\s\S]*1\.2\.3/u);
+    assert.deepEqual(current.checks, ['refresh'], 'entering the category runs its one Refresh');
+    assert.ok(app.document.querySelector('.cat-rows .side-row.harness'), 'board #90: a roster column of harness rows');
+    assert.match(app.document.querySelector('main.mid')?.textContent ?? '', /kiro[\s\S]*1\.2\.3/u, 'and the check is the main column\u2019s front page');
     row.click(); await settle(app);
     assert.deepEqual(current.checks, ['refresh'], 'choosing the open category again is not a new entry');
   } finally { await app.close(); }
 });
 
-test('desktop: a stored Backends category on a server known to lack the check falls back to Agents; caps unknown keeps it (#492 P1-B)', async context => {
+test('a stored Backends category stays on any server, and a reconnect keeps its results (#492 P1-B, #90)', async context => {
   const old = capsServer([]);
   let app = await (await compiled).mount(context, {
     props: { visible: true }, modules: [old.modules],
@@ -998,8 +1069,7 @@ test('desktop: a stored Backends category on a server known to lack the check fa
   });
   try {
     await settle(app);
-    assert.equal(app.document.querySelector('.sidebar .side-row.open .r-name')?.textContent, 'Agents', 'the existing invalid-category fallback');
-    assert.equal(app.document.querySelector('.backends'), null, 'no empty page');
+    assert.equal(app.document.querySelector('.sidebar .side-row.open .r-name')?.textContent, 'Backends', 'no fallback since #90');
     assert.deepEqual(old.checks, []);
   } finally { await app.close(); }
   const s = capsServer(['backends_check']);
@@ -1017,23 +1087,29 @@ test('desktop: a stored Backends category on a server known to lack the check fa
     await s.set(app, ['backends_check']);
     assert.deepEqual(s.checks, ['refresh'], 'and nothing re-runs by itself');
     await s.set(app, []);
-    assert.ok(!categories(app).includes('Backends'), 'now known to lack it: no entry');
-    assert.equal(app.document.querySelector('.sidebar .side-row.open .r-name')?.textContent, 'Agents');
+    assert.ok(categories(app).includes('Backends'), 'known to lack the check: the category stays');
+    assert.equal(app.document.querySelector('.sidebar .side-row.open .r-name')?.textContent, 'Backends');
   } finally { await app.close(); }
 });
 
-test('phone: the Backends section is the section alone, its path selectable on the row, one Refresh when shown (#492)', async context => {
+test('phone: the Backends section lists one row per harness; a harness opens with its own facts, one Refresh (#492, #90)', async context => {
   const s = capsServer(['backends_check']);
-  const app = await (await compiled).mount(context, { props: { visible: false, section: 'backends' }, modules: [s.modules] });
+  const app = await (await compiled).mount(context, {
+    props: { visible: false, section: 'backends' }, modules: [s.modules],
+    setup(window) {
+      const match = window.matchMedia;
+      window.matchMedia = query => Object.assign(match(query), { matches: query === '(max-width: 760px)' });
+    },
+  });
   try {
     await settle(app);
-    assert.deepEqual(s.checks, [], 'a hidden page has not been entered');
     await app.setProps({ visible: true }); await settle(app);
-    assert.deepEqual(s.checks, ['refresh']);
-    assert.ok(app.document.querySelector('.agents-root.solo'), 'one column: no roster sidebar beside it');
-    assert.equal(app.document.querySelector('.backends')?.closest('.page-head'), null);
-    assert.equal(app.document.querySelector('main.mid .page-head'), null, 'Settings owns the head on the phone');
-    assert.equal(app.document.querySelector('.fact-path')?.textContent, '/home/u/.local/bin/kiro-cli');
+    assert.deepEqual(s.checks, [], 'the phone shows the rows alone: nothing runs until a harness opens');
+    assert.deepEqual(harnessNames(app), ['kiro', 'claude', 'codex', 'grok', 'omp'], 'one row per backend, in the served order');
+    harnessRow(app, 'kiro').click(); await settle(app);
+    assert.deepEqual(s.checks, ['refresh'], 'opening a harness is one entry');
+    assert.equal(app.document.querySelector('.editor .fact-path')?.textContent, '/home/u/.local/bin/kiro-cli', 'its facts, path selectable, inside its editor');
+    assert.equal(app.document.querySelector<HTMLButtonElement>('.editor [aria-label="Backend"]')!.disabled, true, 'its backend stays fixed (#84)');
   } finally { await app.close(); }
 });
 
@@ -1211,59 +1287,47 @@ test('team members show a failed or cut model list with Retry, and a derived mem
   } finally { await app.close(); }
 });
 
-// Board #7 (owner 2026-11-05 05:43): harness defaults, the one divider, then
-// custom agents; an agent whose harness this server cannot run is greyed,
-// says why in words, and still opens. Grouping and availability are the
-// server's (registry_list); this pins how the page shows them.
-const listed = [
-  { ...alpha, name: 'kiro', backend: 'kiro', group: 'default', availability: { state: 'available' } },
-  { ...alpha, name: 'grok', backend: 'grok', group: 'default', availability: { state: 'unavailable', reason: 'not_found', missing: [] } },
-  { ...alpha, name: 'dsh', backend: 'dsh', group: 'default', availability: { state: 'unavailable', reason: 'not_found', missing: [] } },
-  { ...alpha, name: 'pentester', backend: 'kiro', group: 'custom', availability: { state: 'available' } },
-];
-async function groupedList(app: App) {
-  for (let i = 0; i < 12 && !app.document.querySelector('.agent-group'); i++) await app.flush();
-  const groups = [...app.document.querySelectorAll('.agent-group')];
-  return groups.map((g) => ({
-    head: g.querySelector('.side-h')?.textContent?.trim(),
-    rows: [...g.querySelectorAll('.side-row:not(.add)')].map((r) => r.querySelector('.r-name')?.textContent),
-  }));
+async function listedRows(app: App, harness: boolean, scope = '') {
+  const sel = harness ? '.side-row.harness' : `${scope} .side-row:not(.add):not(.harness)`.trim();
+  for (let i = 0; i < 12 && !app.document.querySelector(sel); i++) await app.flush();
+  return [...app.document.querySelectorAll(sel)].map((r) => r.querySelector('.r-name')?.textContent);
 }
 for (const layout of ['desktop', 'compact'] as const) {
-  test(`the Agents list shows harness defaults, a divider, then custom agents, greying an unusable harness in words (${layout}, #7)`, async context => {
-    const app = await (await compiled).mount(context, {
-      props: layout === 'compact' ? { visible: true, section: 'agents' } : { visible: true },
+  test(`the Agents list is the custom agents; Backends is one row per harness, greying an unusable one in words (${layout}, #7, #90)`, async context => {
+    const compact = layout === 'compact';
+    const mount = (section: string | null, cat = 'agents') => compiled.then((c) => c.mount(context, {
+      props: section ? { visible: true, section } : { visible: true },
       modules: [rpc({ registryList: async () => ({ agents: listed }) })],
       setup(window) {
-        if (layout !== 'compact') return;
+        if (!compact) { window.localStorage.setItem('tmux_agents_cat', cat); return; }
         const match = window.matchMedia;
         window.matchMedia = query => Object.assign(match(query), { matches: query === '(max-width: 760px)' });
       },
-    });
+    }));
+    let app = await mount(compact ? 'agents' : null);
     try {
-      assert.deepEqual(await groupedList(app), [
-        { head: 'Harness defaults', rows: ['kiro', 'grok', 'dsh'] },
-        { head: 'Custom agents', rows: ['pentester'] },
-      ]);
-      const custom = app.document.querySelectorAll('.agent-group')[1]!;
-      assert.ok(custom.classList.contains('divided'), 'the custom group opens with the divider');
-      const row = (name: string) => [...app.document.querySelectorAll<HTMLButtonElement>('.agent-group .side-row')].find((r) => r.querySelector('.r-name')?.textContent === name)!;
-      // Board #84 (owner 2026-11-08 16:04): greyed in its row, ONE line high
-      // like every other row; the reason stays in words as the row's title
-      // and as a hint in its editor (#7: not colour alone).
-      assert.ok(row('grok').classList.contains('unavailable'));
-      assert.equal(row('grok').querySelector('.r-sub'), null, 'no second line');
-      assert.equal(row('grok').querySelector('.r-dot'), null, 'no extra dot');
-      assert.equal(row('grok').title, 'Unavailable: grok not on the managed PATH', 'the reason in words, not colour alone');
-      assert.ok(!row('kiro').classList.contains('unavailable'));
-      assert.equal(row('kiro').querySelector('.r-sub'), null);
-      assert.equal(row('kiro').title, '', 'an available row carries no reason');
-      // Unavailable is still readable: its definition opens, and says why.
-      row('grok').click(); await app.flush();
+      assert.deepEqual(await listedRows(app, false, compact ? '.sidebar' : '.cat-rows'), compact ? ['Instructions for every agent', 'pentester'] : ['pentester'], 'custom agents only');
+      assert.equal(app.document.querySelector('.side-h'), null, 'no group headings');
+      if (!compact) assert.match(app.document.querySelector('.sidebar .side-row.open')?.textContent ?? '', /Agents\s*1/u, 'the count counts custom agents');
+    } finally { await app.close(); }
+    app = await mount(compact ? 'backends' : null, 'backends');
+    try {
+      assert.deepEqual(await listedRows(app, true), ['kiro', 'claude', 'codex', 'grok', 'omp']);
+      // Board #84: greyed in its row, ONE line high; the reason in words as
+      // the row's title and in its editor (#7: not colour alone).
+      const grok = harnessRow(app, 'grok');
+      assert.ok(grok.classList.contains('unavailable'));
+      assert.equal(grok.querySelector('.r-sub'), null, 'no second line');
+      assert.equal(grok.title, 'Unavailable: grok not on the managed PATH', 'the reason in words, not colour alone');
+      assert.ok(!harnessRow(app, 'kiro').classList.contains('unavailable'));
+      assert.equal(harnessRow(app, 'kiro').title, '', 'an available row carries no reason');
+      assert.equal(harnessRow(app, 'codex').disabled, true, 'a backend with no default definition has nothing to open');
+      assert.equal(harnessRow(app, 'codex').title, 'This server has no default definition for this harness.');
+      const dot = (r: HTMLElement) => (r.querySelector('.h-dot') as HTMLElement).style.background;
+      assert.notEqual(dot(grok), dot(harnessRow(app, 'kiro')), 'the one dot language tells them apart too');
+      grok.click(); await app.flush();
       assert.ok(app.document.querySelector('.editor'), 'an unavailable definition still opens');
       assert.ok([...app.document.querySelectorAll('.editor .hint')].some((h) => h.textContent?.trim() === 'Unavailable: grok not on the managed PATH'), 'the editor says why');
-      row('kiro').click(); await app.flush();
-      assert.ok(![...app.document.querySelectorAll('.editor .hint')].some((h) => h.textContent?.includes('Unavailable')), 'an available definition shows no reason');
     } finally { await app.close(); }
   });
 }
@@ -1272,17 +1336,58 @@ for (const layout of ['desktop', 'compact'] as const) {
 // Its editor shows the backend greyed (the server refuses a change too);
 // a custom agent's backend stays a choice.
 test('a harness default shows its backend greyed; a custom agent keeps the choice (#84)', async context => {
-  const app = await (await compiled).mount(context, { props: { visible: true, section: 'agents' }, modules: [rpc({ registryList: async () => ({ agents: listed }) })] });
+  const backend = (app: App) => app.document.querySelector<HTMLButtonElement>('.editor [aria-label="Backend"]')!;
+  let app = await (await compiled).mount(context, { props: { visible: true, section: 'backends' }, modules: [rpc({ registryList: async () => ({ agents: listed }) })] });
   try {
-    await groupedList(app);
-    const row = (name: string) => [...app.document.querySelectorAll<HTMLButtonElement>('.agent-group .side-row')].find((r) => r.querySelector('.r-name')?.textContent === name)!;
-    const backend = () => app.document.querySelector<HTMLButtonElement>('.editor [aria-label="Backend"]')!;
-    row('kiro').click(); await app.flush();
-    assert.equal(backend().disabled, true, 'a harness default stays on its backend');
-    assert.match(backend().textContent ?? '', /kiro/u, 'and shows it');
+    await listedRows(app, true);
+    harnessRow(app, 'kiro').click(); await app.flush();
+    assert.equal(backend(app).disabled, true, 'a harness default stays on its backend');
+    assert.match(backend(app).textContent ?? '', /kiro/u, 'and shows it');
     assert.equal(app.document.querySelector<HTMLInputElement>('.editor input.config-input')!.readOnly, true, 'name read-only as before');
-    row('pentester').click(); await app.flush();
-    assert.equal(backend().disabled, false, 'a custom agent can move');
+  } finally { await app.close(); }
+  app = await (await compiled).mount(context, { props: { visible: true, section: 'agents' }, modules: [rpc({ registryList: async () => ({ agents: listed }) })] });
+  try {
+    await openAgent(app, 'pentester');
+    assert.equal(backend(app).disabled, false, 'a custom agent can move');
+  } finally { await app.close(); }
+});
+
+// Board #90 round 1 (validator note 6, orchestrator note 9): a harness opened
+// from Backends keeps Backends as its category, the person's return
+// destination; a custom agent opens in Agents.
+test('desktop: a harness opened from Backends stays in Backends, and Cancel returns to its rows (#90 round 1)', async context => {
+  const app = await (await compiled).mount(context, {
+    props: { visible: true }, modules: [rpc({ registryList: async () => ({ agents: listed }) })],
+    setup(window) { window.localStorage.setItem('tmux_agents_cat', 'backends'); },
+  });
+  try {
+    await listedRows(app, true);
+    harnessRow(app, 'grok').click(); await app.flush();
+    assert.equal(app.document.querySelector('.editor [aria-label="Backend"]')?.hasAttribute('disabled'), true, 'its backend is fixed');
+    assert.equal(app.document.querySelector('.sidebar .side-row.open .r-name')?.textContent, 'Backends', 'the category stays Backends');
+    assert.deepEqual(await listedRows(app, true), ['kiro', 'claude', 'codex', 'grok', 'omp'], 'the roster stays the harness rows');
+    assert.equal(app.window.localStorage.getItem('tmux_agents_cat'), 'backends', 'and is stored so');
+    command(app, 'Cancel').click(); await app.flush();
+    assert.equal(app.document.querySelector('.editor'), null);
+    assert.equal(app.document.querySelector('.sidebar .side-row.open .r-name')?.textContent, 'Backends', 'back where it came from');
+  } finally { await app.close(); }
+});
+
+// Board #90 round 1 (validator note 7, orchestrator note 10): an older server
+// that names no group is read by the server's own rule, a definition named
+// after its backend; its harness opens with the backend fixed and is not in
+// the Agents list.
+test('an older server without groups: its harness defaults are the Backends rows, fixed, and not in Agents (#90 round 1)', async context => {
+  const flat = listed.map(({ group: _g, ...d }) => d);
+  let app = await (await compiled).mount(context, { props: { visible: true, section: 'backends' }, modules: [rpc({ registryList: async () => ({ agents: flat }) })] });
+  try {
+    await listedRows(app, true);
+    harnessRow(app, 'grok').click(); await app.flush();
+    assert.equal(app.document.querySelector<HTMLButtonElement>('.editor [aria-label="Backend"]')!.disabled, true, 'its backend is fixed');
+  } finally { await app.close(); }
+  app = await (await compiled).mount(context, { props: { visible: true, section: 'agents' }, modules: [rpc({ registryList: async () => ({ agents: flat }) })] });
+  try {
+    assert.deepEqual(await listedRows(app, false, '.sidebar'), ['Instructions for every agent', 'pentester'], 'the Agents list leaves the defaults out');
   } finally { await app.close(); }
 });
 
@@ -1295,8 +1400,8 @@ test('the editor says why only for the listed backend, and follows the list (#84
   const grokker = { ...alpha, name: 'grokker', backend: 'grok', group: 'custom', availability: { state: 'unavailable', reason: 'not_found', missing: [] } };
   const app = await (await compiled).mount(context, { props: { visible: true, section: 'agents' }, modules: [rpc({ registryList: async () => ({ agents: [...listed, grokker] }) })] });
   try {
-    await groupedList(app);
-    const row = (name: string) => [...app.document.querySelectorAll<HTMLButtonElement>('.agent-group .side-row')].find((r) => r.querySelector('.r-name')?.textContent === name)!;
+    await listedRows(app, false);
+    const row = (name: string) => [...app.document.querySelectorAll<HTMLButtonElement>('.side-row')].find((r) => r.querySelector('.r-name')?.textContent === name)!;
     const why = () => [...app.document.querySelectorAll('.editor .hint')].map((h) => h.textContent?.trim()).filter((h) => h?.startsWith('Unavailable'));
     const pick = async (b: string) => {
       app.document.querySelector<HTMLButtonElement>('.editor [aria-label="Backend"]')!.click(); await app.flush();
@@ -1316,15 +1421,15 @@ test('a report that lands while an editor is open shows its reason there (#84 ro
   let release!: () => void;
   const unknown = listed.map((d) => ({ ...d, availability: { state: 'unknown' } }));
   const app = await (await compiled).mount(context, {
-    props: { visible: true, section: 'agents' },
+    props: { visible: true, section: 'backends' },
     modules: [rpc({
       registryList: async () => ({ agents: landed ? listed : unknown }),
       backendsCheck: () => new Promise<void>((ok) => { release = () => { landed = true; ok(); }; }),
     })],
   });
   try {
-    await groupedList(app);
-    const grok = () => [...app.document.querySelectorAll<HTMLButtonElement>('.agent-group .side-row')].find((r) => r.querySelector('.r-name')?.textContent === 'grok')!;
+    await listedRows(app, true);
+    const grok = () => harnessRow(app, 'grok');
     const why = () => [...app.document.querySelectorAll('.editor .hint')].map((h) => h.textContent?.trim()).filter((h) => h?.startsWith('Unavailable'));
     grok().click(); await app.flush();
     assert.deepEqual(why(), [], 'unknown says nothing');
@@ -1338,7 +1443,7 @@ test('an older server names no group: the flat list stays, with no headings (#7)
   const app = await (await compiled).mount(context, { props: { visible: true, section: 'agents' }, modules: [rpc()] });
   try {
     await openAgent(app);
-    assert.equal(app.document.querySelector('.agent-group'), null);
+    assert.equal(app.document.querySelector('.side-h'), null, 'no headings');
   } finally { await app.close(); }
 });
 
@@ -1354,16 +1459,16 @@ test('an open Agents page greys an unusable harness when the first background ch
   let lists = 0;
   const unknown = listed.map((d) => ({ ...d, availability: { state: 'unknown' } }));
   const app = await (await compiled).mount(context, {
-    props: { visible: true, section: 'agents' },
+    props: { visible: true, section: 'backends' },
     modules: [rpc({
       registryList: async () => { lists++; return { agents: landed ? listed : unknown }; },
       backendsCheck: (...args: unknown[]) => { firstCalls.push(args); return new Promise<void>((ok) => { release = () => { landed = true; ok(); }; }); },
     })],
   });
   try {
-    const grok = () => [...app.document.querySelectorAll<HTMLButtonElement>('.agent-group .side-row')].find((r) => r.querySelector('.r-name')?.textContent === 'grok');
+    const grok = () => [...app.document.querySelectorAll<HTMLButtonElement>('.side-row.harness')].find((r) => r.querySelector('.r-name')?.textContent === 'grok');
     for (let i = 0; i < 12 && !grok(); i++) await app.flush();
-    assert.ok(grok(), 'the grouped list is shown');
+    assert.ok(grok(), 'the harness rows are shown');
     assert.ok(!grok()!.classList.contains('unavailable'), 'unknown greys nothing');
     assert.equal(firstCalls.length, 1, 'the page waits for the one check');
     assert.equal(JSON.stringify(firstCalls[0]), '[{"first":true}]', 'through backends_check {first}');
@@ -1383,7 +1488,7 @@ test('a page whose list is already decided waits for nothing (#7 round 2)', asyn
     modules: [rpc({ registryList: async () => ({ agents: listed }), backendsCheck: async () => { firstCalls++; } })],
   });
   try {
-    for (let i = 0; i < 12 && !app.document.querySelector('.agent-group'); i++) await app.flush();
+    await listedRows(app, false);
     await app.flush();
     assert.equal(firstCalls, 0);
   } finally { await app.close(); }

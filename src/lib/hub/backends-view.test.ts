@@ -6,6 +6,7 @@ import assert from 'node:assert/strict';
 import { readFile } from 'node:fs/promises';
 import {
   REASON_CODES, backendsShown, capState, factDot, hintKey, noteCap, readRefresh, readTest, reasonKey, rowHints, testable,
+  availabilityDot, customAgents, harnessRows,
 } from './backends-view.ts';
 
 test('caps undefined is unknown, not absent; a list without the cap is absent', () => {
@@ -128,16 +129,17 @@ test('config_invalid says the same format-neutral words in tmm and on the page (
 
 // Board #7: the Agents list's two groups and an agent's availability, as
 // `registry_list` states them (the server's ONE rule, readiness::unavailable).
-import { agentGroups, keepAvailable, unavailableOf, unavailableText } from './backends-view.ts';
+import { isHarnessDefault, keepAvailable, unavailableOf, unavailableText } from './backends-view.ts';
 
 const def = (name: string, backend: string, group?: string, availability?: object) => ({ name, backend, group, availability });
 
-test('the list partitions into harness defaults then custom agents, in the server order (#7)', () => {
-  const defs = [def('kiro', 'kiro', 'default'), def('codex', 'claude', 'custom'), def('grok', 'grok', 'default'), def('pentester', 'kiro', 'custom')];
-  const g = agentGroups(defs)!;
-  assert.deepEqual(g.defaults.map((d) => d.name), ['kiro', 'grok']);
-  assert.deepEqual(g.custom.map((d) => d.name), ['codex', 'pentester']);
-  assert.equal(agentGroups([def('kiro', 'kiro')]), null, 'an older server names no group: no groups');
+test('one predicate says which definition is a harness default: the server\u2019s group, else its own name rule (#90 round 1)', () => {
+  const grouped = [def('kiro', 'kiro', 'default'), def('codex', 'claude', 'custom'), def('grok', 'grok', 'default'), def('claude', 'claude', 'custom')];
+  assert.deepEqual(grouped.filter((d) => isHarnessDefault(d, grouped)).map((d) => d.name), ['kiro', 'grok'], 'the server\u2019s group decides when it names one');
+  const flat = [def('kiro', 'kiro'), def('pentester', 'kiro'), def('grok', 'grok')];
+  assert.deepEqual(flat.filter((d) => isHarnessDefault(d, flat)).map((d) => d.name), ['kiro', 'grok'], 'an older server: the definition named after its backend (registry::annotate)');
+  assert.deepEqual(customAgents(flat).map((d) => d.name), ['pentester'], 'and the Agents list leaves those out there too');
+  assert.deepEqual(harnessRows(['kiro', 'grok'], flat).map((r) => r.def?.name), ['kiro', 'grok']);
 });
 
 test('only a stated unavailable greys, and the words say why (#7)', () => {
@@ -197,4 +199,18 @@ test('keepAvailable drops only a pick the server now greys (#7 round 3)', () => 
   ];
   assert.deepEqual(keepAvailable(['grok', 'kiro', 'dsh', 'gone'], rows), ['kiro', 'dsh', 'gone']);
   assert.deepEqual(keepAvailable([], rows), []);
+});
+
+// Board #90: the harness defaults move to the Backends page; the Agents page
+// lists custom agents only.
+test('the Backends rows are one per backend in the server order, each with its harness default (#90)', () => {
+  const defs = [
+    { name: 'kiro', backend: 'kiro', group: 'default', availability: { state: 'available' } },
+    { name: 'pentester', backend: 'kiro', group: 'custom' },
+    { name: 'grok', backend: 'grok', group: 'default', availability: { state: 'unavailable', reason: 'not_found' } },
+  ];
+  assert.deepEqual(harnessRows(['kiro', 'codex', 'grok'], defs).map((r) => [r.backend, r.def?.name ?? null]), [['kiro', 'kiro'], ['codex', null], ['grok', 'grok']]);
+  assert.deepEqual(customAgents(defs).map((d) => d.name), ['pentester']);
+  assert.deepEqual(harnessRows(['kiro'], [{ name: 'kiro', backend: 'kiro' }]).map((r) => r.def?.name), ['kiro'], 'no groups: the name named after its backend');
+  assert.deepEqual([availabilityDot(defs[0]!), availabilityDot(defs[2]!), availabilityDot({ name: 'c', backend: 'codex', availability: { state: 'unknown' } }), availabilityDot(null)], ['idle', 'waiting', 'shell', 'shell']);
 });
