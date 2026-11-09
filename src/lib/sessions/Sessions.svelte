@@ -501,8 +501,9 @@
   <div class="top-row">
     {#if searchOpen}
       <div class="search-bar appear">
-        <Icon name="search" size={14} />
+        <span class="search-glyph"><Icon name="search" size={14} /></span>
         <input
+          class="config-input"
           bind:this={searchInputEl}
           type="text"
           bind:value={query}
@@ -967,39 +968,17 @@
   }
 
   /* ─── Search bar (expanded state) ─────────────────── */
+  /* The bar lays out a glyph, the field and Close, as the Hub's search does;
+     the field is the one text-field family (`.config-input`, board #97). */
   .search-bar {
     flex: 1;
     min-width: 0;
-    position: relative;
     display: flex;
     align-items: center;
     gap: 6px;
-    padding: 0 4px 0 10px;
-    height: var(--ui-control-height);
-    background: var(--input-bg);
-    border: 1px solid var(--border2);
-    border-radius: var(--ui-radius-pill);
-    color: var(--text3);
-    transition: border-color var(--t-fast), color var(--t-fast);
   }
-  .search-bar:focus-within {
-    border-color: var(--accent);
-    color: var(--accent);
-  }
-  .search-bar input {
-    flex: 1;
-    min-width: 0;
-    border: none;
-    outline: none;
-    background: transparent;
-    padding: 0;
-    font-size: var(--fs-body);
-    color: var(--text);
-    -webkit-appearance: none;
-    appearance: none;
-    line-height: 1;
-  }
-  .search-bar input::placeholder { color: var(--text3); }
+  .search-glyph { display: inline-flex; flex: none; color: var(--text3); }
+  .search-bar input { flex: 1; }
   .search-bar .icon-btn {
     width: 20px;
     height: 20px;

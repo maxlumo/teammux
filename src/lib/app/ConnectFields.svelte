@@ -153,7 +153,7 @@
   <label>
     <span class="label-text">{t('address')}</span>
     <div class="addr-wrap">
-      <input type="text" bind:this={field} value={address} oninput={typed} onchange={() => { commit(); }} onfocus={() => { settled = address; }} placeholder="ws://host:port" autocapitalize="off" autocomplete="off" use:focusIf onkeydown={enter} />
+      <input class="config-input" type="text" bind:this={field} value={address} oninput={typed} onchange={() => { commit(); }} onfocus={() => { settled = address; }} placeholder="ws://host:port" autocapitalize="off" autocomplete="off" use:focusIf onkeydown={enter} />
       {#if remembered.length}
         <button class="hist-btn" class:open={showHistory} aria-expanded={showHistory}
           onclick={toggleList}><span class="flip" class:on={showHistory}><Icon name="arrow-down" size={13} /></span></button>
@@ -179,7 +179,7 @@
     <span class="label-text">{t('token')}</span>
     <div class="token-wrap">
       <span class="token-icon"><Icon name="key" size={13} /></span>
-      <input type={showToken ? 'text' : 'password'} bind:value={token} placeholder="auth token" onkeydown={enter} />
+      <input class="config-input" type={showToken ? 'text' : 'password'} bind:value={token} placeholder="auth token" onkeydown={enter} />
       <button class="eye-btn" type="button" onclick={() => showToken = !showToken}>
         <Icon name={showToken ? 'eye-off' : 'eye'} size={14} />
       </button>
@@ -188,7 +188,7 @@
 
   <label>
     <span class="label-text">{t('tmuxSocket')} <span style="font-weight:400;text-transform:none;letter-spacing:0">{t('tmuxSocketHint')}</span></span>
-    <input type="text" bind:value={socket} placeholder="/tmp/tmux-1000/default" autocapitalize="off" autocomplete="off" onkeydown={enter} />
+    <input class="config-input" type="text" bind:value={socket} placeholder="/tmp/tmux-1000/default" autocapitalize="off" autocomplete="off" onkeydown={enter} />
   </label>
 </div>
 
@@ -244,26 +244,7 @@
     letter-spacing: 0.5px;
   }
 
-  input {
-    width: 100%;
-    padding: 11px 14px;
-    border: 1px solid var(--input-border);
-    border-radius: var(--ui-radius-control);
-    background: var(--input-bg);
-    color: var(--text);
-    /* The iOS no-auto-zoom threshold; see --fs-input-touch in app.css. */
-    font-size: var(--fs-input-touch);
-    outline: none;
-    transition: border-color var(--t-fast) ease, background var(--t-fast) ease, box-shadow var(--t-fast) ease;
-    -webkit-appearance: none;
-    appearance: none;
-  }
-  input:focus {
-    border-color: var(--accent);
-    background: var(--accent-bg);
-    box-shadow: 0 0 0 3px var(--accent-glow);
-  }
-  input::placeholder { color: var(--text3); }
+  /* The fields are the one text-field family (`.config-input`, board #97). */
 
   .token-wrap {
     position: relative;

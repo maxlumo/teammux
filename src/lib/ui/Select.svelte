@@ -271,7 +271,9 @@
   /* Dense remains a text-role option for existing non-form consumers, not
      another control height. Configuration forms use the normal value role. */
   .sel-trigger.dense { font-size: var(--fs-ui); }
-  button.sel-trigger { --field-paint: transparent; padding-inline: 0; }
+  /* A select-only value reads by its chevron, not a field box (#161): no
+     fill, no edge. The combo, which is typed into, is the field. */
+  button.sel-trigger { --field-paint: transparent; --field-line: transparent; padding-inline: 0; }
   .sel-trigger:disabled { opacity: var(--control-disabled-opacity); cursor: default; }
   .sel-value { flex: 1; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; color: var(--text2); }
   .sel-trigger :global(svg) { flex: none; color: var(--text2); }

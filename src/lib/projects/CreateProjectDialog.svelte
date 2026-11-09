@@ -98,9 +98,9 @@
       onpick={(p) => { path = p; pickerOpen = false; }}
       oncancel={() => pickerOpen = false} />
   {:else}
-    <input placeholder={t('hubCreateName')} bind:value={name} />
+    <input class="config-input" placeholder={t('hubCreateName')} bind:value={name} />
     <div class="path-row">
-      <input placeholder={t('hubCreatePath')} bind:value={path} />
+      <input class="config-input" placeholder={t('hubCreatePath')} bind:value={path} />
       <button class="chip-btn" onclick={() => pickerOpen = true}>
         <Icon name="folder" size={13} />{t('dirPickerOpen')}
       </button>
@@ -132,8 +132,6 @@
   /* The shape, the scrim, the sheet and the keyboard are ui/Dialog's (#317);
      what is left here is this form's own content. */
   .err { margin: 0; color: var(--danger); font-size: var(--fs-ui); }
-  input { background: var(--input-bg); border: 1px solid var(--input-border); border-radius: var(--ui-radius-control); color: var(--text); padding: 8px 12px; font-size: var(--fs-ui); outline: none; }
-  input:focus { border-color: var(--accent); }
   .dlg-h { font-family: var(--font-mono); font-size: var(--fs-meta); text-transform: uppercase; letter-spacing: 1.4px; color: var(--text3); margin-top: 4px; }
   .dlg-agents { display: flex; flex-direction: column; gap: 5px; }
   /* Phone sheet: the list scrolls inside the sheet instead of pushing the

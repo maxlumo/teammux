@@ -211,12 +211,40 @@ danger semantics.
   5px with them (#219 — 7 on 20 read as circles in the Files toolbar). The
   circle/capsule exceptions, by reason: agent avatars, the composer's Send
   (`CommandButton round`, its only wearer), the switch knob/track, tags and
-  chips (day pills, count badges, `.pick`/AgentChip membership), input
-  capsules (the sessions search), dots (including `MediaRange`'s thumb, #453),
+  chips (day pills, count badges, `.pick`/AgentChip membership), dots (including `MediaRange`'s thumb, #453),
   spinners, progress bars. The list is
   the allowlist of `tokens.source.test.ts` — a new circle or capsule on a
-  button fails it. Field/menu/dialog radii stay `--control-radius 12`,
-  `--control-menu-radius 16`, `--control-dialog-radius 22`.
+  button fails it. A field's corner IS the control step: `--control-radius`
+  is an alias of `--ui-radius-control` since #97 (one scale); menu/dialog
+  radii stay `--control-menu-radius 16`, `--control-dialog-radius 22`.
+- **Text fields are ONE family** (board #97, owner 2026-11-09 05:14: "应用里还有
+  很多风格不一致的情况，比如查找的输入框还有设置里的一些输入框的框线的圆角和 chat 输入框
+  不一样"). Measured in Chromium before: four paints — the composer (corner
+  10, a 1px line, focus = the line turning `--accent-line`), `.config-input`
+  (corner 12/14, a fill and no line, focus = a 2px outline), the config
+  textareas (corner 12 with a line) and private rules (the Sessions pill
+  search, ConnectFields with a glow, the create-project, brief, review
+  note, folder-name and commit fields with `--accent` borders); the Hub
+  search painted only 14px tall on a phone. Now every field a person types
+  into wears `.config-input`, defined once in app.css with the composer as
+  the reference: the `--control-field-bg` fill, a 1px `--field-line`
+  (`--border`) edge, the control corner, `--control-height` per breakpoint
+  (a single-line field paints inside its hit box: transparent inset border,
+  the edge an inset line on the paint, so 28px paint in a 44px touch box),
+  and the composer's focus mark. **Two focus marks, by kind**: a TEXT field
+  shows focus by its edge turning `--accent-line` (no outline: a ring around
+  a typing field is a second edge); every non-text control (buttons,
+  selects, switches) keeps the 2px `--accent-ink` focus-visible ring, a
+  button that borrows the field's look included (the shortcut recorder, an
+  address choice: round 1, validator note 10, the text-field rule had
+  caught 32 shortcut buttons and taken their ring). The
+  exceptions, named in `ui/fields.source.test.ts` with their reasons: the
+  composer's own textarea (its shell is the reference), in-place document
+  editors that keep their look and take only the focus mark (Hub title
+  rename, Board title/body/note, the file editor; orchestrator D3), and a
+  select-only value, which reads by its chevron (#161). The same test
+  allow-lists every literal px corner left in `src/lib`, each a non-field
+  case with its reason.
   These replace the migrated controls' 10/14/18px treatment, not the legacy
   terminal, bubble or card geometry. Configuration boolean/multiple choices
   still use Switch/CheckboxGroup, never `.pick` membership pills.
@@ -1249,7 +1277,8 @@ covered: a link that is a control with its own paint (Settings' About link), whi
   every row on touch became 44px tall and the run read as blank lines. It was
   removed whole. A tool row has one pitch on every pointer.
 - Keyboard reach: the ONE focus ring is app.css `button/input/textarea:
-  focus-visible` (accent outline, 2px offset). Navigation never opts out of
+  focus-visible` (accent outline, 2px offset); a text field's mark is its
+  edge turning `--accent-line` instead (#97, § Radius scale above). Navigation never opts out of
   the Tab order with `tabindex="-1"`; only a container that is focused
   programmatically (a `role=menu`/`listbox` layer) may carry it.
 

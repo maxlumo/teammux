@@ -74,7 +74,8 @@ test('compact page rhythm is opt-in, while preference rows share one inline layo
 });
 
 test('compact control shapes have one explicit round policy, not flattened capsule caps (#161)', () => {
-  assert.match(css, /--control-radius:\s*12px/u);
+  // One radius scale (board #97, D4): a field's corner is the control step.
+  assert.match(css, /--control-radius:\s*var\(--ui-radius-control\);/u);
   assert.match(css, /--control-menu-radius:\s*16px/u);
   assert.match(css, /--control-dialog-radius:\s*22px/u);
   assert.match(css, /:where\(\s*\/\* shared vocabulary/u,

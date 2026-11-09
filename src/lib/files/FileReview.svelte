@@ -767,7 +767,7 @@
         hasPopup="menu" onclick={(e) => { menu = { at: { anchor: anchorOf(e.currentTarget as Element) }, id: a.id }; }} />
     </div>
     {#if notes[a.id] != null}
-      <textarea class="rv-input" rows="3" aria-label={t('reviewNote')} value={notes[a.id]}
+      <textarea class="config-input rv-input" rows="3" aria-label={t('reviewNote')} value={notes[a.id]}
         oninput={(e) => writeNote(a.id, e.currentTarget.value)} onkeydown={(e) => saveKeys(e, () => saveEdit(a))}></textarea>
       <div class="rv-actions">
         <CommandButton label={t('cancel')} onclick={() => dropNote(a.id)} />
@@ -789,7 +789,7 @@
   {#if newAt}
     <div class="rv-card rv-new">
       <q class="rv-quote">{cut(newAt.quote)}</q>
-      <textarea class="rv-input" rows="3" aria-label={t('reviewNote')} placeholder={t('reviewNote')} value={notes[''] ?? ''}
+      <textarea class="config-input rv-input" rows="3" aria-label={t('reviewNote')} placeholder={t('reviewNote')} value={notes[''] ?? ''}
         oninput={(e) => writeNote('', e.currentTarget.value)} onkeydown={(e) => saveKeys(e, saveNew)}></textarea>
       {#if stale}<p class="rv-warn" role="alert">{t('reviewStale')}</p>{/if}
       <div class="rv-actions">
@@ -923,11 +923,9 @@
   .rv-note { margin: 0; font-size: var(--fs-body); color: var(--text); white-space: pre-wrap; overflow-wrap: anywhere; }
   .rv-meta { margin: 0; display: flex; gap: var(--ui-gap); flex-wrap: wrap; font-size: var(--fs-meta); color: var(--text3); }
   .rv-lost { color: var(--status-warn); }
-  .rv-input {
-    width: 100%; box-sizing: border-box; resize: vertical; font: inherit; font-size: var(--fs-body);
-    color: var(--text); background: var(--bg); border: 1px solid var(--input-border); border-radius: var(--ui-radius-control);
-    padding: var(--menu-item-padding-y) var(--config-label-gap);
-  }
+  /* The text-field family's box (`.config-input`, board #97); a note is a
+     few rows, not a config editor. */
+  .rv-input { --config-editor-min: 0px; }
   .rv-actions { display: flex; justify-content: flex-end; gap: var(--ui-gap); }
   .rv-status, .rv-warn { margin: 0; font-size: var(--fs-sub); color: var(--text2); }
   .rv-warn { color: var(--status-warn); }

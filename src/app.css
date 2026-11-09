@@ -80,12 +80,13 @@ html {
   /* The corner of a command's PAINT (the inset layer inside the hit box):
      a rounded rectangle at every paint size — 7px on the desktop's 24px
      square, on a text command's 24px-tall capsule-that-is-not, on the
-     phone's 32px square. --control-radius (12px) is a FIELD's corner; on a
-     24px square it is a circle, which is what the owner stopped (board 218:
+     phone's 32px square. --control-radius (a FIELD's corner, the control
+     step since #97) on a 24px square is nearly a circle, which is what the owner stopped (board 218:
      "这个图标按钮应该都用圆角矩形，不要用圆圈"). Only the composer's Send stays round. */
   --control-paint-radius: 7px;
   --control-field-inset: 2px;
-  --control-radius: 12px;
+  /* One radius scale (board #97, D4): a field's corner IS the control step. */
+  --control-radius: var(--ui-radius-control);
   --control-menu-radius: 16px;
   --control-dialog-radius: 22px;
   --control-icon-size: 16px;
@@ -141,6 +142,9 @@ html {
      and fit from a 330 px viewport. The deliberate exception to the 44 px icon
      hit box: only inside .compact-tools, only on touch. */
   .compact-tools { --control-height: 30px; --control-paint-inset: 2px; }
+  /* A FIELD in a dense tool row (the Hub's search bar) keeps a field's
+     28px paint: 30 - 2 x 1 (board #97; the touch inset of 8 left it 14px). */
+  .compact-tools .config-input { --control-field-inset: 1px; }
 }
 
 @media (any-pointer: coarse) {
@@ -1359,20 +1363,40 @@ button.side-win:hover { background: var(--surface2); color: var(--text); }
 .config-fields[aria-busy="true"] { --control-disabled-opacity: 1; }
 .config-field { display: flex; flex-direction: column; gap: var(--config-label-gap); min-width: 0; }
 .config-field-label { color: var(--text); font: var(--config-label-weight, 600) var(--fs-ui)/1.4 var(--font-ui); }
+/* ONE text-field family (board #97, owner 2026-11-09 05:14: "查找的输入框还有设置
+   里的一些输入框的框线的圆角和 chat 输入框不一样"): the chat composer's shell is
+   the reference. Every field a person types into wears `.config-input`:
+   the --control-field-bg fill, a 1px --field-line (--border) edge, the
+   control corner (--ui-radius-control), --control-height per breakpoint,
+   and the composer's focus mark, the edge turning --accent-line with no
+   outline (a ring around a typing field is a second edge; orchestrator D1).
+   A Select trigger (`.control-field`) takes the same box; a NON-text
+   control keeps the 2px --accent-ink focus-visible ring. */
 .config-input {
   box-sizing: border-box; width: 100%; min-width: 0; height: var(--control-height); padding: 0 12px;
-  border: 1px solid var(--border); border-radius: var(--control-radius);
-  background: var(--control-field-bg); color: var(--text);
+  border: 1px solid var(--field-line, var(--border)); border-radius: var(--control-radius);
+  background: var(--control-field-bg); color: var(--text); outline: none;
   font: 400 var(--fs-body)/var(--control-line-height) var(--font-ui); letter-spacing: 0;
+  transition: border-color var(--t-fast), box-shadow var(--t-fast);
 }
+/* A single-line field paints INSIDE its hit box (the touch box is 44px, the
+   paint stays a field's): the border is a transparent inset and the edge is
+   an inset line on the paint, so the corner and the line sit where the fill
+   ends. */
 input.config-input, .control-field {
   height: var(--control-height); box-sizing: border-box;
   border: solid transparent; border-width: var(--control-field-inset) 0;
   border-radius: var(--control-radius) / calc(var(--control-radius) + var(--control-field-inset));
   background: var(--field-paint, var(--control-field-bg)); background-clip: padding-box;
+  box-shadow: inset 0 0 0 1px var(--field-line, var(--border));
 }
-.config-input[readonly] { --field-paint: transparent; padding-inline: 0; }
-.config-input:focus-visible, .control-field:focus-visible { outline: 2px solid var(--accent-ink); outline-offset: 2px; }
+:is(input.config-input, textarea.config-input, [contenteditable].config-input, input.control-field):focus { --field-line: var(--accent-line); outline: none; }
+.config-input[readonly] { --field-paint: transparent; --field-line: transparent; padding-inline: 0; }
+/* A BUTTON that borrows the field's look (the shortcut recorder, an address
+   choice, a Select-only trigger) is a non-text control: it keeps the ring
+   (#97 round 1, validator note 10: the text-field focus rule had caught 32
+   shortcut buttons and taken their ring). */
+:is(button.config-input, .control-field:not(input)):focus-visible { outline: 2px solid var(--accent-ink); outline-offset: 2px; }
 .config-input::placeholder { color: var(--text2); }
 .config-input:disabled { opacity: var(--control-disabled-opacity); }
 textarea.config-input {

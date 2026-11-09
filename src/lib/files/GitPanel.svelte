@@ -219,7 +219,7 @@
   </div>
   {#if showCommitInput}
     <div class="git-commit-row appear-rise">
-      <textarea bind:value={commitMsg} placeholder={t('commitMsg')} onkeydown={(e) => { if (e.key === 'Enter' && !e.shiftKey && !e.isComposing && e.keyCode !== 229) { e.preventDefault(); gitCommit(); } }} rows="2"></textarea>
+      <textarea class="config-input" bind:value={commitMsg} placeholder={t('commitMsg')} onkeydown={(e) => { if (e.key === 'Enter' && !e.shiftKey && !e.isComposing && e.keyCode !== 229) { e.preventDefault(); gitCommit(); } }} rows="2"></textarea>
       <button class="git-commit-btn" onclick={gitCommit} disabled={!commitMsg.trim()}>OK</button>
     </div>
   {/if}
@@ -339,12 +339,9 @@
   .git-commit-row {
     display: flex; gap: 6px; padding: 6px 10px; border-bottom: 1px solid var(--border); flex-shrink: 0;
   }
-  .git-commit-row textarea {
-    flex: 1; padding: 6px 10px; border: 1px solid var(--input-border); border-radius: var(--ui-radius-control);
-    background: var(--input-bg); color: var(--text); font-size: var(--fs-body); outline: none;
-    font-family: inherit; resize: none; line-height: 1.4;
-  }
-  .git-commit-row textarea:focus { border-color: var(--accent); }
+  /* The text-field family (`.config-input`, board #97); a commit message
+     grows from one row. */
+  .git-commit-row textarea { --config-editor-min: 0px; flex: 1; width: auto; padding: 6px 10px; resize: none; line-height: 1.4; }
   .git-commit-btn {
     padding: 6px 14px; border: none; border-radius: var(--ui-radius-control);
     background: var(--accent-fill); color: var(--accent-fill-ink); font-size: var(--fs-ui); font-weight: 600;

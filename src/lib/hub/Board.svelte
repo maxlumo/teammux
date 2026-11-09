@@ -1842,7 +1842,9 @@
     font-weight: 600;
     padding: 7px 10px;
   }
-  .d-title-input:focus { outline: none; border-color: var(--accent); }
+  /* In-place document editors keep their look (board #97, D3) and take the
+     text-field family's focus mark: the edge turns --accent-line. */
+  .d-title-input:focus { outline: none; border-color: var(--accent-line); }
   .d-body-edit {
     font-size: var(--fs-ui); color: var(--text);
     font-family: inherit;
@@ -1857,7 +1859,7 @@
     resize: vertical;
     flex: none;
   }
-  .d-body-edit:focus { outline: none; border-color: var(--accent); }
+  .d-body-edit:focus { outline: none; border-color: var(--accent-line); }
   /* Locked title/body (board #43): the same type as their editable twins,
      but PROSE — no surface, no border, no focus ring, nothing that invites
      a tap. Explicitly selectable: the app shell's global user-select:none
@@ -1936,5 +1938,5 @@
     padding: 7px 10px;
     font-family: inherit;
   }
-  .note-input:focus, .n-title:focus { outline: none; border-color: var(--accent); }
+  .note-input:focus, .n-title:focus { outline: none; border-color: var(--accent-line); }
 </style>

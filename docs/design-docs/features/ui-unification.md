@@ -274,6 +274,7 @@ The copy-pasted classes become global utilities, deleted from components:
 | `.icon-btn` | square icon-only button |
 | `.side-h` | sidebar/section heading (mono, uppercase, tracked) |
 | `.ava` | agent monogram chip (color set inline per backend) |
+| `.config-input` | EVERY text field (board #97): fill + 1px `--field-line` + control corner + `--control-height`; focus = the edge turning `--accent-line`. Wearers since #97: Hub search, Sessions search (its pill bar deleted), Settings/Agents inputs and textareas, Select combos, ConnectFields, new project, start brief, review note, new folder, commit message, server dialogs, file/folder name. Exceptions in `ui/fields.source.test.ts` |
 
 Svelte scoped styles keep page-specific *layout* (grids, spacing); shared
 *vocabulary* lives in one file. New pages must reach for these before

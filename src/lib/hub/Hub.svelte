@@ -2950,7 +2950,7 @@
             onchange={(v) => { startJoin = v; }} />
         </label>
       {/if}
-      <input class="pick-brief" placeholder={t('hubBrief')} bind:value={startBrief} />
+      <input class="config-input pick-brief" placeholder={t('hubBrief')} bind:value={startBrief} />
       <div class="dlg-actions">
         <CommandButton label={t('cancel')} onclick={closePicker} />
         <CommandButton variant="primary" icon="zap" label={t('hubStartGo').replace('{n}', String(startPick.length))}
@@ -3167,8 +3167,6 @@
 
   /* The dialog's shape, scrim, sheet and keyboard are ui/Dialog's (#317);
      what is left here is the picker's own content. */
-  .pick-brief { background: var(--input-bg); border: 1px solid var(--input-border); border-radius: var(--ui-radius-control); color: var(--text); padding: 8px 12px; font-size: var(--fs-ui); outline: none; }
-  .pick-brief:focus { border-color: var(--accent); }
   @media (prefers-reduced-motion: reduce) { .cols:global(.moving) { transition: none; } }
   .dlg-agents { display: flex; flex-direction: column; gap: 5px; }
   /* Phone sheet: the roster scrolls inside the sheet instead of pushing the

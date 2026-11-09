@@ -139,7 +139,7 @@
   {#if creating}
     <div class="pk-new appear-rise">
       <Icon name="folder-plus" size={13} />
-      <input class="pk-new-input" bind:value={newName} placeholder={t('newFolderName')}
+      <input class="config-input pk-new-input" bind:value={newName} placeholder={t('newFolderName')}
         autocapitalize="off" autocomplete="off"
         onkeydown={(e) => { if (e.key === 'Enter') createFolder(); else if (e.key === 'Escape' && !e.isComposing) cancelLocal(); }} />
       <button class="chip-btn primary" onclick={createFolder} disabled={!newName.trim()}>{t('create')}</button>
@@ -186,13 +186,8 @@
   }
   .pk-err { color: var(--danger); font-size: var(--fs-meta); }
   .pk-new { display: flex; align-items: center; gap: 6px; color: var(--text3); }
-  .pk-new-input {
-    flex: 1; min-width: 0; padding: 5px 8px;
-    border: 1px solid var(--input-border); border-radius: var(--ui-radius-control);
-    background: var(--input-bg); color: var(--text); font-size: var(--fs-ui);
-    font-family: var(--font-mono); outline: none;
-  }
-  .pk-new-input:focus { border-color: var(--accent); }
+  /* The text-field family (`.config-input`, board #97); a path is mono. */
+  .pk-new-input { flex: 1; width: auto; font-family: var(--font-mono); }
   .pk-list {
     flex: 1; min-height: 140px; max-height: calc(42vh / var(--ui-zoom, 1)); overflow-y: auto;
     border: 1px solid var(--border); border-radius: var(--ui-radius-control); background: var(--input-bg);
