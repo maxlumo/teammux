@@ -475,16 +475,159 @@ fn trusted_proxies(v: Option<&toml::Value>) -> crate::server::client_ip::Trusted
     TrustedProxies::from_config(Some(&entries))
 }
 
+/// A machine_id that is not a uuid once its writer had time to finish is
+/// CORRUPTION, not an identity (board #99 round 2, orchestrator note 10):
+/// nothing runs on an id the file disagrees with. The process stops, naming
+/// the file and the remedy.
 fn load_or_create_machine_id() -> String {
-    let path = dirs_next().join("machine_id");
-    if let Ok(id) = std::fs::read_to_string(&path) {
-        let id = id.trim().to_string();
-        if !id.is_empty() { return id; }
-    }
+    machine_id_at(&dirs_next()).unwrap_or_else(|e| {
+        eprintln!("tmm: {e}");
+        std::process::exit(78); // EX_CONFIG
+    })
+}
+
+/// The machine's id: the one `<dir>/machine_id` holds, created once (board
+/// #99). An id is published only COMPLETE and a reader never adopts an
+/// incomplete one (orchestrator, note 5): the new id is written whole to a
+/// private file, then published under the name by a door that fails when
+/// the name exists: a hard link; where the filesystem has none, a
+/// no-replace rename (`renameat2` RENAME_NOREPLACE, Linux); else an
+/// exclusive create plus write, the one door that shows an empty file for
+/// a moment. Of two processes that start with no file (the gateway and the
+/// entrypoint's tmm, seen in the e2e smoke) one wins and the other re-reads
+/// the winner's id. A reader that finds an empty or non-uuid file waits for
+/// it to complete (`settled`, up to 1 s); still not a uuid then, it is an
+/// error naming the file, never an adopted id (round 2, note 10).
+fn machine_id_at(dir: &std::path::Path) -> Result<String, String> {
+    let path = dir.join("machine_id");
+    if let Some(id) = settled(&path)? { return Ok(id); }
+    // Every way this can fail is an error, never a fresh id held only in
+    // memory (round 3, validator-2 note 14, orchestrator note 15): the file
+    // would not hold it, and the next process would make another.
+    let unknown = |what: String| format!("{} could not be created ({what}); this machine's identity is unknown, so nothing was started", path.display());
     let id = uuid::Uuid::new_v4().to_string();
-    let _ = std::fs::create_dir_all(dirs_next());
-    let _ = std::fs::write(&path, &id);
-    id
+    std::fs::create_dir_all(dir).map_err(|e| unknown(format!("its directory: {e}")))?;
+    let tmp = dir.join(format!(".machine_id.{}", uuid::Uuid::new_v4().simple()));
+    std::fs::write(&tmp, &id).map_err(|e| { let _ = std::fs::remove_file(&tmp); unknown(format!("writing {}: {e}", tmp.display())) })?;
+    let published = publish(&tmp, &path, &id);
+    let _ = std::fs::remove_file(&tmp);
+    match published {
+        Ok(()) => Ok(id),
+        // The name was taken: the winner's id, or the error if it never completes.
+        Err(e) if e.kind() == std::io::ErrorKind::AlreadyExists => settled(&path)?.ok_or_else(|| format!("{} vanished while it was being created", path.display())),
+        Err(e) => Err(unknown(e.to_string())),
+    }
+}
+
+/// Put the complete id at `path` unless something is there already
+/// (`AlreadyExists`), through the first door this filesystem has.
+fn publish(tmp: &std::path::Path, path: &std::path::Path, id: &str) -> std::io::Result<()> {
+    let exists = |e: &std::io::Error| e.kind() == std::io::ErrorKind::AlreadyExists;
+    // What each door said, for the error when none works.
+    let mut tried: Vec<String> = Vec::new();
+    #[cfg(test)]
+    let (no_link, no_rename) = test_seam::doors_off(path);
+    #[cfg(not(test))]
+    let (no_link, no_rename) = (false, false);
+    if no_link {
+        tried.push("hard link: off (test)".into());
+    } else {
+        match std::fs::hard_link(tmp, path) {
+            Err(e) if !exists(&e) => tried.push(format!("hard link: {e}")),
+            done => return done,
+        }
+    }
+    #[cfg(target_os = "linux")]
+    if no_rename {
+        tried.push("no-replace rename: off (test)".into());
+    } else {
+        match rename_noreplace(tmp, path) {
+            Err(e) if !exists(&e) => tried.push(format!("no-replace rename: {e}")),
+            done => return done,
+        }
+    }
+    #[cfg(not(target_os = "linux"))]
+    let _ = no_rename;
+    use std::io::Write;
+    let mut f = match std::fs::OpenOptions::new().write(true).create_new(true).open(path) {
+        Err(e) if !exists(&e) => { tried.push(format!("exclusive create: {e}")); return Err(std::io::Error::other(tried.join("; "))); }
+        other => other?,
+    };
+    #[cfg(test)]
+    let written = test_seam::write(path, &mut f, id);
+    #[cfg(not(test))]
+    let written = f.write_all(id.as_bytes());
+    if let Err(e) = written {
+        // OUR exclusive file, partly written: removed, so it never stands as
+        // an id and the next start can create one.
+        drop(f);
+        let _ = std::fs::remove_file(path);
+        tried.push(format!("exclusive create, write: {e}"));
+        return Err(std::io::Error::other(tried.join("; ")));
+    }
+    Ok(())
+}
+
+#[cfg(target_os = "linux")]
+fn rename_noreplace(from: &std::path::Path, to: &std::path::Path) -> std::io::Result<()> {
+    use std::os::unix::ffi::OsStrExt;
+    let c = |p: &std::path::Path| std::ffi::CString::new(p.as_os_str().as_bytes()).map_err(|_| std::io::Error::from(std::io::ErrorKind::InvalidInput));
+    let (a, b) = (c(from)?, c(to)?);
+    // SAFETY: two valid NUL-terminated paths; renameat2 reads them only.
+    let r = unsafe { libc::syscall(libc::SYS_renameat2, libc::AT_FDCWD, a.as_ptr(), libc::AT_FDCWD, b.as_ptr(), libc::RENAME_NOREPLACE) };
+    if r == 0 { Ok(()) } else { Err(std::io::Error::last_os_error()) }
+}
+
+/// What `path` holds once it is complete: `Ok(None)` when there is no
+/// file, `Ok(Some(id))` when it holds a uuid. A file that is empty or not a
+/// uuid may be an exclusive create whose write has not landed (or landed in
+/// part); it is re-read until it is a uuid, up to 1 s. Still not one then,
+/// it is corruption: an error naming the file and what to do, never an id.
+fn settled(path: &std::path::Path) -> Result<Option<String>, String> {
+    let read = || std::fs::read_to_string(path).ok().map(|s| s.trim().to_string());
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(1);
+    loop {
+        let Some(got) = read() else { return Ok(None) };
+        if uuid::Uuid::parse_str(&got).is_ok() { return Ok(Some(got)); }
+        if std::time::Instant::now() >= deadline {
+            return Err(format!("{} does not hold a machine id (it holds {} bytes that are not a uuid); this machine's identity is unknown, so nothing was started. If no other process is writing it, delete the file and start again: a new id is made.", path.display(), got.len()));
+        }
+        std::thread::sleep(std::time::Duration::from_millis(10));
+    }
+}
+
+/// Test seam (board #99, validator-2 notes 4 and 9): for ONE directory, turn
+/// the link door off (and the rename door, with `rename: false`), and delay
+/// the exclusive create's write; `SPLIT` writes its first 8 bytes before the
+/// delay (a partial write a reader can see).
+#[cfg(test)]
+pub(crate) mod test_seam {
+    use std::path::{Path, PathBuf};
+    /// (dir, write delay ms, rename door on)
+    pub static DIR: std::sync::Mutex<Option<(PathBuf, u64, bool)>> = std::sync::Mutex::new(None);
+    pub static SPLIT: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
+    /// After the first 8 bytes the write fails (ENOSPC), validator-2 note 14.
+    pub static FAIL_REST: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
+    /// The exclusive create's write, as the seam shapes it for this dir.
+    pub fn write(path: &Path, f: &mut std::fs::File, id: &str) -> std::io::Result<()> {
+        use std::io::Write;
+        use std::sync::atomic::Ordering::SeqCst;
+        if doors_off(path).0 && (SPLIT.load(SeqCst) || FAIL_REST.load(SeqCst)) {
+            f.write_all(&id.as_bytes()[..8])?;
+            if FAIL_REST.load(SeqCst) { return Err(std::io::Error::from_raw_os_error(28)); }
+            before_write(path);
+            return f.write_all(&id.as_bytes()[8..]);
+        }
+        before_write(path);
+        f.write_all(id.as_bytes())
+    }
+    pub fn doors_off(path: &Path) -> (bool, bool) {
+        DIR.lock().unwrap().as_ref().filter(|(d, _, _)| path.starts_with(d)).map_or((false, false), |(_, _, rename)| (true, !rename))
+    }
+    pub fn before_write(path: &Path) {
+        let ms = DIR.lock().unwrap().as_ref().filter(|(d, _, _)| path.starts_with(d)).map(|(_, ms, _)| *ms);
+        if let Some(ms) = ms { std::thread::sleep(std::time::Duration::from_millis(ms)); }
+    }
 }
 
 fn save_token(token: &str) -> std::io::Result<()> {
@@ -566,6 +709,116 @@ mod tests {
         std::fs::write(dir.join("machine_id"), "mid\n").unwrap();
         let p = Config::peek_at(&dir);
         assert_eq!((p.port, p.token.as_str(), p.machine_id.as_str()), (19878, "t", "mid"));
+    }
+
+    /// Board #99: the gateway and the entrypoint's `tmm` both start with no
+    /// machine_id file (seen in the e2e smoke: gw-a's login said d3e6e2fa…,
+    /// its file a8509150…). Every concurrent creator ends with the id the
+    /// file holds.
+    #[test]
+    fn concurrent_creators_agree_on_the_id_the_file_holds() {
+        for round in 0..40 {
+            let dir = test_scratch(&format!("machine-id-race-{round}"));
+            let go = std::sync::Arc::new(std::sync::Barrier::new(8));
+            let ids: Vec<String> = (0..8)
+                .map(|_| { let (d, g) = (dir.clone(), go.clone()); std::thread::spawn(move || { g.wait(); super::machine_id_at(&d).expect("an id") }) })
+                .collect::<Vec<_>>().into_iter().map(|h| h.join().unwrap()).collect();
+            let file = std::fs::read_to_string(dir.join("machine_id")).unwrap();
+            assert!(!file.trim().is_empty(), "round {round}: the file holds an id");
+            for id in &ids { assert_eq!(id, file.trim(), "round {round}: every creator uses the file's id ({ids:?})"); }
+        }
+    }
+
+    /// Validator-2 note 4, orchestrator note 5: with no link and no rename
+    /// (the exclusive-create door) and its write delayed, every concurrent
+    /// creator still ends with the id the file holds; and a reader that
+    /// finds an empty file written late takes the final id.
+    #[test]
+    fn the_exclusive_create_door_never_hands_out_an_incomplete_id() {
+        // Rounds 0-9: neither link nor rename (the exclusive create, its write
+        // delayed 120 ms); 10-19: no link, the no-replace rename (Linux).
+        for round in 0..20 {
+            let dir = test_scratch(&format!("machine-id-nolink-{round}"));
+            *super::test_seam::DIR.lock().unwrap() = Some((dir.clone(), 120, round >= 10));
+            let go = std::sync::Arc::new(std::sync::Barrier::new(8));
+            let ids: Vec<String> = (0..8)
+                .map(|_| { let (d, g) = (dir.clone(), go.clone()); std::thread::spawn(move || { g.wait(); super::machine_id_at(&d).expect("an id") }) })
+                .collect::<Vec<_>>().into_iter().map(|h| h.join().unwrap()).collect();
+            *super::test_seam::DIR.lock().unwrap() = None;
+            let file = std::fs::read_to_string(dir.join("machine_id")).unwrap();
+            assert!(uuid::Uuid::parse_str(file.trim()).is_ok(), "round {round}: a complete id: {file:?}");
+            for id in &ids { assert_eq!(id, file.trim(), "round {round}: {ids:?}"); }
+        }
+        let dir = test_scratch("machine-id-late");
+        std::fs::create_dir_all(&dir).unwrap();
+        std::fs::write(dir.join("machine_id"), "").unwrap();
+        let late = uuid::Uuid::new_v4().to_string();
+        let (d, l) = (dir.clone(), late.clone());
+        let writer = std::thread::spawn(move || { std::thread::sleep(std::time::Duration::from_millis(200)); std::fs::write(d.join("machine_id"), l).unwrap(); });
+        assert_eq!(super::machine_id_at(&dir), Ok(late), "an empty file is waited for, not adopted or replaced");
+        writer.join().unwrap();
+    }
+
+    /// Round 2 (validator-2 note 9, orchestrator note 10): a create whose
+    /// write lands only IN PART within the reader's 1 s is corruption. No
+    /// reader takes the part as an id: it gets an error naming the file. A
+    /// file that never becomes a uuid (hand-written junk, a dead writer) is
+    /// the same error; a part completed within the second is the id.
+    #[test]
+    fn a_partial_or_non_uuid_machine_id_is_an_error_never_an_adopted_id() {
+        // A split write: 8 bytes, then the rest 1.5 s later (past the deadline).
+        let dir = test_scratch("machine-id-split");
+        *super::test_seam::DIR.lock().unwrap() = Some((dir.clone(), 1500, false));
+        super::test_seam::SPLIT.store(true, std::sync::atomic::Ordering::SeqCst);
+        let go = std::sync::Arc::new(std::sync::Barrier::new(4));
+        let got: Vec<Result<String, String>> = (0..4)
+            .map(|_| { let (d, g) = (dir.clone(), go.clone()); std::thread::spawn(move || { g.wait(); super::machine_id_at(&d) }) })
+            .collect::<Vec<_>>().into_iter().map(|h| h.join().unwrap()).collect();
+        super::test_seam::SPLIT.store(false, std::sync::atomic::Ordering::SeqCst);
+        *super::test_seam::DIR.lock().unwrap() = None;
+        let file = std::fs::read_to_string(dir.join("machine_id")).unwrap();
+        for r in &got {
+            match r {
+                Ok(id) => assert_eq!(id, file.trim(), "an id is only ever the complete one: {got:?}"),
+                Err(e) => assert!(e.contains("machine_id") && e.contains("not a uuid"), "{e}"),
+            }
+        }
+        assert!(got.iter().any(|r| r.is_err()), "a reader past the deadline errs: {got:?}");
+        assert!(!got.iter().any(|r| r.as_ref().is_ok_and(|id| id.len() < 36)), "never the 8-byte part: {got:?}");
+        // Junk that never becomes a uuid.
+        let junk = test_scratch("machine-id-junk");
+        std::fs::create_dir_all(&junk).unwrap();
+        std::fs::write(junk.join("machine_id"), "eeac9f36").unwrap();
+        let e = super::machine_id_at(&junk).expect_err("junk is not an id");
+        assert!(e.contains(&junk.join("machine_id").display().to_string()), "the error names the file: {e}");
+        assert_eq!(std::fs::read_to_string(junk.join("machine_id")).unwrap(), "eeac9f36", "and leaves it for a person to look at");
+    }
+
+    /// Round 3 (validator-2 note 14, orchestrator note 15): when no door can
+    /// publish the id (the last one's write fails part-way, ENOSPC), or the
+    /// private file cannot even be written, it is an error naming the file
+    /// and the doors; no id is adopted, and nothing partial is left behind.
+    #[test]
+    #[cfg(unix)]
+    fn a_failed_publication_is_an_error_and_no_id_is_adopted() {
+        use std::os::unix::fs::PermissionsExt;
+        let dir = test_scratch("machine-id-enospc");
+        *super::test_seam::DIR.lock().unwrap() = Some((dir.clone(), 0, false));
+        super::test_seam::FAIL_REST.store(true, std::sync::atomic::Ordering::SeqCst);
+        let r = super::machine_id_at(&dir);
+        super::test_seam::FAIL_REST.store(false, std::sync::atomic::Ordering::SeqCst);
+        *super::test_seam::DIR.lock().unwrap() = None;
+        let e = r.expect_err("no id when no door published one");
+        assert!(e.contains("machine_id") && e.contains("hard link") && (cfg!(not(target_os = "linux")) || e.contains("no-replace rename")) && e.contains("exclusive create, write") && e.contains("nothing was started"), "{e}");
+        assert!(!dir.join("machine_id").exists(), "the partial file is not left to stand as an id");
+        assert_eq!(super::machine_id_at(&dir).map(|id| id.len()), Ok(36), "the next start, doors back, creates one");
+        // The private file cannot be written: the directory refuses.
+        let ro = test_scratch("machine-id-readonly");
+        std::fs::create_dir_all(&ro).unwrap();
+        std::fs::set_permissions(&ro, std::fs::Permissions::from_mode(0o500)).unwrap();
+        let r = super::machine_id_at(&ro);
+        std::fs::set_permissions(&ro, std::fs::Permissions::from_mode(0o700)).unwrap();
+        assert!(r.as_ref().is_err_and(|e| e.contains("could not be created")), "{r:?}");
     }
 
     use super::*;
