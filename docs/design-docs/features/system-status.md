@@ -39,6 +39,82 @@ only (no process table, no network counters, no multithread refresh).
   of a desktop server and never answers `system_status`; the sampler would be
   dead weight in the mobile shell.
 
+## GPUs: NVML through `nvml-wrapper`, opened once (board #102)
+
+The owner (2026-11-10: "系统资源状态那里如果是我们这种gpu机器要显示状态 显存利用
+率") wants the GPU on machines like this host (one NVIDIA L4). The reader is
+NVML through `nvml-wrapper` `=0.13.0`, pinned exact like `sysinfo` and
+desktop-gated by the same cfg. Not `nvidia-smi`: a process per poll is the
+shell-out this module forbids. Not a hand-rolled `dlopen`: NVML's ABI has
+versioned entry points and struct layouts (`nvmlInit_v2`, `nvmlMemory_v2`),
+and binding the wrong one reads garbage with no error (leader's ruling, #102
+note 1). The crate loads `libnvidia-ml` at run time, so every machine builds
+the same, and one without the NVIDIA driver simply has no GPU.
+
+`Nvml::init` runs ONCE per process, on the first `system_status`, and its
+answer is kept in a `OnceLock`: a machine with no library or no device pays
+one failed load in its life, then reports `gpu: null` on every poll with no
+retry and no log. Per card: name, `utilization_rates().gpu` (a card that
+does not report it gives `null`), and VRAM as NVML memory v2's own `used`
+and `total`, which is the pair `nvidia-smi` reports: `used` leaves out the
+driver's `reserved`. Measured on this host's L4 (fix round 1, validator note
+12, the real device in Docker's NVIDIA runtime): `nvidia-smi` 17458/23034
+MiB; NVML v2 used 18306039808 B (= 17458 MiB), reserved 491651072 B, free
+5355208704 B, total 24152899584 B. The first cut used `total - free`, which
+counts the reservation and read 0.46 GiB high. `summarize_gpus` folds the cards into the strip's one value: VRAM
+summed, utilization the highest card's, the first card's name (pure, unit
+tested; this host has one card, so several GPUs are proven by the test
+only).
+
+The strip is 24 px (#326, the owner) and its readout gets 201 px beside the
+scratch button at the default `--sidebar-w` 240 (measured in Chromium:
+CPU 44.3, MEM 58.8, DISK 68.1 px, gap 9, so three already take 189). No GPU
+form fits as a fourth (the narrowest, `72%`, needs 242), and a second row
+would be the 48 px strip the owner rejected. So with a GPU the strip reads
+CPU, MEM, GPU (the VRAM used, in percent, `72%`; see the 320 px bound below)
+and DISK and the utilization move to the hover card, which spells every
+reading (leader's ruling, #102 note 5; the owner was asked). The GPU's dot
+is `--status-hot`, an existing status token. With several cards the card's
+lines are labelled by position, `GPU 0`, `GPU 1`… (not the NVML index: a
+card that fails to read is left out, and the reading carries no index;
+leader note 25): `ui/InfoRows` keys its rows by label,
+and two cards of one model share a name, so one shared `GPU` label crashed
+the card (`each_key_duplicate`; round 2, validator note 19). Each line puts
+the numbers first and the name last: `ui/InfoRows` keeps a value on one line
+with an ellipsis, and a 55-character model name (`NVIDIA RTX PRO 6000
+Blackwell Max-Q Workstation Edition`) once hid every number behind it
+(round 3, validator note 31, leader note 33).
+
+Touch has no hover card (`ui/hover.ts` arms only off `layout.isTouchDevice`),
+so on touch `sysParts(…, { touch: true })` keeps DISK and adds the GPU:
+CPU, MEM, DISK, GPU in the drawer (round 4, reviewer note 42). The GPU's
+utilization stays card-only, so a touch user does not see it.
+
+**The GPU part is a percentage, and the 320 px bound.** The first strip form,
+VRAM as a fraction (`16/22G`), fit this host's numbers on a 320 px phone with
+3 px to spare and clipped once CPU read 100% or VRAM had three digits
+(`100/128G`, 2-11 px short; round 5, leader note 56). `GPU 72%` fits every
+width with margin except one corner, which is the KNOWN LIMIT (leader note
+58). Natural widths measured in Chromium (playwright 1.60, Chromium 148), gap
+9 px; vitals width: desktop 201, 390 px drawer 284, 320 px drawer 259:
+
+| reading | desktop | 390 | 320 |
+|---|---|---|---|
+| host-like: CPU 5%, MEM 48/60G, DISK 0.9/1.9T, GPU 72% | 160.9 (+40.1) | 238.0 (+46.0) | 238.0 (+21.0) |
+| worst: CPU 100%, MEM 100/128G, DISK 0.9/1.9T, GPU 100% | 183.4 (+17.6) | 260.5 (+23.5) | 260.5 (**-1.5**) |
+
+At 320 px the strip fits every reading whose natural width is at most
+259 px. The one measured exception, all three of CPU 100%, a three-digit MEM
+and GPU 100% at once, shows an ellipsis on every value. A further form cut
+would take MEM's absolute numbers from every phone to buy 1.5 px in that
+corner, so it is not made.
+
+Fit is judged by the SUM OF NATURAL WIDTHS (each part cloned with
+`flex: none`) plus the gaps, against the readout's width, never by
+`scrollWidth > clientWidth`: both are rounded to whole pixels, so a part that
+flex shrank by 0.4 px reported "not clipped" while its ellipsis was on screen
+(round 5; the earlier 320 px rows of this ticket relied on that flag).
+
 ## Which disk is "the disk"
 
 `pick_root_disk` (pure, tested): the exact `/` mount when present with a
@@ -122,7 +198,7 @@ page.
 
 Visual hierarchy is a quiet system-monitor readout, not three cards. The
 shared sidebar background continues uninterrupted; each metric has no local
-fill, border, radius, or padding. A restrained 4px accent/purple/green dot is
+fill, border, radius, or padding. A restrained 4px accent/purple/green (GPU: orange) dot is
 the only category colour, labels use `--text2`, and the actual readings use
 full `--text` ink plus the mono data face. Metrics use natural width and flow
 from the left rather than stretching into three equal columns. Both themes
@@ -150,6 +226,30 @@ servers. Only the focus is polled (D4): no member's vitals are fetched for a
 hover or a row, and the server switcher's card carries no readings at all
 (websocket-client.md ③c-5). The 08:17 sentence promising every member's
 reading on its Connection row is withdrawn (orchestrator 02:28).
+
+**Touch, a name and a GPU: two rows (board #102 round 6, leader note 77).**
+On touch the strip carries four readings when the server has a GPU (§ GPUs),
+and in Aggregate the name sits beside them. Name plus four did not fit the
+drawer's one row (`remote-a`: -37.8 px at 320, -13.0 at 390; validator
+note 73), and touch has no hover card to move a reading to. So in exactly
+that case, `sysRows(reading, { touch, tag }) === 2`, the name takes row 1
+alone and the four readings row 2 (the same part forms and margins as the
+untagged touch table). The readings sit in one `.sv-line` that never wraps:
+`display: contents` in one row, so nothing changes there, and a nowrap flex
+line in two. A first cut wrapped the whole strip, and the worst reading
+(CPU 100%, MEM 100/128G, GPU 100%) then put its GPU part on a third line at
+320 px (validator note 82); now it ellipsizes on row 2 exactly as the
+one-row strip does (-1.34 px, the known limit; leader note 84). The strip reports
+`rows` to App, which sets `sys-two-rows` on `main` beside `touch-layout`;
+that class gives `--sys-sidebar-h` its one second value, `calc(2 * 24px)`.
+The strip and the open drawer's bottom reservation both follow that one
+variable, with no measurement. The desktop never sets it: its bar stays one
+24 px row (#326, the owner), and every other touch case is one row.
+Measured (Chromium, natural-width sums per row, `remote-a`, dark = light):
+320 px row 1 50 of 259, row 2 238.0 (+21.2); 390 px row 2 +46.0; strip 48 px
+and the drawer reserving 48. Aggregate on the desktop clips beside the name
+with or without a GPU (-42.7 px without, -18.9 with): a baseline defect,
+board #103.
 
 ## Tests
 

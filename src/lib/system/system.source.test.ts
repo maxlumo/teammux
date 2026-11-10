@@ -40,7 +40,7 @@ test('fail-soft: a failed load keeps the last reading; nothing renders before th
 });
 
 test('the full reading is the ONE hover card, never a native title (motion.md §1.16, board #86)', () => {
-  assert.match(source, /<div class="sysvitals appear" use:hoverInfo=\{detail\}>/u, 'the corner wears the shared hover card');
+  assert.match(source, /<div class="sysvitals appear" class:two-rows=\{twoRows\} use:hoverInfo=\{detail\}>/u, 'the corner wears the shared hover card');
   assert.ok(!/title=/u.test(source), 'no native title beside the card — a second tooltip species');
   assert.match(source, /sysDetail\(status\)/u, 'the card spells the full numbers the corner abbreviates');
 });
@@ -53,6 +53,9 @@ test('the sidebar monitor uses quiet token dots and readable value ink', () => {
   assert.match(source, /--sv-hue: var\(--accent\)/u, 'CPU uses the brand accent');
   assert.match(source, /--sv-hue: var\(--status-purple\)/u, 'MEM uses the theme violet');
   assert.match(source, /--sv-hue: var\(--status-ok\)/u, 'DISK uses the theme green');
+  // Board #102: the GPU is a fourth explicit category, an existing status token.
+  assert.match(source, /class:gpu=\{p\.k === 'GPU'\}/u, 'the GPU category is explicit');
+  assert.match(source, /\.sv\.gpu \{ --sv-hue: var\(--status-hot\); \}/u, 'GPU uses the theme orange');
   const metricRule = source.match(/\.sv \{[^}]*\}/u)?.[0] ?? '';
   assert.match(metricRule, /flex: 0 1 auto/u,
     'metrics keep natural width and flow from the left — never equal thirds');

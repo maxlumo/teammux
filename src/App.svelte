@@ -1786,6 +1786,9 @@
    * the included set — Aggregate's included entries, Single's one — read
    * once here for every tag in the app. */
   const tagScope = $derived({ included: connMode === 'aggregate' ? includedServers(serverList, excludedIds) : serverList.filter((s) => s.id === serverCurId) });
+  /** The rows the status strip takes (board #102 round 6): two only on touch
+   * with a server name and a GPU; the drawer reserves that height. */
+  let sysRows = $state(1);
   /** The status strip's owner name: in Aggregate ALWAYS the focus's name
    * (orchestrator 02:28 on ③c-5 — a reading is identified by its machine on
    * every input, hover or not, one member included or many); Single none. */
@@ -3971,7 +3974,7 @@
   });
 </script>
 
-<main class:with-rail={shell && !layout.isTouchDevice} class:touch-layout={shell && layout.isTouchDevice} class:side-collapsed={shellSideCollapsed} class:side-page={pageHasSidebar} class:immersive={view.filesImmersive && page === 'files'}>
+<main class:with-rail={shell && !layout.isTouchDevice} class:touch-layout={shell && layout.isTouchDevice} class:side-collapsed={shellSideCollapsed} class:side-page={pageHasSidebar} class:immersive={view.filesImmersive && page === 'files'} class:sys-two-rows={layout.isTouchDevice && sysRows === 2}>
   <!-- Shell chrome. Every nav item is in the Tab order (no tabindex="-1" —
        review, 2026-09-03: the whole nav was unreachable by keyboard) and wears
        the global button:focus-visible ring; the current page is aria-current.
@@ -4130,7 +4133,7 @@
          the identity of the number — not the >1 tag rule, not hover-only). -->
     <aside class="sys-sidebar compact-tools" aria-label="Server system status">
       <SystemStatus load={() => bound()?.api.systemStatus() ?? Promise.reject(new Error('not connected'))} visible={connected}
-        owner={scopeRuntime} tag={sysOwnerName} />
+        owner={scopeRuntime} tag={sysOwnerName} bind:rows={sysRows} />
       {#if !layout.isTouchDevice}
         <button
           class="sys-scratch"
@@ -4763,6 +4766,12 @@
      drawers is actually open. It then becomes the drawer's final reserved
      row, above the scrim and below dialogs; safe-area padding keeps the
      reading clear of the home indicator. */
+  /* The bar's one second height (board #102 round 6, leader note 77): on
+     touch, a server name and a GPU take two rows (the name alone, then the
+     four readings), because the 284 px drawer cannot hold both in one and
+     touch has no hover card. The strip and the open drawer's reservation
+     both follow through this one variable; the desktop never sets it. */
+  main.touch-layout.sys-two-rows { --sys-sidebar-h: calc(2 * 24px); }
   .touch-layout .sys-sidebar {
     display: none;
     left: 0;

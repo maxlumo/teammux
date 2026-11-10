@@ -18,8 +18,9 @@
   // not ask" is not "there is nothing", the roster's lesson), and nothing at
   // all renders until the first successful reading (the verdict rule — no
   // flash of zeros).
-  import { sysDetail, sysParts, SYS_POLL_MS, SYS_POLL_MIN_MS, type SystemStatus } from './system.ts';
+  import { sysDetail, sysParts, sysRows, SYS_POLL_MS, SYS_POLL_MIN_MS, type SystemStatus } from './system.ts';
   import { hoverInfo } from '../ui/hover.ts';
+  import { layout } from '../app/layout.svelte.ts';
   import ServerTag from '../ui/ServerTag.svelte';
   import { untrack } from 'svelte';
   import { t } from '../core/i18n.svelte.ts';
@@ -30,6 +31,7 @@
     visible = true,
     tag = null,
     owner = null,
+    rows = $bindable(1),
   }: {
     load: () => Promise<SystemStatus | null>;
     interval?: number;
@@ -48,14 +50,21 @@
      * the old handle's is never shown under the new name. Unanswered = no
      * reading, never a relabelled old number. */
     owner?: unknown;
+    /** OUT: the rows the strip takes (board 102 round 6), so the host can
+     * reserve that height. 1 until a reading says otherwise. */
+    rows?: 1 | 2;
   } = $props();
 
   let status = $state<SystemStatus | null>(null);
-  const parts = $derived(sysParts(status));
+  // Touch has no hover card (ui/hover.ts), so its strip keeps every reading
+  // the card would carry that fits (board 102, round 4).
+  const parts = $derived(sysParts(status, { touch: layout.isTouchDevice }));
+  const twoRows = $derived(sysRows(status, { touch: layout.isTouchDevice, tag }) === 2);
+  $effect(() => { rows = twoRows ? 2 : 1; });
   const tempo = $derived(Math.max(SYS_POLL_MIN_MS, interval));
   // The full reading rides the ONE hover card (motion.md §1.16), not a native
   // title: exact fractions and the poll tempo, read at open time.
-  const LABELS: Record<string, () => string> = { CPU: () => 'CPU', MEM: () => t('sysMemory'), DISK: () => t('sysDisk') };
+  const LABELS: Record<string, () => string> = { CPU: () => 'CPU', MEM: () => t('sysMemory'), DISK: () => t('sysDisk'), GPU: () => 'GPU' };
   const detail = () => ({
     title: tag ? `${t('sysVitals')} · ${tag}` : t('sysVitals'),
     lines: sysDetail(status).map((r) => ({ label: (LABELS[r.k] ?? (() => r.k))(), value: r.v })),
@@ -98,13 +107,15 @@
        categorical dots aid scanning, muted labels orient, and only the mono
        readings use full ink. The hover card carries the complete reading.
        The owner's name leads it when there is one (the one tag atom). -->
-  <div class="sysvitals appear" use:hoverInfo={detail}>
+  <div class="sysvitals appear" class:two-rows={twoRows} use:hoverInfo={detail}>
     <ServerTag name={tag} />
+    <span class="sv-line">
     {#each parts as p (p.k)}
-      <span class="sv" class:cpu={p.k === 'CPU'} class:mem={p.k === 'MEM'} class:disk={p.k === 'DISK'}>
+      <span class="sv" class:cpu={p.k === 'CPU'} class:mem={p.k === 'MEM'} class:disk={p.k === 'DISK'} class:gpu={p.k === 'GPU'}>
         <span class="sv-k">{p.k}</span><span class="sv-v">{p.v}</span>
       </span>
     {/each}
+    </span>
   </div>
 {/if}
 
@@ -119,6 +130,26 @@
     line-height: 1;
     user-select: none;
     white-space: nowrap;
+  }
+  /* The readings are one line that never wraps. In one row it is not a box
+     at all (`display: contents`, so the readings flow beside the name as
+     always); in two rows (board 102 round 6) the name is row 1 and this line
+     row 2, each one band of the strip's 24 px height. A reading too wide for
+     row 2 ellipsizes as in one row, never falls to a third line (validator
+     note 82, leader note 84). */
+  .sv-line { display: contents; }
+  .sysvitals.two-rows {
+    height: 100%;
+    flex-direction: column;
+    align-items: flex-start;
+    justify-content: space-around;
+  }
+  .two-rows .sv-line {
+    display: flex;
+    gap: inherit;
+    width: 100%;
+    min-width: 0;
+    align-items: center;
   }
   .sv {
     --sv-hue: var(--accent);
@@ -140,6 +171,8 @@
   }
   .sv.mem { --sv-hue: var(--status-purple); }
   .sv.disk { --sv-hue: var(--status-ok); }
+  /* The GPU (board 102): the theme's orange, an existing status token. */
+  .sv.gpu { --sv-hue: var(--status-hot); }
   .sv-k {
     flex: none;
     color: var(--text2);

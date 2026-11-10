@@ -107,6 +107,14 @@ rusqlite = { version = "0.32", features = ["bundled"] }
 # platforms are the ecosystem-standard, widely exercised ones. Desktop-gated:
 # only the desktop server answers `system_status` (a phone is a client).
 sysinfo = { version = "=0.39.6", default-features = false, features = ["system", "disk"] }
+# The server's NVIDIA GPUs for board #102 (utilization + VRAM in the status
+# strip). NVML through nvml-wrapper, pinned EXACT like sysinfo: NVML's ABI has
+# versioned entry points and struct layouts (nvmlInit_v2, nvmlMemory_v2), and
+# the crate binds the right ones; a hand-rolled dlopen would read the wrong
+# struct silently (leader's ruling, #102 note 1). It loads libnvidia-ml at run
+# time, so a machine without the NVIDIA driver builds and runs the same and
+# simply reports no GPU. No shell-out to nvidia-smi (system-status.md).
+nvml-wrapper = { version = "=0.13.0", default-features = false }
 # Local wall-clock formatting for the lines we type into an agent's pane and for
 # `tmm log`; desktop-gated because those two paths are.
 chrono = { version = "0.4.44", default-features = false, features = ["clock", "std"] }

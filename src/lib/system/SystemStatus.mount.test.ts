@@ -50,3 +50,110 @@ test('a late answer after UNMOUNT writes nothing; a late answer of a replaced sa
     await app.unmount();
   }
 });
+
+// Board #102 (owner 2026-11-10 17:15: "系统资源状态那里如果是我们这种gpu机器要显示状态 显存利用率"): the GPU is
+// in the strip in place of DISK (24 px x 201 px hold three: leader note 5), VRAM only; DISK and the
+// utilization are the hover card's, one line per GPU; without one the corner is today's three.
+let gpuCompiled: ReturnType<typeof compileMount> | undefined;
+const gpuFixture = () => gpuCompiled ??= compileMount(new URL('./SystemStatusGpu.test.svelte', import.meta.url), []);
+const G = 1024 ** 3;
+const LONG = 'NVIDIA RTX PRO 6000 Blackwell Max-Q Workstation Edition';
+const base = { cpu_pct: 12, mem_used: 11 * G, mem_total: 60 * G, disk_used: 900 * G, disk_total: 1900 * G };
+
+for (const [label, reading, parts, ...rest] of [
+  ['no GPU', { ...base, gpu: null, gpus: null }, ['CPU', 'MEM', 'DISK'], '', []],
+  ['one GPU', { ...base, gpu: { name: 'NVIDIA L4', count: 1, util_pct: 100, mem_used: 16 * G, mem_total: 22 * G }, gpus: [{ name: 'NVIDIA L4', util_pct: 100, mem_used: 16 * G, mem_total: 22 * G }] }, ['CPU', 'MEM', 'GPU'],
+    '73%', [['GPU', '100.0% · 16.00/22.00G (73%) · NVIDIA L4']]],
+  // Two cards with the SAME name (validator note 19: one shared label made the card's keyed rows collide,
+  // each_key_duplicate, and the card never opened): each line is named by its position in the reading.
+  ['two identical GPUs', { ...base, gpu: { name: 'NVIDIA L4', count: 2, util_pct: 90, mem_used: 14 * G, mem_total: 44 * G }, gpus: [{ name: 'NVIDIA L4', util_pct: 90, mem_used: 10 * G, mem_total: 22 * G }, { name: 'NVIDIA L4', util_pct: 10, mem_used: 4 * G, mem_total: 22 * G }] }, ['CPU', 'MEM', 'GPU'],
+    '32%', [['GPU 0', '90.0% · 10.00/22.00G (45%) · NVIDIA L4'], ['GPU 1', '10.0% · 4.00/22.00G (18%) · NVIDIA L4']]],
+  // A long model name (validator note 31: 53 chars pushed the numbers past the card's ellipsis): the
+  // numbers come first, so the shared InfoRows ellipsis can only eat the name's tail (leader note 33).
+  ['two long-named GPUs', { ...base, gpu: { name: LONG, count: 2, util_pct: 100, mem_used: 50 * G, mem_total: 190 * G }, gpus: [{ name: LONG, util_pct: 100, mem_used: 48 * G, mem_total: 95 * G }, { name: LONG, util_pct: 3, mem_used: 2 * G, mem_total: 95 * G }] }, ['CPU', 'MEM', 'GPU'],
+    '26%', [['GPU 0', `100.0% · 48.00/95.00G (51%) · ${LONG}`], ['GPU 1', `3.0% · 2.00/95.00G (2%) · ${LONG}`]]],
+] as const) {
+  const [strip, gpuRows] = rest;
+  // Touch (round 4, reviewer note 42): no hover card there, so the drawer's strip keeps DISK and adds the GPU.
+  test(`on touch the strip with ${label} keeps DISK (#102)`, { timeout: 60000 }, async (context) => {
+    const f = await gpuFixture();
+    const app = await f.mount(context, { modules: [], setup(w) {
+      w.Element.prototype.getAnimations = () => [];
+      w.localStorage.setItem('tmux_layout_mode', 'mobile');
+    } });
+    try {
+      (app.window as unknown as { __gpu: { reading: unknown } }).__gpu.reading = reading;
+      context.mock.timers.tick(20_000);
+      await until(app, () => !!app.document.querySelector('.sysvitals'));
+      const sv = [...app.document.querySelectorAll<HTMLElement>('.sysvitals .sv')];
+      const gpu = (parts as readonly string[]).includes('GPU');
+      assert.deepEqual(sv.map((e) => e.querySelector('.sv-k')?.textContent), gpu ? ['CPU', 'MEM', 'DISK', 'GPU'] : ['CPU', 'MEM', 'DISK']);
+      if (gpu) assert.equal(sv[3]!.querySelector('.sv-v')?.textContent, strip);
+    } finally { await app.unmount(); }
+  });
+  test(`the strip with ${label}: its metrics in order, the GPU with its own dot (#102)`, { timeout: 60000 }, async (context) => {
+    const f = await gpuFixture();
+    const app = await f.mount(context, { modules: [], setup(w) {
+      w.Element.prototype.getAnimations = () => [];
+      w.localStorage.setItem('tmux_layout_mode', 'desktop'); // a pointer device: the hover card opens
+    } });
+    try {
+      (app.window as unknown as { __gpu: { reading: unknown } }).__gpu.reading = reading;
+      context.mock.timers.tick(20_000);
+      await until(app, () => !!app.document.querySelector('.sysvitals'));
+      const sv = [...app.document.querySelectorAll<HTMLElement>('.sysvitals .sv')];
+      assert.deepEqual(sv.map((e) => e.querySelector('.sv-k')?.textContent), parts);
+      if ((parts as readonly string[]).includes('GPU')) {
+        assert.ok(sv[2]!.classList.contains('gpu'), 'its own category class');
+        assert.equal(sv[2]!.querySelector('.sv-v')?.textContent, strip);
+        // The hover card: one line per GPU, spelled out.
+        const enter = new app.window.Event('pointerenter');
+        Object.defineProperty(enter, 'pointerType', { value: 'mouse' });
+        app.document.querySelector('.sysvitals')!.dispatchEvent(enter);
+        context.mock.timers.tick(500);
+        await until(app, () => !!app.document.querySelector('.hover-card'));
+        const hc = app.document.querySelector('.hover-card')!;
+        const dt = [...hc.querySelectorAll('dt')].map((e) => e.textContent);
+        const dd = [...hc.querySelectorAll('dd')].map((e) => e.textContent);
+        assert.ok(dt.some((t) => /Disk|磁盘/u.test(t ?? '')), `DISK is in the card: ${dt}`);
+        assert.deepEqual(dt.slice(-gpuRows!.length).map((t, i) => [t, dd.at(-gpuRows!.length + i)]), gpuRows, 'one line per GPU');
+        for (const v of dd.slice(-gpuRows!.length)) {
+          const name = (reading as unknown as { gpus: { name: string }[] }).gpus[0]!.name;
+          assert.ok(/^\d/u.test(v ?? '') && v!.indexOf('%') < v!.indexOf(name), `the numbers precede the name: ${v}`);
+        }
+      } else {
+        assert.equal(app.document.querySelector('.sv.gpu'), null, 'no GPU: nothing new in the corner');
+      }
+    } finally { await app.unmount(); }
+  });
+}
+
+// Round 6 (leader note 77): touch + a server name + a GPU puts the name on row 1 alone and the four
+// readings on row 2; touch + a name without a GPU stays one row. The strip reports its row count to its
+// host (App reserves the drawer's bottom space from it).
+for (const [label, reading, rows] of [
+  ['a GPU', { ...base, gpu: { name: 'NVIDIA L4', count: 1, util_pct: 100, mem_used: 16 * G, mem_total: 22 * G }, gpus: null }, 2],
+  ['no GPU', { ...base, gpu: null, gpus: null }, 1],
+] as const) {
+  test(`on touch with a server name and ${label} the strip is ${rows} row(s) (#102 round 6)`, { timeout: 60000 }, async (context) => {
+    const f = await gpuFixture();
+    const app = await f.mount(context, { modules: [], setup(w) {
+      w.Element.prototype.getAnimations = () => [];
+      w.localStorage.setItem('tmux_layout_mode', 'mobile');
+    } });
+    try {
+      const host = (app.window as unknown as { __gpu: { reading: unknown; tag: unknown; rows: number } }).__gpu;
+      host.tag = 'remote-a';
+      host.reading = reading;
+      context.mock.timers.tick(20_000);
+      await until(app, () => !!app.document.querySelector('.sysvitals'));
+      const v = app.document.querySelector<HTMLElement>('.sysvitals')!;
+      // The readings are ONE line (validator note 82: a wrapping flex row let the worst reading's GPU part
+      // fall to a third line); the tag is the line above it.
+      const kids = [...v.children].map((e) => e.classList.contains('server-tag') ? 'tag' : e.classList.contains('sv-line') ? [...e.querySelectorAll('.sv-k')].map((k) => k.textContent) : '?');
+      assert.deepEqual(kids, ['tag', rows === 2 ? ['CPU', 'MEM', 'DISK', 'GPU'] : ['CPU', 'MEM', 'DISK']]);
+      assert.equal(v.classList.contains('two-rows'), rows === 2);
+      assert.equal(host.rows, rows, 'the host is told the row count');
+    } finally { await app.unmount(); }
+  });
+}
