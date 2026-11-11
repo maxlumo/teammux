@@ -46,10 +46,14 @@ pub fn command_when_idle(session: &str, window: &str, target: &str, command: &st
     let _guard = lock.lock().unwrap();
     let _order = telemetry::delivery_decision();
     let first = telemetry::held_rows(session, window).is_empty();
-    let id = telemetry::record_held_command(session, window, command, msg_id)?;
+    // Held for the window's lifetime now (board #116), so its idle edge never
+    // types it into a same-name agent created after it; unreadable: nothing
+    // is held (F1), and the caller says why.
+    let home = super::bind_lifetime(session, window, None).map_err(|why| why.reason().to_string())?;
+    let id = telemetry::record_held_command(session, window, command, msg_id, home.as_deref())?;
     if let Some(row) = first.then(|| telemetry::held_rows(session, window).into_iter().find(|r| r.id == id)).flatten() {
         // Typed now, it is said by the caller's own line (`hub_command`).
-        release_command(session, window, target, &row, false, Some(&_order));
+        release_command(session, window, target, &row, false, Some(&_order), home.as_deref());
     }
     let waiting = telemetry::held_rows(session, window).iter().any(|r| r.id == id && r.verbatim == Some(super::super::store::CommandHold::Waiting));
     Ok(if waiting { WhenIdle::Waiting(id) } else { WhenIdle::Typed })
@@ -115,7 +119,7 @@ fn threads_before() -> &'static Mutex<HashMap<i64, String>> {
 /// the delivery decision); otherwise it is taken here. It is not reentrant,
 /// so the receipt is recorded under the same guard (15:25: a second take of
 /// it deadlocked claude's `/goal`).
-pub(super) fn release_command(session: &str, window: &str, target: &str, row: &super::super::store::DeliveryRow, later: bool, order: Option<&std::sync::MutexGuard<'static, ()>>) {
+pub(super) fn release_command(session: &str, window: &str, target: &str, row: &super::super::store::DeliveryRow, later: bool, order: Option<&std::sync::MutexGuard<'static, ()>>, expect: Option<&str>) {
     let own;
     let order = match order {
         Some(order) => order,
@@ -138,7 +142,7 @@ pub(super) fn release_command(session: &str, window: &str, target: &str, row: &s
         return;
     }
     let receipt = backend.and_then(|b| b.command_echo(name, args)).and_then(|echo| telemetry::record_command_delivery_held(order, session, window, &echo, &row.msg_id));
-    match type_verbatim(session, window, target, &row.line) {
+    match type_verbatim(session, window, target, &row.line, expect) {
         Ok(()) => {
             match effect {
                 None => {
@@ -162,7 +166,10 @@ pub(super) fn release_command(session: &str, window: &str, target: &str, row: &s
             }
             let _ = telemetry::set_command_typed(row.id, false);
             typed_at().lock().unwrap().remove(&row.id);
-            if !kept_at_write(&e) {
+            if e.starts_with(super::REPLACED) {
+                // Another lifetime by the keys (board #116): never typed, not kept.
+                telemetry::drop_held_rows(session, window, std::slice::from_ref(row), super::REPLACED_REASON);
+            } else if !kept_at_write(&e) {
                 telemetry::record_held_blocked(session, window, std::slice::from_ref(row), e.trim());
             }
         }
@@ -635,7 +642,7 @@ mod tests {
         crate::projects::tests::use_test_store();
         let session = format!("tmm-cancel-{}", uuid::Uuid::new_v4());
         let tm = crate::projects::telemetry::record_held_command;
-        let id = tm(&session, "dev", "/clear", "m1").unwrap();
+        let id = tm(&session, "dev", "/clear", "m1", None).unwrap();
         crate::projects::rooms::post_routed_as(&crate::projects::rooms::session_room(&session), "m1", "lead", "[tmm] /clear → dev waits for its turn to end", &[]).unwrap();
         crate::projects::telemetry::record_held(&session, "dev", "[tmm chat] the brief", 0, "m2").unwrap();
         let line = crate::projects::telemetry::held_rows(&session, "dev")[1].id;
@@ -653,7 +660,7 @@ mod tests {
         assert_eq!(held, ["[tmm chat] the brief"], "the line behind it is kept");
         // A TYPED command still waiting for its effect is cancelled too: the
         // lines behind it stop waiting for it.
-        let typed = tm(&session, "dev", "/compact", "m1").unwrap();
+        let typed = tm(&session, "dev", "/compact", "m1", None).unwrap();
         assert!(crate::projects::telemetry::set_command_typed(typed, true).unwrap());
         assert!(cancel_command(&session, typed, "human").is_ok(), "the human may cancel any");
         let room: Vec<(String, String)> = crate::projects::rooms::history_page(&crate::projects::rooms::session_room(&session), None, 100)["messages"]

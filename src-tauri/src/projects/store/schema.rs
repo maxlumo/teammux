@@ -9,7 +9,7 @@ use super::registry::{DEFAULT_DSH_SYSTEM, DEFAULT_KIMI_SYSTEM, DEFAULT_OMP_SYSTE
 
 /// Bumped when the schema changes; `migrate` is the only place that knows the
 /// steps. Stored in SQLite's own `user_version` pragma.
-const SCHEMA_VERSION: i64 = 39;
+const SCHEMA_VERSION: i64 = 40;
 
 impl Store {
     /// Ensure the durable half of Board editability exists, then
@@ -782,6 +782,32 @@ impl Store {
             // only). Additive; inside the ladder, foreign keys off.
             self.ensure_hub_asks()?;
         }
+        if version < 40 {
+            // v40 (board #116): a held delivery carries the LIFETIME it is for,
+            // its recipient's home id. One nullable column, added only when
+            // absent; every existing row reads NULL and is typed as before.
+            // Inside the ladder, foreign keys off (non-negotiable 9).
+            self.ensure_delivery_home()?;
+        }
+        Ok(())
+    }
+
+    /// The v40 shape (also a heal floor): `deliveries.home`, added only when
+    /// absent.
+    pub(super) fn ensure_delivery_home(&self) -> Result<(), String> {
+        let has: bool = self
+            .conn
+            .query_row(
+                "SELECT EXISTS(SELECT 1 FROM pragma_table_info('deliveries') WHERE name = 'home')",
+                [],
+                |r| r.get(0),
+            )
+            .map_err(|e| format!("inspect deliveries.home: {e}"))?;
+        if !has {
+            self.conn
+                .execute_batch("ALTER TABLE deliveries ADD COLUMN home TEXT;")
+                .map_err(|e| format!("add deliveries.home: {e}"))?;
+        }
         Ok(())
     }
 
@@ -1221,6 +1247,34 @@ mod tests {
         assert!(store.reg_get("old-omp").unwrap().unwrap().omp_tools, "a saved on reads back");
     }
 
+    /// v39 -> v40 (board #116): `deliveries.home` appears; a row held before it
+    /// reads no lifetime (typed as before), a new one keeps its own, and the
+    /// heal floor re-adds the column if a stamp ran ahead of it.
+    #[test]
+    fn v39_deliveries_gain_a_nullable_lifetime() {
+        let scratch = crate::tmux::Scratch::new("store-v40");
+        let path = std::path::Path::new(&scratch.path()).join("state.db");
+        {
+            let store = Store::open(&path).unwrap();
+            store.insert_held(&super::activity::NewHeld { session: "s", window: "w", line: "held before", ask_at: 0, ts: 100, msg_id: "m1", home: Some("dropped-with-the-column") }).unwrap();
+            store.conn.execute_batch("ALTER TABLE deliveries DROP COLUMN home; PRAGMA user_version = 39;").unwrap();
+        }
+        let store = Store::open(&path).unwrap();
+        let v: i64 = store.conn.query_row("PRAGMA user_version", [], |r| r.get(0)).unwrap();
+        assert_eq!(v, SCHEMA_VERSION);
+        assert!(SCHEMA_VERSION >= 40);
+        let fk: i64 = store.conn.query_row("PRAGMA foreign_keys", [], |r| r.get(0)).unwrap();
+        assert_eq!(fk, 1, "foreign keys are back on after the ladder");
+        let held = store.held_deliveries("s", "w").unwrap();
+        assert_eq!((held[0].line.as_str(), held[0].home.as_deref()), ("held before", None), "an old row has no lifetime");
+        store.insert_held(&super::activity::NewHeld { session: "s", window: "w", line: "held after", ask_at: 0, ts: 101, msg_id: "m2", home: Some("h-1") }).unwrap();
+        assert_eq!(store.held_deliveries("s", "w").unwrap()[1].home.as_deref(), Some("h-1"));
+        store.conn.execute_batch("ALTER TABLE deliveries DROP COLUMN home;").unwrap();
+        drop(store);
+        let store = Store::open(&path).unwrap();
+        assert_eq!(store.held_deliveries("s", "w").unwrap().len(), 2, "healed on open");
+    }
+
     /// v38 -> v39 (board #106): an old store gains `hub_asks`, its messages
     /// untouched, and the heal floor re-creates the table if a stamp ran ahead.
     #[test]
@@ -1268,7 +1322,7 @@ mod tests {
         assert!(store.pending_deliveries("s", Some("w")).unwrap()[0].verbatim.is_none());
         let held = store.held_deliveries("s", "w").unwrap();
         assert_eq!((held.len(), held[0].line.as_str(), held[0].verbatim), (1, "held line", None));
-        store.insert_held_command("s", "w", "/compact", 102, "m3").unwrap();
+        store.insert_held_command("s", "w", "/compact", 102, "m3", None).unwrap();
         assert_eq!(store.held_deliveries("s", "w").unwrap()[1].verbatim, Some(CommandHold::Waiting));
         store.conn.execute_batch("ALTER TABLE deliveries DROP COLUMN verbatim;").unwrap();
         drop(store);

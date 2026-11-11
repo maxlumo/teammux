@@ -2778,7 +2778,7 @@ mod tests {
         let at = |secs: u64, frac: u32, n: u32| format!("{secs}.{frac:09}-{n}.json");
         put(&at(now - 5, 0, 0), json!({"hook_event_name": "SessionStart", "source": "startup", "session_id": "s0"}));
         hub.consume_inbox();
-        let id = crate::projects::telemetry::record_held_command(&session, "cl", "/clear", "m1").unwrap();
+        let id = crate::projects::telemetry::record_held_command(&session, "cl", "/clear", "m1", None).unwrap();
         crate::projects::telemetry::record_held(&session, "cl", "[tmm chat 2026-11-06 09:00] lead: @cl the brief", 0, "m2").unwrap();
         put(&at(now - 4, 0, 1), json!({"hook_event_name": "SessionStart", "source": "startup", "session_id": "s1"}));
         hub.consume_inbox();

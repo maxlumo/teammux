@@ -798,8 +798,8 @@ fn dispatch_hub(req: &Request, notifications: Option<&crate::agent_notifications
         // question to the person, closed once by an explicit act. The answer
         // or dismissal is typed after its commit through the composer's path.
         "hub_ask" => asks::ask(session, &room, p),
-        "hub_ask_answer" => asks::answer(session, &room, p, &|s, to, body, room, seq, id| deliver_to(s, "human", body, room, Some(seq), id, &[to.to_string()])),
-        "hub_ask_dismiss" => asks::dismiss(session, &room, p, &|s, to, body, room, seq, id| deliver_to(s, "human", body, room, Some(seq), id, &[to.to_string()])),
+        "hub_ask_answer" => asks::answer(session, &room, p, &|s, to, body, room, seq, id, home| deliver_to(s, "human", body, room, Some(seq), id, Recipient { name: to, home })),
+        "hub_ask_dismiss" => asks::dismiss(session, &room, p, &|s, to, body, room, seq, id, home| deliver_to(s, "human", body, room, Some(seq), id, Recipient { name: to, home })),
         "hub_ask_withdraw" => asks::withdraw(session, &room, p),
         "hub_ask_list" => asks::list(session, &room, p),
 
@@ -2789,16 +2789,24 @@ fn deliver_mentions_with(
 ) -> (Vec<String>, Vec<(String, &'static str)>) {
     let names = crate::projects::names::names(session);
     let mentions = names.addressed(body);
-    deliver_routed_with(Routed { session, from, body, room, before_seq, msg_id, to_sender, names, to: mentions }, list_panes)
+    deliver_routed_with(Routed { session, from, body, room, before_seq, msg_id, to_sender, names, to: mentions, home: None }, list_panes)
+}
+
+/// The one recipient `deliver_to` types for (board #116 S2): its name and the
+/// LIFETIME its caller resolved (an ask's asker), checked at the write.
+#[cfg(not(any(target_os = "android", target_os = "ios")))]
+pub(super) struct Recipient<'a> {
+    pub(super) name: &'a str,
+    pub(super) home: &'a str,
 }
 
 /// The one delivery path with its recipients GIVEN rather than read from the
 /// body (board #106 F2): an ask's answer goes to its asker alone, whatever
 /// `@name` the person or an option label wrote inside it.
 #[cfg(not(any(target_os = "android", target_os = "ios")))]
-pub(super) fn deliver_to(session: &str, from: &str, body: &str, room: &str, before_seq: Option<i64>, msg_id: &str, to: &[String]) -> (Vec<String>, Vec<(String, &'static str)>) {
+pub(super) fn deliver_to(session: &str, from: &str, body: &str, room: &str, before_seq: Option<i64>, msg_id: &str, to: Recipient<'_>) -> (Vec<String>, Vec<(String, &'static str)>) {
     let names = crate::projects::names::names(session);
-    deliver_routed_with(Routed { session, from, body, room, before_seq, msg_id, to_sender: false, names, to: to.to_vec() }, crate::tmux::list_panes)
+    deliver_routed_with(Routed { session, from, body, room, before_seq, msg_id, to_sender: false, names, to: vec![to.name.to_string()], home: Some(to.home.to_string()) }, crate::tmux::list_panes)
 }
 
 /// One delivery as the routed path takes it: what is said, by whom, in which
@@ -2817,6 +2825,8 @@ struct Routed<'a> {
     to_sender: bool,
     names: crate::address::Names,
     to: Vec<String>,
+    /// The recipients' lifetime when the caller resolved it (board #116).
+    home: Option<String>,
 }
 
 #[cfg(not(any(target_os = "android", target_os = "ios")))]
@@ -2825,7 +2835,7 @@ fn deliver_routed_with(
     list_panes: impl FnOnce(&str) -> Result<Vec<crate::tmux::TmuxPane>, String>,
 ) -> (Vec<String>, Vec<(String, &'static str)>) {
     use crate::projects::agents;
-    let Routed { session, from, body, room, before_seq, msg_id, to_sender, names, to: mentions } = r;
+    let Routed { session, from, body, room, before_seq, msg_id, to_sender, names, to: mentions, home: given_home } = r;
 
     if mentions.is_empty() {
         return (Vec::new(), Vec::new());
@@ -2882,6 +2892,7 @@ fn deliver_routed_with(
     // accepted" reported a live agent whose pane merely refused as `stopped`
     // (review P1-A, 02:30).
     let mut found: Vec<String> = Vec::new();
+    let mut refused: Vec<(String, &'static str)> = Vec::new();
     for p in &panes {
         if !seen.insert(p.window) || !p.active {
             continue;
@@ -2923,7 +2934,20 @@ fn deliver_routed_with(
         // agent's userPromptSubmit echo settles it, and a pane that refused
         // it (#250, copy mode) is said in the feed.
         found.push(p.window_name.clone());
-        crate::projects::delivery::deliver(session, &p.window_name, &target, &line.text, line.ask_at, msg_id);
+        // The recipient's LIFETIME as resolved here (board #116): the line is
+        // typed, or held, for this agent only, never for a same-name agent
+        // created before the keys. A composer line is addressed to a NAME, so
+        // it is bound to whoever holds the name as it is resolved here; a
+        // lifetime that cannot be read refuses it, said (#116 F1).
+        match crate::projects::delivery::bind_lifetime(session, &p.window_name, given_home.as_deref()) {
+            Ok(home) => {
+                crate::projects::delivery::deliver_for(session, &p.window_name, &target, &line.text, line.ask_at, msg_id, home.as_deref());
+            }
+            Err(why) => {
+                crate::projects::telemetry::record_undelivered(session, &p.window_name, &crate::address::shown(&line.text, line.ask_at), why.reason());
+                refused.push((p.window_name.clone(), why.word()));
+            }
+        }
     }
     // A mention that matched no live managed agent is SAID (board #347,
     // owner: "当这个 agent 不在会话，或者停止什么的时候要返回一个 warning，提示
@@ -2934,7 +2958,10 @@ fn deliver_routed_with(
     // returns. The `declared` half inside it — which of these names this
     // project HAS a managed home for — is what separates a stopped teammate
     // from a name that was never here.
-    let offline = offline_report(session, room, from, &mentions, &found, ws.as_deref(), true);
+    let mut offline = offline_report(session, room, from, &mentions, &found, ws.as_deref(), true);
+    // A found agent whose bind refused the line (#116) is answered with its
+    // own word, `gone` or `unchecked`: it was not typed or held.
+    offline.extend(refused);
     (found, offline)
 }
 

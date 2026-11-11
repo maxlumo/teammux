@@ -72,6 +72,23 @@ pub struct DeliveryRow {
     /// typed alone and verbatim, never combined with lines, never stamped.
     /// `None` for a chat line.
     pub verbatim: Option<CommandHold>,
+    /// The LIFETIME the held line is for (board #116, v40): the recipient's
+    /// home id when it was held, kept when the row is released and typed. A
+    /// flush types it only into a window whose home id is still this one.
+    /// `None` only for a row held before v40, and for a line typed at once
+    /// (never held): a new hold always binds a lifetime or is refused.
+    pub home: Option<String>,
+}
+
+/// One line to hold (board #116): where, what, and the LIFETIME it is for.
+pub struct NewHeld<'a> {
+    pub session: &'a str,
+    pub window: &'a str,
+    pub line: &'a str,
+    pub ask_at: usize,
+    pub ts: u64,
+    pub msg_id: &'a str,
+    pub home: Option<&'a str>,
 }
 
 /// What one unconfirmed report wrote (`Store::report_unconfirmed`, board
@@ -679,10 +696,15 @@ impl Store {
     /// #257). Invisible to the echo match and the sweep until
     /// `set_deliveries_held(…, false, …)` marks it typed.
     pub fn insert_held_delivery(&self, session: &str, window: &str, line: &str, ask_at: usize, ts: u64, msg_id: &str) -> Result<(), String> {
+        self.insert_held(&NewHeld { session, window, line, ask_at, ts, msg_id, home: None })
+    }
+
+    /// `insert_held_delivery` with the LIFETIME the line is for (board #116).
+    pub fn insert_held(&self, h: &NewHeld<'_>) -> Result<(), String> {
         self.conn
             .execute(
-                "INSERT INTO deliveries (session, win, line, ts, msg_id, held, ask_at) VALUES (?1, ?2, ?3, ?4, ?5, 1, ?6)",
-                rusqlite::params![session, window, line, ts as i64, msg_id, ask_at as i64],
+                "INSERT INTO deliveries (session, win, line, ts, msg_id, held, ask_at, home) VALUES (?1, ?2, ?3, ?4, ?5, 1, ?6, ?7)",
+                rusqlite::params![h.session, h.window, h.line, h.ts as i64, h.msg_id, h.ask_at as i64, h.home],
             )
             .map(|_| ())
             .map_err(|e| format!("insert held delivery: {e}"))
@@ -691,11 +713,11 @@ impl Store {
     /// A `/command` held for the window's next idle edge (board #45): a held
     /// row in the same queue as the lines, so its place among them is its id.
     /// The id comes back: it is what `tmm send --cancel` names.
-    pub fn insert_held_command(&self, session: &str, window: &str, command: &str, ts: u64, msg_id: &str) -> Result<i64, String> {
+    pub fn insert_held_command(&self, session: &str, window: &str, command: &str, ts: u64, msg_id: &str, home: Option<&str>) -> Result<i64, String> {
         self.conn
             .execute(
-                "INSERT INTO deliveries (session, win, line, ts, msg_id, held, verbatim) VALUES (?1, ?2, ?3, ?4, ?5, 1, 1)",
-                rusqlite::params![session, window, command, ts as i64, msg_id],
+                "INSERT INTO deliveries (session, win, line, ts, msg_id, held, verbatim, home) VALUES (?1, ?2, ?3, ?4, ?5, 1, 1, ?6)",
+                rusqlite::params![session, window, command, ts as i64, msg_id, home],
             )
             .map(|_| self.conn.last_insert_rowid())
             .map_err(|e| format!("insert held command: {e}"))
@@ -735,7 +757,7 @@ impl Store {
     pub fn held_command(&self, session: &str, id: i64) -> Result<Option<DeliveryRow>, String> {
         Ok(self
             .delivery_rows(
-                "SELECT id, win, line, ts, msg_id, warned, command, ask_at, verbatim FROM deliveries
+                "SELECT id, win, line, ts, msg_id, warned, command, ask_at, verbatim, home FROM deliveries
                  WHERE id = ?1 AND session = ?2 AND held = 1 AND verbatim <> 0",
                 vec![Box::new(id), Box::new(session.to_string())],
             )?
@@ -760,7 +782,7 @@ impl Store {
         let mut stmt = self
             .conn
             .prepare(
-                "SELECT id, win, line, ts, msg_id, warned, command, ask_at, verbatim FROM deliveries
+                "SELECT id, win, line, ts, msg_id, warned, command, ask_at, verbatim, home FROM deliveries
                  WHERE session = ?1 AND win = ?2 AND held = 1 ORDER BY id",
             )
             .map_err(|e| format!("prepare held deliveries: {e}"))?;
@@ -776,6 +798,7 @@ impl Store {
                     command: CommandLife::from_code(r.get::<_, i64>(6)?),
                     ask_at: r.get::<_, i64>(7)?.try_into().unwrap_or(0),
                     verbatim: CommandHold::from_code(r.get::<_, i64>(8)?),
+                    home: r.get(9)?,
                 })
             })
             .map_err(|e| format!("query held deliveries: {e}"))?;
@@ -880,12 +903,12 @@ impl Store {
     ) -> Result<Vec<DeliveryRow>, String> {
         let (sql, args): (&str, Vec<Box<dyn rusqlite::ToSql>>) = match window {
             Some(w) => (
-                "SELECT id, win, line, ts, msg_id, warned, command, ask_at, verbatim FROM deliveries
+                "SELECT id, win, line, ts, msg_id, warned, command, ask_at, verbatim, home FROM deliveries
                  WHERE session = ?1 AND win = ?2 AND held = 0 ORDER BY id",
                 vec![Box::new(session.to_string()), Box::new(w.to_string())],
             ),
             None => (
-                "SELECT id, win, line, ts, msg_id, warned, command, ask_at, verbatim FROM deliveries WHERE session = ?1 AND held = 0 ORDER BY id",
+                "SELECT id, win, line, ts, msg_id, warned, command, ask_at, verbatim, home FROM deliveries WHERE session = ?1 AND held = 0 ORDER BY id",
                 vec![Box::new(session.to_string())],
             ),
         };
@@ -898,7 +921,7 @@ impl Store {
     /// warned or command rows again.
     pub fn unreported_deliveries(&self, session: &str) -> Result<Vec<DeliveryRow>, String> {
         self.delivery_rows(
-            "SELECT id, win, line, ts, msg_id, warned, command, ask_at, verbatim FROM deliveries
+            "SELECT id, win, line, ts, msg_id, warned, command, ask_at, verbatim, home FROM deliveries
              WHERE session = ?1 AND warned = 0 AND held = 0 AND command = 0 ORDER BY id",
             vec![Box::new(session.to_string())],
         )
@@ -921,6 +944,7 @@ impl Store {
                     command: CommandLife::from_code(r.get::<_, i64>(6)?),
                     ask_at: r.get::<_, i64>(7)?.try_into().unwrap_or(0),
                     verbatim: CommandHold::from_code(r.get::<_, i64>(8)?),
+                    home: r.get(9)?,
                 })
             })
             .map_err(|e| format!("query deliveries: {e}"))?;
@@ -1321,7 +1345,7 @@ mod tests {
     fn a_held_command_queues_in_line_and_only_it_can_be_cancelled() {
         let store = Store::open_memory().unwrap();
         store.insert_held_delivery("s", "w", "[tmm chat] before", 0, 100, "m1").unwrap();
-        let id = store.insert_held_command("s", "w", "/clear", 101, "m2").unwrap();
+        let id = store.insert_held_command("s", "w", "/clear", 101, "m2", None).unwrap();
         store.insert_held_delivery("s", "w", "[tmm chat] after", 0, 102, "m3").unwrap();
         let held = store.held_deliveries("s", "w").unwrap();
         let got: Vec<(&str, Option<CommandHold>)> = held.iter().map(|r| (r.line.as_str(), r.verbatim)).collect();

@@ -3116,11 +3116,17 @@ mod tests {
         let mode = std::fs::metadata(&socket).unwrap().permissions().mode();
         std::fs::set_permissions(&socket, std::fs::Permissions::from_mode(0o000)).unwrap();
         let any = (held("elsewhere", "devx"), held(&p.session, "anything"));
-        let kept = super::super::delivery::deliver("elsewhere", "devx", &pane, "TOKEN-UNK", 0, "");
+        // Board #116: a line is bound to a lifetime when it is held. The
+        // moved window's new name has no managed home, so a line addressed to
+        // it is refused, never held unbound; addressed to the agent's slot
+        // (its lifetime is `dev`'s home), the unreadable answer keeps it.
+        let moved = super::super::delivery::deliver("elsewhere", "devx", &pane, "TOKEN-MOVED", 0, "");
+        let kept = super::super::delivery::deliver(&p.session, "dev", &pane, "TOKEN-UNK", 0, "");
         std::fs::set_permissions(&socket, std::fs::Permissions::from_mode(mode)).unwrap();
         assert_eq!(any, (true, true), "unreadable: every window held");
-        assert!(kept && super::super::telemetry::held_rows("elsewhere", "devx").len() == 1, "the line is kept");
-        assert!(!screen_of(&pane).contains("TOKEN-UNK"));
+        assert!(!moved && super::super::telemetry::held_rows("elsewhere", "devx").is_empty(), "no lifetime there: refused, no row");
+        assert!(kept && super::super::telemetry::held_rows(&p.session, "dev").len() == 1, "the line is kept");
+        assert!(!screen_of(&pane).contains("TOKEN-UNK") && !screen_of(&pane).contains("TOKEN-MOVED"));
     }
 
     /// P1-C: prune's verdict is conditional on the row it judged. A planned

@@ -127,13 +127,21 @@ each; another agent's label refused), red with the resolution removed.
 
 ### A held answer and a removed asker (#116)
 
-The home id is checked where #106 hands the line over. A line HELD for a busy
-or exited asker, and the gap between the check and the typing, are closed by
-#116 in the one delivery path itself (the expected lifetime travels with the
-delivery and is verified against the pane it types to, at once and at a
-held row's flush; removal drops held rows). #106 and #116 merge and deploy
-together, so no build carries `tmm ask` without that boundary (leader, note
-61).
+The home id is checked where #106 hands the line over, and the delivery
+carries it on (`Deliver`'s `home`; `deliver_to`'s `Recipient { name, home }` carries it): the one
+delivery path types a line only into the lifetime it was meant for
+(hub-composer.md § A line is typed only into the lifetime it was meant for,
+#116). Its write step resolves the pane, then compares the window's home id
+with the asker's, then types to that pane id only, so an asker removed and
+created again between this check and the keys gets nothing. An answer HELD
+for a busy or exited asker keeps the asker's home id in its row
+(`deliveries.home`), and its flush is checked the same way; a remove drops
+the asker's held answer in its own call (`undelivered (the agent was
+removed)`). Pinned by `a_held_answer_never_reaches_a_same_name_replacement`
+(the asker's home replaced while its answer is held: nothing typed, the row
+retired; removing the asker drops a held answer), red with the check off.
+#106 and #116 merge and deploy together, so no build carries `tmm ask`
+without that boundary (leader, note 61).
 
 ### The doors are as strong as today's, and no stronger (G3)
 

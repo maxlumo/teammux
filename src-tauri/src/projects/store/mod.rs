@@ -33,7 +33,7 @@ mod restore_hold;
 mod rooms;
 mod schema;
 mod wakes;
-pub use activity::{person_paint_key, person_paint_prefix, ActivityRow, CommandHold, CommandLife, DeliveryRow, PromptRow, TurnFact, TurnFacts, GENERATION_REPLACED};
+pub use activity::{person_paint_key, person_paint_prefix, ActivityRow, CommandHold, CommandLife, DeliveryRow, NewHeld, PromptRow, TurnFact, TurnFacts, GENERATION_REPLACED};
 pub use projects::{Project, Slot, SlotKind};
 pub use restore::{Checkpoint, CheckpointProject, CheckpointWindow, RestoreIntents, TmuxInstance};
 pub use restore_batch::{finished_word, settle, Batch, BatchOp, BatchProject, BatchRevision, BatchScan, BatchWindow, Finished, ProjectState, WindowState, NO_WINDOW, RELEASED};
@@ -150,7 +150,7 @@ impl Store {
         self.ensure_activity_requesters()?;
         self.ensure_delivery_command()?;
         self.ensure_delivery_ask_at()?;
-        self.ensure_delivery_verbatim()?; self.ensure_omp_tools()?;
+        self.ensure_delivery_verbatim()?; self.ensure_omp_tools()?; self.ensure_delivery_home()?;
         self.ensure_wakes()?;
         self.ensure_restore_holds()?;
         self.ensure_hub_read()?; self.ensure_hub_asks()?; self.ensure_agent_names()?;

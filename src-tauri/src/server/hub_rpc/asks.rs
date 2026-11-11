@@ -17,10 +17,12 @@ use serde_json::{json, Value};
 
 /// How the one delivery path is reached: injected so the doors and the
 /// order (commit, then deliver) are testable without a pane.
-/// `(session, to, body, room, msg_seq, msg_id)`: the line goes to `to`, the
-/// asker, ALONE (validator F2: an `@name` inside a label or a comment is text,
-/// not a recipient).
-pub(in crate::server) type Deliver<'a> = &'a dyn Fn(&str, &str, &str, &str, i64, &str) -> (Vec<String>, Vec<(String, &'static str)>);
+/// `(session, to, body, room, msg_seq, msg_id, home)`: the line goes to `to`,
+/// the asker, ALONE (validator F2: an `@name` inside a label or a comment is
+/// text, not a recipient), and only to its LIFETIME `home` (board #116: the
+/// delivery's write step checks it, so a same-name agent created after the
+/// check below is never typed, nor held for).
+pub(in crate::server) type Deliver<'a> = &'a dyn Fn(&str, &str, &str, &str, i64, &str, &str) -> (Vec<String>, Vec<(String, &'static str)>);
 
 // The wire door (validator F1, security.md § 1): every supplied field has its
 // one type, or the call is refused before anything is written. Absent and
@@ -126,10 +128,15 @@ pub(super) fn ask(session: &str, room: &str, p: &Value) -> Result<Value, RpcErro
 
 /// What the delivery path did with the line, in the ask's words.
 fn delivery_word(asker: &str, found: &[String], offline: &[(String, &'static str)]) -> &'static str {
+    // A refusal at the bind (#116: `gone`, `unchecked`) outranks `found`: the
+    // asker's pane was found, and the line was neither typed nor held.
+    if let Some((_, why)) = offline.iter().find(|(n, _)| n == asker) {
+        return why;
+    }
     if found.iter().any(|n| n == asker) {
         return "found";
     }
-    offline.iter().find(|(n, _)| n == asker).map(|(_, why)| *why).unwrap_or("unknown")
+    "unknown"
 }
 
 /// After an applied close by the person: type the line through the one
@@ -137,7 +144,7 @@ fn delivery_word(asker: &str, found: &[String], offline: &[(String, &'static str
 fn deliver_close(session: &str, a: &AskRow, body: &str, msg_seq: i64, msg_id: &str, deliver: Deliver<'_>) -> String {
     let word = match asks::home_id(session, &a.asker) {
         Ok(Some(h)) if h == a.asker_home => {
-            let (found, offline) = deliver(session, &a.asker, body, &a.room, msg_seq, msg_id);
+            let (found, offline) = deliver(session, &a.asker, body, &a.room, msg_seq, msg_id, &a.asker_home);
             delivery_word(&a.asker, &found, &offline).to_string()
         }
         Ok(_) => "gone".to_string(),

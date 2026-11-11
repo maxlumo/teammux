@@ -188,6 +188,149 @@ fn a_same_name_replacement_is_not_the_asker() {
     assert_eq!(rig.submits("disk to the card"), 0, "never typed to somebody else: {:?}", rig.screen());
 }
 
+/// Board #116 (reviewer R1 on #106): an answer HELD for a busy asker keeps the
+/// asker's lifetime. The asker replaced before its turn ends (a new home, a
+/// new lifetime; nothing purged, the window kept): the flush types nothing,
+/// and the held answer is said undelivered. Removing the asker drops it at
+/// once.
+#[test]
+fn a_held_answer_never_reaches_a_same_name_replacement() {
+    let Some(rig) = Rig::start("ask-held-replaced") else { return };
+    let seq = rig.ask("dev").unwrap();
+    crate::projects::telemetry::record_prompt(&rig.session, "dev", "[tmm chat 2026-11-11 11:00] human: @dev a long task");
+    let r = rig.call("hub_ask_answer", json!({ "seq": seq, "option": "B" })).unwrap();
+    assert_eq!(r["applied"].as_bool(), Some(true), "{r}");
+    assert_eq!(rig.held(), 1, "held behind the busy turn");
+    let home = rig.ws.join(".tmm/agents/dev");
+    std::fs::remove_dir_all(&home).unwrap();
+    Rig::make_home(&rig.ws, &rig.cmd);
+    crate::projects::telemetry::record_notification(&rig.session, "dev", "completed");
+    crate::projects::delivery::flush(&rig.session, "dev");
+    std::thread::sleep(std::time::Duration::from_millis(1200));
+    assert_eq!(rig.submits("disk to the card"), 0, "never typed to another lifetime: {:?}", rig.screen());
+    assert_eq!(rig.held(), 0, "retired, not kept for it");
+
+    // The remove's own call drops a held answer.
+    let seq = rig.ask("dev").unwrap();
+    crate::projects::telemetry::record_prompt(&rig.session, "dev", "[tmm chat 2026-11-11 11:05] human: @dev another task");
+    rig.call("hub_ask_answer", json!({ "seq": seq, "option": "A" })).unwrap();
+    assert_eq!(rig.held(), 1);
+    crate::projects::managed::agent_remove(&rig.session, "dev").expect("removed");
+    assert_eq!(rig.held(), 0, "dropped with the agent");
+}
+
+impl Rig {
+    /// The same name again after a remove: a new home (a new lifetime) and a
+    /// new `dev` window running the fake codex.
+    fn recreate(&self) {
+        Self::make_home(&self.ws, &self.cmd);
+        crate::tmux::new_named_window(&self.session, "dev", &self.ws.to_string_lossy()).unwrap();
+        crate::tmux::send_command(&self.target, &self.cmd).unwrap();
+        assert!(wait(&|| self.agent() == Some("codex") && self.screen().contains("Ask Codex"), 10000), "the new fake codex runs: {:?}", self.screen());
+    }
+    /// Every delivery row of this session, held or typed.
+    fn rows(&self) -> usize {
+        crate::projects::restore_hold::with_store_for_test(|s| s.pending_deliveries(&self.session, None)).unwrap().len() + self.held()
+    }
+}
+
+/// Board #116 round 2 (reviewer R1): the composer found `dev` managed, then
+/// the agent was removed before its line was BOUND. The bind refuses it, said
+/// `undelivered (the agent it was meant for was removed or replaced)`; no row
+/// is written, so a same-name agent created after gets nothing.
+#[test]
+fn a_composer_line_whose_agent_is_removed_before_the_bind_is_refused() {
+    let Some(rig) = Rig::start("bind-removed") else { return };
+    crate::projects::telemetry::record_prompt(&rig.session, "dev", "[tmm chat 2026-11-11 13:00] human: @dev a long task");
+    let (s, d) = (rig.session.clone(), ());
+    let _ = d;
+    crate::projects::delivery::BEFORE_BIND.with(|h| *h.borrow_mut() = Some(Box::new(move || {
+        crate::projects::managed::agent_remove(&s, "dev").expect("removed");
+    })));
+    rig.call("hub_post", json!({ "from": "human", "body": "@dev REMOVED-BEFORE-BIND" })).unwrap();
+    crate::projects::delivery::BEFORE_BIND.with(|h| *h.borrow_mut() = None);
+    assert_eq!(rig.rows(), 0, "nothing held or typed unbound");
+    let warns: Vec<String> = crate::projects::telemetry::recent_events(&rig.session, 0).into_iter().filter(|e| e.kind == "warn").map(|e| e.text).collect();
+    assert!(warns.iter().any(|w| w.starts_with("undelivered (the agent it was meant for was removed or replaced)") && w.contains("REMOVED-BEFORE-BIND")), "{warns:?}");
+    rig.recreate();
+    crate::projects::delivery::flush(&rig.session, "dev");
+    std::thread::sleep(std::time::Duration::from_millis(1200));
+    assert_eq!(rig.submits("REMOVED-BEFORE-BIND"), 0, "{:?}", rig.screen());
+}
+
+/// The same race for an ask's closing line: bound to the asker's lifetime at
+/// the bind, so the asker removed and created again there types nothing into
+/// the new agent, now or at a later flush.
+#[test]
+fn an_answer_whose_asker_is_replaced_at_the_bind_reaches_nobody() {
+    let Some(rig) = Rig::start("bind-ask") else { return };
+    let seq = rig.ask("dev").unwrap();
+    let (s, ws, cmd) = (rig.session.clone(), rig.ws.clone(), rig.cmd.clone());
+    crate::projects::delivery::BEFORE_BIND.with(|h| *h.borrow_mut() = Some(Box::new(move || {
+        crate::projects::managed::agent_remove(&s, "dev").expect("removed");
+        Rig::make_home(&ws, &cmd);
+        crate::tmux::new_named_window(&s, "dev", &ws.to_string_lossy()).unwrap();
+        crate::tmux::send_command(&format!("{s}:dev"), &cmd).unwrap();
+        std::thread::sleep(std::time::Duration::from_millis(1500));
+    })));
+    rig.call("hub_ask_answer", json!({ "seq": seq, "option": "B" })).unwrap();
+    crate::projects::delivery::BEFORE_BIND.with(|h| *h.borrow_mut() = None);
+    crate::projects::telemetry::record_notification(&rig.session, "dev", "completed");
+    crate::projects::delivery::flush(&rig.session, "dev");
+    std::thread::sleep(std::time::Duration::from_millis(1500));
+    assert_eq!(rig.submits("disk to the card"), 0, "never typed to the new agent: {:?}", rig.screen());
+    assert_eq!(rig.held(), 0, "and not kept for it");
+}
+
+/// Round 3 (validator's P2 at the real ask door): the asker removed, or its
+/// project deleted, after the close checked the asker's home and before the
+/// bind, with NO replacement yet. The given home is verified at the bind:
+/// refused, no row, and the ask's delivery word is the refusal, `gone`.
+#[test]
+fn an_answer_whose_asker_is_gone_at_the_bind_writes_no_row_and_says_gone() {
+    for how in ["remove", "delete"] {
+        let Some(rig) = Rig::start(&format!("bind-gone-{how}")) else { return };
+        let seq = rig.ask("dev").unwrap();
+        crate::projects::telemetry::record_prompt(&rig.session, "dev", "[tmm chat 2026-11-11 15:00] human: @dev a long task");
+        let s = rig.session.clone();
+        let id = crate::projects::project_for_session(&rig.session).unwrap().unwrap().id;
+        let how2 = how.to_string();
+        crate::projects::delivery::BEFORE_BIND.with(|h| *h.borrow_mut() = Some(Box::new(move || {
+            if how2 == "remove" {
+                crate::projects::managed::agent_remove(&s, "dev").expect("removed");
+            } else {
+                crate::projects::delete(&id).expect("deleted");
+            }
+        })));
+        let r = handle_hub_request(&req("hub_ask_answer", json!({ "session": rig.session, "seq": seq, "option": "B" })), None);
+        crate::projects::delivery::BEFORE_BIND.with(|h| *h.borrow_mut() = None);
+        let r = r.result.unwrap_or(Value::Null);
+        assert_eq!((r["applied"].as_bool(), r["ask"]["delivery"].as_str()), (Some(true), Some("gone")), "{how}: {r}");
+        assert_eq!(rig.rows(), 0, "{how}: no row for the dead home");
+        let warns: Vec<String> = crate::projects::telemetry::recent_events(&rig.session, 0).into_iter().filter(|e| e.kind == "warn").map(|e| e.text).collect();
+        assert!(warns.iter().any(|w| w.starts_with("undelivered (the agent it was meant for was removed or replaced)") && w.contains("disk to the card")), "{how}: {warns:?}");
+    }
+}
+
+/// A delivery that captured its target before `projects::delete` binds after
+/// it: refused, and no row is written under the old session name for a
+/// same-name project to inherit (leader's amended rule).
+#[test]
+fn a_line_whose_project_is_deleted_before_the_bind_writes_no_row() {
+    let Some(rig) = Rig::start("bind-deleted") else { return };
+    crate::projects::telemetry::record_prompt(&rig.session, "dev", "[tmm chat 2026-11-11 13:10] human: @dev a long task");
+    let id = crate::projects::project_for_session(&rig.session).unwrap().unwrap().id;
+    crate::projects::delivery::BEFORE_BIND.with(|h| *h.borrow_mut() = Some(Box::new(move || {
+        crate::projects::delete(&id).expect("deleted");
+    })));
+    let target = rig.target.clone();
+    let ok = crate::projects::delivery::deliver(&rig.session, "dev", &target, "[tmm chat 13:11] human: @dev DELETED-BEFORE-BIND", 0, "");
+    crate::projects::delivery::BEFORE_BIND.with(|h| *h.borrow_mut() = None);
+    assert!(!ok, "refused");
+    assert!(crate::projects::project_for_session(&rig.session).unwrap().is_none(), "the project is gone");
+    assert_eq!(rig.rows(), 0, "no row under the old session name");
+}
+
 /// D4 + R1/R5/R9 and the cited message's room (leader, note 4): the doors.
 /// Every refusal stores nothing.
 #[test]
@@ -264,9 +407,10 @@ fn the_line_is_handed_to_delivery_only_after_the_commit_and_only_once() {
     let Some(rig) = Rig::start("ask-order") else { return };
     let seq = rig.ask("dev").unwrap();
     let calls = std::cell::Cell::new(0);
-    let deliver = |_s: &str, to: &str, body: &str, room: &str, msg_seq: i64, _id: &str| {
+    let deliver = |_s: &str, to: &str, body: &str, room: &str, msg_seq: i64, _id: &str, home: &str| {
         calls.set(calls.get() + 1);
         assert_eq!(to, "dev", "the asker, alone");
+        assert_eq!(Some(home.to_string()), crate::projects::asks::home_id(&rig.session, "dev").unwrap(), "for its lifetime alone (#116)");
         let a = crate::projects::asks::get(seq).unwrap().unwrap();
         assert_eq!((a.state.as_str(), a.closed_seq), ("answered", Some(msg_seq)), "committed before delivery");
         assert_eq!(crate::projects::asks::body_of(room, msg_seq).as_deref(), Some(body), "the line is the stored message");

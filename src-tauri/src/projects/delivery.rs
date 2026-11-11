@@ -26,6 +26,11 @@ use super::telemetry;
 pub(crate) mod picker_hold;
 pub use picker_hold::release as release_closed_pickers;
 mod when_idle;
+mod lifetime;
+pub use lifetime::{bind_lifetime, forget_removed, Unbound, UNCHECKED};
+#[cfg(test)]
+pub(crate) use lifetime::BEFORE_BIND;
+use lifetime::{check_write, hold_bound, lifetime_matches, REPLACED, REPLACED_REASON, UNCHECKED_LIFETIME};
 pub use when_idle::{accepted_line, cancel_command, check_command_effects, command_session_started, command_when_idle, WhenIdle};
 use when_idle::{end_held_commands, release_command, Ending};
 #[cfg(test)]
@@ -1090,7 +1095,25 @@ pub fn left_notice(agent: &str, team: &str, stamp: &str) -> String {
 /// line starts in `line` — its producer typed a Team context before it
 /// (board #279, `address::context_first`) — and 0 when nothing leads it.
 pub fn deliver(session: &str, window: &str, target: &str, line: &str, ask_at: usize, msg_id: &str) -> bool {
-    deliver_with(session, window, target, line, ask_at, msg_id, || input_mode(session, window))
+    deliver_for(session, window, target, line, ask_at, msg_id, None)
+}
+
+/// `deliver` for the LIFETIME `home` (board #116): the recipient's home id as
+/// the caller resolved it. The line is typed only into a pane of that
+/// lifetime (`send_into_locked`), and held for it alone; `None` holds it for
+/// whoever runs the window when it is held, and types as before.
+pub fn deliver_for(session: &str, window: &str, target: &str, line: &str, ask_at: usize, msg_id: &str, home: Option<&str>) -> bool {
+    deliver_gated(session, window, target, Pending { line, ask_at, msg_id, home }, || input_mode(session, window), &|| true)
+}
+
+/// One line on its way (board #116 S2): what is typed, where its stamped
+/// part starts, the message it carries, and the LIFETIME it is for.
+#[derive(Clone, Copy)]
+pub(super) struct Pending<'a> {
+    pub(super) line: &'a str,
+    pub(super) ask_at: usize,
+    pub(super) msg_id: &'a str,
+    pub(super) home: Option<&'a str>,
 }
 
 /// `deliver` for a line that is only worth typing if something is STILL true
@@ -1102,7 +1125,7 @@ pub fn deliver(session: &str, window: &str, target: &str, line: &str, ask_at: us
 /// P1-B). False = dropped silently: nothing typed, held or recorded, and the
 /// result is false.
 pub fn deliver_if(session: &str, window: &str, target: &str, line: &str, still_due: &dyn Fn() -> bool) -> bool {
-    deliver_gated(session, window, target, line, 0, "", || input_mode(session, window), still_due)
+    deliver_gated(session, window, target, Pending { line, ask_at: 0, msg_id: "", home: None }, || input_mode(session, window), still_due)
 }
 
 /// Tests' shorthand: deliver with the mode decided up front (`true` = a
@@ -1125,23 +1148,22 @@ fn deliver_as(session: &str, window: &str, target: &str, line: &str, msg_id: &st
 /// (#257); STEER types it into the running turn and owes no echo (#276:
 /// a steered line fires no `userPromptSubmit`, so a pending row could only
 /// ever be swept `unconfirmed`); no choice types it as before.
+#[cfg(test)]
 fn deliver_with(session: &str, window: &str, target: &str, line: &str, ask_at: usize, msg_id: &str, mode: impl FnOnce() -> Option<&'static str>) -> bool {
-    deliver_gated(session, window, target, line, ask_at, msg_id, mode, &|| true)
+    deliver_gated(session, window, target, Pending { line, ask_at, msg_id, home: None }, mode, &|| true)
 }
 
 /// `deliver_with` plus a gate evaluated inside the critical section (see
 /// `deliver_if`); every ordinary delivery passes the gate that is always open.
-#[allow(clippy::too_many_arguments)]
 fn deliver_gated(
     session: &str,
     window: &str,
     target: &str,
-    line: &str,
-    ask_at: usize,
-    msg_id: &str,
+    l: Pending<'_>,
     mode: impl FnOnce() -> Option<&'static str>,
     gate: &dyn Fn() -> bool,
 ) -> bool {
+    let Pending { line, ask_at, msg_id, home } = l;
     let lock = window_lock(session, window);
     let _guard = lock.lock().unwrap();
     let held = telemetry::held_rows(session, window);
@@ -1197,10 +1219,10 @@ fn deliver_gated(
     // the held tail of a long queue is released here too, and no function guesses it from its name.
     let behind = if steered && !hook_busy { in_flight.unwrap_or(0) } else { 0 };
     if steered && held.is_empty() {
-        return type_steered(session, window, target, line, ask_at, msg_id, behind);
+        return type_steered(session, window, target, l, behind);
     }
     if !busy && !unknown && held.is_empty() {
-        return type_now(session, window, target, line, ask_at, msg_id);
+        return type_now(session, window, target, l);
     }
     // Held — for the busy turn's end, or (idle) BEHIND lines still held from a
     // copy-mode refusal or a restart, never ahead of them. A hold that could
@@ -1208,7 +1230,9 @@ fn deliver_gated(
     // 04:49): type it now, as an ordinary delivery; if that fails too, the
     // existing `undelivered` warn says so. Not into an unknown turn (#394
     // ruling): there the line is said undelivered, and nothing is typed.
-    if let Err(e) = telemetry::record_held(session, window, line, ask_at, msg_id) {
+    // The lifetime a held row keeps (board #116); unreadable: refused, said.
+    let Some(bound) = lifetime::bind_or_refuse(session, window, l) else { return false };
+    if let Err(e) = telemetry::record_held_for(session, window, line, ask_at, msg_id, bound.as_deref()) {
         // Typed into an occupied strict window the line is gone: never call
         // that a delivery (review P1-A).
         if strict == Some(true) {
@@ -1223,7 +1247,7 @@ fn deliver_gated(
         }
         eprintln!("⚠️  could not hold a delivery for {session}:{window} ({e}); typing it now");
         // Into a steer turn it is steered, owing no echo (validator, #276).
-        return if steered { type_steered(session, window, target, line, ask_at, msg_id, behind) } else { type_now(session, window, target, line, ask_at, msg_id) };
+        return if steered { type_steered(session, window, target, l, behind) } else { type_now(session, window, target, l) };
     }
     if may_release(known, busy, strict.is_some(), &held) {
         flush_locked(session, window, target, steered.then_some(behind), Some(&_order));
@@ -1241,9 +1265,10 @@ fn deliver_gated(
 ///
 /// `behind` (board #442): the in-flight row this steer sits behind, 0 for a hook-known running
 /// turn. The event records it, so the report of that row can name the lines that followed it.
-fn type_steered(session: &str, window: &str, target: &str, line: &str, ask_at: usize, msg_id: &str, behind: i64) -> bool {
-    match type_text(session, window, target, line) {
-        Err(e) if kept_at_write(&e) => telemetry::record_held(session, window, line, ask_at, msg_id).is_ok(),
+fn type_steered(session: &str, window: &str, target: &str, l: Pending<'_>, behind: i64) -> bool {
+    let Pending { line, ask_at, msg_id, home } = l;
+    match type_text(session, window, target, line, home) {
+        Err(e) if kept_at_write(&e) => hold_bound(session, window, l),
         Ok(()) => {
             telemetry::record_steered(session, window, &crate::address::shown(line, ask_at), &[msg_id], behind);
             super::vitals::sniff_window_soon(session, window);
@@ -1263,9 +1288,10 @@ fn overdue(held: &[super::store::DeliveryRow]) -> bool {
 
 /// The pre-#257 path: type the line, then record the promise its echo will
 /// settle; a refusal is said at once and records nothing (#250).
-fn type_now(session: &str, window: &str, target: &str, line: &str, ask_at: usize, msg_id: &str) -> bool {
-    match type_text(session, window, target, line) {
-        Err(e) if kept_at_write(&e) => telemetry::record_held(session, window, line, ask_at, msg_id).is_ok(),
+fn type_now(session: &str, window: &str, target: &str, l: Pending<'_>) -> bool {
+    let Pending { line, ask_at, msg_id, home } = l;
+    match type_text(session, window, target, line, home) {
+        Err(e) if kept_at_write(&e) => hold_bound(session, window, l),
         Ok(()) => {
             telemetry::record_typed(session, window, line, ask_at, msg_id);
             // A line just landed in this pane: sniff its vitals once the TUI
@@ -1376,10 +1402,12 @@ fn may_release(known: bool, busy: bool, strict: bool, held: &[super::store::Deli
 /// `order` is the turn-fact lock when the caller holds it (the delivery
 /// decision): what a command's receipt is recorded under, never taken twice.
 fn flush_locked(session: &str, window: &str, target: &str, steered: Option<i64>, order: Option<&std::sync::MutexGuard<'static, ()>>) {
-    let rows = telemetry::held_rows(session, window);
+    // Rows of another lifetime are retired and said (board #116); unreadable: all kept.
+    let Some((rows, expect)) = lifetime::owed_rows(session, window, telemetry::held_rows(session, window)) else { return };
+    let expect = expect.as_deref();
     match rows.first().map(|r| (r, r.verbatim)) {
         Some((_, Some(super::store::CommandHold::Typed))) => return,
-        Some((row, Some(super::store::CommandHold::Waiting))) => return release_command(session, window, target, row, true, order),
+        Some((row, Some(super::store::CommandHold::Waiting))) => return release_command(session, window, target, row, true, order, expect),
         _ => {}
     }
     let lines = rows.iter().position(|r| r.verbatim.is_some()).unwrap_or(rows.len());
@@ -1391,7 +1419,7 @@ fn flush_locked(session: &str, window: &str, target: &str, steered: Option<i64>,
     let ids: Vec<i64> = batch.iter().map(|r| r.id).collect();
     let text = batch.iter().map(|r| r.line.as_str()).collect::<Vec<_>>().join(SEPARATOR);
     if let Some(behind) = steered {
-        return flush_steered(session, window, target, batch, &ids, &text, behind);
+        return flush_steered(session, window, target, batch, &text, behind, expect);
     }
     // The batch flips as ONE transaction; if it cannot, nothing is typed and
     // every row stays held for the next trigger (orchestrator 04:49).
@@ -1399,8 +1427,9 @@ fn flush_locked(session: &str, window: &str, target: &str, steered: Option<i64>,
         eprintln!("⚠️  could not release held deliveries for {session}:{window} ({e}); kept held");
         return;
     }
-    match type_text(session, window, target, &text) {
+    match type_text(session, window, target, &text, expect) {
         Ok(()) => super::vitals::sniff_window_soon(session, window),
+        Err(e) if e == REPLACED => lifetime::not_owed(session, window, batch),
         Err(e) => {
             if let Err(err) = telemetry::rehold(&ids) {
                 eprintln!("⚠️  could not re-hold deliveries for {session}:{window} ({err})");
@@ -1415,21 +1444,38 @@ fn flush_locked(session: &str, window: &str, target: &str, steered: Option<i64>,
 /// close the window by ORDER). They owe no echo, so their rows are RETIRED
 /// in one transaction BEFORE the keys go in: no moment exists in which a
 /// typed line has a pending row (a crash or restart after the retire leaves
-/// nothing to sweep). The retire failing types nothing — the rows stay held,
-/// typed at the turn's end like any queue line. Typing failing after it is a
-/// line that did not land: the #250 `undelivered` warn, no row to point at.
-fn flush_steered(session: &str, window: &str, target: &str, batch: &[super::store::DeliveryRow], ids: &[i64], text: &str, behind: i64) {
-    if let Err(e) = telemetry::retire_held(ids) {
+/// nothing to sweep), and a steered line is typed at most once. The retire
+/// failing types nothing — the rows stay held, typed at the turn's end like
+/// any queue line. Typing failing after it is a line that did not land: the
+/// #250 `undelivered` warn, no row to point at.
+///
+/// Before the retire, the write's own checks run with nothing written
+/// (`lifetime::check_write`, board #116 F2, leader's ruling C): an answer that
+/// keeps a line (an unreadable lifetime, a restart, an unidentified pane)
+/// leaves the rows exactly as they were; another lifetime retires them, said.
+/// The write checks again. The stated bound: a lifetime that turns
+/// unreadable in the interval between the pre-check and the write loses the line with an
+/// `undelivered (…)` report, never silently and never typed twice.
+fn flush_steered(session: &str, window: &str, target: &str, batch: &[super::store::DeliveryRow], text: &str, behind: i64, expect: Option<&str>) {
+    let ids: Vec<i64> = batch.iter().map(|r| r.id).collect();
+    match check_write(session, window, target, expect) {
+        Err(e) if kept_at_write(&e) => return,
+        Err(e) if e == REPLACED => return telemetry::drop_held_rows(session, window, batch, REPLACED_REASON),
+        _ => {}
+    }
+    if let Err(e) = telemetry::retire_held(&ids) {
         eprintln!("⚠️  could not retire held deliveries for {session}:{window} ({e}); kept held for the turn's end");
         return;
     }
     let msgs: Vec<&str> = batch.iter().map(|r| r.msg_id.as_str()).collect();
     let shown = batch.iter().map(|r| r.shown()).collect::<Vec<_>>().join(SEPARATOR);
-    match type_text(session, window, target, text) {
+    match type_text(session, window, target, text, expect) {
         Ok(()) => {
             telemetry::record_steered(session, window, &shown, &msgs, behind);
             super::vitals::sniff_window_soon(session, window);
         }
+        // The stated bound (#116): said in F1's own words.
+        Err(e) if e.starts_with(UNCHECKED_LIFETIME) => telemetry::record_undelivered(session, window, &shown, UNCHECKED),
         Err(e) => telemetry::record_undelivered(session, window, &shown, e.trim()),
     }
 }
@@ -1460,15 +1506,15 @@ fn first_prompt(lines: &[&str], max: usize) -> usize {
 }
 
 #[cfg(not(test))]
-fn type_text(session: &str, window: &str, target: &str, text: &str) -> Result<(), String> {
-    send_into_locked(session, window, target, &typed_form(session, window, text))
+fn type_text(session: &str, window: &str, target: &str, text: &str, expect: Option<&str>) -> Result<(), String> {
+    send_into_locked(session, window, target, &typed_form(session, window, text), expect)
 }
 
 /// A held `/command`'s keys (board #45): verbatim, as `hub_command` types
 /// one, keeping its `@` behind the picker guard (`send_into_locked`).
 #[cfg(not(test))]
-fn type_verbatim(session: &str, window: &str, target: &str, text: &str) -> Result<(), String> {
-    send_into_locked(session, window, target, text)
+fn type_verbatim(session: &str, window: &str, target: &str, text: &str, expect: Option<&str>) -> Result<(), String> {
+    send_into_locked(session, window, target, text, expect)
 }
 
 /// The text a DELIVERY types into `window`: the line itself, or, for a CLI
@@ -1503,13 +1549,13 @@ pub(crate) fn send_into(session: &str, window: &str, target: &str, text: &str) -
     // the pane resolution and the write are one step against any restart.
     let lock = window_lock(session, window);
     let _guard = lock.lock().unwrap();
-    send_into_locked(session, window, target, text)
+    send_into_locked(session, window, target, text, None)
 }
 
 /// `send_into` for a caller that already holds the window lock (every
 /// delivery, flush and steer: `type_text`). The lock is not reentrant, so a
 /// locked caller never takes it twice.
-fn send_into_locked(session: &str, window: &str, target: &str, text: &str) -> Result<(), String> {
+fn send_into_locked(session: &str, window: &str, target: &str, text: &str, expect: Option<&str>) -> Result<(), String> {
     // The final write (round 3, P1-R1): re-checked here, under the window lock
     // a delivery holds and a restart takes. A starting window is not typed
     // into, and the write goes to the stable pane id (%N) the window has NOW,
@@ -1518,6 +1564,14 @@ fn send_into_locked(session: &str, window: &str, target: &str, text: &str) -> Re
     // its own native pane and says so in its own words.
     let guard = gate(session, window, target, false)?;
     let pane = final_pane(session, window, target)?;
+    // The LIFETIME (board #116), checked AFTER the pane is resolved: the keys
+    // go to that %id only, which tmux never reuses, so a line can reach the
+    // pane of the lifetime checked here, or none (a remove kills it).
+    lifetime_matches(session, window, expect)?;
+    #[cfg(test)]
+    if let Some(hook) = lifetime::AFTER_LIFETIME.with(|h| h.borrow_mut().take()) {
+        hook();
+    }
     let target = pane.as_str();
     // A verbatim `/command` keeps its `@` (non-negotiable 12), so into a CLI
     // whose `@` opens a picker it gets the one-read picker guard before its
@@ -1552,7 +1606,7 @@ pub(crate) const UNIDENTIFIED: &str = "held: the pane cannot be identified: ";
 /// Was this write refused at the final write (nothing was written; a
 /// delivery keeps its line held)?
 fn kept_at_write(e: &str) -> bool {
-    e.starts_with(RESTARTING) || e.starts_with(UNIDENTIFIED)
+    e.starts_with(RESTARTING) || e.starts_with(UNIDENTIFIED) || e.starts_with(UNCHECKED_LIFETIME)
 }
 
 /// The pane the final write may go to: the window's stable pane id, and only
@@ -1626,10 +1680,11 @@ thread_local! {
 }
 
 #[cfg(test)]
-fn type_verbatim(session: &str, window: &str, target: &str, text: &str) -> Result<(), String> {
+fn type_verbatim(session: &str, window: &str, target: &str, text: &str, expect: Option<&str>) -> Result<(), String> {
     if TYPED.with(|t| t.borrow().is_none()) {
-        return send_into_locked(session, window, target, text);
+        return send_into_locked(session, window, target, text, expect);
     }
+    lifetime_matches(session, window, expect)?;
     VERBATIM_UNDER_TURN_LOCK.with(|v| v.borrow_mut().push(telemetry::turn_order_is_held()));
     if let Some(e) = REFUSE.with(|r| r.borrow().clone()) {
         return Err(e);
@@ -1639,12 +1694,13 @@ fn type_verbatim(session: &str, window: &str, target: &str, text: &str) -> Resul
 }
 
 #[cfg(test)]
-fn type_text(session: &str, window: &str, target: &str, text: &str) -> Result<(), String> {
+fn type_text(session: &str, window: &str, target: &str, text: &str, expect: Option<&str>) -> Result<(), String> {
     let text = &typed_form(session, window, text);
     let faked = TYPED.with(|t| t.borrow().is_some());
     if !faked {
-        return send_into_locked(session, window, target, text);
+        return send_into_locked(session, window, target, text, expect);
     }
+    lifetime_matches(session, window, expect)?;
     if let Some(e) = REFUSE.with(|r| r.borrow().clone()) {
         return Err(e);
     }
@@ -1687,10 +1743,10 @@ mod tests {
     fn refuse(e: Option<&str>) {
         REFUSE.with(|r| *r.borrow_mut() = e.map(str::to_string));
     }
-    fn pending(session: &str, window: &str) -> usize {
+    pub(super) fn pending(session: &str, window: &str) -> usize {
         crate::projects::with_store(|s| s.pending_deliveries(session, Some(window))).unwrap().len()
     }
-    fn held(session: &str, window: &str) -> usize {
+    pub(super) fn held(session: &str, window: &str) -> usize {
         telemetry::held_rows(session, window).len()
     }
     /// Board #347 (owner: "当这个 agent 不在会话，或者停止什么的时候要返回一个
@@ -1814,7 +1870,7 @@ mod tests {
         }
     }
 
-    fn warns(session: &str) -> Vec<String> {
+    pub(super) fn warns(session: &str) -> Vec<String> {
         telemetry::recent_events(session, 0).into_iter().filter(|e| e.kind == "warn").map(|e| e.text).collect()
     }
     pub(super) fn busy(session: &str, window: &str) {
@@ -2570,7 +2626,7 @@ mod tests {
         assert_eq!((held(&s, "dev"), pending(&s, "dev")), (0, 3));
     }
 
-    fn sql(stmt: &str) {
+    pub(super) fn sql(stmt: &str) {
         crate::projects::with_store(|st| st.exec_test_sql(stmt)).unwrap();
     }
 

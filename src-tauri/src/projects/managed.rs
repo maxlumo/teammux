@@ -154,6 +154,9 @@ fn agent_remove_now(session: &str, agent: &str) -> Result<Value, String> {
     if home.is_none() && !declared && !window_killed {
         return Err(format!("'{agent}' is not an agent of project '{}'", project.name));
     }
+    // Its held and typed lines go with it, now (board #116): a same-name
+    // agent created after this is another lifetime and inherits none.
+    super::delivery::forget_removed(session, agent);
     // A process outside the window that still holds the home would write it
     // back after the delete (board #26: omp's text-predict worker, 5 min
     // later), so it is stopped first; one that will not exit refuses.

@@ -1553,19 +1553,26 @@ pub fn forget_delivery(id: i64) {
 /// `Err` when the row could not be written: the caller must not report the
 /// line as queued (it falls back to typing it now, board #257 review).
 pub fn record_held(session: &str, window: &str, line: &str, ask_at: usize, msg_id: &str) -> Result<(), String> {
+    record_held_for(session, window, line, ask_at, msg_id, None)
+}
+
+/// `record_held` with the LIFETIME the line is for (board #116): the
+/// recipient's home id, which the flush compares before it types. `None`
+/// stores none, and the line is typed as before.
+pub fn record_held_for(session: &str, window: &str, line: &str, ask_at: usize, msg_id: &str, home: Option<&str>) -> Result<(), String> {
     recovery_mark(session);
     with_rec(session, window, |_| {});
-    queue(|s| s.insert_held_delivery(session, window, line, ask_at, now(), msg_id))
+    queue(|s| s.insert_held(&super::store::NewHeld { session, window, line, ask_at, ts: now(), msg_id, home }))
 }
 
 /// A `/command` held for the window's next idle edge (board #45): a held
 /// row in the same queue as the lines (`record_held`), marked verbatim. Its
 /// id is returned for `tmm send --cancel`. `Err`: nothing is held, and the
 /// caller says so rather than typing it into a turn that may be running.
-pub fn record_held_command(session: &str, window: &str, command: &str, msg_id: &str) -> Result<i64, String> {
+pub fn record_held_command(session: &str, window: &str, command: &str, msg_id: &str, home: Option<&str>) -> Result<i64, String> {
     recovery_mark(session);
     with_rec(session, window, |_| {});
-    queue(|s| s.insert_held_command(session, window, command, now(), msg_id))
+    queue(|s| s.insert_held_command(session, window, command, now(), msg_id, home))
 }
 
 /// Mark a held command typed (`true`, before its keys go in) or back to
@@ -1833,6 +1840,29 @@ pub fn record_held_blocked(session: &str, window: &str, rows: &[super::store::De
 /// id, no retry, exactly like a copy-mode refusal (#250): senders resend.
 pub fn drop_held(session: &str, window: &str) {
     drop_held_because(session, window, "interrupted");
+}
+
+/// An agent was REMOVED (board #116): its held lines are dropped, each said
+/// once as `undelivered (the agent was removed)`, and its typed lines no
+/// longer owe an echo, in the same call as the remove. A same-name agent
+/// created after it is another lifetime and inherits nothing; waiting for the
+/// roster poll (`retain_windows`) left the lines for it.
+pub fn forget_removed_window(session: &str, window: &str) {
+    drop_held_because(session, window, REMOVED);
+    forget_window_deliveries(session, window);
+}
+
+/// Why a removed agent's held line was not typed (board #116).
+pub const REMOVED: &str = "the agent was removed";
+
+/// Retire held rows whose lifetime is not the window's any more (board
+/// #116), each said once as `undelivered (reason)`.
+pub fn drop_held_rows(session: &str, window: &str, rows: &[super::store::DeliveryRow], reason: &str) {
+    for row in rows {
+        if queue(|s| s.delete_delivery_id(row.id)).unwrap_or(false) {
+            record_undelivered(session, window, &row.shown(), reason);
+        }
+    }
 }
 
 /// Retire the window's held lines, each said once as `undelivered (reason)`.
@@ -3182,7 +3212,7 @@ mod tests {
         crate::projects::store::DeliveryRow { ask_at, ..row(id, line, 0) }
     }
     fn row(id: i64, line: &str, ts: u64) -> crate::projects::store::DeliveryRow {
-        crate::projects::store::DeliveryRow { id, window: "w".into(), line: line.into(), ts, msg_id: String::new(), warned: false, command: None, ask_at: 0, verbatim: None }
+        crate::projects::store::DeliveryRow { id, window: "w".into(), line: line.into(), ts, msg_id: String::new(), warned: false, command: None, ask_at: 0, verbatim: None, home: None }
     }
     const MARK: (i64, u64) = (0, 0);
 
