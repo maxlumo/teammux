@@ -25,6 +25,10 @@ pub(super) fn project_room(session: &str) -> String {
     crate::projects::rooms::session_room(session)
 }
 
+/// The ask RPCs (board #106).
+#[cfg(not(any(target_os = "android", target_os = "ios")))]
+pub(super) mod asks;
+
 /// The hub dispatcher proper (board #146): every arm is a `Result`, so a
 /// missing param or a store error is a `?` with its wire code already chosen
 /// (`RpcError`), and `handle_hub_request` below is the one place a
@@ -789,6 +793,15 @@ fn dispatch_hub(req: &Request, notifications: Option<&crate::agent_notifications
             crate::projects::wakes::cancel(session, id, by).map_err(RpcError::InvalidParams)?;
             Ok(serde_json::json!({ "id": id, "cancelled": true }))
         }
+
+        // Asks (board #106; docs/design-docs/features/asks.md): an agent's
+        // question to the person, closed once by an explicit act. The answer
+        // or dismissal is typed after its commit through the composer's path.
+        "hub_ask" => asks::ask(session, &room, p),
+        "hub_ask_answer" => asks::answer(session, &room, p, &|s, to, body, room, seq, id| deliver_to(s, "human", body, room, Some(seq), id, &[to.to_string()])),
+        "hub_ask_dismiss" => asks::dismiss(session, &room, p, &|s, to, body, room, seq, id| deliver_to(s, "human", body, room, Some(seq), id, &[to.to_string()])),
+        "hub_ask_withdraw" => asks::withdraw(session, &room, p),
+        "hub_ask_list" => asks::list(session, &room, p),
 
         // An existing agent's RUNTIME team (board #384): the Hub's drag of a
         // card onto a team, "Move to team" / "Leave team", `tmm agent team`.
@@ -2774,10 +2787,46 @@ fn deliver_mentions_with(
     to_sender: bool,
     list_panes: impl FnOnce(&str) -> Result<Vec<crate::tmux::TmuxPane>, String>,
 ) -> (Vec<String>, Vec<(String, &'static str)>) {
-    use crate::projects::agents;
-
     let names = crate::projects::names::names(session);
     let mentions = names.addressed(body);
+    deliver_routed_with(Routed { session, from, body, room, before_seq, msg_id, to_sender, names, to: mentions }, list_panes)
+}
+
+/// The one delivery path with its recipients GIVEN rather than read from the
+/// body (board #106 F2): an ask's answer goes to its asker alone, whatever
+/// `@name` the person or an option label wrote inside it.
+#[cfg(not(any(target_os = "android", target_os = "ios")))]
+pub(super) fn deliver_to(session: &str, from: &str, body: &str, room: &str, before_seq: Option<i64>, msg_id: &str, to: &[String]) -> (Vec<String>, Vec<(String, &'static str)>) {
+    let names = crate::projects::names::names(session);
+    deliver_routed_with(Routed { session, from, body, room, before_seq, msg_id, to_sender: false, names, to: to.to_vec() }, crate::tmux::list_panes)
+}
+
+/// One delivery as the routed path takes it: what is said, by whom, in which
+/// session and room, after which room message (the team-context edge), and
+/// to whom. `to` is read from the body by `deliver_mentions`, given by
+/// `deliver_to`.
+#[cfg(not(any(target_os = "android", target_os = "ios")))]
+struct Routed<'a> {
+    session: &'a str,
+    from: &'a str,
+    body: &'a str,
+    room: &'a str,
+    before_seq: Option<i64>,
+    msg_id: &'a str,
+    /// A fired wake or a detached post may reach its own sender (#285).
+    to_sender: bool,
+    names: crate::address::Names,
+    to: Vec<String>,
+}
+
+#[cfg(not(any(target_os = "android", target_os = "ios")))]
+fn deliver_routed_with(
+    r: Routed<'_>,
+    list_panes: impl FnOnce(&str) -> Result<Vec<crate::tmux::TmuxPane>, String>,
+) -> (Vec<String>, Vec<(String, &'static str)>) {
+    use crate::projects::agents;
+    let Routed { session, from, body, room, before_seq, msg_id, to_sender, names, to: mentions } = r;
+
     if mentions.is_empty() {
         return (Vec::new(), Vec::new());
     }

@@ -40,6 +40,10 @@ tmm send "@name /command" --when-idle   typed at the agent's next idle edge, aft
 tmm send "@name <text>" --in 10m | --at 14:30   a WAKE: delivered then as "[wake] <text>"
                                      (yourself included); prints the time and wake id (#275)
 tmm wake list [--all] · tmm wake cancel <id>   pending wakes; the setter or the human cancels
+tmm ask "q" [--option KEY=label]… [--recommend KEY] [--issue N]   one question to the person (#106);
+                                     prints its id; open until closed; never repeated
+tmm ask list [--all] · tmm ask close <id> "why" [--re <seq>]   open asks (--all: closed, with answers);
+                                     withdraw yours, citing a room message; never marks it answered
 tmm task start <name> --wake [@who] -- <cmd>   wake @who (default: you) when it ends by itself
 tmm send "<text>" --status           ambient progress; room-only, interrupts nobody
 tmm scratch [--kill]                 the desktop's scratch terminal session (#324): ensure it
@@ -756,6 +760,7 @@ The rules behind each surface live next to their design, not here:
 | delivery, receipts, status derivation, vitals, activity log | [agent-status.md](agent-status.md) |
 | recipients, `/commands`, the palette, interrupt | [hub-composer.md](hub-composer.md) |
 | the task board (`hub_board_*`, `tmm board`) | [board.md](board.md) |
+| asks (`hub_ask*`, `tmm ask`) | [asks.md](asks.md) |
 | spawn, isolated homes, registry, per-backend knowledge, AGENTS.md | [agents-overview.md](agents-overview.md) |
 | project lifecycle, restart/resume | [projects.md](projects.md) |
 

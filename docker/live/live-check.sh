@@ -27,6 +27,11 @@
 #                      the conversation, the user's auth.json and models.json still linked.
 #   live-check pi-tools   board #86: a managed pi runs two bash calls; the activity log holds one
 #                      tool row per call, each with its command, and no blank (argument-less) row.
+#   live-check asks    board #106: a managed pi asks the person with `tmm ask` (its own tool call);
+#                      the person's answer goes in over the gateway's WebSocket as the app sends it
+#                      (hub_ask_answer, plain token auth); the pi receives it as a chat line quoting
+#                      the ask and says which option it got; a retried answer is refused and typed
+#                      nothing.
 #   live-check pi-paste  board #85: five lines carrying `#81` and ending in `"..."`. typed into a
 #                      BUSY pi, then into an idle one, each arrive as their own user message with no
 #                      inserted text and no unconfirmed report; a /command stays a command, and a
@@ -52,7 +57,7 @@
 #                      Escape closes it.
 set -euo pipefail
 check="${1:-smoke}"
-case "$check" in smoke|codex-models|codex-provider|codex-start|pi|pi-tools|pi-paste|pi-start|dsh-tools|omp-tools|codex-limit|codex-picker) ;; *) echo "live-check: unknown check '$check' (known: smoke, codex-models, codex-provider, codex-start, pi, pi-tools, pi-paste, pi-start, dsh-tools, omp-tools, codex-limit, codex-picker)" >&2; exit 2 ;; esac
+case "$check" in smoke|codex-models|codex-provider|codex-start|pi|pi-tools|asks|pi-paste|pi-start|dsh-tools|omp-tools|codex-limit|codex-picker) ;; *) echo "live-check: unknown check '$check' (known: smoke, codex-models, codex-provider, codex-start, pi, pi-tools, asks, pi-paste, pi-start, dsh-tools, omp-tools, codex-limit, codex-picker)" >&2; exit 2 ;; esac
 
 cfg="$HOME/.config/teammux"
 mkdir -p "$cfg" /work/live
@@ -168,6 +173,56 @@ PY
   [ "$n" = 2 ] || { echo "live-check: pi-tools: FAIL ($n bash rows, expected 2)"; rc=1; }
   [ "$blank" = 0 ] || { echo "live-check: pi-tools: FAIL ($blank blank rows)"; rc=1; }
   if [ $rc = 0 ]; then echo "live-check: pi-tools: PASS"; fi
+  exit $rc
+fi
+
+if [ "$check" = asks ]; then
+  pi_user
+  rc=0
+  tmm registry save --name lask --backend pi --model ust/claude-haiku-5-5 --effort low --system "Live check agent. Do exactly what you are asked." >/dev/null
+  tmm spawn lask --project live >/dev/null
+  pane() { tmux list-panes -a -F '#{pane_id} #{window_name}' | awk '$2=="lask"{print $1; exit}'; }
+  ready() { p=$(pane); [ -n "$p" ] && tmux capture-pane -p -t "$p" | grep -qE '%/[0-9]+k'; }
+  for _ in $(seq 1 120); do ready && break; sleep 0.5; done
+  ready && echo "live-check: asks: pi is ready" || { echo "live-check: asks: FAIL (pi's footer never painted in 60 s)"; exit 1; }
+  tmm send --project live "@lask Run exactly this one shell command and nothing else: tmm ask \"Live check 106: pick one\" --option A=alpha --option B=beta --recommend A
+Then reply with the single word asked. Later a chat line from human will answer that ask: when it does, reply with received- followed by the option KEY it names (for example received-A), nothing else." >/dev/null
+  timeout 180 bash -c "until tmm log --project live --limit 40 | grep -q '] lask: asked'; do sleep 2; done" || { echo "live-check: asks: FAIL (pi never said asked)"; rc=1; }
+  list=$(tmm ask list --project live --output json)
+  echo "live-check: asks: tmm ask list: $list"
+  seq=$(printf '%s' "$list" | python3 -c 'import json,sys; a=json.load(sys.stdin)["asks"]; print(a[0]["seq"] if a and a[0]["asker"]=="lask" and a[0]["question"]=="Live check 106: pick one" and [o["key"] for o in a[0]["options"]]==["A","B"] and a[0]["recommend"]=="A" else "")')
+  [ -n "$seq" ] || { echo "live-check: asks: FAIL (no open ask by lask with its options)"; exit 1; }
+  echo "live-check: asks: pi's own tool call opened ask #$seq"
+  answer() { node -e '
+const [tok, seq, opt] = process.argv.slice(1);
+const ws = new WebSocket("ws://127.0.0.1:9899/");
+let step = 0;
+ws.onmessage = (e) => {
+  const m = JSON.parse(e.data);
+  if (step === 0) { step = 1; ws.send(JSON.stringify({ method: "auth", params: { token: tok } })); return; }
+  if (step === 1) { if (!m.result?.caps?.includes("asks")) { console.log("NO-CAP " + e.data); process.exit(1); } step = 2;
+    ws.send(JSON.stringify({ id: 2, method: "hub_ask_answer", params: { session: "live", seq: Number(seq), option: opt, text: "live-106" } })); return; }
+  if (m.id === 2) { console.log(JSON.stringify(m.result ?? m.error)); ws.close(); process.exit(0); }
+};
+setTimeout(() => { console.log("TIMEOUT"); process.exit(1); }, 15000);
+' "$(sed -n 's/^token *= *"\(.*\)"/\1/p' "$cfg/config.toml")" "$1" "$2"; }
+  r=$(answer "$seq" B)
+  echo "live-check: asks: hub_ask_answer: $r"
+  printf '%s' "$r" | python3 -c 'import json,sys; r=json.load(sys.stdin); a=r["ask"]; sys.exit(0 if r["applied"] and a["state"]=="answered" and a["answer_key"]=="B" and a["delivery"]=="found" else 1)' \
+    || { echo "live-check: asks: FAIL (the answer did not apply and reach the pane)"; rc=1; }
+  timeout 180 bash -c "until tmm log --project live --limit 40 | grep -q '] lask: received-B'; do sleep 2; done" \
+    && echo "live-check: asks: pi received the answer and named option B" || { echo "live-check: asks: FAIL (pi never said received-B)"; rc=1; }
+  typed=$(tmux capture-pane -p -S -200 -t "$(pane)" | grep -c 'B · beta — live-106' || true)
+  r2=$(answer "$seq" A)
+  echo "live-check: asks: retried answer: $r2"
+  printf '%s' "$r2" | python3 -c 'import json,sys; r=json.load(sys.stdin); sys.exit(0 if not r["applied"] and r["ask"]["answer_key"]=="B" and r["refused"].startswith("already answered") else 1)' \
+    || { echo "live-check: asks: FAIL (a retry was not refused with the winner)"; rc=1; }
+  sleep 5
+  typed2=$(tmux capture-pane -p -S -200 -t "$(pane)" | grep -c 'B · beta — live-106' || true)
+  [ "$typed" = "$typed2" ] && ! tmux capture-pane -p -S -200 -t "$(pane)" | grep -q 'A · alpha — live-106' \
+    && echo "live-check: asks: the retry typed nothing (answer lines in the pane: $typed2)" || { echo "live-check: asks: FAIL (the retry typed something)"; rc=1; }
+  echo "live-check: asks: tmm ask list --all:"; tmm ask list --project live --all | sed 's/^/    /'
+  if [ $rc = 0 ]; then echo "live-check: asks: PASS"; fi
   exit $rc
 fi
 

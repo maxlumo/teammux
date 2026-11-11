@@ -9,7 +9,7 @@ use super::registry::{DEFAULT_DSH_SYSTEM, DEFAULT_KIMI_SYSTEM, DEFAULT_OMP_SYSTE
 
 /// Bumped when the schema changes; `migrate` is the only place that knows the
 /// steps. Stored in SQLite's own `user_version` pragma.
-const SCHEMA_VERSION: i64 = 38;
+const SCHEMA_VERSION: i64 = 39;
 
 impl Store {
     /// Ensure the durable half of Board editability exists, then
@@ -776,6 +776,12 @@ impl Store {
                 )
                 .map_err(|e| format!("migrate to 38: {e}"))?;
         }
+        if version < 39 {
+            // v39 (board #106): an agent's question to the person, the
+            // companion row of its `hub_msgs` message (structure and state
+            // only). Additive; inside the ladder, foreign keys off.
+            self.ensure_hub_asks()?;
+        }
         Ok(())
     }
 
@@ -1213,6 +1219,33 @@ mod tests {
         assert!(!old.omp_tools, "an existing definition is off");
         store.reg_save(&RegAgent { omp_tools: true, ..old }, 2).unwrap();
         assert!(store.reg_get("old-omp").unwrap().unwrap().omp_tools, "a saved on reads back");
+    }
+
+    /// v38 -> v39 (board #106): an old store gains `hub_asks`, its messages
+    /// untouched, and the heal floor re-creates the table if a stamp ran ahead.
+    #[test]
+    fn v38_gains_the_asks_table_and_keeps_its_messages() {
+        let scratch = crate::tmux::Scratch::new("store-v39");
+        let path = std::path::Path::new(&scratch.path()).join("state.db");
+        {
+            let store = Store::open(&path).unwrap();
+            store.hub_append("proj:a", "m1", 10, "human", "[]", "msg", "before asks").unwrap();
+            store.conn.execute_batch("DROP TABLE hub_asks; PRAGMA user_version = 38;").unwrap();
+        }
+        let mut store = Store::open(&path).unwrap();
+        let v: i64 = store.conn.query_row("PRAGMA user_version", [], |r| r.get(0)).unwrap();
+        assert_eq!(v, SCHEMA_VERSION);
+        assert!(SCHEMA_VERSION >= 39);
+        let (msgs, _, _) = store.hub_page("proj:a", None, 10).unwrap();
+        assert_eq!(msgs[0].body, "before asks");
+        let o = vec![("A".to_string(), "yes".to_string())];
+        let (_, row) = store.ask_open(&super::asks::NewAsk { room: "proj:a", id: "q1", asker: "dev", asker_home: "h", question: "q", options: &o, recommend: None, issue: None, body: "@human q" }, 20).unwrap();
+        assert_eq!(row.state, super::asks::ASK_OPEN);
+        drop(store);
+        // A stamp ahead of the table: the heal floor puts it back.
+        Connection::open(&path).unwrap().execute_batch("DROP TABLE hub_asks;").unwrap();
+        let store = Store::open(&path).unwrap();
+        assert!(store.ask_list("proj:a", true).unwrap().is_empty(), "healed, empty");
     }
 
     /// v35 -> v36 (board #45): `deliveries.verbatim` appears, every existing

@@ -460,6 +460,28 @@ completion).
   PAGE (tab between Files and Agents), never a drawer partition.
 - Every drawer toggle re-anchors the reading position (`withReadingAnchor`).
 
+## Asks (an agent's question to the person, board #106)
+
+Server and CLI only so far; the chat bubble (#107) and the dashboard (#108,
+#109) show them. Design: [asks.md](../../design-docs/features/asks.md).
+
+- A managed agent asks with `tmm ask "question" [--option KEY=label]…
+  [--recommend KEY] [--issue N]`: up to six options, a recommendation among
+  them, the issue it belongs to. It is a room message addressed to the
+  person, so an older client shows it as text with its options listed.
+- It stays **open** until one explicit act closes it, once: the person
+  answers (an option and/or text) or dismisses it, or the asker withdraws it
+  (`tmm ask close <id> "why" [--re <seq>]`). A "yes" typed in chat names no
+  ask and closes nothing; a withdrawal citing it never marks it answered.
+- The answer or dismissal reaches the asker as a chat line from the person,
+  quoting the ask, through the one delivery path, after it is recorded: typed
+  into a live pane, held for an exited CLI, nothing for a stopped one
+  (`tmm ask list --all` after a restart), nothing for a removed or replaced
+  asker. What happened is recorded beside the answer.
+- `tmm ask list [--all]` shows the open asks, or every one with how it closed.
+- Asks need the server capability `asks`; `tmm ask` refuses an older server
+  before sending.
+
 ## Board page (task management — its own tab)
 - **Several servers** (board #357, owner 2026-10-13: "在 Terminal 页面和 Board
   页面，都没有整合两种或几种不同连接里的所有项目"): in Aggregate the focused

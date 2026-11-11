@@ -55,6 +55,14 @@ USAGE (agent):
   tmm send "@name text" --in 10m | --at 14:30   schedule it: delivered then as a
                                       "[wake] …" line, like one sent now (you may wake
                                       yourself); prints the resolved time and wake id
+  tmm ask "question" [--option KEY=label]… [--recommend KEY] [--issue N]
+                                      one question only the person can answer; prints its id.
+                                      It stays open on the dashboard until closed: never repeat
+                                      it. Up to 6 options (KEY: 1-8 letters or digits)
+  tmm ask list [--all]                this project's open asks; --all: closed ones with their
+                                      answers (read it after a restart)
+  tmm ask close <id> "why" [--re <seq>]  withdraw your ask; --re cites a room message (e.g. the
+                                      person's reply in chat). It never marks it answered
   tmm wake list [--all]               pending wakes (this project, or every project)
   tmm wake cancel <id>                cancel one you set (the human may cancel any)
   tmm log [--since <ts>] [--limit N] [-f]   read chat; --since is exclusive, -f follows
@@ -749,6 +757,56 @@ async fn main() {
                     let why = format!("@{to} was not woken ({})", e.lines().next().unwrap_or(""));
                     let _ = tasks::note_wake_failure(&name, &why);
                     eprintln!("tmm: task {name} ended but {why}");
+                }
+            }
+        }
+        // Asks (board #106): one question only the person can answer. The
+        // params and the printed lines are `projects::asks::cli`'s.
+        ("ask", rest) => {
+            use tmux_mobile::projects::asks::cli;
+            let session = need_project(&ctx);
+            let who = ctx.agent.clone().unwrap_or_default();
+            match rest.first().map(String::as_str) {
+                Some("list") => {
+                    let all = flags.contains_key("all");
+                    let r = rpc_needing(&ctx, "asks", "hub_ask_list", json!({ "session": session, "all": all })).await;
+                    if ctx.json {
+                        println!("{r}");
+                        return;
+                    }
+                    let rows = r["asks"].as_array().cloned().unwrap_or_default();
+                    let names = tmux_mobile::address::Names::from_json(r.get("labels").unwrap_or(&Value::Null));
+                    if rows.is_empty() {
+                        println!("{}", if all { "no asks" } else { "no open asks" });
+                    }
+                    for a in rows {
+                        println!("{}", cli::ask_line(&a, &names));
+                    }
+                }
+                Some("close") => {
+                    let re = flags.get("re").cloned().flatten();
+                    let (seq, params) = cli::close_params(&session, &who, &rest, re.as_deref()).unwrap_or_else(|e| fail(EXIT_USAGE, &e));
+                    let r = rpc_needing(&ctx, "asks", "hub_ask_withdraw", params).await;
+                    if ctx.json {
+                        println!("{r}");
+                    }
+                    match cli::outcome(&r) {
+                        Ok(()) if !ctx.json => println!("✓ withdrew ask #{seq}"),
+                        Ok(()) => {}
+                        Err(e) => fail(EXIT_ERR, &e),
+                    }
+                }
+                _ => {
+                    let options: Vec<&str> = repeated.iter().filter(|(k, _)| k == "option").map(|(_, v)| v.as_str()).collect();
+                    let recommend = flags.get("recommend").cloned().flatten();
+                    let issue = flags.get("issue").cloned().flatten();
+                    let params = cli::ask_params(&session, &who, &rest, &options, recommend.as_deref(), issue.as_deref()).unwrap_or_else(|e| fail(EXIT_USAGE, &e));
+                    let r = rpc_needing(&ctx, "asks", "hub_ask", params).await;
+                    if ctx.json {
+                        println!("{r}");
+                    } else {
+                        println!("✓ ask #{} is open; the answer comes to you as a chat line (tmm ask list)", r["ask"]["seq"]);
+                    }
                 }
             }
         }
@@ -2791,7 +2849,7 @@ const VALUED: &[&str] = &["project", "agent", "server", "output", "since", "limi
                           "name", "session", "with-agent", "backend", "model", "effort", "input-mode", "omp-tools", "system", "skills", "mcp",
                           "ref", "source", "description", "def", "grep", "image", "notify", "body", "assignee", "team", "join", "file",
                           "in", "at", "to", "code", "signal", "re", "as", "from", "before", "lines", "cols", "note", "args-json", "test",
-                          "expect", "message-file", "blocked-by", "only", "seq", "cancel"];
+                          "expect", "message-file", "blocked-by", "only", "seq", "cancel", "option", "recommend", "issue"];
 
 /// An argument is a flag only if it has a flag's SHAPE: `-x`, `--name`, `--name=value`, a letter
 /// first and then letters, digits, `_` or `-` (board #456). Anything else that begins with `-`
@@ -2902,6 +2960,9 @@ const VERB_FLAGS: &[VerbFlags] = &[
     VerbFlags { key: "send", ctx: true, flags: &["status", "image", "at", "in", "re", "when-idle", "cancel"] },
     VerbFlags { key: "scratch", ctx: true, flags: &["kill"] },
     VerbFlags { key: "log", ctx: true, flags: LOG_FLAGS },
+    VerbFlags { key: "ask", ctx: true, flags: &["option", "recommend", "issue"] },
+    VerbFlags { key: "ask list", ctx: true, flags: &["all"] },
+    VerbFlags { key: "ask close", ctx: true, flags: &["re"] },
     VerbFlags { key: "wake", ctx: true, flags: &["all"] },
     VerbFlags { key: "wake list", ctx: true, flags: &["all"] },
     VerbFlags { key: "wake cancel", ctx: true, flags: &[] },
@@ -3220,6 +3281,9 @@ fn cap_refusal(need: &str) -> String {
         ),
         COMMAND_WHEN_IDLE => format!(
             "this server cannot hold a command for the agent's turn to end (its login answer lacks `{need}`; an older server would type it at once, into a turn that may be running) — update the server. Nothing was sent."
+        ),
+        "asks" => format!(
+            "this server is older than asks (its login answer lacks `{need}`): it would keep the question as a plain message that nothing can close — update the server. Nothing was sent."
         ),
         "board_blocks" => format!(
             "this server is older than blocking edges (its login answer lacks `{need}`): it neither keeps blockers nor says which issues are blocked — update the server. Nothing was read or saved."
@@ -4835,7 +4899,7 @@ old — X []
         let skill = include_str!("../../../assets/skills/tmm-cli/SKILL.md");
         let help = usage();
         assert!(!help.contains("session unchanged"), "a rename moves the session (#278)");
-        for term in ["tmm wake list", "tmm wake cancel", "--wake", "--in ", "--at ", "/compact", "tmm agent mode", "--input-mode", "tmm agent restart --team", "tmm agent fork", "--re ", "--join ", "tmm agent team", "tmm skills load", "tmm review list", "tmm review add", "tmm review feedback"] {
+        for term in ["tmm wake list", "tmm wake cancel", "--wake", "--in ", "--at ", "/compact", "tmm agent mode", "--input-mode", "tmm agent restart --team", "tmm agent fork", "--re ", "--join ", "tmm agent team", "tmm skills load", "tmm review list", "tmm review add", "tmm review feedback", "tmm ask list", "tmm ask close", "--recommend", "--option"] {
             assert!(help.contains(term), "help lost {term:?}");
             assert!(skill.contains(term), "the tmm-cli skill does not teach {term:?}");
         }

@@ -2290,6 +2290,7 @@ fn build_prompt_as(def: &RegAgent, name: &str, physical: &str, session: &str, gl
          - Use `tmm send \"current progress\" --status` for optional ambient progress. It records in the room without interrupting anyone or suppressing your final response.\n\
          - Use `tmm log --limit 50` for recent messages, `tmm log --grep <text> [--global]` to search history, and `tmm agent list` for participants. Read a queued backlog in full before replying once; when context is unclear, check the log or ask the relevant person.\n\
          - For a board issue, run `tmm board take <id>`, record progress with `tmm board note <id> \"...\"`, and hand off completed work with `tmm board move <id> review`.\n\
+         - A question only the person can answer goes through `tmm ask \"question\" --option KEY=label … --recommend KEY`: one question, with its options and your recommendation. It stays open until the person closes it; never repeat an open ask. After a restart, read `tmm ask list --all`.\n\
          - Delegate independent parallel work with `tmm spawn <agent> --brief \"...\"` or `tmm spawn --team <team> --brief \"...\"`. State the objective, inputs, outputs, and completion criteria; results return automatically.\n\
          - With no message, wait. If tmm is temporarily unavailable, continue local work. Use `tmm --help` for the remaining commands."
     );
@@ -2740,6 +2741,8 @@ mod tests {
         assert_eq!(crate::backends::kiro::reconcile_engine_in(&pre487, " --agent-engine v3 --trust-workspace").as_deref(), Some(v3.as_str()), "an old v3 recipe is upgraded");
         let prompt = conf.get("prompt").and_then(|p| p.as_str()).unwrap();
         assert!(prompt.contains("tmm send"), "the tmm paragraph IS the integration");
+        // Board #106: the one door for a question to the person, never repeated.
+        assert!(prompt.contains("goes through `tmm ask \"question\" --option KEY=label … --recommend KEY`") && prompt.contains("never repeat an open ask") && prompt.contains("`tmm ask list --all`"), "{prompt}");
         assert!(!prompt.contains("fix the bug"), "brief is delivered as the first user message");
         // Board #436: a kiro agent reads every delivered `@` as `＠`, and its
         // own config says so, as the last bullet of the collaboration flow.
@@ -4667,6 +4670,13 @@ hooks = [ { type = "command", command = "/opt/guard.sh" } ]
         let source_home = agent_home(&ws_str, "fksolo");
         std::fs::create_dir_all(source_home.join("sessions")).unwrap();
         std::fs::write(source_home.join("sessions").join("sess_secret.jsonl"), "the source conversation").unwrap();
+        // Board #106 (G1): the home's lifetime identity. A config refresh of the
+        // same home (materialize again, refresh_hooks) keeps it; the fork's
+        // fresh home gets its own.
+        let source_id = super::super::asks::home_id_at(&source_home).unwrap();
+        materialize(&super::super::recipe::recipe_section(&agent_home(&ws_str, "fksolo")), &def, "fksolo", "proj", &ws_str, "", "lead", None, "fksolo", "", "").unwrap();
+        let _ = refresh_hooks(&ws_str, "fksolo");
+        assert_eq!(super::super::asks::home_id_at(&source_home).unwrap(), source_id, "a refresh keeps the home's id");
         let recipe_before = std::fs::read(source_home.join("launch.json")).unwrap();
 
         let live = vec!["fksolo".to_string(), "shell".to_string()];
@@ -4686,6 +4696,9 @@ hooks = [ { type = "command", command = "/opt/guard.sh" } ]
         let prompt = serde_json::from_str::<Value>(&std::fs::read_to_string(new_home.join("agents").join("fksolo-2.json")).unwrap()).unwrap()["prompt"].as_str().unwrap().to_string();
         assert!(prompt.contains("Fork persona."), "{prompt}");
         assert!(!new_home.join("sessions").exists(), "nothing of the source's home is copied");
+        assert!(!new_home.join(super::super::asks::HOME_ID_FILE).exists(), "the source's identity is not copied either");
+        assert_ne!(super::super::asks::home_id_at(&new_home).unwrap(), source_id, "a fork is somebody else");
+        assert_eq!(super::super::asks::home_id_at(&source_home).unwrap(), source_id);
         assert_eq!(std::fs::read(source_home.join("launch.json")).unwrap(), recipe_before, "the source is only read");
         assert!(source_home.join("sessions").join("sess_secret.jsonl").exists());
         let _ = std::fs::remove_dir_all(&ws);

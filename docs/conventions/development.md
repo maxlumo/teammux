@@ -721,6 +721,7 @@ pnpm run test:live:docker codex-provider   # board #74: a codex chat restarted u
 pnpm run test:live:docker codex-start      # board #113: the first line to a fresh codex, sent before its session is configured and under load, is one submitted prompt (agent-status.md)
 pnpm run test:live:docker pi             # board #71: a managed pi end to end (agents-overview.md § The pi backend)
 pnpm run test:live:docker pi-tools       # board #86: a pi tool call is one row with its argument (agent-status.md)
+pnpm run test:live:docker asks           # board #106: a pi asks with tmm ask, the person answers over the WS, the pi receives it once (asks.md)
 pnpm run test:live:docker pi-paste       # board #85: lines carrying `#81` reach a busy and an idle pi whole and alone (agents-overview.md § The pi backend)
 pnpm run test:live:docker pi-start       # board #88: a line sent to ten fresh pi agents at launch waits for pi's ready edge (agents-overview.md § The pi backend)
 pnpm run test:live:docker dsh-tools      # board #87: a dsh tool call is one row, its result folded by call id (agents-overview.md § dsh)

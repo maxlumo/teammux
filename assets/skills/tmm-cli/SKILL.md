@@ -90,6 +90,30 @@ told a job ended, use `task start --wake`. A `/command` cannot be scheduled. If 
 time the wake fires once when it is back, marked late; a task wake that could
 not be sent shows as `wake not sent: …` in `tmm task status|list|logs`.
 
+## Asking the person — one question that stays open
+
+A question only the person can answer (a decision, an approval, a choice
+between options) goes through `tmm ask`, not a chat line that twenty later
+lines bury:
+
+```bash
+tmm ask "Desktop Aggregate: the server name on its own row (48 px)?" \
+  --option A="own row" --option B="DISK to the hover card" --recommend A --issue 103
+tmm ask list [--all]                 # open asks; --all: closed ones with their answers
+tmm ask close <id> "why" [--re <seq>]  # withdraw it; --re cites a room message
+```
+
+- One question, up to 6 options (`KEY=label`, KEY 1-8 letters or digits), your
+  recommendation, and the issue it belongs to. It prints the id.
+- It stays open on the person's dashboard until the person answers or
+  dismisses it, or you withdraw it. **Never repeat an open ask.**
+- The answer arrives in your pane as a chat line from `human`, quoting the
+  ask. If you were stopped when it came, nothing is queued: after a restart,
+  read `tmm ask list --all`.
+- A "yes" typed in chat names no ask, so it does not close one. If you act on
+  it, withdraw the ask citing that message: `tmm ask close <id> "answered in
+  chat" --re <seq>`. That never marks it answered.
+
 ## The task board — shared kanban, humans and agents alike
 
 The project has ONE board (todo / doing / review / done). The human writes
