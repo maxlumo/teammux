@@ -51,8 +51,15 @@ enum Cli {
 
 /// `st` as the Hub and `tmm agent list` show it for `pane`: the turn state,
 /// unless the window's CLI is starting or exited to the shell.
-pub fn shown(session: &str, workspace: Option<&str>, pane: &TmuxPane, mut st: AgentStatus) -> AgentStatus {
-    let (state, detail) = match classify(session, workspace, pane) {
+pub fn shown(session: &str, workspace: Option<&str>, pane: &TmuxPane, st: AgentStatus) -> AgentStatus {
+    shown_owned(session, workspace, pane, st, None)
+}
+
+/// `shown` with the window's membership ALREADY observed by the caller
+/// (board #108: the roster fold reads each home's marker once, and nothing
+/// reads it again). `None` reads it here, as `shown` does.
+pub fn shown_owned(session: &str, workspace: Option<&str>, pane: &TmuxPane, mut st: AgentStatus, managed: Option<bool>) -> AgentStatus {
+    let (state, detail) = match classify(session, workspace, pane, managed) {
         Cli::Shown | Cli::Unknown => return st,
         Cli::Starting => (STARTING, ""),
         Cli::Exited => (STATE, DETAIL),
@@ -114,7 +121,7 @@ fn read_now(session: &str, window: &str) -> Cli {
     #[cfg(not(test))]
     let panes = crate::tmux::list_panes(session);
     match panes {
-        Ok(panes) => panes.iter().find(|p| p.window_name == window && p.active).map_or(Cli::Unknown, |pane| classify(session, Some(&workspace), pane)),
+        Ok(panes) => panes.iter().find(|p| p.window_name == window && p.active).map_or(Cli::Unknown, |pane| classify(session, Some(&workspace), pane, None)),
         Err(_) => Cli::Unknown,
     }
 }
@@ -127,8 +134,8 @@ fn seen() -> &'static std::sync::Mutex<std::collections::HashMap<(String, String
     SEEN.get_or_init(Default::default)
 }
 
-fn classify(session: &str, workspace: Option<&str>, pane: &TmuxPane) -> Cli {
-    if !crate::projects::is_managed_in(workspace, &pane.window_name) {
+fn classify(session: &str, workspace: Option<&str>, pane: &TmuxPane, managed: Option<bool>) -> Cli {
+    if !managed.unwrap_or_else(|| crate::projects::is_managed_in(workspace, &pane.window_name)) {
         return Cli::Shown;
     }
     let Some(home) = workspace.and_then(|ws| crate::projects::agents::home_dir(ws, &pane.window_name)) else { return Cli::Shown };

@@ -4,6 +4,41 @@ The `issues`/`issue_notes` board: fixed columns, per-project numbering, dispatch
 
 ## Rules and their reasons
 
+### An issue knows when it was done (board #108, 2026-11-11)
+
+`issues.done_at` (schema v41) is when the issue last ENTERED done: the move
+into done stamps it, an edit or a note while done keeps it, a move out clears
+it, a move back in re-stamps it, an issue created as done is done at creation
+(`issue_save`, the one place status changes). The dashboard's Finished · 24 h
+reads it (`issues_done_since`). It replaced reading the room's
+`[tmm] board #N … → done` lines, which is parsing a body (tenet 8) and keeps
+the title the issue had then (leader, #108 note 4). Existing done issues are
+backfilled from `updated_at`, their last change, an APPROXIMATION: an edit
+after the move moved it. A backfilled issue whose last change falls inside the
+24 h window is listed with that approximate time (leader, #108 note 38). Pinned by
+`done_at_is_set_by_the_move_to_done_and_cleared_by_a_move_out` and
+`v40_issues_gain_done_at_backfilled_from_the_last_change`.
+
+### The sidebar row shows the board's open asks (board #108)
+
+A board with open asks wears one more chip LEADING its count line, as its own
+full-width grid row (`.side-wins.grid > .side-win.asks`), in the chip
+language with NO status dot (an ask is not a board status; an accent dot read
+as a fifth status beside Doing's, validator #108 note 16) and its count in the
+row's unread atom (`.side-unread`, with a placement-only `margin-left: 0`): `Asks` / `等你`, the
+count. Only when the count is above 0. Measured in Chromium (#108 note 3): the line is already a 2×2 grid at
+every sidebar width (189 px desktop, 250 px at 390, 225 px at 320; four in a
+row need 311), so a fifth cell would lay out 2+2+1, the shape the owner
+refused (2026-09-01, 不要 3+1); the leading row costs 20 px of height on rows
+with asks only. The counts come from `hub_ask_counts` (one grouped read,
+keyed by room) beside `hub_board_counts`, only from a server that announces
+`dashboard`, where it is a REQUIRED read like the board counts: a failed one
+keeps the last slice muted (`failed`), a failed first one is no list yet,
+never "no asks" (validator #108 note 13); each server's slice
+carries its own (`BoardSlice.asks`). `visibleBoards` lists a board with open
+asks even when it has no issues (board #39 hid empty boards), or its asks
+would have no row.
+
 ### The Board's project list is the Hub's union, not a second one (#357, 2026-10-13)
 
 Owner: "在 Terminal 页面和 Board 页面，都没有整合两种或几种不同连接里的所有项目."

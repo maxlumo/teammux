@@ -453,6 +453,13 @@ export function createWsApi(connection: Connection) {
    * (absence = hide), so callers must not expect all-zeros rows. */
   const boardCounts = () =>
     call<{ counts: Record<string, BoardCountRow> }>('hub_board_counts', {});
+  /** Every board's OPEN-ask count, keyed by the project's room, in one grouped
+   * read (board #108, cap `dashboard`); a room with none is absent. */
+  const askCounts = () =>
+    call<{ counts: Record<string, number> }>('hub_ask_counts', {});
+  /** One project's derived summary (board #108, cap `dashboard`). */
+  const dashboard = (session: string) =>
+    call<Record<string, unknown>>('hub_dashboard', { session });
   const boardGet = (session: string, id: number) =>
     call<BoardIssue>('hub_board_get', { session, id });
   /** Create (no id) or patch (id + only the fields to change). `who` records the
@@ -738,7 +745,7 @@ export function createWsApi(connection: Connection) {
     fsUploadBegin, fsUploadResume, fsUploadAbort, fsConvert, gitCmd, projectList, projectCreate, projectAdopt, projectUp,
     projectDown, projectRename, projectArchive, projectDelete, projectAutostart, hubPost,
     hubCommand, hubLog, hubLogAround, hubSearch, hubFiles, hubMsgArchive, hubMsgRestore, hubMsgPurge, hubRooms,
-    hubUnread, hubRead, systemStatus, hubArchive, hubAgents, boardList, boardCounts,
+    hubUnread, hubRead, systemStatus, hubArchive, hubAgents, boardList, boardCounts, askCounts, dashboard,
     boardGet, boardSave, boardNote, boardDelete, boardBlock, hubActivity, hubSpawn, hubSpawnTeam,
     hubAgentStop, hubAgentRemove, hubAgentInterrupt, hubAgentInputMode, hubAgentSetTeam, hubAgentRestart, hubAgentFork, hubAgentRename,
     hubTeamRestart, hubTeamRemove, registryList, registrySave, registryDelete, globalPromptGet,
@@ -794,7 +801,7 @@ export const RPC_KIND = {
   hubMsgArchive: 'write', hubMsgRestore: 'write', hubMsgPurge: 'write',
   hubRooms: 'read', hubUnread: 'read', hubRead: 'write', systemStatus: 'read',
   hubArchive: 'write', hubAgents: 'read',
-  boardList: 'read', boardCounts: 'read', boardGet: 'read',
+  boardList: 'read', boardCounts: 'read', askCounts: 'read', dashboard: 'read', boardGet: 'read',
   boardSave: 'write', boardNote: 'write', boardDelete: 'write', boardBlock: 'write',
   hubActivity: 'read', hubSpawn: 'write', hubSpawnTeam: 'write',
   hubAgentStop: 'write', hubAgentRemove: 'write', hubAgentInterrupt: 'write', hubAgentInputMode: 'write', hubAgentSetTeam: 'write',

@@ -197,6 +197,17 @@ impl Store {
         rows.collect::<Result<Vec<_>, _>>().map_err(|e| format!("read asks: {e}"))
     }
 
+    /// Every room's OPEN asks in one grouped read (board #108, the Board
+    /// sidebar's chip): `(room, count)`, rooms with none absent.
+    pub fn ask_open_counts(&self) -> Result<Vec<(String, i64)>, String> {
+        let mut stmt = self
+            .conn
+            .prepare("SELECT m.room, COUNT(*) FROM hub_asks a JOIN hub_msgs m ON m.seq = a.seq WHERE a.state = 'open' GROUP BY m.room")
+            .map_err(|e| format!("prepare ask counts: {e}"))?;
+        let rows = stmt.query_map([], |r| Ok((r.get(0)?, r.get(1)?))).map_err(|e| format!("query ask counts: {e}"))?;
+        rows.collect::<Result<Vec<_>, _>>().map_err(|e| format!("read ask counts: {e}"))
+    }
+
     /// Close an ask: append the closing message under `ask_close_id` and move
     /// the state off `open`, both or neither. A close that finds the ask
     /// already closed (or its closing id taken) writes nothing and returns the
@@ -379,6 +390,23 @@ mod tests {
         open_one(&mut s, "proj:a", "q1");
         assert_eq!(s.hub_delete("proj:a", &["q1".to_string()]).unwrap(), 1);
         assert!(s.ask_list("proj:a", true).unwrap().is_empty());
+    }
+
+    /// Board #108: one grouped read of every room's open asks; closed ones
+    /// do not count, a room with none is absent.
+    #[test]
+    fn open_asks_are_counted_per_room_in_one_read() {
+        let mut s = Store::open_memory().unwrap();
+        open_one(&mut s, "proj:a", "a1");
+        let seq = open_one(&mut s, "proj:a", "a2").seq;
+        open_one(&mut s, "proj:b", "b1");
+        open_one(&mut s, "proj:c", "c1");
+        s.ask_close(&answer(seq, None, "x"), 200).unwrap();
+        let c3 = s.ask_list("proj:c", false).unwrap()[0].seq;
+        s.ask_close(&answer(c3, None, "y"), 201).unwrap();
+        let mut counts = s.ask_open_counts().unwrap();
+        counts.sort();
+        assert_eq!(counts, vec![("proj:a".to_string(), 1), ("proj:b".to_string(), 1)]);
     }
 
     #[test]

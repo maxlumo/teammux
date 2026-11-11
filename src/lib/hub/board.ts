@@ -108,6 +108,10 @@ export function rebaseDraft(
 import type { BoardCountRow } from '../core/ws.ts';
 import { stateIsLive, HUMAN } from './hub.ts';
 import type { BackendCatalog } from '../core/agents.ts';
+import { roomOf } from '../projects/projects.ts';
+
+/** The client's one room rule, re-exported for the Board (board #108). */
+export { roomOf };
 
 export const BOARD_STATUSES = ['todo', 'doing', 'review', 'done'] as const;
 
@@ -145,11 +149,14 @@ export function applyCounts(
 /** The sidebar's filter: only projects whose board HAS issues. Absence and
  * total agree by construction (countsOf/the server both refuse zero rows),
  * but the check is total>0 so a defensive zero row could never render. */
-export function visibleBoards<T extends { project: { session: string } }>(
+export function visibleBoards<T extends { project: { session: string; room?: string } }>(
   rows: T[],
   counts: Record<string, BoardCountRow>,
+  asks: Record<string, number> = {},
 ): T[] {
-  return rows.filter((r) => (counts[r.project.session]?.total ?? 0) > 0);
+  // Board #108: an empty board with OPEN ASKS is listed too, or its asks
+  // would have no row to show on (the asks are keyed by the project's room).
+  return rows.filter((r) => (counts[r.project.session]?.total ?? 0) > 0 || (asks[roomOf(r.project)] ?? 0) > 0);
 }
 
 /** The page-head's name lookup runs over the FULL project list, never the

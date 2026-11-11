@@ -38,8 +38,8 @@
   import { feedbackPosition } from '../ui/feedback-position.ts';
   import { copyText } from '../core/clipboard.ts';
   import { scheduleCompletion } from '../ui/feedback-lifetime.ts';
-  import { BOARD_AGREEMENT, BOARD_BLOCKS, BOARD_DISPATCH, lacksCap } from '../core/login-caps.ts';
-  import { draftOf, draftDirty, draftValid, draftPatch, isSubmitChord, rebaseDraft, issueRef, countsOf, applyCounts, visibleBoards, boardTitle, chipCols, assigneeView, rememberBackends } from './board.ts';
+  import { BOARD_AGREEMENT, BOARD_BLOCKS, BOARD_DISPATCH, DASHBOARD, lacksCap } from '../core/login-caps.ts';
+  import { draftOf, draftDirty, draftValid, draftPatch, isSubmitChord, rebaseDraft, issueRef, countsOf, applyCounts, visibleBoards, roomOf, boardTitle, chipCols, assigneeView, rememberBackends } from './board.ts';
   import { messageActsSet, messageActsCopyLanded, messageActsCopyFailed, messageActsExpired, MESSAGE_ACTS_IDLE, type MessageActsState } from './message-actions.ts';
   import { scrollFade } from '../core/scrollFade.ts';
   import { flip } from 'svelte/animate';
@@ -60,7 +60,7 @@
   const serverId = guardOwner.id;
   const catalog = scope.state.backends;
   const backendIcon = catalog.icon;
-  const { boardList, boardGet, boardSave, boardNote, boardDelete, boardBlock, boardCounts, projectList, hubAgents, hubRooms } = guardOwner.api;
+  const { boardList, boardGet, boardSave, boardNote, boardDelete, boardBlock, boardCounts, askCounts, projectList, hubAgents, hubRooms } = guardOwner.api;
   /** The capabilities of THIS server's current authenticated socket (board
    * #377): `undefined` while its login has not answered (or while it is being
    * redialled), `[]` for an older server that announced none. Observed, not
@@ -286,7 +286,11 @@
   // (create/delete below) re-filters without waiting for any poll.
   let allProjects = $state<ProjectRow[]>([]);
   let countsMap = $state<Record<string, BoardCountRow>>({});
-  const projects = $derived(visibleBoards(allProjects, countsMap));
+  /** Open asks per project room (board #108), from `hub_ask_counts` when the
+   * server announces `dashboard`. A failed read keeps the last map: "could
+   * not ask" is never "no asks". A server known to lack the cap has none. */
+  let askMap = $state<Record<string, number>>({});
+  const projects = $derived(visibleBoards(allProjects, countsMap, askMap));
   /** The list's own state for the union (P1-C4). A Board's list is TWO
    * required reads — the projects AND the per-board counts that decide which
    * boards exist (an empty board is hidden, board #39). There is ONE counts
@@ -321,22 +325,30 @@
       // handler — an unhandled rejection from a member that now refreshes
       // while hidden (#357).
       const ask = <T,>(f: () => Promise<T>): Promise<T> => (async () => f())();
-      const [r, rooms, bc] = await Promise.all([
+      const asksCapable = Array.isArray(loginCaps) && loginCaps.includes(DASHBOARD);
+      const [r, rooms, bc, ac] = await Promise.all([
         ask(() => projectList()),
         ask(() => hubRooms()).catch(() => ({ rooms: {} })),
         ask(() => boardCounts()).catch(() => null),
+        asksCapable ? ask(() => askCounts()).catch(() => null) : Promise.resolve(lacksCap(loginCaps, DASHBOARD) ? { counts: {} } : null),
       ]);
       if (request !== projectReadSequence) return;
       // Counts did not answer: flags only. The map, the rows and the clock stay
       // as last confirmed ("could not ask" is not "every board is empty").
       if (!bc) { listFailed = true; return; }
+      // Board #108 (validator, round 1): on a server that announces
+      // `dashboard` the ask counts are a REQUIRED read like the board counts:
+      // a failed one keeps everything as last confirmed and mutes the row,
+      // and a first one that failed is not an answer (no asks is not "none").
+      if (asksCapable && !ac) { listFailed = true; return; }
       talkMap = rooms.rooms ?? {};
       allProjects = sortRows((r.projects ?? []).filter((row) => !row.project.archived), talkMap);
       countsMap = bc.counts ?? {};
+      if (ac) askMap = ac.counts ?? {};
       completeOnce = true; listFailed = false;
       // No session to follow: land on the first NON-EMPTY board — the ones
       // the sidebar actually shows (board #39).
-      if (!cur) cur = visibleBoards(allProjects, countsMap)[0]?.project.session ?? '';
+      if (!cur) cur = visibleBoards(allProjects, countsMap, askMap)[0]?.project.session ?? '';
     } catch {
       /* keep the last list — "could not ask" is not "there is nobody" */
       if (request === projectReadSequence) listFailed = true;
@@ -358,7 +370,7 @@
   // tree. The union is read-only to this Board beyond its own slice.
   $effect(() => {
     if (!union) return;
-    union.source.publish(guardOwner, serverId, { rows: allProjects, talk: talkMap, counts: countsMap, answered: completeOnce, failed: listFailed });
+    union.source.publish(guardOwner, serverId, { rows: allProjects, talk: talkMap, counts: countsMap, asks: askMap, answered: completeOnce, failed: listFailed });
   });
   $effect(() => () => { union?.source.withdraw(guardOwner); });
   /** The sidebar's list: in Aggregate every included server's boards merged
@@ -368,8 +380,8 @@
    * template either way. */
   const unionList = $derived(union ? union.source.rows(union.included) : null);
   const sideRows = $derived<BoardUnionRow[]>(unionList
-    ? unionList.rows.filter((r) => (r.slice.counts[r.item.project.session]?.total ?? 0) > 0)
-    : projects.map((p) => ({ serverId, item: p, ref: sessionRef(serverId, p.project.session), key: refKey(sessionRef(serverId, p.project.session)), tag: null, slice: { rows: allProjects, talk: talkMap, counts: countsMap, answered: completeOnce, failed: listFailed } })));
+    ? unionList.rows.filter((r) => visibleBoards([r.item], r.slice.counts, r.slice.asks).length > 0)
+    : projects.map((p) => ({ serverId, item: p, ref: sessionRef(serverId, p.project.session), key: refKey(sessionRef(serverId, p.project.session)), tag: null, slice: { rows: allProjects, talk: talkMap, counts: countsMap, asks: askMap, answered: completeOnce, failed: listFailed } })));
   const curKey = $derived(refKey(sessionRef(serverId, cur)));
   const missingRows = $derived(unionList ? (union?.included ?? []).filter((s) => unionList.missing.includes(s.id)) : []);
   const unavailableRows = $derived(unionList ? (union?.included ?? []).filter((s) => unionList.unavailable.includes(s.id)) : []);
@@ -1149,6 +1161,18 @@
             </span>
             {#if r.tag}<span class="p-source"><ServerTag name={r.tag} /></span>{/if}
             <span class="side-wins grid" style:grid-template-columns={`repeat(${cols}, minmax(0, 1fr))`}>
+              <!-- Board #108: the open asks LEAD the count line as their own
+                   full-width row, only when there are some (measured: a fifth
+                   cell in the 2-column grid would lay out 2+2+1). No status
+                   dot: an ask is not a board status, and an accent dot read as
+                   a fifth status beside Doing's (validator, round 1); the count
+                   wears the unread ink instead. -->
+              {#if (r.slice.asks[roomOf(p.project)] ?? 0) > 0}
+                <span class="side-win asks">
+                  <span class="side-win-name">{t('boardAsks')}</span>
+                  <span class="b-count side-unread">{r.slice.asks[roomOf(p.project)]}</span>
+                </span>
+              {/if}
               {#each STATUSES as st (st)}
                 <span class="side-win">
                   <span class="side-win-dot" style:background={countColor(st)}></span>

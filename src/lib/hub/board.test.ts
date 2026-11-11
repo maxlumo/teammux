@@ -263,3 +263,25 @@ test('the submit chord is Cmd or Ctrl + Enter, never a bare/Shift Enter and neve
   assert.equal(k({ metaKey: true, isComposing: true }), false, 'the Enter that commits an IME candidate is not a submit');
   assert.equal(k({ ctrlKey: true, isComposing: true }), false);
 });
+
+test('visibleBoards also lists an EMPTY board that has open asks (board #108)', async () => {
+  const { visibleBoards } = await import('./board.ts');
+  const rows = [
+    { project: { session: 'a', name: 'A', room: 'proj:a' } },
+    { project: { session: 'b', name: 'B', room: 'proj:b' } },
+    { project: { session: 'c', name: 'C', room: 'proj:c' } },
+  ];
+  const counts = { a: { todo: 1, doing: 0, review: 0, done: 0, total: 1 } };
+  // b has no issues but an open ask: listed, or its ask is invisible.
+  assert.deepEqual(visibleBoards(rows, counts, { 'proj:b': 2 }).map((r) => r.project.session), ['a', 'b']);
+  assert.deepEqual(visibleBoards(rows, counts, { 'proj:b': 0 }).map((r) => r.project.session), ['a'], 'zero asks hides as before');
+  assert.deepEqual(visibleBoards(rows, counts).map((r) => r.project.session), ['a'], 'no ask map: today\u2019s rule');
+});
+
+test('roomOf is the client s one room rule, the server s: recorded, empty, missing (board #108)', async () => {
+  const { roomOf } = await import('./board.ts');
+  assert.equal(roomOf({ session: 'a', room: 'proj:old' }), 'proj:old', 'a recorded room is kept (as across a rename)');
+  assert.equal(roomOf({ session: 'a', room: '' }), 'proj:a', 'an EMPTY recorded room is no room, as the server maps it');
+  assert.equal(roomOf({ session: 'a' }), 'proj:a');
+  assert.equal(roomOf({ session: 'a', room: null }), 'proj:a');
+});

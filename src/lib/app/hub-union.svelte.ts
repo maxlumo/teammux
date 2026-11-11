@@ -125,9 +125,12 @@ export function createHubUnion(): HubUnion {
  * and `visibleBoards` filters by them (board #39: an empty board is hidden). */
 export interface BoardSlice extends ProjectsSlice {
   counts: Record<string, BoardCountRow>;
+  /** Open asks per project ROOM (board #108); `{}` from a server without the
+   * `dashboard` cap. */
+  asks: Record<string, number>;
 }
 export type BoardUnionRow = ProjectsUnionRow<BoardSlice>;
 export type BoardUnion = ProjectsUnion<BoardSlice>;
 export function createBoardUnion(): BoardUnion {
-  return createProjectsUnion<BoardSlice>({ rows: [], talk: {}, counts: {}, answered: false, failed: false });
+  return createProjectsUnion<BoardSlice>({ rows: [], talk: {}, counts: {}, asks: {}, answered: false, failed: false });
 }

@@ -52,6 +52,7 @@
 // so `ensurePermission` asks whenever it is not `granted`; and it settles
 // asynchronously at startup, so a caption read at mount may lag one tick.
 import { systemLine, statusNote, boardLine, newsKind, type NewsKind } from './hub.ts';
+import { roomOf } from '../projects/projects.ts';
 
 export type FeedMsg = { id?: number | string; ts?: number; from?: string; body?: string; to?: unknown };
 export type NotifyState = { seen: Set<string>; lastCueAt: number };
@@ -109,7 +110,7 @@ export function roomProjectName(
   rows: readonly { project: { name?: string; session?: string; room?: string | null } }[],
   room: string,
 ): string {
-  const hit = rows.find((r) => (r.project.room ?? `proj:${r.project.session ?? ''}`) === room);
+  const hit = rows.find((r) => roomOf(r.project) === room);
   return hit?.project.name || room.replace(/^proj:/u, '');
 }
 

@@ -602,6 +602,25 @@ impl Store {
         Ok(FilesPage { files, next, scanned })
     }
 
+    /// `room`'s status-shaped rows, NEWEST FIRST, handed to `each` until it
+    /// answers false (board #108: no window; the caller stops once it has what
+    /// it wants). The marker is matched here only to narrow the read;
+    /// `rooms::status_text` is the one parser.
+    pub fn hub_status_rows(&self, room: &str, mut each: impl FnMut(String, String, i64) -> bool) -> Result<(), String> {
+        let mut stmt = self
+            .conn
+            .prepare("SELECT sender, body, ts FROM hub_msgs WHERE room = ?1 AND (body LIKE '[tmm status %' OR body LIKE '[tmm done]%') ORDER BY seq DESC")
+            .map_err(|e| format!("prepare status rows: {e}"))?;
+        let mut rows = stmt.query(rusqlite::params![room]).map_err(|e| format!("query status rows: {e}"))?;
+        while let Some(r) = rows.next().map_err(|e| format!("read status rows: {e}"))? {
+            let row = (r.get(0).map_err(|e| e.to_string())?, r.get(1).map_err(|e| e.to_string())?, r.get(2).map_err(|e| e.to_string())?);
+            if !each(row.0, row.1, row.2) {
+                break;
+            }
+        }
+        Ok(())
+    }
+
     /// Newest message timestamp (ms) per room — what orders the project list.
     pub fn hub_room_latest(&self) -> Result<Vec<(String, i64)>, String> {
         let mut stmt = self

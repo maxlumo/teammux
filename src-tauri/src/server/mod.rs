@@ -51,7 +51,7 @@ pub type NotificationHub = Arc<AgentNotificationHub>;
 /// needs one refuses the write instead of saving a label nobody acts on. The
 /// phone's server has no Hub, so it announces none.
 #[cfg(not(any(target_os = "android", target_os = "ios")))]
-pub(crate) const LOGIN_CAPS: &[&str] = &["board_dispatch", "board_notify", "spawn_join", "agent_team", "hub_files", "mcp_masked", "backends_check", "board_blocks", "board_agreement", "command_when_idle", "omp_tools", "asks"];
+pub(crate) const LOGIN_CAPS: &[&str] = &["board_dispatch", "board_notify", "spawn_join", "agent_team", "hub_files", "mcp_masked", "backends_check", "board_blocks", "board_agreement", "command_when_idle", "omp_tools", "asks", "dashboard"];
 #[cfg(any(target_os = "android", target_os = "ios"))]
 pub(crate) const LOGIN_CAPS: &[&str] = &[];
 
@@ -642,6 +642,9 @@ mod exited_hold_tests;
 
 #[cfg(all(test, not(any(target_os = "android", target_os = "ios"))))]
 mod ask_tests;
+
+#[cfg(all(test, not(any(target_os = "android", target_os = "ios"))))]
+mod dashboard_tests;
 
 #[cfg(all(test, not(any(target_os = "android", target_os = "ios"))))]
 mod picker_hold_tests;

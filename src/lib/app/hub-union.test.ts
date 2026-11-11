@@ -95,8 +95,8 @@ test('a row carries ITS server s catalog: the slice s icon, not the focus s (P2-
 test('the Board s union is the SAME merge (#357): its rows ride each server s clock, its slice keeps ITS server s counts, and answered/failed behave as the Hub s', () => {
   const u = createBoardUnion();
   const cnt = (total: number) => ({ todo: total, doing: 0, review: 0, done: 0, total });
-  const board = (rows: ProjectRow[], counts: Record<string, ReturnType<typeof cnt>>, talk: Record<string, number> = {}, state: { answered?: boolean; failed?: boolean } = {}) =>
-    ({ rows, talk, counts, answered: state.answered ?? true, failed: state.failed ?? false });
+  const board = (rows: ProjectRow[], counts: Record<string, ReturnType<typeof cnt>>, talk: Record<string, number> = {}, state: { answered?: boolean; failed?: boolean } = {}, asks: Record<string, number> = {}) =>
+    ({ rows, talk, counts, asks, answered: state.answered ?? true, failed: state.failed ?? false });
   const ra = { id: 'ra' }, rb = { id: 'rb' };
   u.publish(ra, 'a', board([row('app', true)], { app: cnt(2) }, { 'proj:app': 100 }));
   assert.deepEqual(u.rows([{ id: 'a', name: 'alpha' }]).rows.map((x) => x.tag), [null], 'one server: untagged, the server s own list');
@@ -105,6 +105,10 @@ test('the Board s union is the SAME merge (#357): its rows ride each server s cl
   assert.deepEqual(r.rows.map((x) => `${x.tag}:${x.item.project.name}`), ['beta:ops', 'alpha:app', 'beta:app'], 'merged by the one rule, each head on its own server s clock');
   assert.equal(r.rows[1]!.slice.counts.app!.total, 2, 'a row reads ITS server s counts');
   assert.equal(r.rows[2]!.slice.counts.app!.total, 1, 'the same-named board on B reads B s');
+  // Board #108: a row reads ITS server's open asks too (same-named rooms on two servers).
+  u.publish(rb, 'b', board([row('ops', true), row('app', true)], { ops: cnt(3), app: cnt(1) }, { 'proj:ops': 900, 'proj:app': 5 }, {}, { 'proj:app': 4 }));
+  const ra2 = u.rows(two).rows;
+  assert.deepEqual(ra2.map((x) => `${x.tag}:${x.item.project.name}:${x.slice.asks['proj:app'] ?? 0}`), ['beta:ops:4', 'alpha:app:0', 'beta:app:4'], 'asks are each server s own');
   // B has not answered: missing, not an empty list.
   u.publish(rb, 'b', board([], {}, {}, { answered: false }));
   assert.deepEqual(u.rows(two).missing, ['b']);

@@ -39,7 +39,7 @@
   import { onDestroy, untrack, tick as settled } from 'svelte';
   import { t } from '../core/i18n.svelte.ts';
   import { firstReport, keepAvailable, settleAvailability, teamUnavailableText, unavailableText } from './backends-view.ts';
-  import { sortRows } from '../projects/projects.ts';
+  import { roomOf, sortRows } from '../projects/projects.ts';
   import { alertOf } from './notify-centre.svelte.ts';
   import HubSearch from './HubSearch.svelte';
   import { createHubSearch } from './hub-search.svelte.ts';
@@ -1063,7 +1063,7 @@
   // only while the mark it was asked with is still the room's mark: a newer
   // mark means a fresher question is already on its way.
   let roomUnread = $state({});      // session -> {count, first_seq, last_seq}
-  const roomKey = (r) => r.project.room ?? `proj:${r.project.session}`;
+  const roomKey = (r) => roomOf(r.project);
   async function refreshUnread(sessions = rows.map((r) => r.project.session)) {
     const asked = {};
     const marks = {};

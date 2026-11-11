@@ -751,6 +751,11 @@ button:disabled {
    3+1). Chat's agent chips keep the bare flex-wrap: their count varies, so
    a grid would pad ghosts. */
 .side-wins.grid { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); }
+/* Board #108: the open-ask chip leads the count line as its own full-width row,
+   with no status dot (an ask is not a status); its count wears the unread atom
+   (.side-unread), placed beside its label instead of pushed to the row's end. */
+.side-wins.grid > .side-win.asks { grid-column: 1 / -1; }
+.side-win.asks .side-unread { margin-left: 0; }
 /* .mirror: the measurement ghost behind that override (Board.svelte renders
    one) — a real row's structure IN FLOW (so its width IS a row's width, no
    positioned-ancestor guesswork) at zero height, invisible and inert, chips

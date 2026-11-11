@@ -358,6 +358,11 @@ pub fn close(c: &super::store::asks::AskClose<'_>) -> Result<super::store::asks:
     Ok(out)
 }
 
+/// Every room's open-ask count, one grouped read (board #108).
+pub fn open_counts() -> Result<Vec<(String, i64)>, String> {
+    super::with_store(|s| s.ask_open_counts())
+}
+
 pub fn set_delivery(seq: i64, delivery: &str) -> Result<(), String> {
     super::with_store(|s| s.ask_set_delivery(seq, delivery))
 }

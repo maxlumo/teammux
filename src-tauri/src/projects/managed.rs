@@ -825,6 +825,24 @@ pub fn deliver_chat_line_found(session: &str, target_name: &str, line: &str) -> 
 /// expanded into two addresses, one of them a broadcast). A routing word
 /// (`all`, `human`) is never an expansion result, whatever is on disk.
 pub fn managed_names_in(workspace: &str) -> Result<Vec<String>, String> {
+    managed_names_with(workspace, false, &[], &managed_state)
+}
+
+/// `managed_names_in`, but an entry whose marker cannot be READ is an error,
+/// not "not managed" (board #108 round 5: a count must not drop a home it
+/// could not look at; the readers keep the fail-open answer).
+pub fn managed_names_checked(workspace: &str) -> Result<Vec<String>, String> {
+    managed_names_with(workspace, true, &[], &managed_state)
+}
+
+/// `managed_names_checked` for a caller that has ALREADY observed some homes
+/// (board #108: the roster fold read the live windows' markers): those names
+/// are skipped, never read again, and the marker read is the caller's.
+pub fn managed_names_checked_except(workspace: &str, observed: &[String], marker: &dyn Fn(&str, &str) -> ManagedState) -> Result<Vec<String>, String> {
+    managed_names_with(workspace, true, observed, marker)
+}
+
+fn managed_names_with(workspace: &str, strict: bool, skip: &[String], marker: &dyn Fn(&str, &str) -> ManagedState) -> Result<Vec<String>, String> {
     let agents = std::path::Path::new(workspace).join(".tmm").join("agents");
     #[cfg(test)]
     if read_seam::fail_this(&agents) {
@@ -839,7 +857,16 @@ pub fn managed_names_in(workspace: &str) -> Result<Vec<String>, String> {
     for entry in entries {
         let entry = entry.map_err(|e| format!("the project's agents ({}) cannot be read: {e}", agents.display()))?;
         let Some(name) = entry.file_name().to_str().map(str::to_string) else { continue };
-        if !crate::address::is_routing_word(&name) && is_managed_in(Some(workspace), &name) {
+        if crate::address::is_routing_word(&name) || skip.contains(&name) {
+            continue;
+        }
+        if strict {
+            match marker(workspace, &name) {
+                ManagedState::Managed => out.push(name),
+                ManagedState::Plain => {}
+                ManagedState::Unknown(e) => return Err(format!("the project's agent home '{name}' cannot be read: {e}")),
+            }
+        } else if is_managed_in(Some(workspace), &name) {
             out.push(name);
         }
     }

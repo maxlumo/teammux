@@ -47,6 +47,11 @@ export const BOARD_AGREEMENT = 'board_agreement';
  * own defaults, so the switch is offered, and a save carrying it sent, only when announced. */
 export const OMP_TOOLS = 'omp_tools';
 
+/** `hub_dashboard` and `hub_ask_counts` exist (board #108): a project's one
+ * derived summary and every board's open-ask count. Without it the Board
+ * shows no ask chip and never asks. */
+export const DASHBOARD = 'dashboard';
+
 /** What an older server lacking a capability means for the person, per cap. */
 const TOO_OLD: Record<string, string> = {
   [BOARD_DISPATCH]: 'This server is older than the app. Update the server to assign.',

@@ -28,6 +28,9 @@ pub(super) fn project_room(session: &str) -> String {
 /// The ask RPCs (board #106).
 #[cfg(not(any(target_os = "android", target_os = "ios")))]
 pub(super) mod asks;
+/// The dashboard read (board #108).
+#[cfg(not(any(target_os = "android", target_os = "ios")))]
+pub(super) mod dashboard;
 
 /// The hub dispatcher proper (board #146): every arm is a `Result`, so a
 /// missing param or a store error is a `?` with its wire code already chosen
@@ -131,6 +134,11 @@ fn dispatch_hub(req: &Request, notifications: Option<&crate::agent_notifications
     // all-rooms reads; same authenticated reader as everything here.
     if req.method == "hub_board_counts" {
         return Ok(crate::projects::board_counts().map_err(RpcError::Internal)?);
+    }
+    // Every room's open-ask count in one grouped read (board #108): about
+    // every room, like the board counts, so before the session gate.
+    if req.method == "hub_ask_counts" {
+        return dashboard::ask_counts();
     }
     let asked = param(p, "session")?;
     // Resolve the caller's session name to the project's CURRENT one, ONCE, here.
@@ -802,6 +810,14 @@ fn dispatch_hub(req: &Request, notifications: Option<&crate::agent_notifications
         "hub_ask_dismiss" => asks::dismiss(session, &room, p, &|s, to, body, room, seq, id, home| deliver_to(s, "human", body, room, Some(seq), id, Recipient { name: to, home })),
         "hub_ask_withdraw" => asks::withdraw(session, &room, p),
         "hub_ask_list" => asks::list(session, &room, p),
+        // The dashboard read (board #108): the roster is the ONE fold
+        // `hub_agents` answers with, read once here.
+        "hub_dashboard" => {
+            // Session, workspace AND room from the fold's one project row
+            // (round 5); the dispatcher's `room` is not used here.
+            let f = fold(session, crate::projects::project_for_session(session), crate::tmux::list_panes);
+            dashboard::dashboard(session, &f.room, &f.roster, f.workspace.as_deref())
+        }
 
         // An existing agent's RUNTIME team (board #384): the Hub's drag of a
         // card onto a team, "Move to team" / "Leave team", `tmm agent team`.
@@ -3061,15 +3077,104 @@ pub(super) fn fire_wake(id: i64) {
 /// <workspace>/.tmm/agents/<window_name>/ exists iff spawn materialized it.
 #[cfg(not(any(target_os = "android", target_os = "ios")))]
 fn agent_states(session: &str) -> serde_json::Value {
+    roster(session).0
+}
+
+/// What the dashboard builds on, all from the fold's ONE project row (board
+/// #108 round 5): the roster, its workspace, and its room, by
+/// `session_room_checked`'s rule (the recorded room, else `proj:<session>`),
+/// never the dispatcher's separately resolved room.
+#[cfg(not(any(target_os = "android", target_os = "ios")))]
+pub(super) struct Fold {
+    pub(super) roster: serde_json::Value,
+    pub(super) workspace: Option<String>,
+    pub(super) room: String,
+}
+
+/// The roster and the workspace it was read with: ONE project read for the
+/// fold and whoever builds on it (board #108 round 3: the dashboard's stopped
+/// count uses this workspace, never a second read that could disagree).
+#[cfg(not(any(target_os = "android", target_os = "ios")))]
+fn roster(session: &str) -> (serde_json::Value, Option<String>) {
+    let f = fold(session, crate::projects::project_for_session(session), crate::tmux::list_panes);
+    (f.roster, f.workspace)
+}
+
+/// How a home's marker is read by the fold: once per window (round 5
+/// amendment A). Injected in tests.
+#[cfg(not(any(target_os = "android", target_os = "ios")))]
+pub(super) type MarkerRead<'a> = &'a dyn Fn(&str, &str) -> crate::projects::managed::ManagedState;
+
+/// `roster_with` keeping the row's room too.
+#[cfg(not(any(target_os = "android", target_os = "ios")))]
+pub(super) fn fold(
+    session: &str,
+    project: Result<Option<crate::projects::store::Project>, String>,
+    list_panes: impl FnOnce(&str) -> Result<Vec<crate::tmux::TmuxPane>, String>,
+) -> Fold {
+    fold_with(session, project, list_panes, &crate::projects::managed::managed_state)
+}
+
+/// `fold` with the marker read injected; the dashboard's stopped walk uses
+/// the same reader (board #108 round 5).
+#[cfg(not(any(target_os = "android", target_os = "ios")))]
+pub(super) fn fold_with(
+    session: &str,
+    project: Result<Option<crate::projects::store::Project>, String>,
+    list_panes: impl FnOnce(&str) -> Result<Vec<crate::tmux::TmuxPane>, String>,
+    marker: MarkerRead<'_>,
+) -> Fold {
+    let room = match &project {
+        Ok(Some(p)) if !p.room.is_empty() => p.room.clone(),
+        _ => format!("proj:{session}"),
+    };
+    let (roster, workspace) = roster_with_markers(session, project, list_panes, marker);
+    Fold { roster, workspace, room }
+}
+
+/// The roster fold with its project read and its pane lister injected
+/// (board #108 rounds 2 and 3), the seam `deliver_mentions_with` has. Its
+/// answer says whether the observation is conclusive, `panes`: `ok`, `absent`
+/// (tmux says the session is not there: a real "no live window") or
+/// `failed` (tmux could not be asked, OR the project could not be read, so no
+/// row's `managed` is known: the rows are not a reading). `hub_agents`'
+/// clients ignore it; `hub_dashboard` refuses on `failed`, so "could not ask"
+/// never reads as "nobody is live".
+#[cfg(not(any(target_os = "android", target_os = "ios")))]
+pub(super) fn roster_with(
+    session: &str,
+    project: Result<Option<crate::projects::store::Project>, String>,
+    list_panes: impl FnOnce(&str) -> Result<Vec<crate::tmux::TmuxPane>, String>,
+) -> (serde_json::Value, Option<String>) {
+    roster_with_markers(session, project, list_panes, &crate::projects::managed::managed_state)
+}
+
+/// `roster_with` with the marker read injected too (round 5 amendment).
+#[cfg(not(any(target_os = "android", target_os = "ios")))]
+pub(super) fn roster_with_markers(
+    session: &str,
+    project: Result<Option<crate::projects::store::Project>, String>,
+    list_panes: impl FnOnce(&str) -> Result<Vec<crate::tmux::TmuxPane>, String>,
+    marker: MarkerRead<'_>,
+) -> (serde_json::Value, Option<String>) {
     let names = crate::projects::names::names(session);
     use crate::projects::{agents, telemetry};
 
-    let ws = crate::projects::project_for_session(session)
-        .ok()
-        .flatten()
-        .map(|p| p.path);
-    let listed = crate::tmux::list_panes(session);
+    // A project whose CURRENT session is not the one listed means the door's
+    // resolution of a previous name was lost (board #108 round 4): tmux's
+    // answer would be about the wrong session, so the observation is none.
+    let project_read = matches!(&project, Ok(None)) || matches!(&project, Ok(Some(p)) if p.session == session);
+    let ws = project.ok().flatten().map(|p| p.path);
+    let listed = list_panes(session);
     let read_ok = listed.is_ok();
+    // Why an observation is not conclusive, named (round 5 amendment C).
+    let mut inconclusive: Option<String> = None;
+    let panes_read = match &listed {
+        _ if !project_read => { inconclusive = Some("its project could not be read".into()); "failed" }
+        Ok(_) => "ok",
+        Err(e) if crate::tmux::session_confirmed_absent(e) => "absent",
+        Err(_) => { inconclusive = Some("its panes could not be listed".into()); "failed" }
+    };
     let panes = listed.unwrap_or_default();
     let activity: std::collections::HashMap<usize, u64> =
         crate::tmux::window_activity_times(session).into_iter().collect();
@@ -3088,6 +3193,23 @@ fn agent_states(session: &str) -> serde_json::Value {
             .or_insert(p);
     }
     let live: Vec<String> = windows.values().map(|p| p.window_name.clone()).collect();
+    // A window whose home marker cannot be READ has no known `managed`
+    // (round 5): the readers keep the fail-open answer, the observation
+    // says it is not conclusive.
+    // ONE marker observation per window (amendment A): it decides both whether
+    // the reading is conclusive and every row's membership; nothing reads the
+    // marker again.
+    use crate::projects::managed::ManagedState;
+    let home: std::collections::HashMap<String, ManagedState> = windows
+        .values()
+        .map(|p| (p.window_name.clone(), ws.as_deref().map_or(ManagedState::Plain, |w| marker(w, &p.window_name))))
+        .collect();
+    if let Some(name) = home.iter().find(|(_, m)| matches!(m, ManagedState::Unknown(_))).map(|(n, _)| n.clone()) {
+        if inconclusive.is_none() {
+            inconclusive = Some(format!("the home marker of '{name}' could not be read"));
+        }
+    }
+    let panes_read = if inconclusive.is_some() { "failed" } else { panes_read };
     // Only a listing that succeeded says which windows are gone: a failed
     // read would otherwise retire every window's records and report every
     // held line undelivered (board #404 review).
@@ -3105,8 +3227,13 @@ fn agent_states(session: &str) -> serde_json::Value {
         .values()
         .map(|p| {
             let agent = agents::detect_pane(ws.as_deref(), p);
-            let st = crate::projects::exited::shown(session, ws.as_deref(), p, telemetry::derive(session, &p.window_name, activity.get(&p.window).copied().unwrap_or(0)));
-            let managed = agent.is_some() && crate::projects::is_managed_in(ws.as_deref(), &p.window_name);
+            // The membership the fold observed, never read again (round 5).
+            let observed = Some(matches!(home.get(&p.window_name), Some(ManagedState::Managed)));
+            let st = crate::projects::exited::shown_owned(session, ws.as_deref(), p, telemetry::derive(session, &p.window_name, activity.get(&p.window).copied().unwrap_or(0)), observed);
+            // Membership is the marker (amendment B); `managed` keeps its
+            // meaning for hub_agents' clients (a detected agent with a home).
+            let home_managed = matches!(home.get(&p.window_name), Some(ManagedState::Managed));
+            let managed = agent.is_some() && home_managed;
             // What the agent's own status line says: model, context used, effort,
             // branch. There is no API for a CLI's live state, so it is SNIFFED
             // from the last lines of the pane — hence managed agents only (we
@@ -3153,13 +3280,18 @@ fn agent_states(session: &str) -> serde_json::Value {
                 "command": p.current_command,
                 "agent": agent.map(|a| a.backend),
                 "managed": managed,
+                // The home marker alone (board #108): what the dashboard admits by.
+                "home_managed": home_managed,
                 // The configured team this window was started as part of
                 // (board #74) — the Hub groups same-team cards; null = solo.
                 "team": if managed { crate::projects::team_of(ws.as_deref(), &p.window_name) } else { None },
                 // In that team by a JOIN, not by its definition (board #382):
                 // a team restart leaves it as it is, a team stop stops it.
                 "joined": managed && crate::projects::joined_team(ws.as_deref(), &p.window_name).is_some(),
-                "state": if agent.is_some() { st.state.as_str() } else { "shell" },
+                // A managed home's state is the DERIVED one even when its CLI kind
+                // could not be read (round 5 amendment B: the kind is display
+                // only); only a window that is no agent and no home is "shell".
+                "state": if agent.is_some() || home_managed { st.state.as_str() } else { "shell" },
                 "detail": st.detail,
                 // The provider's error text of a `provider_failed` end (board
                 // #39), redacted at the door; absent otherwise.
@@ -3174,7 +3306,7 @@ fn agent_states(session: &str) -> serde_json::Value {
         .collect();
     let stopped_teams = stopped_teams(ws.as_deref(), &live);
     // Every label in the project, stopped agents' included (board #20).
-    serde_json::json!({ "session": session, "agents": rows, "stopped_teams": stopped_teams, "labels": names.labels() })
+    (serde_json::json!({ "session": session, "agents": rows, "stopped_teams": stopped_teams, "labels": names.labels(), "panes": panes_read, "inconclusive": inconclusive }), ws)
 }
 
 /// The team of every agent home whose window is NOT live (board #258): a

@@ -283,6 +283,41 @@ fn board_finished(line: &str) -> bool {
     (after.is_empty() || after.starts_with(" \u{2014}")) && (to == "review" || to == "done")
 }
 
+/// A status row's own words, without its `[tmm status <state>]` marker
+/// (board #108: the dashboard shows an agent's latest status line); `None`
+/// for a body that is not a status note. The one parser, `status_note`'s.
+pub fn status_text(body: &str) -> Option<&str> {
+    status_note(body)?;
+    let rest = match body.strip_prefix("[tmm status ") {
+        Some(r) => r.split_once(']').map(|(_, t)| t)?,
+        None => body.strip_prefix("[tmm done]")?,
+    };
+    Some(rest.trim())
+}
+
+/// Each WANTED sender's newest row in `room` that the one parser accepts:
+/// `{sender: (text, ts)}` (board #108, leader's amended rule). No window: an
+/// old status line still counts however much traffic followed it, and a newer
+/// malformed candidate is skipped, never taken. The read walks newest first
+/// and stops once every wanted sender has one.
+pub fn latest_status(room: &str, wanted: &[String]) -> Result<std::collections::HashMap<String, (String, i64)>, String> {
+    let mut out = std::collections::HashMap::new();
+    if wanted.is_empty() {
+        return Ok(out);
+    }
+    with_store(|s| {
+        s.hub_status_rows(room, |sender, body, ts| {
+            if wanted.contains(&sender) && !out.contains_key(&sender) {
+                if let Some(text) = status_text(&body) {
+                    out.insert(sender, (text.to_string(), ts));
+                }
+            }
+            out.len() < wanted.len()
+        })
+    })?;
+    Ok(out)
+}
+
 /// `[tmm status <word>] text` / `[tmm done] text` with non-empty text → the
 /// state word (TS `statusNote`).
 fn status_note(body: &str) -> Option<&str> {

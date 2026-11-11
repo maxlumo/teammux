@@ -565,8 +565,8 @@ test('the sidebar consumes ONE bulk counts read and reacts to local writes at on
   // The sidebar list is DERIVED through the pure filter: only boards with
   // issues render (total>0), and a local counts change re-filters without
   // waiting for any poll.
-  assert.match(source, /const projects = \$derived\(visibleBoards\(allProjects, countsMap\)\);/u,
-    'the shown rows are derived from the full list + counts');
+  assert.match(source, /const projects = \$derived\(visibleBoards\(allProjects, countsMap, askMap\)\);/u,
+    'the shown rows are derived from the full list + counts (+ open asks, board #108: an empty board with asks is listed)');
   // load() folds the fresh issues into the counts map — create-first appears
   // and delete-last disappears NOW, not at the 20 s poll.
   const load = source.slice(source.indexOf('async function readBoard()'), source.indexOf('let agents ='));
@@ -579,7 +579,7 @@ test('the sidebar consumes ONE bulk counts read and reacts to local writes at on
     'the h1 reads the unfiltered list with the old fallbacks');
   // No session to follow → the first NON-EMPTY board, i.e. the first row the
   // sidebar actually shows.
-  assert.match(source, /if \(!cur\) cur = visibleBoards\(allProjects, countsMap\)\[0\]\?\.project\.session \?\? '';/u,
+  assert.match(source, /if \(!cur\) cur = visibleBoards\(allProjects, countsMap, askMap\)\[0\]\?\.project\.session \?\? '';/u,
     'the default selection is the first visible board');
   // Each row's second line is the four columns in FIXED order, zeros
   // included, wearing the shared chip atoms + the one board status language.
@@ -1015,14 +1015,14 @@ test('the Board s sidebar is the Hub s union, one row template (#357, owner 2026
   // ONE merge: the Board publishes to the generalised projects union, never a
   // second comparator or poller (tenet 9).
   assert.match(source, /import type \{ BoardUnion, BoardUnionRow \} from '\.\.\/app\/hub-union\.svelte\.ts';/u);
-  assert.match(source, /union\.source\.publish\(guardOwner, serverId, \{ rows: allProjects, talk: talkMap, counts: countsMap, answered: completeOnce, failed: listFailed \}\)/u, 'it publishes its own slice, by its runtime — THE counts map as it stands (bulk batches, boardList results and local confirmations all write it), answered only once BOTH reads have answered (reviewer P1-A, R1 on 0feb403e)');
+  assert.match(source, /union\.source\.publish\(guardOwner, serverId, \{ rows: allProjects, talk: talkMap, counts: countsMap, asks: askMap, answered: completeOnce, failed: listFailed \}\)/u, 'it publishes its own slice, by its runtime — THE counts map as it stands (bulk batches, boardList results and local confirmations all write it), answered only once BOTH reads have answered (reviewer P1-A, R1 on 0feb403e)');
   assert.match(source, /if \(!bc\) \{ listFailed = true; return; \}/u, 'a counts failure changes a flag, never the map: it can not read as "no boards"');
   assert.doesNotMatch(source, /complete\?\.|let complete = |complete = \{/u, 'no second, frozen counts snapshot');
   assert.match(source, /\$effect\(\(\) => \(\) => \{ union\?\.source\.withdraw\(guardOwner\); \}\);/u, 'and withdraws it with the tree');
   // The row list: the union filtered by EACH SERVER'S counts, else this server's
   // own boards as single-server entries — never one shape for Aggregate and
   // another for Single.
-  assert.match(source, /unionList\.rows\.filter\(\(r\) => \(r\.slice\.counts\[r\.item\.project\.session\]\?\.total \?\? 0\) > 0\)/u, 'an empty board is hidden by ITS server s counts (board #39)');
+  assert.match(source, /unionList\.rows\.filter\(\(r\) => visibleBoards\(\[r\.item\], r\.slice\.counts, r\.slice\.asks\)\.length > 0\)/u, 'an empty board is hidden by ITS server s counts (board #39), the one visibleBoards rule (board #108: asks list it too)');
   assert.match(source, /: projects\.map\(\(p\) => \(\{ serverId, item: p, ref: sessionRef\(serverId, p\.project\.session\)/u, 'Single: this server s rows, same shape');
   assert.equal(source.match(/\{#each sideRows as r \(r\.key\)\}/gu)?.length, 1, 'ONE row template');
   assert.doesNotMatch(source, /\{#each projects as /u, 'the old per-server loop is gone');
@@ -1084,4 +1084,18 @@ test('the Board head wears the Hub head s Name + tag atom from app.css — no lo
   // #369: the Board's head wears the same ONE fit action as the Hub's (any head with a tag does).
   assert.match(source, /import \{ titleFit \} from '\.\.\/ui\/title-fit\.ts';/u);
   assert.match(source, /use:titleFit=\{\{ active: !narrowVp, key: /u, 'the phone is stacked by its own class: the action is a no-op there');
+});
+
+test('the open-ask chip leads the count line in the chip language (board #108)', () => {
+  // ONE chip species: the same .side-win with its name and count, first
+  // inside the grid, only when the row's server reports
+  // open asks for the project's room.
+  assert.match(source, /\{#if \(r\.slice\.asks\[roomOf\(p\.project\)\] \?\? 0\) > 0\}\s*<span class="side-win asks">\s*<span class="side-win-name">\{t\('boardAsks'\)\}<\/span>\s*<span class="b-count side-unread">/u);
+  // No status dot (round 1: an accent dot read as a fifth status beside
+  // Doing's), the count in the unread ink, an existing token.
+  assert.ok(!/class="side-win asks">\s*<span class="side-win-dot"/u.test(source), 'no dot on the ask chip');
+  assert.match(appCss, /\.side-win\.asks \.side-unread \{ margin-left: 0; \}/u, 'the unread atom, placement only');
+  assert.ok(!/\.side-win\.asks \.b-count \{[^}]*color/u.test(appCss), 'no copied ink: the atom carries it');
+  assert.ok(source.indexOf('class="side-win asks"') < source.indexOf('{#each STATUSES as st (st)}', source.indexOf('class="side-wins grid"')), 'before the four status chips');
+  assert.match(appCss, /\.side-wins\.grid > \.side-win\.asks \{ grid-column: 1 \/ -1; \}/u, 'its own full-width row: never 2+2+1');
 });

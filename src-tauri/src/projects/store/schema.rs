@@ -9,7 +9,7 @@ use super::registry::{DEFAULT_DSH_SYSTEM, DEFAULT_KIMI_SYSTEM, DEFAULT_OMP_SYSTE
 
 /// Bumped when the schema changes; `migrate` is the only place that knows the
 /// steps. Stored in SQLite's own `user_version` pragma.
-const SCHEMA_VERSION: i64 = 40;
+const SCHEMA_VERSION: i64 = 41;
 
 impl Store {
     /// Ensure the durable half of Board editability exists, then
@@ -789,6 +789,13 @@ impl Store {
             // Inside the ladder, foreign keys off (non-negotiable 9).
             self.ensure_delivery_home()?;
         }
+        if version < 41 {
+            // v41 (board #108): an issue knows when it was done, so the
+            // dashboard's Finished · 24 h is read, not parsed out of the
+            // room. Additive, backfilled from the last change; inside the
+            // ladder, foreign keys off (non-negotiable 9).
+            self.ensure_issue_done_at()?;
+        }
         Ok(())
     }
 
@@ -1273,6 +1280,33 @@ mod tests {
         drop(store);
         let store = Store::open(&path).unwrap();
         assert_eq!(store.held_deliveries("s", "w").unwrap().len(), 2, "healed on open");
+    }
+
+    /// v40 -> v41 (board #108): `issues.done_at` appears; a done issue is
+    /// backfilled from its last change (an approximation, said in board.md),
+    /// every other issue reads NULL; the heal floor re-adds it.
+    #[test]
+    fn v40_issues_gain_done_at_backfilled_from_the_last_change() {
+        let scratch = crate::tmux::Scratch::new("store-v41");
+        let path = std::path::Path::new(&scratch.path()).join("state.db");
+        {
+            let store = Store::open(&path).unwrap();
+            store.issue_save("s", None, Some("open"), None, None, None, "human", 100).unwrap();
+            store.issue_save("s", None, Some("shipped"), None, Some("done"), None, "human", 200).unwrap();
+            store.conn.execute_batch("UPDATE issues SET updated_at = 250 WHERE title = 'shipped'; ALTER TABLE issues DROP COLUMN done_at; PRAGMA user_version = 40;").unwrap();
+        }
+        let store = Store::open(&path).unwrap();
+        let v: i64 = store.conn.query_row("PRAGMA user_version", [], |r| r.get(0)).unwrap();
+        assert_eq!(v, SCHEMA_VERSION);
+        assert!(SCHEMA_VERSION >= 41);
+        let rows: Vec<(String, Option<i64>)> = store.conn.prepare("SELECT title, done_at FROM issues ORDER BY project_number").unwrap()
+            .query_map([], |r| Ok((r.get(0)?, r.get(1)?))).unwrap().map(|r| r.unwrap()).collect();
+        assert_eq!(rows, vec![("open".to_string(), None), ("shipped".to_string(), Some(250))]);
+        store.conn.execute_batch("ALTER TABLE issues DROP COLUMN done_at;").unwrap();
+        drop(store);
+        let store = Store::open(&path).unwrap();
+        let has: bool = store.conn.query_row("SELECT EXISTS(SELECT 1 FROM pragma_table_info('issues') WHERE name = 'done_at')", [], |r| r.get(0)).unwrap();
+        assert!(has, "healed on open");
     }
 
     /// v38 -> v39 (board #106): an old store gains `hub_asks`, its messages

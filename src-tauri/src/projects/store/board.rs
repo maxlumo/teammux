@@ -126,7 +126,75 @@ impl Store {
         self.ensure_issue_edit_lock()?;
         self.ensure_issue_numbering()?;
         self.ensure_issue_blocks()?;
-        self.ensure_issue_agreement()
+        self.ensure_issue_agreement()?;
+        self.ensure_issue_done_at()
+    }
+
+    /// The v41 shape (board #108; also a heal floor): `issues.done_at`, when
+    /// the issue last ENTERED done, NULL when it is not done. Added only when
+    /// absent; a done issue is backfilled from `updated_at`, its last change,
+    /// which is an approximation (an edit after the move moved it).
+    pub(super) fn ensure_issue_done_at(&self) -> Result<(), String> {
+        let has_column: bool = self
+            .conn
+            .query_row("SELECT EXISTS(SELECT 1 FROM pragma_table_info('issues') WHERE name = 'done_at')", [], |r| r.get(0))
+            .map_err(|e| format!("inspect Board done_at: {e}"))?;
+        if !has_column {
+            self.conn
+                .execute_batch("ALTER TABLE issues ADD COLUMN done_at INTEGER; UPDATE issues SET done_at = updated_at WHERE status = 'done';")
+                .map_err(|e| format!("add Board done_at: {e}"))?;
+        }
+        Ok(())
+    }
+
+    /// The board's issue in `status` whose LAST CHANGE is oldest (board #108):
+    /// `(number, title, assignee, updated_at)`. `updated_at` moves with any
+    /// edit or note, so it is "last change", never "in that column since".
+    pub fn issue_oldest_change(&self, session: &str, status: &str) -> Result<Option<(i64, String, String, i64)>, String> {
+        self.conn
+            .query_row(
+                "SELECT project_number, title, assignee, updated_at FROM issues WHERE session = ?1 AND status = ?2 ORDER BY updated_at, project_number LIMIT 1",
+                rusqlite::params![session, status],
+                |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?)),
+            )
+            .optional()
+            .map_err(|e| e.to_string())
+    }
+
+    /// Who holds an issue in doing, per assignee (board #108): the issue an
+    /// agent "holds" on the dashboard. The lowest number when it holds several.
+    pub fn issues_held(&self, session: &str) -> Result<Vec<(String, i64, String)>, String> {
+        let mut stmt = self
+            .conn
+            .prepare("SELECT assignee, MIN(project_number), title FROM issues WHERE session = ?1 AND status = 'doing' AND assignee <> '' GROUP BY assignee")
+            .map_err(|e| e.to_string())?;
+        let rows = stmt
+            .query_map(rusqlite::params![session], |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)))
+            .map_err(|e| e.to_string())?
+            .collect::<Result<Vec<_>, _>>()
+            .map_err(|e| e.to_string())?;
+        Ok(rows)
+    }
+
+    /// Test seam (board #108): backdate a row as time would have.
+    #[cfg(test)]
+    pub fn exec_for_test(&self, sql: &str) -> Result<(), String> {
+        self.conn.execute_batch(sql).map_err(|e| e.to_string())
+    }
+
+    /// A board's issues that entered done at or after `since` (seconds, the board's unit), newest
+    /// first: `(number, title, assignee, done_at)` (board #108, Finished · 24 h).
+    pub fn issues_done_since(&self, session: &str, since: i64) -> Result<Vec<(i64, String, String, i64)>, String> {
+        let mut stmt = self
+            .conn
+            .prepare("SELECT project_number, title, assignee, done_at FROM issues WHERE session = ?1 AND status = 'done' AND done_at >= ?2 ORDER BY done_at DESC, project_number DESC")
+            .map_err(|e| e.to_string())?;
+        let rows = stmt
+            .query_map(rusqlite::params![session, since], |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?)))
+            .map_err(|e| e.to_string())?
+            .collect::<Result<Vec<_>, _>>()
+            .map_err(|e| e.to_string())?;
+        Ok(rows)
     }
 
     /// The v35 shape (board #44; also a heal floor): `issue_notes.agreement`,
@@ -383,8 +451,8 @@ impl Store {
                 self.conn
                     .execute(
                         "INSERT INTO issues
-                           (session, project_number, title, body, status, assignee, created_by, created_at, updated_at, agent_touched)
-                         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?8, ?9)",
+                           (session, project_number, title, body, status, assignee, created_by, created_at, updated_at, agent_touched, done_at)
+                         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?8, ?9, CASE WHEN ?5 = 'done' THEN ?8 END)",
                         rusqlite::params![
                             session,
                             number,
@@ -440,6 +508,11 @@ impl Store {
                            status   = COALESCE(?5, status),
                            assignee = COALESCE(?6, assignee),
                            updated_at = ?7,
+                           -- Board #108: the move INTO done stamps it, staying
+                           -- done keeps it, a move out clears it (the old
+                           -- status, as SQLite reads it in SET).
+                           done_at  = CASE WHEN COALESCE(?5, status) <> 'done' THEN NULL
+                                           WHEN status = 'done' THEN done_at ELSE ?7 END,
                            agent_touched = CASE WHEN ?8 <> 'human' THEN 1 ELSE agent_touched END
                          WHERE session = ?1 AND project_number = ?2",
                         rusqlite::params![session, id, title, body, status, assignee, now, who],
@@ -518,6 +591,57 @@ impl Store {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn done_at(store: &Store, id: i64) -> Option<i64> {
+        store.conn.query_row("SELECT done_at FROM issues WHERE session = 'proj' AND project_number = ?1", rusqlite::params![id], |r| r.get(0)).unwrap()
+    }
+
+    /// Board #108: an issue knows when it was DONE. The move into done sets
+    /// it, an edit while done keeps it, a move out clears it, a re-done issue
+    /// gets the new time; created as done is done at creation.
+    #[test]
+    fn done_at_is_set_by_the_move_to_done_and_cleared_by_a_move_out() {
+        let store = Store::open_memory().unwrap();
+        let id = store.issue_save("proj", None, Some("t"), None, None, None, "human", 100).unwrap();
+        assert_eq!(done_at(&store, id), None);
+        store.issue_save("proj", Some(id), None, None, Some("doing"), Some("dev"), "dev", 200).unwrap();
+        assert_eq!(done_at(&store, id), None);
+        store.issue_save("proj", Some(id), None, None, Some("done"), None, "human", 300).unwrap();
+        assert_eq!(done_at(&store, id), Some(300));
+        store.issue_save("proj", Some(id), None, None, Some("done"), None, "human", 350).unwrap();
+        store.issue_save("proj", Some(id), None, None, None, Some("lead"), "human", 360).unwrap();
+        store.issue_note("proj", id, "human", "a note while done", 370).unwrap();
+        assert_eq!(done_at(&store, id), Some(300), "an edit while done keeps when it was done");
+        store.issue_save("proj", Some(id), None, None, Some("review"), None, "human", 400).unwrap();
+        assert_eq!(done_at(&store, id), None, "reopened");
+        store.issue_save("proj", Some(id), None, None, Some("done"), None, "human", 500).unwrap();
+        assert_eq!(done_at(&store, id), Some(500));
+        let born = store.issue_save("proj", None, Some("born done"), None, Some("done"), None, "human", 600).unwrap();
+        assert_eq!(done_at(&store, born), Some(600));
+        // The 24 h window: newest first, with title and assignee.
+        let finished = store.issues_done_since("proj", 450).unwrap();
+        assert_eq!(finished, vec![(born, "born done".to_string(), String::new(), 600), (id, "t".to_string(), "lead".to_string(), 500)]);
+        assert!(store.issues_done_since("proj", 601).unwrap().is_empty());
+        assert!(store.issues_done_since("other", 0).unwrap().is_empty(), "one board only");
+    }
+
+    /// Board #108: the oldest LAST CHANGE in a column, and the issue each
+    /// assignee holds in doing (its lowest number when it holds several).
+    #[test]
+    fn the_oldest_change_in_doing_and_the_issue_each_agent_holds() {
+        let store = Store::open_memory().unwrap();
+        let a = store.issue_save("proj", None, Some("a"), None, Some("doing"), Some("dev"), "human", 100).unwrap();
+        let b = store.issue_save("proj", None, Some("b"), None, Some("doing"), Some("dev"), "human", 200).unwrap();
+        let c = store.issue_save("proj", None, Some("c"), None, Some("doing"), Some("qa"), "human", 300).unwrap();
+        store.issue_save("proj", None, Some("d"), None, Some("todo"), Some("ops"), "human", 50).unwrap();
+        assert_eq!(store.issue_oldest_change("proj", "doing").unwrap(), Some((a, "a".to_string(), "dev".to_string(), 100)));
+        store.issue_note("proj", a, "dev", "progress", 400).unwrap();
+        assert_eq!(store.issue_oldest_change("proj", "doing").unwrap().map(|r| r.0), Some(b), "a note is a change");
+        let mut held = store.issues_held("proj").unwrap();
+        held.sort();
+        assert_eq!(held, vec![("dev".to_string(), a, "a".to_string()), ("qa".to_string(), c, "c".to_string())]);
+        assert_eq!(store.issue_oldest_change("proj", "review").unwrap(), None);
+    }
 
     #[test]
     fn board_issues_live_move_and_remember() {

@@ -482,6 +482,17 @@ Server and CLI only so far; the chat bubble (#107) and the dashboard (#108,
 - Asks need the server capability `asks`; `tmm ask` refuses an older server
   before sending.
 
+## Dashboard read (board #108)
+
+Server half of the dashboard (the view is #109): `hub_dashboard` answers a
+project's open asks, board counts with the doing issue whose last change is
+oldest, each live agent's derived state with the issue it holds and its latest
+status line, the count of stopped agents, and the issues finished in the last
+24 hours. Who needs a person and the Notes for you list are derived in the
+client by the definitions it already has. On the Board sidebar a board with
+open asks shows an `Asks` chip leading its counts, and is listed even when it
+has no issues. Design: [dashboard.md](../../design-docs/features/dashboard.md).
+
 ## Board page (task management — its own tab)
 - **Several servers** (board #357, owner 2026-10-13: "在 Terminal 页面和 Board
   页面，都没有整合两种或几种不同连接里的所有项目"): in Aggregate the focused

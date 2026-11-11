@@ -116,11 +116,19 @@ export function declaredWindowChips(slots: Slot[]): WindowChip[] {
     });
 }
 
+/** A project's room: its recorded room when it has one, else `proj:<session>`
+ * (board #108). The server's rule (`rooms::session_room_checked`): an EMPTY
+ * recorded room, as the wire carries it, is no room, like a missing one. The
+ * ONE client spelling. */
+export function roomOf(p: { session?: string; room?: string | null }): string {
+  return p.room || `proj:${p.session ?? ''}`;
+}
+
 /** One project update clock for every Projects list. Conversation activity is
  * the user-visible change; projects with no room history fall back to tmux's
  * last observation/up/creation time. Bus timestamps are ms, project rows sec. */
 export function projectUpdatedMs(row: ProjectRow, talk: Record<string, number> = {}): number {
-  const room = row.project.room ?? `proj:${row.project.session}`;
+  const room = roomOf(row.project);
   return talk[room]
     ?? (row.project.last_seen_at ?? row.project.last_up_at ?? row.project.created_at ?? 0) * 1000;
 }
@@ -153,7 +161,7 @@ export interface RowWithClock {
 /** The activity a row is ordered by, from ITS server's clock. */
 function activityOf({ row, talk }: RowWithClock): number {
   return Math.max(
-    talk[row.project.room ?? `proj:${row.project.session}`] ?? 0,
+    talk[roomOf(row.project)] ?? 0,
     (row.project.last_up_at ?? row.project.created_at ?? 0) * 1000,
   );
 }

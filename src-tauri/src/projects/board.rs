@@ -55,6 +55,14 @@ pub fn board_list(session: &str) -> Result<Value, String> {
     with_store(|store| Ok(json!({ "issues": store.issues_list(session)?, "statuses": BOARD_STATUSES })))
 }
 
+/// The board half of the dashboard read (board #108), one store section:
+/// the oldest last change in doing, the issues done since `since`, and the
+/// issue each assignee holds in doing.
+#[allow(clippy::type_complexity)]
+pub fn dashboard_board(session: &str, since: i64) -> Result<(Option<(i64, String, String, i64)>, Vec<(i64, String, String, i64)>, Vec<(String, i64, String)>), String> {
+    with_store(|store| Ok((store.issue_oldest_change(session, "doing")?, store.issues_done_since(session, since)?, store.issues_held(session)?)))
+}
+
 /// Issue counts for EVERY board in one read (board #39): the Board sidebar
 /// wants to show per-project column counts and hide projects with an empty
 /// board, and asking `board_list` per project is an N+1 over the wire. Shape:

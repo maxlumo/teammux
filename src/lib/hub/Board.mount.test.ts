@@ -716,3 +716,125 @@ test('a server without board_agreement shows the agreement but offers no toggle 
     assert.ok(app.document.querySelector('.note-input'), 'a plain note still goes');
   } finally { await app.close(); }
 });
+
+// Board #108: the open-ask chip LEADS a row's count line as its own full-width
+// row, only on boards with open asks; an empty board with asks is listed; a
+// failed ask read keeps the last count (never 0); a server without the
+// `dashboard` cap is never asked.
+test('the sidebar row carries the open-ask chip, and an empty board with asks is listed (#108)', async (context) => {
+  let askReads = 0, failAsks = false;
+  const app = await (await compiled).mount(context, {
+    props: { session: 'fixture', visible: true },
+    setup(window) { window.Element.prototype.getAnimations = () => []; },
+    modules: [rpc({
+      getCaps: () => ['board_dispatch', 'dashboard'],
+      projectList: async () => ({ projects: [
+        { project: { id: 'fixture', session: 'fixture', name: 'Fixture', room: 'proj:fixture' }, live: true },
+        { project: { id: 'quiet', session: 'quiet', name: 'Quiet', room: 'proj:quiet' }, live: true },
+        { project: { id: 'none', session: 'none', name: 'Nothing', room: 'proj:none' }, live: true },
+      ] }),
+      askCounts: async () => { askReads++; if (failAsks) throw new Error('down'); return { counts: { 'proj:fixture': 2, 'proj:quiet': 1 } }; },
+    })],
+  });
+  try {
+    await flush(app);
+    const rows = () => [...app.document.querySelectorAll<HTMLElement>('.side-row.proj-row:not(.mirror):not(.missing)')];
+    assert.deepEqual(rows().map((r) => r.querySelector('.p-name')?.textContent), ['Fixture', 'Quiet'], 'the empty board with an ask is listed, the empty one without is not');
+    const chip = (r: HTMLElement) => r.querySelector<HTMLElement>('.side-wins .side-win.asks');
+    for (const [i, n] of [[0, '2'], [1, '1']] as const) {
+      const c = chip(rows()[i]!);
+      assert.ok(c, 'an ask chip');
+      assert.equal(c.parentElement!.firstElementChild, c, 'it LEADS the count line');
+      assert.equal(c.querySelector('.b-count')?.textContent, n);
+      assert.equal(c.querySelector('.side-win-name')?.textContent, 'Asks');
+    }
+    assert.ok(askReads >= 1);
+    // A failed ask read keeps the last counts: never read as no asks.
+    failAsks = true;
+    app.advance(20_000); await flush(app);
+    assert.equal(chip(rows()[0]!)?.querySelector('.b-count')?.textContent, '2', 'kept after a failed read');
+  } finally { await app.close(); }
+});
+
+test('a board with no open asks has no ask chip, and a server without the dashboard cap is never asked (#108)', async (context) => {
+  let askReads = 0;
+  const app = await (await compiled).mount(context, {
+    props: { session: 'fixture', visible: true },
+    setup(window) { window.Element.prototype.getAnimations = () => []; },
+    modules: [rpc({ askCounts: async () => { askReads++; return { counts: { 'proj:fixture': 3 } }; } })],
+  });
+  try {
+    await flush(app);
+    assert.equal(askReads, 0, 'no cap, no read');
+    assert.equal(app.document.querySelector('.side-win.asks'), null);
+  } finally { await app.close(); }
+});
+
+// Board #108 round 1 (validator's AC4 finding): on a capable server the ask
+// counts are a required read. A failed one after a good one keeps the last
+// counts AND mutes the slice; a failed first one is not a complete answer.
+function unionFor(published: any[]) {
+  return { source: { publish: (_o: unknown, _id: string, slice: unknown) => published.push(JSON.parse(JSON.stringify(slice))), withdraw: () => {}, rows: () => ({ rows: [], missing: [], unavailable: [] }) }, included: [{ id: 'fixture', name: 'Fixture' }] };
+}
+test('a failed ask read keeps the last counts muted, and a failed first one is not an answer (#108)', async (context) => {
+  let fail = false;
+  const published: any[] = [];
+  const app = await (await compiled).mount(context, {
+    props: { session: 'fixture', visible: true, union: unionFor(published) },
+    setup(window) { window.Element.prototype.getAnimations = () => []; },
+    modules: [rpc({ getCaps: () => ['dashboard'], askCounts: async () => { if (fail) throw new Error('down'); return { counts: { 'proj:fixture': 2 } }; },
+      projectList: async () => ({ projects: [{ project: { id: 'fixture', session: 'fixture', room: 'proj:fixture', name: 'Fixture' }, live: true }] }) })],
+  });
+  try {
+    await flush(app);
+    assert.deepEqual([published.at(-1).asks['proj:fixture'], published.at(-1).failed], [2, false]);
+    fail = true;
+    app.advance(20_000); await flush(app);
+    assert.deepEqual([published.at(-1).asks['proj:fixture'], published.at(-1).failed], [2, true], 'kept and muted');
+  } finally { await app.close(); }
+  const first: any[] = [];
+  const app2 = await (await compiled).mount(context, {
+    props: { session: 'fixture', visible: true, union: unionFor(first) },
+    setup(window) { window.Element.prototype.getAnimations = () => []; },
+    modules: [rpc({ getCaps: () => ['dashboard'], askCounts: async () => { throw new Error('down'); } })],
+  });
+  try {
+    await flush(app2);
+    assert.equal(first.at(-1).answered, false, 'no first answer: missing, never an empty "no asks"');
+  } finally { await app2.close(); }
+});
+
+// Board #108 round 5 (11): a project with NO recorded room is keyed by the
+// client's one rule, proj:<session>, so its asks show (a plain miss before).
+test('a project with no recorded room shows its ask chip under proj:<session> (#108)', async (context) => {
+  const app = await (await compiled).mount(context, {
+    props: { session: 'fixture', visible: true },
+    setup(window) { window.Element.prototype.getAnimations = () => []; },
+    modules: [rpc({ getCaps: () => ['dashboard'], askCounts: async () => ({ counts: { 'proj:fixture': 3 } }) })],
+  });
+  try {
+    await flush(app);
+    assert.equal(app.document.querySelector('.side-win.asks .b-count')?.textContent, '3');
+  } finally { await app.close(); }
+});
+
+// Round 5 amendment (validator note 81): the wire carries an EMPTY room; an
+// empty board with asks under proj:<session> is listed with its chip.
+test('a project whose recorded room is EMPTY shows its row and ask chip under proj:<session> (#108)', async (context) => {
+  const app = await (await compiled).mount(context, {
+    props: { session: 'fixture', visible: true },
+    setup(window) { window.Element.prototype.getAnimations = () => []; },
+    modules: [rpc({ getCaps: () => ['dashboard'],
+      projectList: async () => ({ projects: [
+        { project: { id: 'fixture', session: 'fixture', name: 'Fixture', room: 'proj:fixture' }, live: true },
+        { project: { id: 'blank', session: 'blank', name: 'Blank', room: '' }, live: true },
+      ] }),
+      askCounts: async () => ({ counts: { 'proj:blank': 2 } }) })],
+  });
+  try {
+    await flush(app);
+    const row = [...app.document.querySelectorAll<HTMLElement>('.side-row.proj-row:not(.mirror)')].find((r) => r.querySelector('.p-name')?.textContent === 'Blank');
+    assert.ok(row, 'the empty board with asks is listed');
+    assert.equal(row.querySelector('.side-win.asks .b-count')?.textContent, '2');
+  } finally { await app.close(); }
+});
