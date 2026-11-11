@@ -191,29 +191,51 @@ make a workspace. Two consequences fall out of that:
     subscribes, captures, types into and resizes its own pane. A plain
     same-name session the user made, and a name a project declares, stay
     visible exactly as before.
-  - **Exiting the shell does not end it**, and that is tmux's own mechanism,
-    not a process manager of ours (tenet 2). `ensure` applies, idempotently and
-    only to its own window and session: `remain-on-exit on` (a WINDOW option,
-    so it is set through the pane target — a session target would only reach
-    that session's current window) and the session hook
-    `pane-died: respawn-pane`. Measured on **tmux 3.6a**: before this,
-    `exit` in the pane closed the only window and the SESSION disappeared
-    ("can't find session"); with the keep-alive the pane comes back with the
-    SAME `%id` and the same `session:window.pane` target, which is why the
-    Terminal's subscription survives it. The hook body is bare
-    `respawn-pane`: no target, because tmux runs a `pane-died` hook against the
-    pane that died — verified with two panes, only the dead one was respawned
-    and the live pane kept its shell pid (the explicit
-    `respawn-pane -t "#{pane_id}"` form stores fine and never fires on 3.6a) —
-    and no `-k`, for the reason below. The respawned shell starts in the
-    pane's creation directory, which for this session is `$HOME`
-    (`new_session(_, None, None)` passes `-c $HOME`) — measured with a pane
-    created in `/tmp/probe-cwd` that had `cd /usr`'d: it came back in
-    `/tmp/probe-cwd`, never `/`. No global option or hook is touched.
+  - **Exiting the shell does not end it: the pane's own command starts it
+    again** (board #114, 2026-11-11; it replaced #326's hook). The pane runs
+    `scratch::RECIPE`, `/bin/sh -c` a loop that starts `$SHELL -l` (the login
+    shell tmux's default pane starts) whenever it exits, given to tmux as an
+    argv so no `default-shell` parses it. The pane never dies by an exit, so
+    its `%id` and `session:window.pane` target stay, which is why the
+    Terminal's subscription survives it; the shell comes back in the pane's
+    creation directory, `$HOME`. It is a declaration tmux runs, not a process
+    of ours watching it: it works with the gateway down (tenet 4) and on every
+    tmux. A shell that ends within 2 s of starting (a broken `$SHELL`, a
+    failing rc) is started again only after 3 s, and the pane says why
+    (`[tmm] <shell> ended within 2 s of starting; starting it again in 3 s`),
+    so it never spins a core. Nothing in the app reads the pane's pid as the
+    shell: readiness (`tmux::wait_for_shell`) reads `pane_dead` and the
+    cursor, typing goes to the target, and `#{pane_current_command}` names
+    the shell, the pane's foreground process.
+    **The incident.** #326 kept the shell alive with tmux's own keep-alive,
+    `remain-on-exit on` plus the session hook `pane-died: respawn-pane`,
+    measured on tmux 3.6a. On this host's tmux 3.2a (Ubuntu 22.04) the pane
+    stayed dead after `exit` (validator, #106 pass; the known-failures row in
+    testing.md called it timing). Measured in the isolated runner (3.2a) and
+    in Docker (Debian trixie, 3.5a), own sockets: after `exit` the shell was a
+    zombie whose parent is the tmux server, and the server's `-vv` log had the
+    pane's EOF and no `Child exited` after it; the next child the server ran
+    (`run-shell true`) reaped it, and only then did the hook fire. 6 to 7 of
+    10 exits were missed on 3.2a (zsh, bash and sh alike, sh least), 0 of 10
+    on 3.5a. `pane-died` fires only at the reap: tmux 3.2a's
+    `server_destroy_pane` returns at the EOF, with `remain-on-exit` on, until
+    `server_child_exited` marks the status ready. A silence-alert hook did not
+    help (9 of 10 missed), and no hook fires at the EOF. With the loop the
+    shell is the loop's child, which `/bin/sh` reaps itself: 10 of 10 exits
+    gave a ready shell on both versions, with nothing else run on the server.
+    **Migration** is in `ensure`, idempotent: a session made before #114 whose
+    shell is LIVE is left alone, hook and all (a shell is never killed to
+    migrate); once its pane is dead, the repair respawns it with the recipe
+    and drops `remain-on-exit` and the `pane-died` hook from that window and
+    session. `tmm scratch --kill` still ends it: the loop is the pane's
+    process and goes with the session. Pinned by
+    `scratch::tests::exiting_the_shell_starts_it_again_in_the_same_pane`,
+    `an_old_scratch_session_migrates_only_once_its_pane_is_dead` and
+    `a_shell_that_ends_at_once_is_started_again_only_after_a_pause`.
   - **`ensure` hands back a LIVE pane, and "only a dead pane" is TMUX's
-    decision.** A pane that died before the keep-alive existed (an older
-    session, a hook someone removed, an exit between create and hook) is
-    repaired here. The first implementation read `pane_dead` and then ran
+    decision.** A dead pane (an older session's, see Migration above, or a
+    loop someone killed while the pane was kept) is repaired here, with the
+    recipe. The first implementation read `pane_dead` and then ran
     `respawn-pane -k`, which review (#326 P1) correctly called a
     check-then-kill: between the read and the call the `pane-died` hook or a
     concurrent `ensure` can revive the pane, and the `-k` would then have
@@ -263,9 +285,10 @@ make a workspace. Two consequences fall out of that:
     exactly like a refusal at the start. A repeated ensure is pinned to keep the shell pid across
     three calls, across a running command, and across the review's exact race
     (observed dead, revived by another path, then repaired).
-  - **Explicit Kill is still the only way to end it.** `pane-died` is a session
-    option, so it goes with the session: measured, `kill-session` on a session
-    carrying the hook leaves no session behind rather than a respawned pane.
+  - **Explicit Kill is still the only way to end it.** The loop is the pane's
+    own process and goes with the session: measured on tmux 3.2a and 3.5a,
+    `kill-session` leaves no session behind (#114; before it, measured with
+    #326's hook, which was a session option and went the same way).
 - **One create path.** The old "new session" form now creates a *project* and
   brings it up (`project_create` + `project_up`), so the second `+` in the
   Projects header is gone. A bare `new_session` would have been pointless anyway:
@@ -1538,7 +1561,7 @@ TESTS that type into a pane go through the same wait, behind one helper per
 test module (`scratch.rs`'s `typed`), never a bespoke readiness poll — a second
 readiness mechanism is weaker than this one and drifts from it. Found by the
 #337 validator: `the_shell_can_exit_without_ending_the_session_and_a_dead_pane_is_repaired`
-typed `sleep 120` straight at a pane `ensure` had just respawned, and measured
+(replaced by #114's tests, which keep the helper) typed `sleep 120` straight at a pane `ensure` had just respawned, and measured
 at that instant the pane's cursor still sat at column 0 in 5 of 5 runs — #325's
 precondition for a lost line, with no wait in front of it. It flaked only in the
 full suite, where the host is loaded.

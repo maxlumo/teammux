@@ -26,10 +26,16 @@
 //! - **Hidden from every listing.** `hidden_session()` — derived from the one
 //!   `owned` predicate, never from the name — is the session the session/pane
 //!   listings drop (`server/rpc.rs`). The panel is its only door.
-//! - **Exiting the shell does not end it.** tmux's own mechanism, not a
-//!   process manager of ours: `remain-on-exit` keeps the pane when its shell
-//!   exits, and the session's `pane-died` hook respawns it IN PLACE, so the
-//!   `session:window.pane` target the Terminal subscribes stays valid.
+//! - **Exiting the shell does not end it.** The pane's own command is a loop
+//!   that starts the person's login shell again whenever it exits (`LOOP`,
+//!   board #114), so the pane never dies by an exit and the
+//!   `session:window.pane` target the Terminal subscribes stays valid. It is
+//!   a declaration tmux runs, not a process of ours watching it: it works
+//!   with the gateway down and on every tmux. It replaced #326's
+//!   `remain-on-exit` + `pane-died: respawn-pane`, which tmux 3.2a cannot
+//!   keep: its server lost the exited shell's SIGCHLD in 6-7 of 10 exits
+//!   (the shell stayed a zombie of the server), and `pane-died` fires only
+//!   at the reap (tmux 3.2a `server_destroy_pane`), so the pane stayed dead.
 
 use crate::tmux;
 // ONE refusal type, from the write that refuses to the socket that answers
@@ -39,18 +45,26 @@ use super::projects::Refused;
 
 pub const SCRATCH_SESSION: &str = "tmm-scratch";
 const MARK: &str = "@tmm-scratch";
-/// The keep-alive hook's body. Plain `respawn-pane`, with no target and no
-/// `-k`:
-///
-/// - no TARGET, because tmux runs a `pane-died` hook with the pane that died
-///   as its target (measured on tmux 3.6a with two panes — only the dead pane
-///   was respawned, the live pane kept its shell pid). The explicit
-///   `respawn-pane -t "#{pane_id}"` form stores fine and never fires on 3.6a;
-/// - no `-k`, so the hook cannot kill a shell either: if `ensure` repaired the
-///   pane between the death and the hook, tmux refuses the hook's respawn
-///   instead of killing the shell the reader is already typing into
-///   (`tmux::respawn_pane`).
-const RESPAWN_HOOK: &str = "respawn-pane";
+/// The scratch pane's command (board #114): `/bin/sh` runs it, given as an
+/// argv so no `default-shell` parses it. It starts `$SHELL` (tmux sets it to
+/// the `default-shell` in every pane) as a login shell, as tmux's own default
+/// pane does, and starts it again when it exits. A shell that ends within
+/// 2 s of starting (a broken `$SHELL`, a failing rc) is started again only
+/// after 3 s, with a line in the pane saying why, so it never spins a core.
+/// The leading `: tmm-scratch-loop` is a no-op that names the recipe in
+/// `#{pane_start_command}` (`runs_the_loop`). Measured on tmux 3.2a (this
+/// host) and 3.5a: 10 exits gave 10 ready shells with nothing else run on the
+/// server, and `SHELL=/bin/false` printed the line once per 3 s at 0% CPU.
+const LOOP: &str = ": tmm-scratch-loop; while :; do t=$(date +%s); \"${SHELL:-/bin/sh}\" -l; \
+    if [ $(( $(date +%s) - t )) -lt 2 ]; then \
+    printf '\\r\\n[tmm] %s ended within 2 s of starting; starting it again in 3 s\\r\\n' \"${SHELL:-/bin/sh}\"; sleep 3; fi; done";
+/// The pane's argv: the loop, run by `/bin/sh`.
+const RECIPE: [&str; 3] = ["/bin/sh", "-c", LOOP];
+/// Is the pane running the recipe (rather than #326's bare shell, kept alive
+/// by a hook)? Read from what tmux started it with.
+fn runs_the_loop(pane: &str) -> bool {
+    tmux::pane_format(pane, "#{pane_start_command}").is_some_and(|c| c.contains(": tmm-scratch-loop;"))
+}
 /// Where a project that held the reserved name is renamed to when the reader
 /// releases it: `<reserved>-recovered`, or — when something already holds
 /// that — the same name `create` would pick, through the ONE suffixing rule
@@ -221,25 +235,12 @@ pub fn hidden_session() -> Option<String> {
     }
 }
 
-/// Exiting the shell must not end the session (owner: "退出这个隐藏会话时，
-/// 也不要关掉"). Two native tmux facts, applied to the pane we are about to
-/// hand out and re-applied by every `ensure` (declaration is truth: a session
-/// created before this existed, or one whose hook was removed, self-heals):
-///
-/// - `remain-on-exit` (a WINDOW option, hence the pane target) keeps the pane
-///   when its shell exits instead of closing the window — and the window is
-///   the session's only one, so the session cannot end that way either;
-/// - the session's `pane-died` hook respawns that pane in place, keeping its
-///   `%id`, its `session:window.pane` target and its start directory
-///   (measured, tmux 3.6a: a pane created with `-c /tmp/probe-cwd`, `cd /usr`,
-///   then `exit`, came back in `/tmp/probe-cwd` — never `/`; our session is
-///   created with `-c $HOME`).
-///
-/// Both are scoped to this window and this session; no global option or hook
-/// is touched.
-fn keep_alive(pane: &str) -> Result<(), String> {
-    tmux::set_window_option(pane, "remain-on-exit", "on")?;
-    tmux::set_hook(&name(), "pane-died", RESPAWN_HOOK)
+/// #326's keep-alive, which an older scratch session still carries: once its
+/// pane runs the recipe it goes (board #114), from this window and this
+/// session only; no global option or hook is touched.
+fn drop_old_keep_alive(pane: &str) -> Result<(), String> {
+    tmux::run_tmux(&["set-option", "-w", "-u", "-t", pane, "remain-on-exit"])?;
+    tmux::run_tmux(&["set-hook", "-u", "-t", &name(), "pane-died"]).map(|_| ())
 }
 
 /// Release the reserved name from the project that holds it, on an explicit
@@ -336,9 +337,9 @@ fn freed(reserved: &str, written: Option<&str>, holder: Option<&str>) -> Result<
 /// against. A concurrent ensure that created it first is the only create
 /// failure accepted, and only once `owned` says it is ours.
 ///
-/// The pane handed back is always LIVE: a pane that died before the keep-alive
-/// existed (an older session, a hook that was removed, an exit between create
-/// and hook) is repaired here. "Only a dead pane" is TMUX's decision, not a
+/// The pane handed back is always LIVE: a dead pane (a session made before
+/// the recipe whose shell exited, a loop that was killed while the pane was
+/// kept) is repaired here, with the recipe. "Only a dead pane" is TMUX's decision, not a
 /// check-then-act of ours (#326 review P1): `respawn_pane` carries no `-k`, so
 /// tmux refuses it while a shell or a command is still running. That is what
 /// makes a repeated ensure safe — our own `pane_live` reading is only a fast
@@ -346,13 +347,15 @@ fn freed(reserved: &str, written: Option<&str>, holder: Option<&str>) -> Result<
 /// `pane-died` hook or another ensure may revive the pane in between. The END
 /// STATE is therefore what decides: a refusal whose pane is now live is
 /// success (someone else won the race), and only a pane that is still not live
-/// is an error.
+/// is an error. (The `pane-died` hook named above is #326's; a session made
+/// since #114 carries none, and an older one loses it once it runs the
+/// recipe.)
 pub fn ensure() -> Result<serde_json::Value, String> {
     match owned()? {
         Ownership::Taken(why) => return Err(why),
         Ownership::Ours => {}
         Ownership::Absent => {
-            if let Err(e) = tmux::new_session(&name(), None, None) {
+            if let Err(e) = tmux::new_session_argv(&name(), None, &RECIPE) {
                 let raced = e.contains("already exists") || e.contains("duplicate session");
                 if !raced || owned()? != Ownership::Ours {
                     // A raced create that is not ours yet may be the other
@@ -368,7 +371,6 @@ pub fn ensure() -> Result<serde_json::Value, String> {
         }
     }
     let target = first_pane()?;
-    keep_alive(&target)?;
     // Everything from here on names the pane by its tmux `%id`, read once:
     // `session:window.pane` is a POSITION, and a window or pane created beside
     // ours renumbers it, so the check and the repair could otherwise land on
@@ -380,12 +382,19 @@ pub fn ensure() -> Result<serde_json::Value, String> {
     // Unless the pane is PROVEN live, offer it a shell: an unreadable answer
     // falls on the repair side, which costs nothing now that the repair cannot
     // kill anything.
+    // A dead pane gets the recipe (board #114): a session made before it, or
+    // one whose loop was killed with the pane kept. A LIVE pane is never
+    // restarted to migrate it: a session on #326's recipe with its shell
+    // running keeps that shell and its hook until the pane is dead.
     if tmux::pane_live(&id) != Some(true) {
-        let attempt = tmux::respawn_pane(&id);
+        let attempt = tmux::respawn_pane(&id, &RECIPE);
         if tmux::pane_live(&id) != Some(true) {
             return Err(attempt.err().unwrap_or_else(||
                 format!("the scratch terminal's shell will not start in {target}")));
         }
+    }
+    if runs_the_loop(&id) {
+        drop_old_keep_alive(&id)?;
     }
     // The answer is the position of the pane we actually verified, read from
     // its %id at the END (#326 review): the string `first_pane` gave us is a
@@ -457,11 +466,10 @@ fn first_pane() -> Result<String, String> {
     Ok(format!("{}:{}.{}", n, first.window, first.pane))
 }
 
-/// Kill the scratch session — only when it is ours. The keep-alive cannot
-/// fight this: `pane-died` is a SESSION option, so it goes with the session
-/// (measured on tmux 3.6a: `kill-session` on a session carrying the hook
-/// leaves no session behind, not a respawned one). Explicit Kill stays the
-/// one way to end it.
+/// Kill the scratch session — only when it is ours. The loop cannot fight
+/// this: it is the pane's own process and ends with the pane (measured on
+/// tmux 3.2a and 3.5a: `kill-session` leaves no session behind). Explicit
+/// Kill stays the one way to end it.
 pub fn kill() -> Result<serde_json::Value, String> {
     match owned()? {
         Ownership::Ours => {
@@ -598,12 +606,28 @@ mod tests {
         tmux::run_tmux(&["show-options", "-g", "-v", "pane-died"]).ok().map(|s| s.trim().to_string()).filter(|s| !s.is_empty())
     }
 
-    /// The hidden session stays alive across an exit, and `ensure` repairs a
-    /// pane that died before the keep-alive existed (board #326, review P1-b).
-    /// Under a guard-owned name: the production `tmm-scratch` and the global
-    /// tmux options/hooks are never touched.
+    /// The shell's own process: the loop's child (board #114). The pane's
+    /// pid is the loop, which lives as long as the pane.
+    fn shell_pid(target: &str) -> Option<String> {
+        let lp = pane_pid(target);
+        let out = std::process::Command::new("pgrep").args(["-P", &lp]).output().ok()?;
+        String::from_utf8_lossy(&out.stdout).lines().map(str::trim).find(|l| !l.is_empty()).map(str::to_string)
+    }
+    fn hook_and_remain(n: &str, target: &str) -> (Option<String>, Option<String>) {
+        (tmux::session_hook(n, "pane-died"), tmux::window_option(target, "remain-on-exit").filter(|v| v == "on"))
+    }
+    /// The notice the loop prints for a shell that ended at once.
+    fn notices(target: &str) -> usize {
+        tmux::run_tmux(&["capture-pane", "-p", "-S", "-200", "-t", target]).unwrap_or_default().matches("ended within 2 s of starting").count()
+    }
+
+    /// Exiting the shell starts it again in the SAME pane, every time, on any
+    /// tmux (board #114: #326's `pane-died` hook left the pane dead in 6-7 of
+    /// 10 exits on tmux 3.2a, whose server lost the shell's SIGCHLD). Under a
+    /// guard-owned name: the production `tmm-scratch` and the global tmux
+    /// options/hooks are never touched.
     #[test]
-    fn the_shell_can_exit_without_ending_the_session_and_a_dead_pane_is_repaired() {
+    fn exiting_the_shell_starts_it_again_in_the_same_pane() {
         crate::projects::tests::use_test_store();
         let real_before = tmux::session_exists(SCRATCH_SESSION);
         let real_hook_before = tmux::session_hook(SCRATCH_SESSION, "pane-died");
@@ -617,109 +641,128 @@ mod tests {
         }
         let first = ensure().expect("created");
         let target = first["target"].as_str().unwrap().to_string();
-        // The keep-alive is tmux's own, scoped to this window and session.
-        assert_eq!(tmux::window_option(&target, "remain-on-exit").as_deref(), Some("on"));
-        // The body is asserted LITERALLY, not against RESPAWN_HOOK: comparing
-        // the constant to itself would pass however it changed, and the two
-        // things that must not come back — a `-k` and an explicit target —
-        // are exactly a change to this string (#326 review P1).
-        assert_eq!(tmux::session_hook(&n, "pane-died").as_deref(), Some("respawn-pane"));
-        assert_eq!(RESPAWN_HOOK, "respawn-pane");
-        // A repeated ensure re-applies it and never kills a running shell.
-        let pid = pane_pid(&target);
-        assert!(!pid.is_empty());
+        assert!(runs_the_loop(&target), "the pane runs the recipe: {:?}", tmux::pane_format(&target, "#{pane_start_command}"));
+        assert_eq!(hook_and_remain(&n, &target), (None, None), "no pane-died hook and no remain-on-exit: nothing waits on a reap");
+        // A repeated ensure never restarts a running shell.
+        assert!(settles(|| shell_pid(&target).is_some()), "a shell under the loop");
+        let (lp, sh) = (pane_pid(&target), shell_pid(&target));
         for _ in 0..3 {
             assert_eq!(ensure().unwrap()["target"], target.as_str());
         }
-        assert_eq!(pane_pid(&target), pid, "a healthy ensure leaves the shell alone");
-        assert_eq!(tmux::pane_live(&target), Some(true));
+        assert_eq!((pane_pid(&target), shell_pid(&target)), (lp.clone(), sh.clone()), "a healthy ensure leaves the shell alone");
 
-        // Ctrl-D / `exit`: the pane comes back IN PLACE — same target, so the
-        // Terminal's subscription stays valid — and the session survives.
-        exit_shell(&target, &pid);
-        assert!(settles(|| pane_pid(&target) != pid && tmux::pane_live(&target) == Some(true)),
-            "the pane-died hook respawns the shell in place");
+        // Ten exits, nothing else run on the server: a new, ready shell each
+        // time, in the same pane, with the session alive. Each shell is given
+        // its 2 s, so none of them reads as one that ended at once.
+        let mut before = sh.unwrap();
+        let mut born = std::time::Instant::now();
+        for round in 0..10 {
+            std::thread::sleep(std::time::Duration::from_secs(2).saturating_sub(born.elapsed()) + std::time::Duration::from_millis(100));
+            typed(&target, "exit", || shell_pid(&target).is_some_and(|p| p != before));
+            born = std::time::Instant::now();
+            assert!(tmux::wait_for_shell(&target, tmux::SHELL_READY), "round {round}: the new shell draws its prompt");
+            assert_eq!(tmux::pane_live(&target), Some(true), "round {round}: the pane never died");
+            assert_eq!(pane_pid(&target), lp, "round {round}: the same loop, the same pane");
+            before = shell_pid(&target).expect("a shell");
+        }
+        assert_eq!(notices(&target), 0, "no shell was taken for one that ended at once");
         assert!(tmux::session_exists(&n), "the hidden session does not end with its shell");
         assert_eq!(first_pane().unwrap(), target, "and keeps the same session:window.pane");
-        let revived = pane_pid(&target);
 
-        // A pane that died BEFORE the keep-alive existed (an old session, a
-        // removed hook): ensure repairs it instead of handing out a dead pane.
-        tmux::run_tmux(&["set-hook", "-u", "-t", &n, "pane-died"]).expect("hook removed");
-        assert_eq!(tmux::session_hook(&n, "pane-died"), None);
-        exit_shell(&target, &revived);
-        assert!(settles(|| tmux::pane_live(&target) == Some(false)), "with no hook the pane stays dead");
-        // The review's exact sequence: this path has OBSERVED the pane dead,
-        // and another path (the hook, or a concurrent ensure) revives it
-        // before the repair runs. The repair must kill nothing.
-        assert_eq!(tmux::pane_live(&target), Some(false), "observed dead");
-        tmux::respawn_pane(&target).expect("another path revives it first");
-        let winner = pane_pid(&target);
-        assert_eq!(tmux::pane_live(&target), Some(true));
-        assert!(tmux::respawn_pane(&target).is_err(), "the late repair is refused, not applied");
-        assert_eq!(pane_pid(&target), winner, "the winner's shell is untouched");
-        // ensure over that same state is idempotent: same pane, still alive.
-        let after_race = ensure().expect("idempotent over a revived pane");
-        assert_eq!(after_race["target"], target.as_str());
-        assert_eq!(pane_pid(&target), winner);
-        // Back to dead, so the repair path itself is still exercised below.
-        // (That last ensure re-installed the hook, as it is meant to.)
-        tmux::run_tmux(&["set-hook", "-u", "-t", &n, "pane-died"]).expect("hook removed again");
-        exit_shell(&target, &winner);
-        assert!(settles(|| tmux::pane_live(&target) == Some(false)), "dead again, with no hook");
-        let repaired = ensure().expect("ensure repairs a dead pane");
-        assert_eq!(repaired["target"], target.as_str());
-        assert_eq!(tmux::pane_live(&target), Some(true), "the target handed back is a LIVE pane");
-        assert_ne!(pane_pid(&target), revived, "a new shell, in the same pane");
-        assert_eq!(tmux::session_hook(&n, "pane-died").as_deref(), Some("respawn-pane"), "and the hook is back");
-
-        // #326 review P1: the repair is TMUX's decision, not our
-        // check-then-act. A respawn aimed at a pane whose shell is running —
-        // which is what a stale `pane_live` reading, the pane-died hook or a
-        // concurrent ensure would produce — is REFUSED, and the shell (and
-        // anything it started) survives. Without this, the `-k` form would
-        // have killed whatever won the race.
-        let running = pane_pid(&target);
-        typed(&target, "sleep 120", || tmux::pane_format(&target, "#{pane_current_command}").as_deref() == Some("sleep"));
-        let refused = tmux::respawn_pane(&target);
-        assert!(refused.is_err(), "tmux refuses to respawn a pane that is still active: {refused:?}");
-        assert_eq!(pane_pid(&target), running, "the shell is untouched");
-        assert_eq!(tmux::pane_format(&target, "#{pane_current_command}").as_deref(), Some("sleep"),
-            "and so is the command it was running");
-        // Which is also why a repeated ensure through this path is a no-op.
-        assert_eq!(ensure().unwrap()["target"], target.as_str());
-        assert_eq!(pane_pid(&target), running, "ensure did not restart a live shell");
-        tmux::send_keys(&target, "C-c", false).ok();
-
-        // The target ensure ANSWERS with is read back from that same %id at
-        // the end, so the client can only ever be handed the position of the
-        // pane this call verified.
-        let answered = ensure().unwrap()["target"].as_str().unwrap().to_string();
-        let answered_id = tmux::pane_format(&answered, "#{pane_id}");
-        assert_eq!(answered_id, tmux::pane_format(&target, "#{pane_id}"), "the answer names the pane we checked");
-        assert_eq!(tmux::pane_live(&answered), Some(true), "and it is live");
-
-        // The check and the repair name the pane by its %id, so a window
-        // created beside ours (which renumbers positions) cannot make them
-        // land on two different panes.
-        let id = tmux::pane_format(&target, "#{pane_id}").expect("a pane id");
-        assert!(id.starts_with('%'));
-        assert_eq!(tmux::pane_live(&id), tmux::pane_live(&target), "both names, one pane");
-        // The three liveness states tmux can report, each distinguished —
-        // 'unreadable' is its own answer and never passes for 'live'.
-        assert_eq!(tmux::pane_live("tmm-no-such-session-326:9.9"), None, "a pane that is not there is unknown, not live");
-        assert_eq!(tmux::pane_live("%999999"), None, "and so is an id that is not there");
-
-        // Explicit Kill is still the one way to end it: the hook is a session
-        // option, so it dies with the session instead of rebuilding the pane.
+        // Explicit Kill is still the one way to end it.
         assert_eq!(kill().unwrap()["killed"], true);
         std::thread::sleep(std::time::Duration::from_millis(500));
-        assert!(!tmux::session_exists(&n), "killed, not respawned by its own hook");
+        assert!(!tmux::session_exists(&n), "killed, not started again by its loop");
         assert_eq!(owned().unwrap(), Ownership::Absent);
 
         assert_eq!(tmux::session_exists(SCRATCH_SESSION), real_before, "the real scratch session was never touched");
         assert_eq!(tmux::session_hook(SCRATCH_SESSION, "pane-died"), real_hook_before, "nor its hooks");
         assert_eq!(global_hook(), global_hook_before, "and no global hook was set");
+    }
+
+    /// A scratch session made before #114 (#326's recipe: the bare shell,
+    /// `remain-on-exit`, the `pane-died` hook) keeps its LIVE shell: ensure
+    /// never kills a shell to migrate it. Once its pane is dead, ensure gives
+    /// it the recipe and drops the old keep-alive. The repair is TMUX's
+    /// decision (no `-k`), so a respawn aimed at a running pane is refused
+    /// and kills nothing (#326 review P1).
+    #[test]
+    fn an_old_scratch_session_migrates_only_once_its_pane_is_dead() {
+        crate::projects::tests::use_test_store();
+        let global_hook_before = global_hook();
+        let mut guard = tmux::Scratch::new("mg");
+        let n = guard.session("m");
+        use_test_name(&n);
+        if tmux::new_session(&n, None, None).is_err() {
+            eprintln!("no tmux server — skipping");
+            return;
+        }
+        tmux::set_session_option(&n, MARK, "1").unwrap();
+        let target = first_pane().unwrap();
+        tmux::set_window_option(&target, "remain-on-exit", "on").unwrap();
+        tmux::set_hook(&n, "pane-died", "respawn-pane").unwrap();
+        let old = pane_pid(&target);
+
+        // Live: left alone, hook and all.
+        assert_eq!(ensure().unwrap()["target"], target.as_str());
+        assert_eq!(pane_pid(&target), old, "the live shell is not killed to migrate");
+        assert!(!runs_the_loop(&target));
+        assert_eq!(hook_and_remain(&n, &target), (Some("respawn-pane".into()), Some("on".into())), "its keep-alive untouched");
+
+        // Dead (the hook removed, so the pane stays dead on every tmux):
+        // ensure applies the recipe in the same pane and drops the hook.
+        tmux::run_tmux(&["set-hook", "-u", "-t", &n, "pane-died"]).expect("hook removed");
+        exit_shell(&target, &old);
+        assert!(settles(|| tmux::pane_live(&target) == Some(false)), "with no hook the pane stays dead");
+        let id = tmux::pane_format(&target, "#{pane_id}");
+        assert_eq!(ensure().expect("ensure repairs a dead pane")["target"], target.as_str());
+        assert_eq!(tmux::pane_live(&target), Some(true), "the target handed back is a LIVE pane");
+        assert_eq!(tmux::pane_format(&target, "#{pane_id}"), id, "the same pane");
+        assert!(runs_the_loop(&target), "now on the recipe");
+        assert_eq!(hook_and_remain(&n, &target), (None, None), "and the old keep-alive is gone");
+
+        // A respawn aimed at a running pane is refused; nothing is killed.
+        assert!(settles(|| shell_pid(&target).is_some()));
+        let (lp, sh) = (pane_pid(&target), shell_pid(&target));
+        typed(&target, "sleep 120", || tmux::pane_format(&target, "#{pane_current_command}").as_deref() == Some("sleep"));
+        assert!(tmux::respawn_pane(&target, &RECIPE).is_err(), "tmux refuses to respawn a pane that is still active");
+        assert_eq!(ensure().unwrap()["target"], target.as_str());
+        assert_eq!((pane_pid(&target), shell_pid(&target)), (lp, sh), "ensure restarted nothing");
+        assert_eq!(tmux::pane_format(&target, "#{pane_current_command}").as_deref(), Some("sleep"), "and the command runs on");
+        tmux::send_keys(&target, "C-c", false).ok();
+
+        // The target ensure answers is read back from the same %id at the end.
+        let answered = ensure().unwrap()["target"].as_str().unwrap().to_string();
+        assert_eq!(tmux::pane_format(&answered, "#{pane_id}"), tmux::pane_format(&target, "#{pane_id}"), "the answer names the pane we checked");
+        // The three liveness states tmux can report, each distinguished.
+        assert_eq!(tmux::pane_live("tmm-no-such-session-326:9.9"), None, "a pane that is not there is unknown, not live");
+        assert_eq!(tmux::pane_live("%999999"), None, "and so is an id that is not there");
+        assert_eq!(global_hook(), global_hook_before, "no global hook was set");
+    }
+
+    /// A shell that ends at once (a broken `$SHELL`) does not spin: the loop
+    /// waits 3 s before each new start and says why in the pane (board #114).
+    #[test]
+    fn a_shell_that_ends_at_once_is_started_again_only_after_a_pause() {
+        let mut guard = tmux::Scratch::new("bs");
+        let s = guard.session("b");
+        let mut argv = vec!["env", "SHELL=/bin/false"];
+        argv.extend(RECIPE);
+        if tmux::new_session_argv(&s, None, &argv).is_err() {
+            eprintln!("no tmux server — skipping");
+            return;
+        }
+        let panes = tmux::list_panes(&s).unwrap();
+        let p = panes.iter().min_by_key(|p| (p.window, p.pane)).unwrap();
+        let target = format!("{s}:{}.{}", p.window, p.pane);
+        assert!(settles(|| notices(&target) >= 1), "the pane says why");
+        let first = notices(&target);
+        std::thread::sleep(std::time::Duration::from_millis(4500));
+        let more = notices(&target) - first;
+        assert!((1..=2).contains(&more), "one start per 3 s, not a hot loop: {more} more in 4.5 s");
+        assert_eq!(tmux::pane_live(&target), Some(true), "the loop itself keeps running");
+        let screen = tmux::run_tmux(&["capture-pane", "-p", "-t", &target]).unwrap_or_default();
+        assert!(screen.contains("[tmm] /bin/false ended within 2 s of starting; starting it again in 3 s"), "{screen}");
     }
 
     /// Why the repair names the pane by `%id` and not by its position

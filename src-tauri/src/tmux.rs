@@ -1363,6 +1363,16 @@ pub fn pane_cwd(target: &str) -> Result<String, String> {
 
 /// 创建新 session
 pub fn new_session(name: &str, path: Option<&str>, command: Option<&str>) -> Result<(), String> {
+    let command: Vec<&str> = command.filter(|c| !c.is_empty()).into_iter().collect();
+    new_session_argv(name, path, &command)
+}
+
+/// `new_session` whose command is an ARGV (board #114): two or more words
+/// are run by tmux directly, with no shell parsing them, so a command that is
+/// a script for `/bin/sh` reaches it unchanged whatever the user's
+/// `default-shell` is. One word is a shell command, as before; none is the
+/// default shell.
+pub fn new_session_argv(name: &str, path: Option<&str>, command: &[&str]) -> Result<(), String> {
     // Check if session name already exists to prevent grouped sessions. Exact:
     // with only `dev-2` alive, `dev` must be creatable.
     if session_exists(name) {
@@ -1384,13 +1394,7 @@ pub fn new_session(name: &str, path: Option<&str>, command: Option<&str>) -> Res
         args.push("-c");
         args.push(&home);
     }
-    let cmd_str;
-    if let Some(cmd) = command {
-        if !cmd.is_empty() {
-            cmd_str = cmd.to_string();
-            args.push(&cmd_str);
-        }
-    }
+    args.extend_from_slice(command);
     run_tmux(&args)?;
     Ok(())
 }
@@ -1778,9 +1782,12 @@ fn liveness(raw: Option<&str>) -> Option<bool> {
 /// running, which was the point. Verified on tmux 3.6a, including two
 /// concurrent respawns of one dead pane (one wins, the other is refused, the
 /// surviving shell keeps its pid) and a repair attempt against a pane running
-/// `sleep 120` (refused, pid unchanged).
-pub fn respawn_pane(target: &str) -> Result<(), String> {
-    run_tmux(&["respawn-pane", "-t", target]).map(|_| ())
+/// `sleep 120` (refused, pid unchanged). `command` is an argv as in
+/// `new_session_argv`; empty keeps the pane's own command.
+pub fn respawn_pane(target: &str, command: &[&str]) -> Result<(), String> {
+    let mut args = vec!["respawn-pane", "-t", target];
+    args.extend_from_slice(command);
+    run_tmux(&args).map(|_| ())
 }
 
 /// 检查 tmux server 是否运行
