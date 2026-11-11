@@ -1,6 +1,6 @@
 # Board dashboard: what needs the person, the current state, an agent-maintained page
 
-Board #104. Proposal v2, 2026-11-11, written by the leader for the owner's
+Board #104. Proposal v3, 2026-11-11, written by the leader for the owner's
 decision, after a first-principles look by reviewer (design), pentester (the
 page's threat model) and builder (feasibility); their notes and the rulings
 are on the issue. Nothing here is built. The owner's decisions are in § 10.
@@ -123,24 +123,28 @@ what the stream cannot hold.
 |---|---|---|
 | open | `tmm ask` | a card in Needs you; a bubble with live buttons |
 | answered | the person taps an option (with or without a comment), or sends text from the card's box, which says **Answer** | the answer, who, when |
-| answered (linked) | the asker links an **actual message from the person in this room** as the answer (`tmm ask close <id> --answered-by <seq>`; the server checks the sender and the room) | that message, quoted; "linked by <asker>" |
 | dismissed | the person taps Dismiss: "I will not answer this" | dismissed, when |
-| withdrawn | the asker closes it for any other reason, with a line of why | "withdrawn by <asker>: why" |
+| withdrawn | the asker closes it, with a line of why, and may cite a room message (`tmm ask close <id> "why" --re <seq>`) | "withdrawn by <asker>: why", the cited message quoted |
 
-All four closings are terminal. An approval is never inferred: an agent's
-reading of "可以" in chat closes an ask only by pointing at the person's own
-message, and reads as a link, not as the person's act on the card. A
-question back ("A 的 48px 只在聚合模式吗？") is not an answer: **Discuss in
-chat** opens the chat at the ask's bubble with Reply armed; the ask stays
-open.
+All three closings are terminal. **Only the person's own act on the ask
+makes it answered**: the card and the chat bubble are the two places to do
+it, and both name the ask. An approval is never inferred. A "可以" typed
+into the chat names no ask (on 11-10 the same word could have meant the
+phone's 48 px or the desktop's, #102 and #103), so an asker that reads it as
+its answer can only **withdraw**, citing that message; the record then says
+what happened: the agent's reading, with the person's words beside it. A
+question back ("A 的 48px 只在聚合模式吗？") is not an answer either:
+**Discuss in chat** opens the chat at the ask's bubble with Reply armed, and
+the ask stays open.
 
 ### Delivery state: the one delivery path's, shown beside the decision
 
-The answer (and a dismissal) is a message from the person to the asker,
-recorded and typed by the same server path as a composer message, in the
-transaction that changes the ask's state. What happened to that line is the
-delivery path's own report, shown next to "answered" and never merged into
-it:
+The answer (and a dismissal) is a message from the person to the asker.
+**One SQLite transaction** appends that message and changes the ask's state;
+nothing is typed before it commits. **After the commit** the line goes
+through the one delivery path like a composer message, with that path's own
+failures and reports. What happened to the line is shown next to "answered"
+and never merged into it:
 
 | asker at that moment | what happens |
 |---|---|
@@ -156,7 +160,7 @@ it:
 | two clients answer at once | one guarded update decides (`state='open'` → changed rows = 1); the loser gets "already answered at HH:MM" with the winner's answer, sends nothing, repaints |
 | the person answers while the asker withdraws | first commit wins; the other is refused with the winner shown |
 | the answer's reply is lost and the client retries | the id is derived from the ask and the edge: the retry returns the same row, nothing is typed twice |
-| the server stops between commit and typing | whatever the delivery path does for a composer message today; no ask-specific queue |
+| the server stops after the commit, before typing | the decision stands (it is committed); the line's fate is whatever the delivery path does for a composer message today, reported as such; no ask-specific queue, and never a send before the commit |
 | answer, dismiss or withdraw on a closed ask | refused, state shown |
 | the project is renamed, archived, removed | asks follow the room, as issues follow the board |
 
@@ -213,12 +217,18 @@ tmm dashboard publish <dir>
 ```
 
 The door validates (an `index.html`, regular files only, no symlinks, a size
-ceiling) and swaps `<ws>/.tmm/dashboard/` atomically, recording who published
-and when. So a reader never sees a half-written page, several agents cannot
-interleave their writes (the last publish wins, with its author's name on
-the section header), an agent confined to its worktree or its sandbox can
-still publish, and every publication is a **revision** the app can name.
-`<ws>/.tmm/` is already one of the two stores (tenet 7).
+ceiling), copies the bundle into its own **revision** directory under
+`<ws>/.tmm/dashboard/` and then moves the "current" pointer, recording who
+published and when. So a reader never sees a half-written page, several
+agents cannot interleave their writes (the last publish wins, with its
+author's name on the section header), and an agent confined to its worktree
+or its sandbox can still publish. A loaded document's own files (its
+stylesheet, its pictures) are read from **its** revision, so a page kept on
+screen while a newer one is published stays one consistent snapshot; the
+revision before the current one is kept for that, older ones are removed at
+the next publish. Project files a page points at outside its bundle (a mix,
+a report) are live by declared policy: they are the project's, not the
+page's. `<ws>/.tmm/` is already one of the two stores (tenet 7).
 
 **How it is shown.** Exactly as the Files page previews an HTML file today
 (board #433), mounted as the dashboard's last section:
@@ -281,9 +291,13 @@ which then acts and publishes again. The app handles the click, not the page:
   project switch or a focus move cannot rewrite or redirect it.
 - A newer revision is **adopted automatically only when nothing is in
   progress**: no edited field, no playing media, no standing confirm, the
-  scroll position kept. Otherwise the header offers **Refresh**.
-- Entering or returning to the view always shows the newest revision. The
-  file door's signature is renewed at each load (it lasts 4 hours).
+  scroll position kept. Otherwise the header offers **Refresh**. This is the
+  ONE adoption rule: a first entry has no document and loads the newest;
+  returning to a document the app kept (after a look at Chat, or a hidden
+  tab) goes through the same guard, so a half-filled form is still there.
+  Refresh on a page with edited fields, and leaving the project, discard
+  them through the app's existing discard confirm.
+- The file door's signature is renewed at each load (it lasts 4 hours).
 
 **Why no scripts in v1.** The page is written by an agent that may have read
 anything on the web. The app that shows it holds the gateway token, the
@@ -315,9 +329,9 @@ tmm ask "question" [--option KEY=label]… [--recommend KEY] [--issue N]
                                  on the dashboard until closed. Never repeat it.
 tmm ask list [--all]             this project's open asks; --all: closed ones with
                                  their answers (read this after a restart)
-tmm ask close <id> "why"         withdraw it
-tmm ask close <id> --answered-by <seq>
-                                 the person answered in chat: link HIS message
+tmm ask close <id> "why" [--re <seq>]
+                                 withdraw it; --re cites a room message (e.g. the
+                                 person's reply in chat). It never marks it answered.
 tmm dashboard publish <dir>      publish <dir>/index.html and its files as the project page
 ```
 
@@ -354,7 +368,7 @@ an open ask is never repeated; a project page is optional and published with
 | hidden, then shown | the poll stops while hidden and reads at once on return |
 | older server, newer app | no capability: no switch, no chip, no ask bubbles |
 | newer server, older app | an ask is a plain message with its options as text; a reply in chat does not close it; the asker links it or the person answers on an updated client |
-| authoring from a worktree, several agents, a sandboxed CLI | `tmm dashboard publish`: the last publish wins, atomically, attributed |
+| authoring from a worktree, several agents, a sandboxed CLI | `tmm dashboard publish`: the last publish wins, atomically, attributed; a document on screen keeps its own revision's files |
 | no page published | the fourth section is absent |
 | input | keyboard only (options are buttons in focus order); an IME's Enter never sends the answer box (the note box's rule); wide touch targets; six long options wrap |
 | widths and themes | 320 / 390 / 1280, dark and light, real Chromium, by natural widths with the longest realistic names, server tags and numbers, for the sidebar row, the cards and the confirm with a very long text (the #102/#103 lesson) |
@@ -407,9 +421,10 @@ you / Project page (概览 · 看板；等你处理 / 现状 / 留言 / 项目�
 - **An agent-written summary as the dashboard's top.** A summary is a claim;
   the counts, the states and the finished list are derived (tenet 8). The
   agents' words have their places: the status line, the notes, the page.
-- **Closing an ask from the asker's reading of a chat reply.** That turns an
-  agent's interpretation into the person's approval. The asker may only
-  point at the person's message.
+- **An asker marking its ask answered, even by linking the person's chat
+  message.** A message that names no ask does not say which ask it answers;
+  linking it is still the agent's interpretation. The asker withdraws and
+  cites; only the person's act on the ask is an answer.
 - **A row for every agent in Now.** A second roster. The roster is one tap
   away; Now lists who is active and counts the rest.
 - **"Finished since your last visit".** A new read mark, and an answer to
