@@ -412,13 +412,22 @@ Two obligations ticket 3 carries, from the review:
   the frame mounted and hidden, or the guard above ("nothing changes under
   the person's hands") is void.
 
-Before ticket 3 is designed further, one measurement: in real Chromium in
-the rig, then by pentester on the Android and macOS apps, the script-less
-same-origin frame — does anything in it ever execute (SVG `onload`, meta
-refresh, `javascript:` links, CSS-triggered loads); do the app's click
-listeners and field reads work; is the content height readable; does any
-request leave for an origin other than the signed door. Pentester verifies
-ticket 3 before it ships.
+Before ticket 3 is designed further, one measurement (#110): in real
+Chromium and WebKit in the rig, the script-less same-origin frame — does
+anything in it ever execute (SVG `onload`, meta refresh, `javascript:`
+links, CSS-triggered loads); do the app's click listeners and field reads
+work; is the content height readable; does any request leave for an origin
+other than the signed door. Pentester verifies ticket 3 against that list in
+the rig.
+
+**The real Android and macOS apps are a separate, named gate**, and nobody
+on the team holds those devices: ticket 3 ships a **probe page** (every
+attempt to run or to load from elsewhere would visibly mark it; a clean
+probe reads "nothing ran, nothing left") beside the feature, and the native
+result is the owner's look at that probe on his phone and his Mac, recorded
+on the ticket. A rig pass is never labelled a native result. Shipping before
+that look is the risk the Files HTML preview already carries: it is the same
+frame and the same policy.
 
 ## 10. The owner's decisions (2026-11-11 07:22)
 
@@ -487,44 +496,60 @@ that an ask, a new kind of news, rings at all of them.
 The owner, 07:22: "我看 kirocrew 的 BOT 里有一个 dashboard，相当于这个 BOT 可以
 创建一个自己的页面。我理解我们前端其实也是一个页面，能不能通过 iframe 或者
 其他形式，把这个静态网页显示出来？我能看到上面的一些状态就行". Yes: that is
-ticket 3. Read from KiroCrew's own repository
-(github.com/kirodotdev/KiroCrew @ 4dd6b6be, `docs/architecture/
-dashboard-iframe-hosts.md`, `docs/request-for-change/
-rfc-crewmate-dynamic-dashboard.md`, `src/kiro_crew/dashboard_frame.py`;
-cited, not run):
+ticket 3. What follows is read from KiroCrew's own repository
+(github.com/kirodotdev/KiroCrew; the design documents at 4dd6b6be, the code
+re-read at 756346d0: `website/src/pages/members/CrewDynamicDashboard.tsx`,
+`website/src/hooks/useSandboxDoc.ts`,
+`src/kiro_crew/dashboard/handlers/sandbox_doc.py`,
+`src/kiro_crew/dashboard_frame.py`). Cited source, not a running KiroCrew.
+The first draft of this section took the frame's shape from the design
+documents and was wrong about it; reviewer read the code (#104 note 19).
 
 | | KiroCrew's crew page | our project page (v1) |
 |---|---|---|
-| who writes it | the crewmate, as a template body; reviewed built-ins too | the project's agents, as a published bundle |
-| frame | `sandbox="allow-scripts"` only: an origin of its own, no access to the host | the preview's frame: the app's origin, **no scripts** |
-| may it run code | yes, inline scripts (a chart needs one) | no |
-| network | closed (`connect-src 'none'`, no frames, no form posts) | closed (only the signed door to the project's own files) |
+| who writes it | the crewmate, as a page the host wraps; reviewed built-ins too | the project's agents, as a published bundle |
+| how the frame gets it | a document its **gateway serves at a real URL** (`iframe src`), chosen after a `blob:` URL was refused and a sandboxed `srcdoc` rendered blank in some WebKit hosts | the preview's `srcdoc` |
+| frame | `sandbox="allow-scripts"`: an origin of its own. Or, when the server withholds script, an empty sandbox: the page is shown **static** and the gateway writes the bound values in as text | the app's origin, **no scripts** |
+| may it run code | yes, when its source is one the server lets run; not under a policy that denies the agent egress | no |
+| network | narrowed, not closed: `connect-src 'none'`, no form posts. Its own code says this is not complete protection (a page can navigate its own frame; WebRTC), and gives the reason it accepts that: the agent that wrote the page already reaches the network | closed: only the signed door to the project's own files, and nothing in the page can run to navigate |
 | live values | the host fills declared slots and hands them to the page's script | none injected: the app's own sections sit above the page |
 | talking back | three narrow messages; "send" is off by default; "act" only fills the composer | ticket 4, later: one verb, always confirmed |
 
-The direction is the same (the agent owns a page; the host contains it;
-egress closed; nothing the page says is trusted). The one difference is
-code in the page, and it is not a matter of taste here:
+The direction is the same: the agent owns a page, the host contains it, and
+nothing the page says is trusted. KiroCrew also has our v1 inside it: its
+static mode. What differs is code in the page, and for us that is a change
+of policy and a new door, not a switch:
 
-- KiroCrew mints the page as a `srcdoc` under a host policy that allows
-  inline scripts. Ours forbids them (`script-src 'self'` in
-  `tauri.conf.json`), on purpose: the app renders agents' markdown and
-  repository files, and that rule is what turns an escaping bug into a
-  broken picture. A `srcdoc`, `blob:` or `data:` frame inherits the app's
-  policy, so a script in it does not run.
-- To run, the page would have to be loaded from the gateway with a policy of
-  its own. The apps' `frame-src` is `'self' blob: data:`; the server address
-  is typed by the person, so allowing it means allowing any http(s) origin,
-  and then a scripted page can navigate itself anywhere.
+- Our app forbids inline script (`script-src 'self'` in `tauri.conf.json`),
+  on purpose: it renders agents' markdown and repository files, and that
+  rule is what turns an escaping bug into a broken picture. A `srcdoc`,
+  `blob:` or `data:` frame inherits the app's policy, so a script in it does
+  not run.
+- A page that runs code would therefore be what KiroCrew's is: a document
+  the gateway serves under a policy of its own. Today the apps' `frame-src`
+  is `'self' blob: data:`, so that needs a policy change (the server address
+  is typed by the person), a new HTTP door, and an answer to the page
+  navigating its own frame, the channel KiroCrew's code names. That is a
+  design to make when a page needs code, with its own review; nothing here
+  says it cannot be made.
 - On the phone and the desktop app the native bridge is in the same webview.
-  Whether a frame with no origin can reach it is a fact to measure on the
-  real apps, and "reachable" ends the idea.
+  Whether a frame with an origin of its own can reach it is a fact to
+  measure on the real apps (#110 part B reads the pinned sources first).
 
-So v1 shows a static page, which is what was asked for. Two things we do
-take: a frame is never moved or unmounted to hide it (their note measured
-that a moved iframe reloads; § 9), and a page that talks back does so
-through messages the host treats as hostile (our ticket 4 already asks the
-person to confirm the exact text). Not taken in v1: host-filled value slots
-in the page. They would repeat the numbers of Now, directly above, in a
-second place; if a page needs them laid out its own way, that is a small
-later addition to an inert frame the app can already write into.
+So v1 shows a static page, which is what was asked for and needs none of
+that. What we take:
+
+- **A compatibility lesson for #110 and ticket 3:** KiroCrew found a
+  sandboxed `srcdoc` frame blank in some WebKit hosts. Theirs allowed
+  scripts and had its own origin; ours is the script-less, same-origin
+  `srcdoc` the Files preview already ships. It is measured in WebKit as well
+  as Chromium in the rig, and the real macOS and Android apps decide.
+- **A frame is never moved or unmounted to hide it** (their note measured
+  that a moved iframe reloads; § 9).
+- **A page that talks back is treated as hostile** (our ticket 4 asks the
+  person to confirm the exact text).
+
+Not taken in v1: host-filled value slots in the page. They would repeat the
+numbers of Now, directly above, in a second place; if a page needs them laid
+out its own way, that is a small later addition to an inert frame the app
+can already write into.
