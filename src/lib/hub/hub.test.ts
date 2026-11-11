@@ -409,6 +409,40 @@ test('a run ended by its own reply joins that reply; every other run stands alon
   assert.equal(carried(feedBlocks([{ ts: 200, from: 'dev', body: 'fixed' }], tools, 'status', lanes)[0]), 0);
 });
 
+test('a line taken into a running turn does not split its lane; a turn end does (board #105)', () => {
+  // Recorded on this host (pi 07:35, builder-2): a tool call, then 12 ms later
+  // the echo of a line leader sent while the turn ran, then more calls, with
+  // no turn end between. The feed drew two adjacent groups, "1 tool calls"
+  // and "20 tool calls", with nothing between them (owner's screenshot).
+  const lanes = (from: string) => (from === 'dev' ? 'dev' : undefined);
+  const feed = [
+    { id: 'm1', ts: 1000, from: 'leader', body: '@dev take #105' },
+    { id: 'm2', ts: 1500, from: 'leader', body: '@dev you are a second builder' },
+    { id: 'r', ts: 9000, from: 'dev', body: 'root cause found' },
+  ];
+  const start = ev({ ts: 1010, window: 'dev', kind: 'prompt', via: 'app', text: '[tmm chat 07:35] leader: @dev take #105', deliveries: [{ id: 9842, msg: 'm1' }] });
+  const midTurn = ev({ ts: 2012, window: 'dev', kind: 'prompt', via: 'app', text: '[tmm chat 07:35] leader: @dev you are a second builder', deliveries: [{ id: 9843, msg: 'm2' }] });
+  const tools = [
+    ev({ ts: 2000, window: 'dev', tool: 'bash', text: 'tmm board take 105' }),
+    ev({ ts: 6489, window: 'dev', tool: 'read', text: 'mwbskuz8-c5b8ce25.webp' }),
+    ev({ ts: 7000, window: 'dev', tool: 'bash', text: 'git log -1' }),
+  ];
+  const one = feedBlocks(feed, [start, ...tools.slice(0, 1), midTurn, ...tools.slice(1)], 'tools', lanes);
+  assert.deepEqual(one.map((b) => b.type), ['msg', 'msg', 'msg'], 'one run, carried by the reply that ends the turn');
+  assert.equal(one[2]?.type === 'msg' && one[2].steps?.events.length, 3);
+  assert.equal(one[1]?.type === 'msg' && one[1].delivered, true, 'the echo is still the receipt');
+  // A turn that ENDED (no reply) and a later line that opens the next one
+  // still split: that echo is a turn start.
+  const ended = ev({ ts: 3000, window: 'dev', kind: 'notif', text: 'completed' });
+  const next = ev({ ts: 4000, window: 'dev', kind: 'prompt', via: 'app', text: '[tmm chat 07:35] leader: @dev you are a second builder', deliveries: [{ id: 9843, msg: 'm2' }] });
+  const two = feedBlocks([feed[0]!, { ...feed[1]!, ts: 3500 }, feed[2]!], [start, tools[0]!, ended, next, ...tools.slice(1)], 'tools', lanes);
+  assert.deepEqual(two.map((b) => b.type), ['msg', 'steps', 'msg', 'msg'], 'the ended turn keeps its own run');
+  assert.equal(two[3]?.type === 'msg' && two[3].steps?.events.length, 2);
+  // An interrupt ends a turn the same way.
+  const cut = feedBlocks([feed[0]!, { ...feed[1]!, ts: 3500 }, feed[2]!], [start, tools[0]!, { ...ended, text: 'interrupted' }, next, ...tools.slice(1)], 'tools', lanes);
+  assert.deepEqual(cut.map((b) => b.type), ['msg', 'steps', 'msg', 'msg']);
+});
+
 test('two agents working at once keep one lane each', () => {
   // The churn this replaces: folding only CONSECUTIVE events turned an
   // interleaved run into one group per call (owner report, 2026-08-19).

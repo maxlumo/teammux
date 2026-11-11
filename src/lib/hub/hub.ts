@@ -2032,11 +2032,15 @@ function squashOf(obj: object | null | undefined, text: string | null | undefine
   return v;
 }
 
-/** Internal: a turn boundary that produces NO row — a delivery echo. The echo
- * is consumed as a receipt (rule 1) so it never renders, but it is still the
- * moment `userPromptSubmit` opened a new turn, and a new turn must not pour its
- * tool calls into the previous turn's group. */
-type TurnMark = { type: 'turn'; ts: number; window: string };
+/** Internal: a turn mark that produces NO row. `start` is a delivery echo:
+ * consumed as a receipt (rule 1) so it never renders, and a new turn's start
+ * when the window's previous turn has ended, so that turn's tool calls do not
+ * pour into the previous group. `end` is the turn's end (`completed`,
+ * `interrupted`), which closes nothing by itself: the reply that follows it
+ * still carries the run (#295). An echo with no end since the lane opened is
+ * a line the agent took into its RUNNING turn (pi's steering, board #105) and
+ * does not split the lane. */
+type TurnMark = { type: 'turn'; ts: number; window: string; edge: 'start' | 'end' };
 
 /** `tmm` subcommands whose EFFECT is already a row in this timeline: the
  * message, the status change, the completion, the spawn notice. Showing the
@@ -2140,7 +2144,10 @@ export function echoContains(canonEcho: string, body: string, truncated: boolean
  * 3. **Tool calls collapse per AGENT, replies do not.** A window's tool events
  *    fold into one `steps` group that stays open for that window's whole turn.
  *    Only that SAME window ends its own run — its reply, its local prompt, the
- *    echo of a line delivered to it, a note about it. Another agent's rows are a
+ *    echo of a line delivered to it once its previous turn has ended, a note
+ *    about it. An echo inside a running turn (a line the CLI took into the
+ *    turn, pi's steering) is a receipt only: splitting there drew two adjacent
+ *    groups with nothing between them (board #105). Another agent's rows are a
  *    different lane and must not break it: with two agents working, a rule that
  *    folded only CONSECUTIVE events produced one group per call
  *    (w1, w2, w1, w2 …) and the feed read as churn (owner report, 2026-08-19).
@@ -2245,7 +2252,7 @@ export function feedBlocks(
     if (hit) {
       consumed.add(e);
       // Invisible, but still a turn boundary (rule 3).
-      turns.push({ type: 'turn', ts: e.ts, window: e.window });
+      turns.push({ type: 'turn', ts: e.ts, window: e.window, edge: 'start' });
     }
   }
 
@@ -2300,11 +2307,13 @@ export function feedBlocks(
     // message, and its chip goes idle. A row saying "finished a turn" after
     // every answer was just noise in the transcript (owner call, 2026-08-16).
     // The other lifecycle events all mean something is WAITING on a human.
-    if (e.kind === 'notif' && e.text === 'completed') continue;
     // An interrupt's end row is a turn edge for the server's restart
     // recovery (board #249); the room already says `[tmm] interrupted`, so
-    // it draws nothing here either.
-    if (e.kind === 'notif' && e.text === 'interrupted') continue;
+    // it draws nothing here either. Both are kept as invisible turn ends.
+    if (e.kind === 'notif' && (e.text === 'completed' || e.text === 'interrupted')) {
+      stream.push({ type: 'turn', ts: e.ts, window: e.window, edge: 'end' });
+      continue;
+    }
     stream.push({ type: 'note', ts: e.ts, window: e.window, event: e });
   }
   // Chronological, and when two things share a timestamp the OBSERVATION comes
@@ -2321,6 +2330,9 @@ export function feedBlocks(
   // a row from any other window is a different lane and is ignored.
   const out: FeedBlock[] = [];
   const open = new Map<string, Extract<FeedBlock, { type: 'steps' }>>();
+  // Windows whose open lane has seen its turn end: their next echo starts a
+  // new turn and closes it.
+  const ended = new Set<string>();
   for (const item of stream) {
     if (item.type === 'tool') {
       const group = open.get(item.window);
@@ -2336,11 +2348,13 @@ export function feedBlocks(
         events: [item.event],
       };
       open.set(item.window, created);
+      ended.delete(item.window);
       out.push(created);
       continue;
     }
     if (item.type === 'turn') {
-      open.delete(item.window);
+      if (item.edge === 'end') ended.add(item.window);
+      else if (ended.delete(item.window)) open.delete(item.window);
       continue;                      // a receipt renders as a mark on its message
     }
     if (item.type === 'msg') {
