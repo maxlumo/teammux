@@ -6186,7 +6186,12 @@ while True:
             assert!(crate::projects::restore_hold::with_store_for_test(|s| s.install_hold(&old, &uuid::Uuid::new_v4().to_string(), stage, &identity(), 1)).unwrap());
         };
         let screen = || crate::tmux::capture_pane_plain(&pane, Some(0)).unwrap_or_default();
-        let keys_seen = || screen().lines().filter(|l| l.starts_with("key:")).map(str::to_string).collect::<Vec<_>>();
+        // One row per byte the fixture read. The row is compared without its
+        // trailing spaces (board #115): `capture-pane -J` keeps them, and tmux
+        // 3.2a returns `key:023` as `key:023` + 13 spaces. A key that IS a
+        // space, or an Enter, prints a row of its own (`key:`, `key:\r`), so
+        // trimming a row cannot hide one.
+        let keys_seen = || screen().lines().filter(|l| l.starts_with("key:")).map(|l| l.trim_end().to_string()).collect::<Vec<_>>();
         let wait_keys = |n: usize| (0..100).any(|_| keys_seen().len() >= n || { std::thread::sleep(std::time::Duration::from_millis(30)); false });
         let respawn_before_write = || {
             let (p2, r2) = (pane.clone(), run.clone());
