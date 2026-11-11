@@ -131,9 +131,11 @@ The home id is checked where #106 hands the line over, and the delivery
 carries it on (`Deliver`'s `home`; `deliver_to`'s `Recipient { name, home }` carries it): the one
 delivery path types a line only into the lifetime it was meant for
 (hub-composer.md § A line is typed only into the lifetime it was meant for,
-#116). Its write step resolves the pane, then compares the window's home id
-with the asker's, then types to that pane id only, so an asker removed and
-created again between this check and the keys gets nothing. An answer HELD
+#116). Its write step observes the pane with its server and process,
+compares the window's home id with the asker's, then types to that pane only
+under the native guard of that observation (#117: a pane id is unique only
+within one tmux server), so an asker removed and created again between this
+check and the keys, even on a new server, gets nothing. An answer HELD
 for a busy or exited asker keeps the asker's home id in its row
 (`deliveries.home`), and its flush is checked the same way; a remove drops
 the asker's held answer in its own call (`undelivered (the agent was

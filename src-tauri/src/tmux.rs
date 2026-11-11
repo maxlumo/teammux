@@ -225,6 +225,20 @@ pub struct PaneFacts {
     pub session: String,
     pub window: String,
     pub index: usize,
+    /// The pane's own process (`#{pane_pid}`, board #117): with the server's
+    /// incarnation and the `%id`, what a `WriteGuard` binds a write to.
+    pub pane_pid: u32,
+}
+
+impl CheckedPane {
+    /// The native guard for a write into this pane (board #117): tmux runs it
+    /// only while the server, the pane and its process are the ones this ONE
+    /// observation saw (`write_pane`). `None` when that server has no such
+    /// pane.
+    pub fn guard(&self, pane_id: &str) -> Option<WriteGuard> {
+        let facts = self.pane.as_ref()?;
+        Some(WriteGuard { pid: self.server.pid, start_time: self.server.start, pane_id: pane_id.to_string(), pane_pid: facts.pane_pid })
+    }
 }
 
 pub fn resolve_pane_checked(pane_id: &str) -> Result<CheckedPane, String> {
@@ -233,7 +247,7 @@ pub fn resolve_pane_checked(pane_id: &str) -> Result<CheckedPane, String> {
     }
     let out = run_tmux(&[
         "display-message", "-t", pane_id, "-p",
-        "#{socket_path}<TMM_SEP>#{pid}<TMM_SEP>#{start_time}<TMM_SEP>#{pane_id}<TMM_SEP>#{session_name}<TMM_SEP>#{window_name}<TMM_SEP>#{pane_index}",
+        "#{socket_path}<TMM_SEP>#{pid}<TMM_SEP>#{start_time}<TMM_SEP>#{pane_id}<TMM_SEP>#{session_name}<TMM_SEP>#{window_name}<TMM_SEP>#{pane_index}<TMM_SEP>#{pane_pid}",
     ])?;
     checked_from_output(pane_id, &out)
 }
@@ -242,7 +256,7 @@ pub fn resolve_pane_checked(pane_id: &str) -> Result<CheckedPane, String> {
 /// can be tested with answers tmux gives only in awkward circumstances.
 fn checked_from_output(pane_id: &str, out: &str) -> Result<CheckedPane, String> {
     let fields: Vec<&str> = out.trim_end_matches('\n').split("<TMM_SEP>").collect();
-    let [socket, pid, start, native, session, window, index] = fields[..] else {
+    let [socket, pid, start, native, session, window, index, pane_pid] = fields[..] else {
         return Err(format!("unreadable server identity: {out:?}"));
     };
     let server = incarnation_of(&[socket, pid, start]).ok_or_else(|| format!("unreadable server identity: {out:?}"))?;
@@ -252,7 +266,8 @@ fn checked_from_output(pane_id: &str, out: &str) -> Result<CheckedPane, String> 
         return Ok(CheckedPane { server, pane: None });
     }
     let index = index.parse().map_err(|_| format!("unreadable server identity: {out:?}"))?;
-    Ok(CheckedPane { server, pane: Some(PaneFacts { session: session.to_string(), window: window.to_string(), index }) })
+    let pane_pid = pane_pid.parse().map_err(|_| format!("unreadable server identity: {out:?}"))?;
+    Ok(CheckedPane { server, pane: Some(PaneFacts { session: session.to_string(), window: window.to_string(), index, pane_pid }) })
 }
 
 pub(crate) fn run_tmux(args: &[&str]) -> Result<String, String> {
@@ -1179,6 +1194,8 @@ fn write_pane(args: &[&str]) -> Result<(), String> {
 
 #[cfg(test)]
 thread_local! {
+    /// Test seam (board #117): runs once between a line's text and its Enter.
+    pub(crate) static BEFORE_ENTER: std::cell::RefCell<Option<Box<dyn FnOnce()>>> = std::cell::RefCell::new(None);
     /// Test seam: runs once right before the next guarded write.
     pub(crate) static BEFORE_GUARDED_WRITE: std::cell::RefCell<Option<Box<dyn FnOnce()>>> = std::cell::RefCell::new(None);
 }
@@ -1277,6 +1294,10 @@ pub fn send_command_with(target: &str, command: &str, paste: bool, before_enter:
     // the screen before the Enter (kiro's picker guard, `before_enter`);
     // 200 ms is imperceptible next to a model turn.
     std::thread::sleep(std::time::Duration::from_millis(200));
+    #[cfg(test)]
+    if let Some(hook) = BEFORE_ENTER.with(|h| h.borrow_mut().take()) {
+        hook();
+    }
     before_enter()?;
     send_keys(target, "Enter", false)?;
     Ok(())
@@ -2237,17 +2258,18 @@ mod tests {
     #[test]
     fn the_checked_response_is_a_pane_only_when_it_names_the_pane_asked_about() {
         let sep = "<TMM_SEP>";
-        let line = |native: &str, session: &str, window: &str, index: &str| format!("/tmp/s{sep}4242{sep}1700000000{sep}{native}{sep}{session}{sep}{window}{sep}{index}\n");
+        let line = |native: &str, session: &str, window: &str, index: &str| format!("/tmp/s{sep}4242{sep}1700000000{sep}{native}{sep}{session}{sep}{window}{sep}{index}{sep}77\n");
         let ok = checked_from_output("%3", &line("%3", "work", "dev", "1")).unwrap();
         assert_eq!(ok.server, Incarnation { socket: "/tmp/s".into(), pid: 4242, start: 1700000000 });
-        assert_eq!(ok.pane, Some(PaneFacts { session: "work".into(), window: "dev".into(), index: 1 }));
+        assert_eq!(ok.pane, Some(PaneFacts { session: "work".into(), window: "dev".into(), index: 1, pane_pid: 77 }));
+        assert_eq!(ok.guard("%3"), Some(WriteGuard { pid: 4242, start_time: 1700000000, pane_id: "%3".into(), pane_pid: 77 }), "the guard is that one observation");
         assert_eq!(checked_from_output("%3", &line("", "", "", "")).unwrap().pane, None, "tmux's empty answer for a pane it does not have");
         assert_eq!(checked_from_output("%3", &line("%7", "work", "dev", "1")).unwrap().pane, None, "another pane's fields are not this pane's");
         assert_eq!(checked_from_output("%3", &line("%3", "", "dev", "1")).unwrap().pane, None);
         assert!(checked_from_output("%3", "garbage").is_err());
-        assert!(checked_from_output("%3", &format!("{sep}x{sep}y{sep}%3{sep}a{sep}b{sep}0")).is_err(), "an unreadable server identity is not a pane");
+        assert!(checked_from_output("%3", &format!("{sep}x{sep}y{sep}%3{sep}a{sep}b{sep}0{sep}1")).is_err(), "an unreadable server identity is not a pane");
         // A socket path with a space is a real server; it just cannot be written into an envelope.
-        assert!(checked_from_output("%3", &format!("/tmp/a b/s{sep}1{sep}2{sep}%3{sep}w{sep}n{sep}0")).unwrap().pane.is_some());
+        assert!(checked_from_output("%3", &format!("/tmp/a b/s{sep}1{sep}2{sep}%3{sep}w{sep}n{sep}0{sep}5")).unwrap().pane.is_some());
     }
 
     /// Board #422 (validator K9): a window identity's server is the full

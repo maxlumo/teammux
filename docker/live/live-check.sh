@@ -19,6 +19,17 @@
 #                      most under busy loops on every core: each line is one prompt its hook
 #                      reports, confirmed and answered; then a line sent to a busy queue-mode codex
 #                      waits for the turn and arrives once. A failing round prints its frames.
+#   live-check write-guard   board #117: codex, claude, pi and omp are each sent a long line (800
+#                      characters) and a three-line line through the guarded write (if-shell -F on
+#                      the observed server, pane and process): each arrives once and whole, its row
+#                      settled by the CLI's own prompt hook, with no unconfirmed report; then a
+#                      steer-mode codex gets a long line steered into its running turn, once. dsh
+#                      answers through the dsh-tools stand-in (text only, a fake key, no model calls).
+#                      claude also gets a native slash command (/cost) through the same write.
+#                      Not run here (said, not omitted): kiro and kimi (not installed); a slash
+#                      command to dsh (its /model, /effort, /new are run by the app; codex-picker,
+#                      pi-paste and omp-tools type them for codex, pi and omp); a busy queue line to
+#                      claude, omp or dsh (no queue mode offered; codex-start and pi-paste cover it).
 #   live-check pi      board #71: a managed pi 1.5.0 agent end to end. The rig writes ~/.pi/agent
 #                      in the owner's provider shape (ust anthropic-messages + ust-openai
 #                      openai-responses, apiKey $UST_API_KEY; orchestrator, #71 note 6); nothing of
@@ -57,7 +68,7 @@
 #                      Escape closes it.
 set -euo pipefail
 check="${1:-smoke}"
-case "$check" in smoke|codex-models|codex-provider|codex-start|pi|pi-tools|asks|pi-paste|pi-start|dsh-tools|omp-tools|codex-limit|codex-picker) ;; *) echo "live-check: unknown check '$check' (known: smoke, codex-models, codex-provider, codex-start, pi, pi-tools, asks, pi-paste, pi-start, dsh-tools, omp-tools, codex-limit, codex-picker)" >&2; exit 2 ;; esac
+case "$check" in smoke|codex-models|codex-provider|codex-start|write-guard|pi|pi-tools|asks|pi-paste|pi-start|dsh-tools|omp-tools|codex-limit|codex-picker) ;; *) echo "live-check: unknown check '$check' (known: smoke, codex-models, codex-provider, codex-start, write-guard, pi, pi-tools, asks, pi-paste, pi-start, dsh-tools, omp-tools, codex-limit, codex-picker)" >&2; exit 2 ;; esac
 
 cfg="$HOME/.config/teammux"
 mkdir -p "$cfg" /work/live
@@ -77,14 +88,14 @@ fi
 # Each CLI answers for itself at its pinned version (round 1: omp needs its Bun runtime).
 for c in claude codex omp bun pi dsh; do printf 'live-check: %s --version: %s\n' "$c" "$($c --version 2>&1 | head -1)"; done
 
-if [ "$check" = dsh-tools ]; then
+if [ "$check" = dsh-tools ] || [ "$check" = write-guard ]; then
   # The stand-in answers the n-th Messages request with step n of the script: a tool_use block per
   # call (two blocks in one message = two calls in one step), then the text done-87. It starts
   # before the gateway, so every pane the gateway's tmux opens inherits the fake key and its URL.
   cat > /work/stand-in.mjs <<'JS'
 import { createServer } from 'node:http';
 import { appendFileSync, writeFileSync } from 'node:fs';
-const steps = [[['bash', { command: 'echo first-87' }]], [['bash', { command: 'echo second-87' }]],
+const steps = process.env.STAND_IN_STEPS === 'none' ? [] : [[['bash', { command: 'echo first-87' }]], [['bash', { command: 'echo second-87' }]],
   [['bash', { command: 'echo par-a-87' }], ['bash', { command: 'echo par-b-87' }]],
   [['read', { file_path: '/work/live/a87.txt' }], ['read', { file_path: '/work/live/b87.txt' }]]];
 let n = 0;
@@ -110,7 +121,9 @@ const srv = createServer((req, res) => {
 });
 srv.listen(0, '127.0.0.1', () => writeFileSync('/work/stand-in.port', String(srv.address().port)));
 JS
-  node /work/stand-in.mjs & for _ in $(seq 1 50); do [ -s /work/stand-in.port ] && break; sleep 0.1; done
+  # write-guard (#117) needs only text answers for dsh: no tool steps.
+  steps=""; [ "$check" = write-guard ] && steps=none
+  STAND_IN_STEPS=$steps node /work/stand-in.mjs & for _ in $(seq 1 50); do [ -s /work/stand-in.port ] && break; sleep 0.1; done
   export DEEPSEEK_API_KEY=not-a-key DEEPSEEK_BASE_URL="http://127.0.0.1:$(cat /work/stand-in.port)"
 fi
 server >"$HOME/server.log" 2>&1 &
@@ -608,6 +621,85 @@ if [ "$check" = codex-provider ]; then
   case "$(pane_cmd)" in bash|zsh|sh|dash) echo "live-check: codex-provider: FAIL (agreeing layers: a shell, not codex)"; rc=1 ;; esac
   if ask gamma; then echo "live-check: codex-provider: agreeing layers: it answered gamma"; else echo "live-check: codex-provider: FAIL (agreeing layers: no answer)"; rc=1; fi
   tmm agent list --project live
+  exit $rc
+fi
+
+if [ "$check" = write-guard ]; then
+  # Board #117: every ordinary write runs under the native guard of one observation (if-shell -F
+  # on the server, the pane and its process). Each installed real CLI is sent a long line and a
+  # three-line line; each must arrive once and whole: its row settled by the CLI's own prompt hook
+  # (the server matches the WHOLE line), one prompt row naming its marker, no unconfirmed report.
+  [ -f "$HOME/.codex/config.toml" ] || { echo "live-check: write-guard: skipped: ~/.codex/config.toml not staged"; exit 2; }
+  pi_user
+  rc=0
+  ok() { echo "live-check: write-guard: $1"; }; bad() { echo "live-check: write-guard: FAIL ($1)"; rc=1; }
+  until_ok() { local t=$1 what=$2; shift 2; local end=$((SECONDS + t)); until "$@"; do [ $SECONDS -ge $end ] && { bad "timed out after ${t}s: $what"; return 1; }; sleep 0.5; done; }
+  pending() { node --no-warnings -e 'const {DatabaseSync}=require("node:sqlite");const d=new DatabaseSync(process.argv[1],{readOnly:true});console.log(d.prepare("SELECT count(*) AS n FROM deliveries WHERE win = ?").get(process.argv[2]).n)' "$cfg/state.db" "$1"; }
+  prompts() { node --no-warnings -e 'const {DatabaseSync}=require("node:sqlite");const d=new DatabaseSync(process.argv[1],{readOnly:true});console.log(d.prepare("SELECT count(*) AS n FROM activity WHERE win = ? AND kind = ? AND instr(text, ?) > 0").get(process.argv[2],"prompt",process.argv[3]).n)' "$cfg/state.db" "$1" "$2"; }
+  idle() { tmm agent list --project live | grep -q "$1 \[[a-z]*\] idle"; }
+  # Ready to be typed into: idle, its start released (no start mark: the backend's own ready
+  # edge where it has one), and its screen settled (two reads 1 s apart are the same).
+  gpane() { tmux list-panes -a -F '#{pane_id} #{window_name}' | awk -v w="$1" '$2==w{print $1; exit}'; }
+  settled_screen() { local a b; a=$(tmux capture-pane -p -t "$(gpane "$1")" 2>/dev/null); sleep 1; b=$(tmux capture-pane -p -t "$(gpane "$1")" 2>/dev/null); [ -n "$a" ] && [ "$a" = "$b" ]; }
+  ready() { idle "$1" && [ ! -e "/work/live/.tmm/agents/$1/starting" ] && settled_screen "$1"; }
+  # A typed slash command's arrival (AC4: once and whole): its echo, a line that is the command
+  # alone after an optional prompt glyph, EXACTLY once; and an answer line the echo cannot be:
+  # a dollar amount. Pinned below by validator-2's two bad transcripts, which must fail.
+  slash_counts() { printf '%s\n' "$2" | awk -v c="$1" '{ t=$0; sub(/^[[:space:]]*(>|❯|›)?[[:space:]]*/, "", t); sub(/[[:space:]]+$/, "", t); if (t == c) e++; if ($0 ~ /\$[0-9]+\.[0-9]+/) a++ } END { printf "echo=%d answer=%d", e+0, a+0 }'; }
+  slash_once() { case "$(slash_counts "$1" "$2")" in "echo=1 answer="[1-9]*) true ;; *) false ;; esac; }
+  slash_answered() { slash_counts "$1" "$(tmux capture-pane -p -S -300 -t "$(gpane "$2")")" | grep -q 'answer=[1-9]'; }
+  good=$(printf '❯ /cost\n  Usage by model:\n  write ($0.1053)\n'); dup=$(printf '> /cost\n> /cost\n  write ($0.1053)\n'); bare=$(printf '> /cost\n  Esc to cancel\n')
+  if slash_once /cost "$good" && ! slash_once /cost "$dup" && ! slash_once /cost "$bare"; then ok "the slash predicate passes one answered echo and fails a duplicate and an echo with no answer"; else bad "the slash predicate's own controls"; fi
+  # Pacing only (omp's turn may not end in this rig): waits, never fails, says the state.
+  pace() { local end=$((SECONDS + 120)); until idle "$1" || [ $SECONDS -ge $end ]; do sleep 0.5; done; ok "$1 is $(tmm agent list --project live | grep -o "$1 \[[a-z]*\] [a-z]*" | awk '{print $3}') before the next line"; }
+  long=$(for i in $(seq 1 160); do printf 'w%03d ' "$i"; done)
+  for b in codex claude pi omp dsh; do
+    w=g$b; extra=""; [ $b = pi ] && extra="--model ust/claude-haiku-5-5 --effort low"
+    tmm registry save --name "$w" --backend "$b" $extra --system "Live check agent. Answer in one short line." >/dev/null
+    tmm spawn "$w" --project live >/dev/null
+    until_ok 120 "$w ready" ready "$w" || true
+    tmm send --project live "@$w LONG-$b-117 reply with the single word long. $long" >/dev/null
+    until_ok 120 "$w's long line settled" bash -c "[ \"\$(node --no-warnings -e 'const {DatabaseSync}=require(\"node:sqlite\");const d=new DatabaseSync(process.argv[1],{readOnly:true});console.log(d.prepare(\"SELECT count(*) AS n FROM deliveries WHERE win = ?\").get(process.argv[2]).n)' $cfg/state.db $w)\" = 0 ]" || true
+    pace "$w"
+    printf -v multi '@%s MULTI-%s-117 first of three\nsecond of three\nreply with the single word multi' "$w" "$b"
+    tmm send --project live "$multi" >/dev/null
+    until_ok 120 "$w's multi-line settled" bash -c "[ \"\$(node --no-warnings -e 'const {DatabaseSync}=require(\"node:sqlite\");const d=new DatabaseSync(process.argv[1],{readOnly:true});console.log(d.prepare(\"SELECT count(*) AS n FROM deliveries WHERE win = ?\").get(process.argv[2]).n)' $cfg/state.db $w)\" = 0 ]" || true
+    pace "$w"
+    a=$(prompts "$w" "LONG-$b-117"); m=$(prompts "$w" "MULTI-$b-117")
+    if [ "$a" = 1 ] && [ "$m" = 1 ] && [ "$(pending "$w")" = 0 ]; then ok "$b: the long line and the three-line line each arrived once, settled"; else bad "$b: prompts long=$a multi=$m, $(pending "$w") rows pending"; fi
+    if tmm log --project live --limit 80 | grep -q "\[tmm\] unconfirmed $w"; then bad "$b: unconfirmed"; fi
+    if tmm log --project live --limit 80 | grep -q "undelivered"; then bad "$b: undelivered: $(tmm log --project live --limit 80 | grep undelivered | tail -2)"; fi
+    if [ $b = claude ]; then
+      # A native slash command, typed verbatim through the same guarded write (hub_command):
+      # its echo is on the pane EXACTLY once, and claude's answer is there, recognised by a
+      # line the echo cannot match (a dollar amount of the cost breakdown).
+      tmm send --project live "@$w /cost" >/dev/null
+      until_ok 60 "claude's /cost answer" slash_answered "/cost" "$w" || true
+      shown=$(tmux capture-pane -p -S -300 -t "$(gpane "$w")")
+      echo "live-check: write-guard: --- $w after /cost:"; printf '%s\n' "$shown" | grep -v '^\s*$' | tail -12 | sed 's/^/    |/'
+      if slash_once "/cost" "$shown"; then ok "claude: /cost reached the CLI once and was answered"; else bad "claude: /cost: $(slash_counts "/cost" "$shown")"; fi
+    fi
+    tmm agent remove "$w" --project live >/dev/null || true
+  done
+  # A STEER line through the guard (codex, the installed backend that offers steer): typed into
+  # the RUNNING turn, recorded as a steered event with no pending row, and taken by codex once
+  # (its prompt hook fires inside the turn, codex.rs SWITCHES_INPUT_MODE).
+  w=gsteer
+  tmm registry save --name "$w" --backend codex --input-mode steer --system "Follow the requested shell command exactly; answer in one short line." >/dev/null
+  tmm spawn "$w" --project live >/dev/null
+  until_ok 120 "$w ready" ready "$w" || true
+  tmm send --project live "@$w Run the shell command: sleep 25. Then reply with the single word slept" >/dev/null
+  until_ok 60 "$w working" bash -c "tmm agent list --project live | grep -q '$w \[codex\] running'" || true
+  tmm send --project live "@$w STEER-codex-117 also say the word steered. $long" >/dev/null
+  steered() { node --no-warnings -e 'const {DatabaseSync}=require("node:sqlite");const d=new DatabaseSync(process.argv[1],{readOnly:true});console.log(d.prepare("SELECT count(*) AS n FROM activity WHERE win = ? AND kind = ? AND instr(text, ?) > 0").get(process.argv[2],"steered",process.argv[3]).n)' "$cfg/state.db" "$1" "$2"; }
+  until_ok 60 "$w's steered event" bash -c "[ \"\$(node --no-warnings -e 'const {DatabaseSync}=require(\"node:sqlite\");const d=new DatabaseSync(process.argv[1],{readOnly:true});console.log(d.prepare(\"SELECT count(*) AS n FROM activity WHERE win = ? AND kind = ? AND instr(text, ?) > 0\").get(process.argv[2],\"steered\",\"STEER-codex-117\").n)' $cfg/state.db $w)\" = 1 ]" || true
+  until_ok 180 "$w's prompt hook took the steer line" bash -c "[ \"\$(node --no-warnings -e 'const {DatabaseSync}=require(\"node:sqlite\");const d=new DatabaseSync(process.argv[1],{readOnly:true});console.log(d.prepare(\"SELECT count(*) AS n FROM activity WHERE win = ? AND kind = ? AND instr(text, ?) > 0\").get(process.argv[2],\"prompt\",\"STEER-codex-117\").n)' $cfg/state.db $w)\" -ge 1 ]" || true
+  pace "$w"
+  st=$(steered "$w" "STEER-codex-117"); pr=$(prompts "$w" "STEER-codex-117")
+  if [ "$st" = 1 ] && [ "$pr" = 1 ] && [ "$(pending "$w")" = 0 ]; then ok "codex steer: the line steered into the running turn once (steered 1, prompt 1, nothing pending)"; else bad "codex steer: steered=$st prompt=$pr pending=$(pending "$w")"; fi
+  if tmm log --project live --limit 80 | grep -q "\[tmm\] unconfirmed $w"; then bad "codex steer: unconfirmed"; fi
+  echo "live-check: write-guard: --- $w's last lines:"; tmux capture-pane -p -t "$(tmux list-panes -a -F '#{pane_id} #{window_name}' | awk -v w=$w '$2==w{print $1; exit}')" | grep -v '^\s*$' | tail -12 | sed 's/^/    |/'
+  [ $rc = 0 ] && echo "live-check: write-guard: PASS"
   exit $rc
 fi
 

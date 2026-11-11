@@ -30,7 +30,9 @@ mod lifetime;
 pub use lifetime::{bind_lifetime, forget_removed, Unbound, UNCHECKED};
 #[cfg(test)]
 pub(crate) use lifetime::BEFORE_BIND;
-use lifetime::{check_write, hold_bound, lifetime_matches, REPLACED, REPLACED_REASON, UNCHECKED_LIFETIME};
+use lifetime::{hold_bound, observe, type_observed, Observed, NOT_OBSERVED, REPLACED, REPLACED_REASON, UNCHECKED_LIFETIME};
+#[cfg(test)]
+use lifetime::lifetime_matches;
 pub use when_idle::{accepted_line, cancel_command, check_command_effects, command_session_started, command_when_idle, WhenIdle};
 use when_idle::{end_held_commands, release_command, Ending};
 #[cfg(test)]
@@ -1449,34 +1451,32 @@ fn flush_locked(session: &str, window: &str, target: &str, steered: Option<i64>,
 /// any queue line. Typing failing after it is a line that did not land: the
 /// #250 `undelivered` warn, no row to point at.
 ///
-/// Before the retire, the write's own checks run with nothing written
-/// (`lifetime::check_write`, board #116 F2, leader's ruling C): an answer that
-/// keeps a line (an unreadable lifetime, a restart, an unidentified pane)
-/// leaves the rows exactly as they were; another lifetime retires them, said.
-/// The write checks again. The stated bound: a lifetime that turns
-/// unreadable in the interval between the pre-check and the write loses the line with an
-/// `undelivered (…)` report, never silently and never typed twice.
+/// Before the retire, the write's ONE observation is taken, nothing written
+/// (`lifetime::observe`, #116 F2, #117 F1): a "not now" answer leaves the
+/// rows exactly as they were; another lifetime retires them, said. The write
+/// runs under that observation's guard; one tmux refuses after the retire is
+/// a loss said once, never typed twice (a refused Enter does not tell us
+/// whether the text reached the old process).
 fn flush_steered(session: &str, window: &str, target: &str, batch: &[super::store::DeliveryRow], text: &str, behind: i64, expect: Option<&str>) {
     let ids: Vec<i64> = batch.iter().map(|r| r.id).collect();
-    match check_write(session, window, target, expect) {
+    let observed = match observe(session, window, target, expect) {
+        Ok(o) => Ok(o),
         Err(e) if kept_at_write(&e) => return,
         Err(e) if e == REPLACED => return telemetry::drop_held_rows(session, window, batch, REPLACED_REASON),
-        _ => {}
-    }
+        Err(e) => Err(e),
+    };
     if let Err(e) = telemetry::retire_held(&ids) {
         eprintln!("⚠️  could not retire held deliveries for {session}:{window} ({e}); kept held for the turn's end");
         return;
     }
     let msgs: Vec<&str> = batch.iter().map(|r| r.msg_id.as_str()).collect();
     let shown = batch.iter().map(|r| r.shown()).collect::<Vec<_>>().join(SEPARATOR);
-    match type_text(session, window, target, text, expect) {
+    match observed.and_then(|o| type_observed(session, window, &o, text)) {
         Ok(()) => {
             telemetry::record_steered(session, window, &shown, &msgs, behind);
             super::vitals::sniff_window_soon(session, window);
         }
-        // The stated bound (#116): said in F1's own words.
-        Err(e) if e.starts_with(UNCHECKED_LIFETIME) => telemetry::record_undelivered(session, window, &shown, UNCHECKED),
-        Err(e) => telemetry::record_undelivered(session, window, &shown, e.trim()),
+        Err(e) => telemetry::record_undelivered(session, window, &shown, e.trim().trim_start_matches("held: ")),
     }
 }
 
@@ -1562,17 +1562,20 @@ fn send_into_locked(session: &str, window: &str, target: &str, text: &str, expec
     // never through a reusable session:index.pane address.
     // The restore barrier answers first: it binds a restored window's write to
     // its own native pane and says so in its own words.
-    let guard = gate(session, window, target, false)?;
-    let pane = final_pane(session, window, target)?;
-    // The LIFETIME (board #116), checked AFTER the pane is resolved: the keys
-    // go to that %id only, which tmux never reuses, so a line can reach the
-    // pane of the lifetime checked here, or none (a remove kills it).
-    lifetime_matches(session, window, expect)?;
+    // ONE observation (boards #116, #117: `lifetime::observe`): the pane with
+    // its server and process, then the lifetime; every write below runs under
+    // its native guard, so tmux types only into what was checked, or nothing.
+    let observed = observe(session, window, target, expect)?;
+    write_observed(session, window, &observed, text)
+}
+
+/// The writes of one line under its observation's guard (`send_into_locked`).
+fn write_observed(session: &str, window: &str, observed: &Observed, text: &str) -> Result<(), String> {
     #[cfg(test)]
     if let Some(hook) = lifetime::AFTER_LIFETIME.with(|h| h.borrow_mut().take()) {
         hook();
     }
-    let target = pane.as_str();
+    let target = observed.pane.as_str();
     // A verbatim `/command` keeps its `@` (non-negotiable 12), so into a CLI
     // whose `@` opens a picker it gets the one-read picker guard before its
     // Enter (board #436 validator P1; limits at `kiro::picker_open`). A
@@ -1583,7 +1586,7 @@ fn send_into_locked(session: &str, window: &str, target: &str, text: &str, expec
     let backend = recipe_mode(session, window).map(|(backend, _)| backend);
     let paste = backend.is_some_and(|b| b.types_by_paste());
     let picker = backend.filter(|backend| backend.picker_guard(text));
-    crate::tmux::with_write_guard(guard, || match picker {
+    let written = crate::tmux::with_write_guard(observed.guard.clone(), || match picker {
         None => crate::tmux::send_command_with(target, text, paste, || Ok(())),
         Some(backend) => crate::tmux::send_command_with(target, text, paste, || {
             if backend.picker_open(&crate::tmux::capture_pane_plain(target, Some(8)).unwrap_or_default()) {
@@ -1592,7 +1595,8 @@ fn send_into_locked(session: &str, window: &str, target: &str, text: &str, expec
             }
             Ok(())
         }),
-    })
+    });
+    lifetime::refused_natively(written, observed.ordinary)
 }
 
 /// What a write refused because the window is restarting says: nothing was
@@ -1606,12 +1610,12 @@ pub(crate) const UNIDENTIFIED: &str = "held: the pane cannot be identified: ";
 /// Was this write refused at the final write (nothing was written; a
 /// delivery keeps its line held)?
 fn kept_at_write(e: &str) -> bool {
-    e.starts_with(RESTARTING) || e.starts_with(UNIDENTIFIED) || e.starts_with(UNCHECKED_LIFETIME)
+    e.starts_with(RESTARTING) || e.starts_with(UNIDENTIFIED) || e.starts_with(UNCHECKED_LIFETIME) || e.starts_with(NOT_OBSERVED)
 }
 
 /// The pane the final write may go to: the window's stable pane id, and only
 /// when `target` still resolves to it and no start mark is set.
-fn final_pane(session: &str, window: &str, target: &str) -> Result<String, String> {
+fn final_pane(session: &str, window: &str, target: &str) -> Result<(String, crate::tmux::WriteGuard), String> {
     if is_starting(session, window) {
         return Err(format!("{RESTARTING}its new CLI has not shown it is ready"));
     }
@@ -1624,8 +1628,9 @@ fn final_pane(session: &str, window: &str, target: &str) -> Result<String, Strin
     // An identity that cannot be established refuses (round 4): an unknown
     // pane is never permission to type through a reusable address.
     let Some(pane) = crate::tmux::pane_id_of(target) else { return Err(format!("{UNIDENTIFIED}'{target}' does not resolve to a pane")) };
+    let guard = lifetime::observed_guard(&pane)?;
     match crate::tmux::find_window_by_name(session, window) {
-        Some(now) if now == pane => Ok(pane),
+        Some(now) if now == pane => Ok((pane, guard)),
         Some(_) => Err(format!("{RESTARTING}its pane changed since the check")),
         None => Err(format!("{UNIDENTIFIED}no window '{window}' is listed")),
     }
@@ -1640,8 +1645,9 @@ pub(crate) static BEFORE_FINAL: Mutex<Option<Box<dyn Fn() + Send>>> = Mutex::new
 /// may always cancel — but still written only into the bound pane's own
 /// identity, so it never lands in a respawned or swapped stranger).
 pub(crate) fn send_key_into(session: &str, window: &str, target: &str, key: &str, interrupt: bool) -> Result<(), String> {
-    let guard = gate(session, window, target, interrupt)?;
-    crate::tmux::with_write_guard(guard, || crate::tmux::send_keys(target, key, false))
+    // An ordinary window's key runs under the guard of one observation (#117).
+    let (guard, ordinary) = lifetime::key_guard(gate(session, window, target, interrupt)?, target)?;
+    lifetime::refused_natively(crate::tmux::with_write_guard(Some(guard), || crate::tmux::send_keys(target, key, false)), ordinary)
 }
 
 /// What a refusal by the restore barrier says (the door's own decision, or

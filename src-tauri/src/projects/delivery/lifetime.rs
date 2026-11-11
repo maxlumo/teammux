@@ -102,26 +102,86 @@ pub(super) fn lifetime_matches(session: &str, window: &str, expect: Option<&str>
     }
 }
 
-/// The write's own checks with nothing written (F2): the restore gate, the
-/// pane, then the lifetime, as `send_into_locked` runs them. A steer flush
-/// asks this before it retires its rows.
-#[cfg(not(test))]
-pub(super) fn check_write(session: &str, window: &str, target: &str, expect: Option<&str>) -> Result<(), String> {
-    super::gate(session, window, target, false)?;
-    super::final_pane(session, window, target)?;
-    lifetime_matches(session, window, expect)
+/// The ONE observation a write runs under (boards #116 F2, #117): the
+/// restore gate, then the pane with its server and its process
+/// (`final_pane`: `tmux::resolve_pane_checked`), then the lifetime. A `%id`
+/// is unique only within one tmux server (a deleted project's last session
+/// takes its server, and a new one hands the `%id` out again), so every write
+/// of the line runs under this observation's native guard: tmux types only
+/// into the server, pane and process that were checked, or nothing. A
+/// restored window keeps its own bound guard, never replaced. A steer flush
+/// takes it BEFORE retiring its rows and writes under the same one.
+pub(super) struct Observed {
+    pub(super) pane: String,
+    pub(super) guard: Option<crate::tmux::WriteGuard>,
+    pub(super) ordinary: bool,
 }
 
-/// `check_write` behind the tests' typing seam: a faked pane has no pane to
-/// resolve, so only the lifetime is asked, as the faked write does.
-#[cfg(test)]
-pub(super) fn check_write(session: &str, window: &str, target: &str, expect: Option<&str>) -> Result<(), String> {
+pub(super) fn observe(session: &str, window: &str, target: &str, expect: Option<&str>) -> Result<Observed, String> {
+    // A faked pane (the unit tests' typing seam) has no pane to observe.
+    #[cfg(test)]
     if super::TYPED.with(|t| t.borrow().is_some()) {
-        return lifetime_matches(session, window, expect);
+        lifetime_matches(session, window, expect)?;
+        return Ok(Observed { pane: target.to_string(), guard: None, ordinary: true });
     }
-    super::gate(session, window, target, false)?;
-    super::final_pane(session, window, target)?;
-    lifetime_matches(session, window, expect)
+    let bound = super::gate(session, window, target, false)?;
+    let (pane, seen) = super::final_pane(session, window, target)?;
+    lifetime_matches(session, window, expect)?;
+    let ordinary = bound.is_none();
+    Ok(Observed { pane, guard: Some(bound.unwrap_or(seen)), ordinary })
+}
+
+/// The native guard of ONE observation of `pane` (a `%id` or a target): its
+/// server, the pane and its process, in one tmux response.
+pub(super) fn observed_guard(pane: &str) -> Result<crate::tmux::WriteGuard, String> {
+    let unidentified = super::UNIDENTIFIED;
+    let id = if pane.starts_with('%') { pane.to_string() } else { crate::tmux::pane_id_of(pane).ok_or_else(|| format!("{unidentified}'{pane}' does not resolve to a pane"))? };
+    let observed = crate::tmux::resolve_pane_checked(&id).map_err(|e| format!("{unidentified}{e}"))?;
+    observed.guard(&id).ok_or_else(|| format!("{unidentified}'{id}' is not a pane of the server that answered"))
+}
+
+/// The guard of a key (the Escape, the toggle: `send_key_into`): the restore
+/// gate's bound one, else one observation of its target; and whether it is
+/// an ordinary window's.
+pub(super) fn key_guard(bound: Option<crate::tmux::WriteGuard>, target: &str) -> Result<(crate::tmux::WriteGuard, bool), String> {
+    match bound {
+        Some(g) => Ok((g, false)),
+        None => Ok((observed_guard(target)?, true)),
+    }
+}
+
+/// `type_text` under an observation already taken (a steer flush's).
+#[cfg(not(test))]
+pub(super) fn type_observed(session: &str, window: &str, observed: &Observed, text: &str) -> Result<(), String> {
+    super::write_observed(session, window, observed, &super::typed_form(session, window, text))
+}
+
+/// `type_observed` behind the tests' typing seam.
+#[cfg(test)]
+pub(super) fn type_observed(session: &str, window: &str, observed: &Observed, text: &str) -> Result<(), String> {
+    let text = &super::typed_form(session, window, text);
+    if super::TYPED.with(|t| t.borrow().is_none()) {
+        return super::write_observed(session, window, observed, text);
+    }
+    if let Some(e) = super::REFUSE.with(|r| r.borrow().clone()) {
+        return Err(e);
+    }
+    super::TYPED.with(|t| t.borrow_mut().as_mut().unwrap().push(text.to_string()));
+    Ok(())
+}
+
+/// What a write refused by the native guard of an ordinary window says: nothing
+/// was written into a pane other than the one observed, and the line is kept
+/// (`kept_at_write`), so the next bind or flush decides by its lifetime:
+/// another one is refused and said, the same one (a restarted CLI) is typed
+/// once. A restored window's own refusal keeps its own words.
+pub(crate) const NOT_OBSERVED: &str = "held: the pane is not the one checked: ";
+
+pub(super) fn refused_natively(written: Result<(), String>, ordinary: bool) -> Result<(), String> {
+    match written {
+        Err(e) if ordinary && e == crate::tmux::BOUND_REFUSED => Err(format!("{NOT_OBSERVED}its server, pane or process changed since the check")),
+        other => other,
+    }
 }
 
 /// A line the write kept (a restart, an unidentified pane, an unreadable
@@ -433,41 +493,247 @@ mod tests {
         }
     }
 
-    /// The stated bound of a steer flush (leader's ruling C): a lifetime that
-    /// turns unreadable AFTER the pre-check, between the retire and the
-    /// write, loses the line with ONE report in F1's own words, and it is
-    /// never typed, then or after the repair.
+    /// A steer flush writes under the ONE observation it took before the
+    /// retire (#117 F1): a home that turns unreadable after it does not stop
+    /// the line, because the guard still binds the write to the checked
+    /// server, pane and process. Typed once; nothing kept; nothing said.
     #[test]
-    fn a_steer_line_lost_after_its_pre_check_is_said_unchecked_once_and_never_typed() {
+    fn a_steer_flush_writes_under_its_one_observation_once() {
         let Some(t) = Lifetime::with_mode("post-steer", "steer") else { return };
         let home = t.home().unwrap();
         busy(&t.s, "dev");
         telemetry::record_held_for(&t.s, "dev", "[tmm chat 03:05] human: @dev BOUND-116", 0, "", Some(&home)).unwrap();
         let id = telemetry::held_rows(&t.s, "dev")[0].id;
         sql(&format!("UPDATE deliveries SET ts = ts - {HOLD_MAX_SECS} WHERE id = {id}"));
-        // The pane is resolved twice: the pre-check, then the write. Only the
-        // second makes the home unreadable.
-        let (dir, calls) = (t.home_dir(), std::sync::Arc::new(std::sync::atomic::AtomicUsize::new(0)));
+        let calls = std::sync::Arc::new(std::sync::atomic::AtomicUsize::new(0));
         let seen = calls.clone();
         *BEFORE_FINAL.lock().unwrap() = Some(Box::new(move || {
-            use std::os::unix::fs::PermissionsExt;
-            if seen.fetch_add(1, std::sync::atomic::Ordering::SeqCst) == 1 {
-                std::fs::set_permissions(&dir, std::fs::Permissions::from_mode(0o000)).unwrap();
-            }
+            seen.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
         }));
+        let dir = t.home_dir();
+        AFTER_LIFETIME.with(|h| *h.borrow_mut() = Some(Box::new(move || {
+            use std::os::unix::fs::PermissionsExt;
+            std::fs::set_permissions(&dir, std::fs::Permissions::from_mode(0o000)).unwrap();
+        })));
         flush(&t.s, "dev");
         *BEFORE_FINAL.lock().unwrap() = None;
+        AFTER_LIFETIME.with(|h| *h.borrow_mut() = None);
         t.unreadable(false);
         t.settle();
-        assert_eq!(calls.load(std::sync::atomic::Ordering::SeqCst), 2, "pre-check, then the write");
-        assert!(!t.shown().contains("BOUND-116"), "{:?}", t.shown());
-        assert_eq!(held(&t.s, "dev"), 0, "retired before the keys (#276)");
-        let said: Vec<String> = warns(&t.s).into_iter().filter(|w| w.contains("BOUND-116")).collect();
-        assert_eq!(said, vec![format!("undelivered ({UNCHECKED}): [tmm chat 03:05] human: @dev BOUND-116")], "one report, F1's words");
-        end(&t.s, "dev");
-        flush(&t.s, "dev");
-        t.settle();
-        assert!(!t.shown().contains("BOUND-116"), "never typed after the repair: {:?}", t.shown());
+        assert_eq!(calls.load(std::sync::atomic::Ordering::SeqCst), 1, "one observation, before the retire");
+        assert_eq!(t.shown().matches("BOUND-116").count(), 2, "typed once (cat echoes it): {:?}", t.shown());
+        assert_eq!(held(&t.s, "dev"), 0);
+        assert!(warns(&t.s).iter().all(|w| !w.contains("BOUND-116")), "{:?}", warns(&t.s));
+    }
+
+    /// Poll (with a deadline) until the pane's stand-in is in its read loop:
+    /// its process has a `dd` child waiting for the next byte (the per-byte
+    /// stand-ins of the #117 tests). A guessed sleep raced a slow host.
+    fn reading(pane: &str) {
+        let reads = || {
+            let pid = crate::tmux::pane_format(pane, "#{pane_pid}").unwrap_or_default().trim().to_string();
+            let out = std::process::Command::new("ps").args(["-e", "-o", "pid=,ppid=,comm="]).output().map(|o| String::from_utf8_lossy(&o.stdout).to_string()).unwrap_or_default();
+            let procs: Vec<(String, String, String)> = out.lines().filter_map(|l| { let mut f = l.split_whitespace(); Some((f.next()?.to_string(), f.next()?.to_string(), f.next()?.to_string())) }).collect();
+            // a `dd` whose ancestry reaches the pane's own process
+            procs.iter().filter(|(_, _, c)| c == "dd").any(|(_, parent, _)| {
+                let mut up = parent.clone();
+                for _ in 0..8 {
+                    if up == pid { return true; }
+                    match procs.iter().find(|(p, _, _)| *p == up) { Some((_, pp, _)) => up = pp.clone(), None => return false }
+                }
+                false
+            })
+        };
+        let ready = (0..200).any(|_| reads() || { std::thread::sleep(std::time::Duration::from_millis(25)); false });
+        assert!(ready, "{pane}: the stand-in never started reading");
+    }
+
+    /// A pane whose process logs every byte it reads, with its pid, into one
+    /// file across respawns: what a process received is read from the log.
+    fn logging_stand_in(t: &Lifetime) -> (String, String, std::path::PathBuf) {
+        let log = std::path::Path::new(&t.scratch.path()).join("keys.log");
+        let keys = std::path::Path::new(&t.scratch.path()).join("keys-log.sh");
+        std::fs::write(&keys, format!("stty raw -echo\nwhile :; do k=$(dd bs=1 count=1 2>/dev/null | od -An -c | tr -d ' '); printf '%s key:%s\\n' \"$$\" \"$k\" >> {}; done\n", log.display())).unwrap();
+        let run = format!("bash -c 'exec -a kiro-cli bash {}'", keys.display());
+        let pane = format!("={}:dev", t.s);
+        crate::tmux::run_tmux(&["respawn-pane", "-k", "-t", &pane, &run]).unwrap();
+        reading(&pane);
+        (pane, run, log)
+    }
+    fn keys_of(log: &std::path::Path, pid: &str) -> Vec<String> {
+        std::fs::read_to_string(log).unwrap_or_default().lines().filter(|l| l.starts_with(&format!("{pid} "))).map(|l| l.split_once(' ').unwrap().1.to_string()).collect()
+    }
+
+    /// #117 F1 (validator-2's probe on the retired path): a HELD steer line,
+    /// flushed into a running steer turn (`flush_steered`, rows retired
+    /// before the keys, #276), whose write tmux refuses AFTER the retire, the
+    /// pane's process replaced inside the write before its text or between
+    /// its text and its Enter. The stated bound: one report, and never typed
+    /// again: not into the new process, not after the turn ends.
+    #[test]
+    fn a_held_steer_line_refused_after_its_retire_is_said_once_and_never_retyped() {
+        for at in ["text", "enter"] {
+            let Some(t) = Lifetime::with_mode(&format!("steer-retired-{at}"), "steer") else { return };
+            let (pane, run, log) = logging_stand_in(&t);
+            let home = t.home().unwrap();
+            busy(&t.s, "dev");
+            let line = format!("[tmm chat 18:00] human: @dev RETIRED-{at}-117");
+            telemetry::record_held_for(&t.s, "dev", &line, 0, "", Some(&home)).unwrap();
+            let id = telemetry::held_rows(&t.s, "dev")[0].id;
+            sql(&format!("UPDATE deliveries SET ts = ts - {HOLD_MAX_SECS} WHERE id = {id}"));
+            let old = crate::tmux::pane_format(&pane, "#{pane_pid}").unwrap();
+            let respawn: Box<dyn FnOnce()> = Box::new(move || {
+                crate::tmux::run_tmux(&["respawn-pane", "-k", "-t", &pane, &run]).unwrap();
+                reading(&pane);
+            });
+            if at == "text" { AFTER_LIFETIME.with(|h| *h.borrow_mut() = Some(respawn)); } else { crate::tmux::BEFORE_ENTER.with(|h| *h.borrow_mut() = Some(respawn)); }
+            flush(&t.s, "dev");
+            AFTER_LIFETIME.with(|h| *h.borrow_mut() = None);
+            crate::tmux::BEFORE_ENTER.with(|h| *h.borrow_mut() = None);
+            let new = crate::tmux::pane_format(&format!("={}:dev", t.s), "#{pane_pid}").unwrap();
+            assert_ne!(old, new, "{at}: a new process");
+            assert_eq!(held(&t.s, "dev"), 0, "{at}: retired before the keys (#276), not re-held");
+            end(&t.s, "dev");
+            flush(&t.s, "dev");
+            t.settle();
+            let enters = |v: &[String]| v.iter().filter(|k| k.as_str() == "key:\\r").count();
+            let (first, second) = (keys_of(&log, old.trim()), keys_of(&log, new.trim()));
+            eprintln!("[DEBUG-117] steer retired, refused at {at}: old process {} keys {} Enter, new process {} keys", first.len(), enters(&first), second.len());
+            assert_eq!(enters(&first), 0, "{at}: the old process never got the Enter");
+            assert!(second.is_empty(), "{at}: the new process got nothing: {second:?}");
+            let said: Vec<String> = warns(&t.s).into_iter().filter(|w| w.contains(&format!("RETIRED-{at}-117"))).collect();
+            assert_eq!(said.len(), 1, "{at}: said once: {said:?}");
+            assert!(said[0].starts_with("undelivered (the pane is not the one checked: "), "{at}: {said:?}");
+        }
+    }
+
+    /// Board #117, measured first: a pane id is unique only within one tmux
+    /// SERVER. The write is paused after its lifetime check (or between its
+    /// text and its Enter); the project owning the server's last session is
+    /// deleted, so the server exits; a same-name project and agent start a
+    /// NEW server whose `dev` pane gets the same `%N`; the write resumes. The
+    /// new pane runs a stand-in that prints every byte it reads
+    /// (`key:<od -c>`), so even a lone Enter shows.
+    fn replace_server(s: &str, path: &str) {
+        let before = crate::tmux::server_incarnation().ok();
+        let old_home = crate::projects::asks::home_id(s, "dev").ok().flatten();
+        let old_pane = crate::tmux::run_tmux(&["display-message", "-p", "-t", &format!("={s}:dev"), "#{pane_id}"]).unwrap_or_default();
+        crate::projects::delete(s).expect("the project deleted");
+        assert!((0..100).any(|_| crate::tmux::server_incarnation().is_err() || { std::thread::sleep(std::time::Duration::from_millis(50)); false }), "the server exited with its last session");
+        crate::projects::with_store(|st| st.insert_project(&crate::projects::Project {
+            id: s.into(), name: s.into(), path: path.into(), icon: None,
+            session: s.into(), adopted: false, autostart: false, created_at: 1,
+            last_up_at: None, last_seen_at: None, archived: false, room: String::new(),
+        })).unwrap();
+        let home = std::path::Path::new(path).join(".tmm").join("agents").join("dev");
+        std::fs::create_dir_all(&home).unwrap();
+        std::fs::write(home.join("launch.json"), serde_json::json!({ "backend": "kiro", "input_mode": "queue", "cmd": "x" }).to_string()).unwrap();
+        let keys = std::path::Path::new(path).join("keys117.sh");
+        std::fs::write(&keys, "stty raw -echo\nwhile :; do k=$(dd bs=1 count=1 2>/dev/null | od -An -c | tr -d ' '); printf 'key:%s\\r\\n' \"$k\"; done\n").unwrap();
+        assert!(std::process::Command::new("tmux").args(["new-session", "-d", "-s", s, "-n", "keep", "-c", path, "cat"]).status().is_ok_and(|st| st.success()));
+        crate::tmux::run_tmux(&["new-window", "-d", "-t", &format!("={s}:"), "-n", "dev", "-c", path, &format!("bash -c 'exec -a kiro-cli bash {}'", keys.display())]).unwrap();
+        reading(&format!("={s}:dev"));
+        let after = crate::tmux::server_incarnation().ok();
+        let new_pane = crate::tmux::run_tmux(&["display-message", "-p", "-t", &format!("={s}:dev"), "#{pane_id}"]).unwrap_or_default();
+        let new_home = crate::projects::asks::home_id(s, "dev").ok().flatten();
+        eprintln!("[DEBUG-117] server {before:?} -> {after:?}; pane {} -> {}; home {old_home:?} -> {new_home:?}", old_pane.trim(), new_pane.trim());
+        assert_ne!(before, after, "a new server");
+        assert_eq!(old_pane.trim(), new_pane.trim(), "the same %N in it");
+        assert_ne!(old_home, new_home, "another lifetime");
+    }
+    fn keys_in(s: &str) -> Vec<String> {
+        crate::tmux::capture_pane_plain(&format!("={s}:dev"), Some(0)).unwrap_or_default().lines().filter(|l| l.starts_with("key:")).map(|l| l.trim_end().to_string()).collect()
+    }
+
+    #[test]
+    fn a_line_paused_after_its_check_never_reaches_a_new_servers_pane() {
+        let mut typed_into = Vec::new();
+        for case in ["immediate", "held", "enter"] {
+            let Some(t) = Lifetime::new(&format!("srv-{case}")) else { return };
+            let home = t.home().unwrap();
+            let target = t.target();
+            let (s, path) = (t.s.clone(), t.scratch.path());
+            let replace: Box<dyn FnOnce()> = Box::new(move || replace_server(&s, &path));
+            let line = format!("[tmm chat 16:50] human: @dev SERVER-{case}-117");
+            match case {
+                "immediate" => {
+                    AFTER_LIFETIME.with(|h| *h.borrow_mut() = Some(replace));
+                    deliver_for(&t.s, "dev", &target, &line, 0, "", Some(&home));
+                }
+                "held" => {
+                    busy(&t.s, "dev");
+                    assert!(deliver_for(&t.s, "dev", &target, &line, 0, "", Some(&home)));
+                    assert_eq!(held(&t.s, "dev"), 1);
+                    end(&t.s, "dev");
+                    AFTER_LIFETIME.with(|h| *h.borrow_mut() = Some(replace));
+                    flush(&t.s, "dev");
+                }
+                _ => {
+                    crate::tmux::BEFORE_ENTER.with(|h| *h.borrow_mut() = Some(replace));
+                    deliver_for(&t.s, "dev", &target, &line, 0, "", Some(&home));
+                }
+            }
+            AFTER_LIFETIME.with(|h| *h.borrow_mut() = None);
+            crate::tmux::BEFORE_ENTER.with(|h| *h.borrow_mut() = None);
+            t.settle();
+            let keys = keys_in(&t.s);
+            eprintln!("[DEBUG-117] {case}: the new server's pane read {} keys: {:?}", keys.len(), keys.iter().take(6).collect::<Vec<_>>());
+            if !keys.is_empty() {
+                typed_into.push((case, keys));
+            }
+            // Refused natively, the line was kept and then judged by its
+            // lifetime: no row is left for the new agent, and it was said.
+            if case == "held" {
+                flush(&t.s, "dev");
+            }
+            assert_eq!(held(&t.s, "dev"), 0, "{case}: nothing kept for another lifetime");
+            assert!(warns(&t.s).iter().any(|w| w.starts_with(&format!("undelivered ({REPLACED_REASON})")) && w.contains(&format!("SERVER-{case}-117"))), "{case}: {:?}", warns(&t.s));
+            let _ = crate::tmux::run_tmux(&["kill-session", "-t", &format!("={}", t.s)]);
+        }
+        assert!(typed_into.is_empty(), "a new server's pane was typed into: {typed_into:?}");
+    }
+
+    /// #117 (leader's point i): the guard binds the pane's PROCESS too. A
+    /// pane respawned between a line's text and its Enter (same server, same
+    /// %id, same home: a restarted CLI) refuses the Enter natively; the text
+    /// reached only the old process, never submitted, and the kept line is
+    /// typed once, whole, into the new one. Queue and steer alike: at most
+    /// once into any one process.
+    #[test]
+    fn a_write_refused_between_text_and_enter_reaches_the_new_process_once() {
+        for mode in ["queue", "steer"] {
+            let Some(t) = Lifetime::with_mode(&format!("proc-{mode}"), mode) else { return };
+            let (pane, run, log) = logging_stand_in(&t);
+            let home = t.home().unwrap();
+            let old = crate::tmux::pane_format(&pane, "#{pane_pid}").unwrap();
+            let (p2, r2) = (pane.clone(), run.clone());
+            crate::tmux::BEFORE_ENTER.with(|h| *h.borrow_mut() = Some(Box::new(move || {
+                crate::tmux::run_tmux(&["respawn-pane", "-k", "-t", &p2, &r2]).unwrap();
+                reading(&p2);
+            })));
+            if mode == "steer" {
+                busy(&t.s, "dev");
+            }
+            let line = format!("[tmm chat 17:00] human: @dev PROC-{mode}-117");
+            deliver(&t.s, "dev", &t.target(), &line, 0, "");
+            crate::tmux::BEFORE_ENTER.with(|h| *h.borrow_mut() = None);
+            let new = crate::tmux::pane_format(&pane, "#{pane_pid}").unwrap();
+            assert_ne!(old, new, "{mode}: a new process in the same pane");
+            assert_eq!(t.home().unwrap(), home, "{mode}: the same lifetime");
+            assert_eq!(held(&t.s, "dev"), 1, "{mode}: the refused line is kept");
+            if mode == "steer" {
+                end(&t.s, "dev");
+            }
+            flush(&t.s, "dev");
+            t.settle();
+            let (first, second) = (keys_of(&log, old.trim()), keys_of(&log, new.trim()));
+            let enters = |v: &[String]| v.iter().filter(|k| k.as_str() == "key:\\r").count();
+            eprintln!("[DEBUG-117] {mode}: old process {} keys, {} Enter; new process {} keys, {} Enter", first.len(), enters(&first), second.len(), enters(&second));
+            assert_eq!(enters(&first), 0, "{mode}: the old process never got the Enter");
+            assert_eq!(enters(&second), 1, "{mode}: the new process got the line once");
+            assert_eq!(second.len(), line.replace('@', "\u{ff20}").len() + 1, "{mode}: every byte of the typed line, then its Enter");
+            assert_eq!(held(&t.s, "dev"), 0);
+        }
     }
 
     /// A restart keeps the home, so the lifetime: a held line is typed into

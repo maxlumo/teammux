@@ -1026,7 +1026,11 @@ was broken out to another window has not ended that pane), retires it in the sam
   inside `if-shell -F` on the instance, the `%id` and the pane's process
   (`tmux::with_write_guard`), so a pane respawned after the target was
   resolved (same `%id`, a new process), or another server, refuses it and
-  the caller keeps the line. Only the target option is rewritten: nothing
+  the caller keeps the line. Since board #117 an ORDINARY window's write gets the same
+  native guard, built from one observation of its pane, its server and its
+  process (`tmux::resolve_pane_checked`): a `%id` is unique only within one
+  server incarnation, and a new server hands it out again
+  (hub-composer.md § A line is typed only into the lifetime it was meant for). Only the target option is rewritten: nothing
   after `--`, where the payload begins (a literal `-t` is text). The same
   door carries the automated and keyed input too (round 3, orchestrator
   14:56/14:59): the recovery's auto-continue (`recovery::check_once` types
