@@ -1,9 +1,10 @@
 # Board dashboard: what needs the person, the current state, an agent-maintained page
 
-Board #104. Proposal v3, 2026-11-11, written by the leader for the owner's
-decision, after a first-principles look by reviewer (design), pentester (the
-page's threat model) and builder (feasibility); their notes and the rulings
-are on the issue. Nothing here is built. The owner's decisions are in § 10.
+Board #104. Design v4, 2026-11-11, written by the leader after a
+first-principles look by reviewer (design), pentester (the page's threat
+model) and builder (feasibility); their notes and the rulings are on the
+issue. **Approved by the owner 2026-11-11 07:22** (§ 10); nothing is built
+yet. The tickets of § 9 carry the work.
 
 Owner, 2026-11-11 05:23: "我想加一个功能，在board页面增加一个dashboard功能，
 包括现在状态的统计，以及agent给人类的状态信息等，留言，让人有更好的交互，现在
@@ -389,11 +390,27 @@ an open ask is never repeated; a project page is optional and published with
 | 1b | Asks, client | the chat bubble with options and both states; the bell amendment |
 | 2a | Dashboard read | `hub_dashboard`, the bulk ask count, the Board sidebar chip |
 | 2b | Dashboard view | the switch, Needs you (answer, dismiss, discuss), Now, Notes for you |
-| 3 | Project page, read-only | `tmm dashboard publish`, the inert embed, tokens, height, revisions and Refresh, links and media |
-| 4 | Page actions | `data-tmm-send` with the frozen envelope and the confirm, forms, issue links |
+| 3 | Project page, shown | `tmm dashboard publish`, the inert embed, tokens, height, revisions and Refresh, links and media |
+| 4 | Page actions (later) | `data-tmm-send` with the frozen envelope and the confirm, forms, issue links |
 
-1a–2b answer "I cannot keep up and I miss what matters". 3–4 answer "each
-project its own interaction". 1a–2b ship without 3–4.
+1a–2b answer "I cannot keep up and I miss what matters". 3 answers "each
+project its own page". 1a–2b ship without 3. Ticket 4 is **not in the first
+delivery**: the owner, 07:22, "我能看到上面的一些状态就行，可以先看看，不一定
+需要后端直接去交互". Its design above stands for when it is wanted; it is
+filed unassigned.
+
+Two obligations ticket 3 carries, from the review:
+
+- **Load and publish are serialized.** Reading the "current" pointer and
+  minting the document's file access are one server operation, ordered
+  against publish's pointer move. A cap is never minted for a revision that
+  is no longer current; otherwise "select A, publish B, mint A's cap" gives a
+  document whose files can be collected before its access expires (reviewer,
+  #104 note 15). A test races the two.
+- **The frame is never moved or unmounted to hide it.** Moving an iframe in
+  the DOM reloads it; switching Dashboard ⇄ Board, or to another tab, keeps
+  the frame mounted and hidden, or the guard above ("nothing changes under
+  the person's hands") is void.
 
 Before ticket 3 is designed further, one measurement: in real Chromium in
 the rig, then by pentester on the Android and macOS apps, the script-less
@@ -403,18 +420,25 @@ listeners and field reads work; is the content height readable; does any
 request leave for an origin other than the signed door. Pentester verifies
 ticket 3 before it ships.
 
-## 10. Decisions for the owner
+## 10. The owner's decisions (2026-11-11 07:22)
 
-| | question | options | recommendation |
-|---|---|---|---|
-| D1 | What should a project page let you do? v1 as designed: see whatever the agents lay out (tables, charts as pictures, status), play audio and video, open and download files, and tap buttons or fill small forms that send your message to an agent (each one confirmed). Not in v1: anything that needs code running in the page — sorting or filtering a table yourself, live-updating charts, an editor in the page. | (a) Start with that. (b) You already have an interaction in mind that needs code in the page: tell us which, and it becomes its own ticket after a security measurement on the real phone and desktop apps. | (a) |
-| D2 | What does the Board tab open on? | (a) Dashboard, with Board one tap away. (b) Board, as today, with Dashboard one tap away. | (a): the tab's first answer becomes "what needs me" |
-| D3 | One list of asks across all projects? | (a) v1: the count on each project's row in the Board sidebar. (b) Also an "All projects" list of every open ask. | (a) first; (b) if the counts prove not enough |
+"你说的这些，反正你们讨论好确认就可以，不用找我反复确认这一点了。我看这些都
+可以，你先做出来 我们再调整。" The three questions were put to him with a
+recommendation each; all three stand as recommended, and for this feature the
+team settles what comes up itself.
 
-Stated behaviour you can veto, not questions: an ask rings at every
-notification level; a page button's message is always confirmed with its
-exact text; the words are Dashboard · Board and Needs you / Now / Notes for
-you / Project page (概览 · 看板；等你处理 / 现状 / 留言 / 项目页).
+| | question | decided |
+|---|---|---|
+| D1 | May a project page run code? | No, for now: what the agents lay out (tables, pictures of charts, status), audio and video, files to open and download. A page that needs code running in it is its own ticket, after a security measurement on the real apps (§ 6, § 13) |
+| D2 | What does the Board tab open on? | Dashboard, with Board one tap away |
+| D3 | One list of asks across all projects? | The count on each project's row first; a cross-project list only if the counts prove not enough |
+
+Stated with them and standing: an ask rings at every notification level; the
+words are Dashboard · Board and Needs you / Now / Notes for you / Project
+page (概览 · 看板；等你处理 / 现状 / 留言 / 项目页). In the same message he
+restated the core ("最近需要我需要人确认的消息，避免这些消息被你们说的很多
+对话给淹没了": Needs you comes first) and pointed at KiroCrew's crewmate
+dashboard for the page (§ 13).
 
 ## 11. Considered and rejected
 
@@ -457,3 +481,50 @@ untouched. Delivery is still typing into a pane, with no new queue. The
 room's read mark moves only by reading the room. The notification levels
 keep their meaning for everything that exists today; the one amendment is
 that an ask, a new kind of news, rings at all of them.
+
+## 13. KiroCrew's crewmate dashboard, and what we take from it
+
+The owner, 07:22: "我看 kirocrew 的 BOT 里有一个 dashboard，相当于这个 BOT 可以
+创建一个自己的页面。我理解我们前端其实也是一个页面，能不能通过 iframe 或者
+其他形式，把这个静态网页显示出来？我能看到上面的一些状态就行". Yes: that is
+ticket 3. Read from KiroCrew's own repository
+(github.com/kirodotdev/KiroCrew @ 4dd6b6be, `docs/architecture/
+dashboard-iframe-hosts.md`, `docs/request-for-change/
+rfc-crewmate-dynamic-dashboard.md`, `src/kiro_crew/dashboard_frame.py`;
+cited, not run):
+
+| | KiroCrew's crew page | our project page (v1) |
+|---|---|---|
+| who writes it | the crewmate, as a template body; reviewed built-ins too | the project's agents, as a published bundle |
+| frame | `sandbox="allow-scripts"` only: an origin of its own, no access to the host | the preview's frame: the app's origin, **no scripts** |
+| may it run code | yes, inline scripts (a chart needs one) | no |
+| network | closed (`connect-src 'none'`, no frames, no form posts) | closed (only the signed door to the project's own files) |
+| live values | the host fills declared slots and hands them to the page's script | none injected: the app's own sections sit above the page |
+| talking back | three narrow messages; "send" is off by default; "act" only fills the composer | ticket 4, later: one verb, always confirmed |
+
+The direction is the same (the agent owns a page; the host contains it;
+egress closed; nothing the page says is trusted). The one difference is
+code in the page, and it is not a matter of taste here:
+
+- KiroCrew mints the page as a `srcdoc` under a host policy that allows
+  inline scripts. Ours forbids them (`script-src 'self'` in
+  `tauri.conf.json`), on purpose: the app renders agents' markdown and
+  repository files, and that rule is what turns an escaping bug into a
+  broken picture. A `srcdoc`, `blob:` or `data:` frame inherits the app's
+  policy, so a script in it does not run.
+- To run, the page would have to be loaded from the gateway with a policy of
+  its own. The apps' `frame-src` is `'self' blob: data:`; the server address
+  is typed by the person, so allowing it means allowing any http(s) origin,
+  and then a scripted page can navigate itself anywhere.
+- On the phone and the desktop app the native bridge is in the same webview.
+  Whether a frame with no origin can reach it is a fact to measure on the
+  real apps, and "reachable" ends the idea.
+
+So v1 shows a static page, which is what was asked for. Two things we do
+take: a frame is never moved or unmounted to hide it (their note measured
+that a moved iframe reloads; § 9), and a page that talks back does so
+through messages the host treats as hostile (our ticket 4 already asks the
+person to confirm the exact text). Not taken in v1: host-filled value slots
+in the page. They would repeat the numbers of Now, directly above, in a
+second place; if a page needs them laid out its own way, that is a small
+later addition to an inert frame the app can already write into.
