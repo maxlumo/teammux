@@ -14,6 +14,11 @@
 #                      under another (a second provider id for the same endpoint, in this
 #                      container's copy of the config), comes back on a fresh conversation and
 #                      the room says why; a restart under the same provider resumes as before.
+#   live-check codex-start   board #113: eight fresh codex agents, each sent one line at a chosen
+#                      moment of its start (pane created, pre-session placeholder, footer, idle),
+#                      most under busy loops on every core: each line is one prompt its hook
+#                      reports, confirmed and answered; then a line sent to a busy queue-mode codex
+#                      waits for the turn and arrives once. A failing round prints its frames.
 #   live-check pi      board #71: a managed pi 1.5.0 agent end to end. The rig writes ~/.pi/agent
 #                      in the owner's provider shape (ust anthropic-messages + ust-openai
 #                      openai-responses, apiKey $UST_API_KEY; orchestrator, #71 note 6); nothing of
@@ -47,7 +52,7 @@
 #                      Escape closes it.
 set -euo pipefail
 check="${1:-smoke}"
-case "$check" in smoke|codex-models|codex-provider|pi|pi-tools|pi-paste|pi-start|dsh-tools|omp-tools|codex-limit|codex-picker) ;; *) echo "live-check: unknown check '$check' (known: smoke, codex-models, codex-provider, pi, pi-tools, pi-paste, pi-start, dsh-tools, omp-tools, codex-limit, codex-picker)" >&2; exit 2 ;; esac
+case "$check" in smoke|codex-models|codex-provider|codex-start|pi|pi-tools|pi-paste|pi-start|dsh-tools|omp-tools|codex-limit|codex-picker) ;; *) echo "live-check: unknown check '$check' (known: smoke, codex-models, codex-provider, codex-start, pi, pi-tools, pi-paste, pi-start, dsh-tools, omp-tools, codex-limit, codex-picker)" >&2; exit 2 ;; esac
 
 cfg="$HOME/.config/teammux"
 mkdir -p "$cfg" /work/live
@@ -548,6 +553,83 @@ if [ "$check" = codex-provider ]; then
   case "$(pane_cmd)" in bash|zsh|sh|dash) echo "live-check: codex-provider: FAIL (agreeing layers: a shell, not codex)"; rc=1 ;; esac
   if ask gamma; then echo "live-check: codex-provider: agreeing layers: it answered gamma"; else echo "live-check: codex-provider: FAIL (agreeing layers: no answer)"; rc=1; fi
   tmm agent list --project live
+  exit $rc
+fi
+
+if [ "$check" = codex-start ]; then
+  # Board #113: a fresh codex left the first delivered line whole in its composer, unsubmitted:
+  # its placeholder paints before its session is configured, and a queue-mode Enter typed then is
+  # dropped. Each round spawns one fresh codex and sends one line at a moment of its start. Every
+  # frame of the pane is recorded from the spawn, so a failing round shows what codex painted
+  # when the line was typed. Every wait polls with a deadline.
+  [ -f "$HOME/.codex/config.toml" ] || { echo "live-check: codex-start: skipped: ~/.codex/config.toml not staged"; exit 2; }
+  rc=0; rounds=${CODEX_START_ROUNDS:-8}
+  ok() { echo "live-check: codex-start: $1"; }; bad() { echo "live-check: codex-start: FAIL ($1)"; rc=1; }
+  until_ok() { local t=$1 what=$2; shift 2; local end=$((SECONDS + t)); until "$@"; do [ $SECONDS -ge $end ] && { bad "timed out after ${t}s: $what"; return 1; }; sleep 0.1; done; }
+  pane() { tmux list-panes -a -F '#{pane_id} #{window_name}' | awk -v w="$1" '$2==w{print $1; exit}'; }
+  has_pane() { [ -n "$(pane "$1")" ]; }
+  footer() { tmux capture-pane -p -t "$(pane "$1")" 2>/dev/null | grep -qE 'Context [0-9]+% (used|left)'; }
+  pending() { node --no-warnings -e 'const {DatabaseSync}=require("node:sqlite");const d=new DatabaseSync(process.argv[1],{readOnly:true});console.log(d.prepare("SELECT count(*) AS n FROM deliveries WHERE win = ?").get(process.argv[2]).n)' "$cfg/state.db" "$1"; }
+  settled() { [ "$(pending "$1")" = 0 ]; }
+  answered() { tmm log --project live --limit 80 | grep -q "] $1: .*$2"; }
+  # The user prompts codex itself recorded (its rollout's user_message events).
+  # The prompts the CLI's own hook reported for this window (userPromptSubmit), holding $2.
+  prompts() { node --no-warnings -e 'const {DatabaseSync}=require("node:sqlite");const d=new DatabaseSync(process.argv[1],{readOnly:true});console.log(d.prepare("SELECT count(*) AS n FROM activity WHERE win = ? AND kind = ? AND instr(text, ?) > 0").get(process.argv[2],"prompt",process.argv[3]).n)' "$cfg/state.db" "$1" "$2"; }
+  placeholder() { local f; f=$(tmux capture-pane -p -t "$(pane "$1")" 2>/dev/null) && [[ $f == *"Ask Codex to do anything"* ]] && [[ $f != *"Context "* ]]; }
+  # Every distinct frame, stamped in ms since the spawn, until the file /tmp/stop-$1 exists.
+  record() { local w=$1 t0=$2 last="" f; until [ -f "/tmp/stop-$w" ]; do
+      p=$(pane "$w"); [ -n "$p" ] && f=$(tmux capture-pane -p -t "$p" 2>/dev/null | grep -v '^\s*$') && [ "$f" != "$last" ] && { echo "=== +$(( $(date +%s%3N) - t0 )) ms"; echo "$f"; last=$f; }
+      sleep 0.05; done > "/tmp/frames-$w"; }
+  for i in $(seq 1 "$rounds"); do
+    w=cs$i; mode=queue; [ $((i % 4)) = 0 ] && mode=steer
+    # The plan, one round each: when the line is sent, and how long it is. The long line is the
+    # validator's #106 bootstrap (262 characters, codex wraps it to four rows).
+    plan=${CODEX_START_PLAN:-placeholder:long:load launch:long:load placeholder:short:load placeholder:long:load footer:long:load placeholder:short:load idle:short placeholder:long}
+    step=$(echo $plan | cut -d' ' -f$(( (i - 1) % $(echo $plan | wc -w) + 1 )))
+    when=$(echo "$step" | cut -d: -f1); size=$(echo "$step" | cut -d: -f2); load=$(echo "$step" | cut -d: -f3)
+    # load: busy loops on every core while codex starts (the validator's rig ran its Rust gates
+    # beside it), stopped once the round is judged.
+    burners=""; if [ "$load" = load ]; then for _ in $(seq 1 $(( $(nproc) * 2 ))); do (while :; do :; done) & burners="$burners $!"; done; fi
+    tmm registry save --name "$w" --backend codex --input-mode "$mode" --system "Follow the requested shell command exactly; answer in one short line." >/dev/null
+    t0=$(date +%s%3N); record "$w" "$t0" & rec=$!
+    tmm spawn "$w" --project live >/dev/null & sp=$!
+    case $when in
+      launch) until_ok 30 "$w's pane" has_pane "$w" || true ;;
+      footer) until_ok 120 "$w's footer" footer "$w" || true ;;
+      idle) until_ok 120 "$w's footer" footer "$w" || true; sleep 10 ;;
+      # The placeholder painted before the footer, the validator's #106 poll (/Ask Codex/).
+      placeholder) until_ok 60 "$w's placeholder" placeholder "$w" || true ;;
+    esac
+    if [ $size = long ]; then line="Execute this shell command: touch /work/live/start$i; while ! test -f /work/live/start$i; do sleep 1; done; echo gate-open. Then reply with the single word start$i. When you subsequently receive an answer to an ask, reply BUSY-B only."
+    else line="Run the shell command: echo start$i. Then reply with the single word start$i"; fi
+    tmm send --project live "@$w $line" >/dev/null
+    ok "$w ($mode, $size line, sent at $when${load:+, under load}, +$(( $(date +%s%3N) - t0 )) ms): $(pending "$w") row pending"
+    wait "$sp" || true; rc0=$rc
+    until_ok 60 "$w's line confirmed" settled "$w" || true
+    until_ok 120 "$w's answer" answered "$w" "start$i" && ok "$w: answered start$i" || true
+    touch "/tmp/stop-$w"; wait "$rec" || true
+    [ -z "$burners" ] || kill $burners 2>/dev/null || true
+    n=$(prompts "$w" "single word start$i")
+    if [ "$n" = 1 ]; then ok "$w: its hook reported the line as one prompt"; else bad "$w: its hook reported the line $n times"; fi
+    if tmm log --project live --limit 80 | grep -q "\[tmm\] unconfirmed $w"; then bad "$w: unconfirmed"; fi
+    if [ $rc != $rc0 ] || [ $i = 1 ]; then echo "live-check: codex-start: --- $w's frames from the spawn:"; sed 's/^/    |/' "/tmp/frames-$w" | tail -400; fi
+    tmm agent remove "$w" --project live >/dev/null || true   # the project's cap is 8 agents (spawn::SPAWN_CAP)
+  done
+  # The busy queue (#257) is unchanged: a line sent while a queue-mode codex works waits for the
+  # turn's end and becomes its own prompt, once.
+  w=csq; tmm registry save --name "$w" --backend codex --input-mode queue --system "Follow the requested shell command exactly; answer in one short line." >/dev/null
+  tmm spawn "$w" --project live >/dev/null
+  until_ok 120 "$w's footer" footer "$w" || true
+  tmm send --project live "@$w Run the shell command: sleep 20. Then reply with the single word busy-a" >/dev/null
+  until_ok 60 "$w working" bash -c "tmm agent list --project live | grep -q '$w \[codex\] running'" || true
+  tmm send --project live "@$w Reply with the single word busy-b" >/dev/null
+  ok "$w: busy-b sent while $w is $(tmm agent list --project live | grep -o "$w \[codex\] [a-z]*" | awk '{print $3}'), $(pending "$w") row pending"
+  until_ok 180 "$w's busy-a" answered "$w" busy-a && until_ok 120 "$w's busy-b" answered "$w" busy-b && ok "$w: answered busy-a, then busy-b" || true
+  until_ok 60 "$w's lines confirmed" settled "$w" || true
+  a=$(prompts "$w" "single word busy-a"); b=$(prompts "$w" "single word busy-b")
+  if [ "$a" = 1 ] && [ "$b" = 1 ]; then ok "$w: each line reported as one prompt"; else bad "$w: prompts busy-a $a, busy-b $b"; fi
+  if tmm log --project live --limit 80 | grep -q "\[tmm\] unconfirmed $w"; then bad "$w: unconfirmed"; fi
+  [ $rc = 0 ] && echo "live-check: codex-start: PASS"
   exit $rc
 fi
 

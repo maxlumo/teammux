@@ -718,6 +718,7 @@ and every live check with a real agent CLI runs in the live rig:
 pnpm run test:live:docker            # check `smoke`: one codex turn and one claude turn
 pnpm run test:live:docker codex-models   # board #70: codex's list follows its config (agents-overview.md § Model catalogue)
 pnpm run test:live:docker codex-provider   # board #74: a codex chat restarted under another provider comes back fresh (agents-overview.md)
+pnpm run test:live:docker codex-start      # board #113: the first line to a fresh codex, sent before its session is configured and under load, is one submitted prompt (agent-status.md)
 pnpm run test:live:docker pi             # board #71: a managed pi end to end (agents-overview.md § The pi backend)
 pnpm run test:live:docker pi-tools       # board #86: a pi tool call is one row with its argument (agent-status.md)
 pnpm run test:live:docker pi-paste       # board #85: lines carrying `#81` reach a busy and an idle pi whole and alone (agents-overview.md § The pi backend)
