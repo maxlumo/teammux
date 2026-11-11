@@ -224,10 +224,16 @@ agents cannot interleave their writes (the last publish wins, with its
 author's name on the section header), and an agent confined to its worktree
 or its sandbox can still publish. A loaded document's own files (its
 stylesheet, its pictures) are read from **its** revision, so a page kept on
-screen while a newer one is published stays one consistent snapshot; the
-revision before the current one is kept for that, older ones are removed at
-the next publish. Project files a page points at outside its bundle (a mix,
-a report) are live by declared policy: they are the project's, not the
+screen while newer ones are published stays one consistent snapshot. That
+guarantee has one stated bound, the file door's own: a document's signed
+access lasts 4 hours from its load. So a revision is removed only once it
+has not been the current one for 4 hours (checked at each publish, however
+many publications came in between): by then no document loaded from it can
+still read anything, and a page kept longer than that says so and offers
+Refresh. Counting publications instead ("keep the previous one") would
+delete the files under a form someone is filling in after two quick
+publishes. Project files a page points at outside its bundle (a mix, a
+report) are live by declared policy: they are the project's, not the
 page's. `<ws>/.tmm/` is already one of the two stores (tenet 7).
 
 **How it is shown.** Exactly as the Files page previews an HTML file today
@@ -297,7 +303,9 @@ which then acts and publishes again. The app handles the click, not the page:
   tab) goes through the same guard, so a half-filled form is still there.
   Refresh on a page with edited fields, and leaving the project, discard
   them through the app's existing discard confirm.
-- The file door's signature is renewed at each load (it lasts 4 hours).
+- The file door's signature is minted at each load and lasts 4 hours; a
+  document kept on screen past that can no longer read its files, and the
+  header then says the page is out of date and offers Refresh.
 
 **Why no scripts in v1.** The page is written by an agent that may have read
 anything on the web. The app that shows it holds the gateway token, the
@@ -368,7 +376,7 @@ an open ask is never repeated; a project page is optional and published with
 | hidden, then shown | the poll stops while hidden and reads at once on return |
 | older server, newer app | no capability: no switch, no chip, no ask bubbles |
 | newer server, older app | an ask is a plain message with its options as text; a reply in chat does not close it; the asker links it or the person answers on an updated client |
-| authoring from a worktree, several agents, a sandboxed CLI | `tmm dashboard publish`: the last publish wins, atomically, attributed; a document on screen keeps its own revision's files |
+| authoring from a worktree, several agents, a sandboxed CLI | `tmm dashboard publish`: the last publish wins, atomically, attributed; a document on screen keeps its own revision's files for the door's 4 hours, through any number of publications |
 | no page published | the fourth section is absent |
 | input | keyboard only (options are buttons in focus order); an IME's Enter never sends the answer box (the note box's rule); wide touch targets; six long options wrap |
 | widths and themes | 320 / 390 / 1280, dark and light, real Chromium, by natural widths with the longest realistic names, server tags and numbers, for the sidebar row, the cards and the confirm with a very long text (the #102/#103 lesson) |
