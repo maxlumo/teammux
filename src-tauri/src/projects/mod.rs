@@ -56,7 +56,7 @@ pub use board::{BOARD_STATUSES, ISSUE_REF_CHARS, board_block, board_counts, boar
 pub use rooms::{archive_msg, archived_ids, archived_msgs, unarchive_msgs};
 pub use registry::{global_prompt_get, global_prompt_set, registry_delete, registry_get, registry_list, registry_save, registry_set_model_effort, team_get, teams_delete, teams_list, teams_save};
 pub(crate) use registry::{with_registry_mcp, with_registry_skills};
-pub use managed::{agent_remove, team_remove, team_remove_preview, deliver_chat_line, deliver_chat_line_found, is_managed_in, joined_team, managed_home, managed_names_in, member_of, spawned_by, team_of};
+pub use managed::{agent_remove, team_remove, team_remove_preview, deliver_chat_line, deliver_chat_line_found, is_managed_in, joined_team, managed_home, managed_home_checked, managed_names_in, member_of, spawned_by, team_of};
 #[cfg(unix)]
 pub use managed::tighten_existing;
 pub use skills::{managed_skills_dir, mcp_delete, mcp_list, mcp_save, seed_builtin_skills, skill_delete, skill_file, skill_files, skill_import, skill_load, skill_read, skill_refresh, skill_save, skills_list};
@@ -237,6 +237,42 @@ pub(crate) mod tests {
         fn drop(&mut self) {
             SECTION.with(|s| s.set(self.0));
         }
+    }
+
+    /// Boards #118 and #121: the ONE seam for a FAILED project read. The test store's
+    /// `projects` table is renamed away for the guard's lifetime (the suite is
+    /// sequential); the store itself stays up. Restored on drop, even on a panic.
+    pub(crate) struct ProjectsUnreadable;
+    impl ProjectsUnreadable {
+        pub(crate) fn now() -> ProjectsUnreadable {
+            super::with_store(|s| s.exec_test_sql("ALTER TABLE projects RENAME TO projects_away")).unwrap();
+            assert!(super::project_for_session("any").is_err(), "the project read genuinely fails");
+            ProjectsUnreadable
+        }
+    }
+    impl Drop for ProjectsUnreadable {
+        fn drop(&mut self) {
+            super::with_store(|s| s.exec_test_sql("ALTER TABLE projects_away RENAME TO projects")).unwrap();
+        }
+    }
+
+    /// Board #121: a project RENAMED once, so its persisted room (`proj:<first name>`)
+    /// is not the default a failed read would make from its current session.
+    /// Answers (current session, its room, project id).
+    pub(crate) fn renamed_project(tag: &str) -> (String, String, String) {
+        use_test_store();
+        let id = uuid::Uuid::new_v4().simple().to_string()[..8].to_string();
+        let ws = crate::config::test_scratch(&format!("tmm-{tag}-{id}"));
+        std::fs::create_dir_all(&ws).unwrap();
+        let label = format!("{tag}-{id}");
+        let made = super::create(&ws.to_string_lossy(), Some(&label), Some(&label), None).expect("project");
+        let first = made["session"].as_str().unwrap().to_string();
+        let project = super::project_for_session(&first).unwrap().unwrap();
+        let current = format!("{first}-now");
+        super::with_store(|s| s.set_session(&project.id, &current, &first)).unwrap();
+        let room = super::project_for_session(&current).unwrap().unwrap().room;
+        assert!(!room.is_empty() && room != format!("proj:{current}"), "the persisted room is not the default: {room}");
+        (current, room, project.id)
     }
 
     /// Point the process-wide store at a throwaway database, wiped once per

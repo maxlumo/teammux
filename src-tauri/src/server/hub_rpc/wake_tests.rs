@@ -30,7 +30,7 @@ impl Drop for RoomInsertsRejected {
 fn a_wake_whose_room_line_cannot_be_stored_stays_due_and_fires_once_later() {
     let session = project_with(&["lead"]);
     let project = crate::projects::project_for_session(&session).unwrap().unwrap();
-    let room = crate::projects::rooms::session_room(&session);
+    let room = crate::projects::rooms::session_room(&session).unwrap();
     let w = crate::projects::wakes::schedule(&session, "lead", "@lead check the build", crate::projects::now() as i64).unwrap();
     let lines = |r: &str| -> usize {
         rooms::history_page(r, None, 50)["messages"].as_array().unwrap().iter().filter(|m| m["body"].as_str().unwrap_or("").contains("check the build")).count()

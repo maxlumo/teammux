@@ -621,9 +621,15 @@ fn recipe_field(workspace: Option<&str>, window_name: &str, key: &str) -> String
 /// managed: `<ws>/.tmm/agents/../..` IS a directory — the workspace — and this
 /// function's answer is what authorises `agent_remove` to `remove_dir_all` it.
 pub fn managed_home(session: &str, window_name: &str) -> Option<std::path::PathBuf> {
-    let project = project_for_session(session).ok().flatten()?;
-    let dir = agents::home_dir(&project.path, window_name)?;
-    home_is_managed(&dir, window_name).then_some(dir)
+    managed_home_checked(session, window_name).ok().flatten()
+}
+
+/// `managed_home` with a FAILED project read kept apart from "not managed" (board
+/// #121): `Err` when the store could not be asked, for a caller that must not
+/// consume on a guess (the hook consumer of a turn's end and its final reply).
+pub fn managed_home_checked(session: &str, window_name: &str) -> Result<Option<std::path::PathBuf>, String> {
+    let Some(project) = project_for_session(session)? else { return Ok(None) };
+    Ok(agents::home_dir(&project.path, window_name).filter(|dir| home_is_managed(dir, window_name)))
 }
 
 /// Close what older builds left readable by other users (board #448 D3),

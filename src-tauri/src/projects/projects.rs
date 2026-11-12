@@ -840,7 +840,7 @@ pub(crate) fn project_for_session_in(store: &store::Store, session: &str) -> Res
 /// its persisted room, or, for a positively ABSENT project, the asked name and
 /// `proj:<name>` (how a session without a project is served). The ONE mapping of a
 /// project row to (session, room): the hub's door, a fired wake and
-/// `rooms::session_room_checked` all use it.
+/// `rooms::session_room` all use it.
 pub struct Resolved {
     pub session: String,
     pub room: String,

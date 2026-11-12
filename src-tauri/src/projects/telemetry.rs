@@ -5613,7 +5613,7 @@ mod tests {
 
     /// `overdue_message`, plus the message's time as a line names it.
     fn overdue_message_at(session: &str, from: &str, to: &str, text: &str) -> ((String, i64), String) {
-        let room = crate::projects::rooms::session_room(session);
+        let room = crate::projects::rooms::session_room(session).unwrap();
         let id = uuid::Uuid::new_v4().to_string();
         let msg = crate::projects::rooms::post_routed_as(&room, &id, from, &format!("@{to} {text}"), &[to.to_string()]).unwrap();
         record_delivery(session, to, &format!("[tmm chat 2026-10-20 08:40] {from}: @{to} {text}"), &id);
@@ -5754,7 +5754,7 @@ mod tests {
             last_up_at: None, last_seen_at: None, archived: false, room: room.clone(),
         })).unwrap();
         sql(&format!("UPDATE projects SET created_at = 'unreadable' WHERE id = '{session}'"));
-        assert!(crate::projects::rooms::session_room_checked(&session).is_err(), "the fixture makes the room unreadable");
+        assert!(crate::projects::rooms::session_room(&session).is_err(), "the fixture makes the room unreadable");
         assert!(crate::projects::delivery::report_unconfirmed(&session).is_empty());
         untouched("room read failed");
         sql(&format!("UPDATE projects SET created_at = 1 WHERE id = '{session}'"));
@@ -5813,7 +5813,7 @@ mod tests {
     fn a_row_without_a_known_sender_gets_the_feed_warn_alone() {
         crate::projects::tests::use_test_store();
         let session = format!("anon437-{}", uuid::Uuid::new_v4());
-        let room = crate::projects::rooms::session_room(&session);
+        let room = crate::projects::rooms::session_room(&session).unwrap();
         record_delivery(&session, "dev", "[tmm chat 2026-10-20 08:40] tmm: [reply] a board notice", "");
         record_delivery(&session, "qa", "[tmm chat 2026-10-20 08:40] lead: @qa gone", &uuid::Uuid::new_v4().to_string());
         backdate(&session);

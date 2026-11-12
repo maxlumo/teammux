@@ -158,7 +158,7 @@ fn every_rooms_open_asks_are_counted_in_one_read() {
     rig.call("hub_ask", json!({ "from": "dev", "question": "two" })).unwrap();
     rig.call("hub_ask_dismiss", json!({ "seq": a["ask"]["seq"] })).unwrap();
     let r = handle_hub_request(&req("hub_ask_counts", json!({})), None).result.unwrap();
-    let room = super::hub_rpc::project_room(&rig.session);
+    let room = super::hub_rpc::project_room(&rig.session).unwrap();
     assert_eq!(r["counts"][room.as_str()].as_i64(), Some(1), "{r}");
 }
 
@@ -202,7 +202,7 @@ fn an_unreadable_agents_directory_is_an_error_not_zero_stopped() {
 #[test]
 fn a_failed_pane_listing_is_an_error_and_an_absent_session_counts_its_homes_stopped() {
     let Some(rig) = Rig::start("dash-panes") else { return };
-    let room = super::hub_rpc::project_room(&rig.session);
+    let room = super::hub_rpc::project_room(&rig.session).unwrap();
     let ws = || crate::projects::project_for_session(&rig.session);
     let (failed, fws) = super::hub_rpc::roster_with(&rig.session, ws(), |_| Err("error connecting to /tmp/x (Permission denied)".to_string()));
     assert_eq!(failed["panes"].as_str(), Some("failed"), "{failed}");
@@ -223,7 +223,7 @@ fn a_failed_pane_listing_is_an_error_and_an_absent_session_counts_its_homes_stop
 #[test]
 fn a_failed_project_read_in_the_fold_refuses_the_dashboard() {
     let Some(rig) = Rig::start("dash-project") else { return };
-    let room = super::hub_rpc::project_room(&rig.session);
+    let room = super::hub_rpc::project_room(&rig.session).unwrap();
     let (roster, ws) = super::hub_rpc::roster_with(&rig.session, Err("state.db: database is locked".to_string()), crate::tmux::list_panes);
     assert_eq!((roster["panes"].as_str(), ws.as_deref()), (Some("failed"), None), "{roster}");
     let e = super::hub_rpc::dashboard::dashboard(&rig.session, &room, &roster, ws.as_deref()).unwrap_err();
@@ -240,7 +240,7 @@ fn a_failed_project_read_in_the_fold_refuses_the_dashboard() {
 #[test]
 fn a_fold_listing_another_session_than_its_projects_is_no_reading() {
     let Some(rig) = Rig::start("dash-alias") else { return };
-    let room = super::hub_rpc::project_room(&rig.session);
+    let room = super::hub_rpc::project_room(&rig.session).unwrap();
     let mut project = crate::projects::project_for_session(&rig.session).unwrap().unwrap();
     project.session = format!("{}-renamed", rig.session);
     // Listed under the session it was asked with, while the project now names another.
@@ -268,7 +268,7 @@ fn the_dashboard_reads_the_room_of_the_folds_project_row() {
     assert_eq!(f.room, project.room);
     let d = super::hub_rpc::dashboard::dashboard(&rig.session, &f.room, &f.roster, f.workspace.as_deref()).unwrap();
     assert_eq!(d["asks"].as_array().unwrap().iter().map(|a| a["seq"].as_i64().unwrap()).collect::<Vec<_>>(), vec![ask.seq], "{d}");
-    // A row with no recorded room: session_room_checked's rule, proj:<session>.
+    // A row with no recorded room: session_room's rule, proj:<session>.
     project.room = String::new();
     assert_eq!(super::hub_rpc::fold(&rig.session, Ok(Some(project)), crate::tmux::list_panes).room, format!("proj:{}", rig.session));
 }
@@ -406,7 +406,7 @@ fn the_dashboard_reads_each_home_marker_once() {
 #[test]
 fn the_latest_status_survives_traffic_and_a_malformed_newer_candidate() {
     let Some(rig) = Rig::start("dash-status") else { return };
-    let room = super::hub_rpc::project_room(&rig.session);
+    let room = super::hub_rpc::project_room(&rig.session).unwrap();
     rig.call("hub_post", json!({ "from": "dev", "body": "compiled the store", "status": true })).unwrap();
     for i in 0..2001 {
         crate::projects::rooms::post(&room, "human", &format!("unrelated {i}")).unwrap();
@@ -425,7 +425,7 @@ fn the_latest_status_survives_traffic_and_a_malformed_newer_candidate() {
 #[test]
 fn the_latest_status_read_cost_on_a_real_sized_room() {
     let Some(rig) = Rig::start("dash-cost") else { return };
-    let room = super::hub_rpc::project_room(&rig.session);
+    let room = super::hub_rpc::project_room(&rig.session).unwrap();
     crate::projects::rooms::seed_msg(&room, "cost-status", 1, "dev", &[], "[tmm status working] the oldest line");
     for i in 0..12_600 {
         crate::projects::rooms::seed_msg(&room, &format!("cost-{i}"), 2 + i, if i % 3 == 0 { "dev" } else { "human" }, &[], &format!("message {i}"));

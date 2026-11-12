@@ -85,6 +85,12 @@ its turn fact, its effects and its durable mark have all succeeded
   pass retries the end's tail alone (`finish_end`: the post, then the flush),
   never its end fact (round 6). A post that succeeded but reported an
   error is posted again: the at-least-once window below;
+- an end whose project cannot be READ keeps the envelope before anything is
+  recorded (board #121: `managed_home_checked`, the end's one project read; a
+  failed read is not "unmanaged", which consumed the Stop and lost its final):
+  the next pass records the end and posts the final into the project's own room
+  with its reply edge; a final's room is `rooms::session_room`, an `Err` on a
+  failed read, never `proj:<session>`;
 - a mark that cannot be written keeps the envelope; its effects are done, so
   later passes retry the mark alone;
 - while a producer has an envelope not yet accepted, its later envelopes wait

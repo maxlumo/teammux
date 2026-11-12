@@ -384,7 +384,10 @@ fn report_not_ready(session: &str, window: &str, secs: u64, rows: &[super::store
     if !rows.is_empty() {
         telemetry::record_held_blocked(session, window, rows, &why);
     }
-    if let Err(e) = super::rooms::post(&super::rooms::session_room(session), "tmm", &format!("[tmm] {why}")) {
+    // One-shot (board #121): with a failed project read the line is dropped and
+    // said here; the held rows' record above is the outcome.
+    let posted = super::rooms::session_room(session).and_then(|room| super::rooms::post(&room, "tmm", &format!("[tmm] {why}")).map(|_| ()));
+    if let Err(e) = posted {
         eprintln!("delivery: {why}, and the room line was not written: {e}");
     }
 }
@@ -762,7 +765,7 @@ pub fn report_unconfirmed(session: &str) -> Vec<telemetry::Report> {
     // The room, read so that a failed read is told from "no project" (review
     // P1 on b92c3d88): unknown is never treated as the legacy fallback, and
     // a session whose room cannot be read is not swept at all this time.
-    let room = match super::rooms::session_room_checked(session) {
+    let room = match super::rooms::session_room(session) {
         Ok(room) => room,
         Err(e) => {
             eprintln!("⚠️  could not read the room of {session} ({e}); its unconfirmed lines wait for the next sweep");
@@ -824,7 +827,7 @@ pub fn unconfirmed_notice(items: &[(&str, &str)], stamp: &str) -> String {
 /// the record and tells each AGENT sender once (#437's notice path), after the kill. Held
 /// lines (#38: never typed) stay held and the next CLI's ready edge types them.
 pub(crate) fn take_in_flight(session: &str, window: &str, why: &str) -> Result<Taken, String> {
-    let room = super::rooms::session_room_checked(session);
+    let room = super::rooms::session_room(session);
     let now = chrono::Local::now();
     let mut items: Vec<(String, String)> = Vec::new();
     let found = telemetry::take_in_flight(session, window, |msgs, once_id| {
@@ -1716,6 +1719,24 @@ fn type_text(session: &str, window: &str, target: &str, text: &str, expect: Opti
 
 #[cfg(test)]
 mod tests {
+    /// Board #121: the "not ready after N s" line is one-shot; the held rows' record
+    /// is the outcome. With a failed project read the line is DROPPED (logged), never
+    /// posted into proj:<current session>, which is not a renamed project's room.
+    #[test]
+    fn a_not_ready_line_whose_project_read_fails_is_dropped_not_defaulted() {
+        let (session, room, id) = crate::projects::tests::renamed_project("r121-ready");
+        let bodies = |r: &str| -> Vec<String> { crate::projects::rooms::history_page(r, None, 50)["messages"].as_array().unwrap().iter().map(|m| m["body"].as_str().unwrap_or("").to_string()).collect() };
+        {
+            let _away = crate::projects::tests::ProjectsUnreadable::now();
+            report_not_ready(&session, "dev", 30, &[]);
+        }
+        assert!(bodies(&format!("proj:{session}")).is_empty(), "nothing in the defaulted room");
+        assert!(bodies(&room).is_empty(), "dropped, not posted later");
+        report_not_ready(&session, "dev", 30, &[]);
+        assert_eq!(bodies(&room), vec!["[tmm] dev has not become ready after 30 s"], "with a read, the project's own room");
+        crate::projects::restore_hold::with_store_for_test(|s| s.delete_project(&id)).ok();
+    }
+
     use super::*;
     use crate::projects::telemetry::{record_notification, record_prompt};
 
@@ -1728,7 +1749,7 @@ mod tests {
     fn a_start_that_never_becomes_ready_is_said_once_in_the_room() {
         crate::projects::tests::use_test_store();
         let session = format!("tmm-notready-{}", std::process::id());
-        let room = crate::projects::rooms::session_room(&session);
+        let room = crate::projects::rooms::session_room(&session).unwrap();
         let before = crate::projects::rooms::history_page(&room, None, 100)["messages"].as_array().unwrap().len();
         not_ready_after(&session, "val", 120);
         let page = crate::projects::rooms::history_page(&room, None, 100);
@@ -2981,7 +3002,7 @@ mod tests {
     fn stuck(tag: &str, first_from: &str, first_msg: Option<&str>) -> Stuck {
         telemetry::PERSIST_IN_TEST.with(|p| p.set(true));
         let session = setup(tag);
-        let room = crate::projects::rooms::session_room(&session);
+        let room = crate::projects::rooms::session_room(&session).unwrap();
         let first = match first_msg {
             Some(id) => id.to_string(),
             None => say(&room, first_from, "dev", "first"),
@@ -3065,7 +3086,7 @@ mod tests {
     fn a_held_tail_flushed_while_the_first_batch_is_in_flight_is_behind_it() {
         telemetry::PERSIST_IN_TEST.with(|p| p.set(true));
         let s = setup("behind-tail");
-        let room = crate::projects::rooms::session_room(&s);
+        let room = crate::projects::rooms::session_room(&s).unwrap();
         let long = "x".repeat(FLUSH_MAX_CHARS / 2 + 10);
         // Three lines held (a restart's leftovers, a copy-mode refusal): the window is idle and known.
         let mut ids = Vec::new();
@@ -3206,7 +3227,7 @@ mod tests {
         // Exit 2: the same through the held tail (`flush_locked` -> `flush_steered`).
         telemetry::PERSIST_IN_TEST.with(|p| p.set(true));
         let s = setup("once-2");
-        let room = crate::projects::rooms::session_room(&s);
+        let room = crate::projects::rooms::session_room(&s).unwrap();
         let long = "x".repeat(FLUSH_MAX_CHARS / 2 + 10);
         let mut ids = Vec::new();
         for n in 0..3 {

@@ -21,7 +21,7 @@ use super::rpc::ERR_METHOD_NOT_FOUND;
 /// behind. `proj:<session>` stays the FALLBACK — it is what every room created
 /// before v8 is called, and what an untracked session gets.
 #[cfg(not(any(target_os = "android", target_os = "ios")))]
-pub(super) fn project_room(session: &str) -> String {
+pub(super) fn project_room(session: &str) -> Result<String, String> {
     crate::projects::rooms::session_room(session)
 }
 
@@ -1280,7 +1280,7 @@ fn start_agent_owned(session: &str, agent: &str, permit: crate::projects::StartP
                 Err(se) => format!("[tmm] {e} (and it could not be stopped: {se})"),
             };
             // Board #118: a failed read posts nothing; the start's error is the answer.
-            if let Ok(room) = crate::projects::rooms::session_room_checked(session) {
+            if let Ok(room) = crate::projects::rooms::session_room(session) {
                 let _ = crate::projects::rooms::post(&room, agent, &line);
             }
             return Err(e);
@@ -3037,7 +3037,7 @@ fn agent_states(session: &str) -> serde_json::Value {
 
 /// What the dashboard builds on, all from the fold's ONE project row (board
 /// #108 round 5): the roster, its workspace, and its room, by
-/// `session_room_checked`'s rule (the recorded room, else `proj:<session>`),
+/// `session_room`'s rule (the recorded room, else `proj:<session>`),
 /// never the dispatcher's separately resolved room.
 #[cfg(not(any(target_os = "android", target_os = "ios")))]
 pub(super) struct Fold {
@@ -3757,7 +3757,7 @@ mod tests {
         let wait_for = |name: &str, text: &str| (0..30).any(|_| { let hit = pane(name).contains(text); if !hit { std::thread::sleep(std::time::Duration::from_millis(100)); } hit });
         let lines = || -> Vec<String> { room(&session).iter().filter_map(|m| m["body"].as_str().map(str::to_string)).filter(|b| b.starts_with("[tmm] moved") || b.starts_with("[tmm] left")).collect() };
         let ws_s = ws.to_string_lossy().to_string();
-        let room_id = super::project_room(&session);
+        let room_id = super::project_room(&session).unwrap();
         let home = crate::projects::spawn::agent_home(&ws_s, "helper");
         let seed = |old: &str| super::team_members(&session, old, "helper");
         let set = |team: &str| handle_hub_request(&req("hub_agent_set_team", serde_json::json!({ "session": session, "agent": "helper", "team": team })), None);
@@ -3943,7 +3943,7 @@ mod tests {
     #[test]
     fn the_handler_sends_the_full_brief_once_per_name_then_pointers() {
         let session = project_with(&["dev", "qa", "Dev"]);
-        let room_name = project_room(&session);
+        let room_name = project_room(&session).unwrap();
         // The production wiring (`hub_board_save` through the RPC): the brief is posted as
         // BRIEF_KIND and found again by the production lookup.
         let briefs = |session: &str| told(session).into_iter().filter(|m| m["kind"] == super::BRIEF_KIND).map(|m| m["body"].as_str().unwrap().to_string()).collect::<Vec<_>>();
@@ -3990,7 +3990,7 @@ mod tests {
         // The deletion removed the agent homes it wrote; the new project declares dev again.
         declare_agent(std::path::Path::new(&proj.path), "dev");
         crate::projects::create(&proj.path, Some(&session), Some(&session), None).expect("the same project again");
-        assert_eq!(project_room(&session), room_name, "the room, with its history, is the same");
+        assert_eq!(project_room(&session).unwrap(), room_name, "the room, with its history, is the same");
         let reborn = issue_id(&save_issue(&session, serde_json::json!({ "title": "Reborn", "body": "NEW BODY", "assignee": "dev", "who": "lead", "dispatch": true })));
         assert_eq!(reborn, id, "the public number is reused");
         let last = briefs(&session).last().cloned().unwrap();
@@ -4180,7 +4180,7 @@ mod tests {
     #[test]
     fn a_failed_post_after_the_save_is_an_answer_not_an_error() {
         let session = project_with(&["builder-2"]);
-        let room_name = project_room(&session);
+        let room_name = project_room(&session).unwrap();
         let broken = HandOff { issue: &|_, _, _| Err("the room is full".into()), deliver: &|_, m| m, managed: &|_| true, read: &stored };
 
         // The create path: one issue exists afterwards, assigned, and the answer
@@ -4217,7 +4217,7 @@ mod tests {
     #[test]
     fn a_read_back_that_fails_after_the_commit_still_answers_saved() {
         let session = project_with(&["builder-2"]);
-        let room_name = project_room(&session);
+        let room_name = project_room(&session).unwrap();
         let unreadable = HandOff { issue: &|_, _, _| panic!("nothing to hand off without the issue"), deliver: &|_, m| m, managed: &|_| true, read: &|_, _| Err("database is locked".into()) };
 
         // Asked to hand it over: saved once, the id comes back, and the answer says why nobody was told.
@@ -5090,7 +5090,7 @@ mod tests {
             r.result.expect("posted")
         };
         let offline_of = |msg: &serde_json::Value| msg.get("offline").cloned().unwrap_or(serde_json::json!([]));
-        let room = project_room(&session);
+        let room = project_room(&session).unwrap();
         let lines = || -> Vec<String> {
             rooms::history_page(&room, None, 50)["messages"].as_array().unwrap().iter()
                 .map(|m| m["body"].as_str().unwrap_or_default().to_string()).collect()
@@ -5231,7 +5231,7 @@ mod tests {
         // `cat` shows a typed line twice (the tty's echo, then cat's copy), so
         // once is as often as ping-0, which one name delivered.
         assert_eq!(pane("dev").matches("ping-dup").count(), pane("dev").matches("ping-0").count(), "typed once: {}", pane("dev"));
-        let stored: Vec<String> = rooms::history_page(&project_room(&session), None, 20)["messages"].as_array().unwrap().iter()
+        let stored: Vec<String> = rooms::history_page(&project_room(&session).unwrap(), None, 20)["messages"].as_array().unwrap().iter()
             .map(|m| m["body"].as_str().unwrap_or_default().to_string()).collect();
         assert!(stored.contains(&"@bob ping-0".to_string()), "the stored body is never rewritten: {stored:?}");
 
@@ -5936,7 +5936,7 @@ while True:
 
         let reports = crate::projects::delivery::report_unconfirmed(&session);
         assert_eq!(reports.len(), 4, "every row is reported: {reports:?}");
-        let room = project_room(&session);
+        let room = project_room(&session).unwrap();
         let lines: Vec<String> = rooms::history_page(&room, None, 100)["messages"].as_array().unwrap().iter()
             .filter(|m| m["from"] == "tmm" && m["body"].as_str().unwrap_or("").starts_with("[tmm] unconfirmed "))
             .map(|m| m["body"].as_str().unwrap().to_string())
@@ -6369,7 +6369,7 @@ while True:
         let mode = || handle_hub_request(&req("hub_agent_input_mode", serde_json::json!({ "session": session, "agent": "lead", "mode": "steer" })), None).error.map(|e| e.message);
         let interrupt = || handle_hub_request(&req("hub_agent_interrupt", serde_json::json!({ "session": session, "agent": "lead" })), None).error.map(|e| e.message);
         let interrupted_rows = || {
-            let page = rooms::history_page(&project_room(&session), None, 50);
+            let page = rooms::history_page(&project_room(&session).unwrap(), None, 50);
             page["messages"].as_array().unwrap().iter().filter(|m| m["body"].as_str().unwrap_or("").contains("[tmm] interrupted lead")).count()
         };
         std::thread::sleep(std::time::Duration::from_millis(300));
@@ -7041,7 +7041,7 @@ while True:
             .status()
             .unwrap();
         crate::projects::adopt(&session, Some("team-context-test")).expect("adopt project");
-        let room = project_room(&session);
+        let room = project_room(&session).unwrap();
         // Room history BEFORE the current message — the catch-up the team
         // member must receive. Stored routes are what the reconstruction reads.
         rooms::seed_msg(&room, &format!("{room}-1"), 1000, "human", &["lead".into()], "@lead old task");
@@ -7363,7 +7363,7 @@ while True:
 
         // The announcement is in the ROOM — the half the pane notice never
         // had — as a plain mention line with no bracket marker.
-        let room = project_room(&session);
+        let room = project_room(&session).unwrap();
         let page = crate::projects::rooms::history_page(&room, None, 50);
         let posted = page["messages"]
             .as_array()
@@ -7430,7 +7430,7 @@ while True:
             assert!(r.error.is_none(), "{:?}", r.error.map(|e| e.message));
             let panes = crate::tmux::list_panes(&session).unwrap_or_default();
             assert!(!panes.iter().any(|p| p.window_name == "dev"), "the window is gone");
-            let msgs = rooms::history_page(&project_room(&session), None, 10);
+            let msgs = rooms::history_page(&project_room(&session).unwrap(), None, 10);
             let msgs = msgs["messages"].as_array().unwrap();
             assert!(
                 msgs.iter().any(|m| m["body"].as_str().unwrap_or("").contains("[tmm] stopped dev")),
@@ -7654,7 +7654,7 @@ while True:
         let wait = |ok: &dyn Fn() -> bool, ms: u64| (0..ms / 50).any(|_| ok() || { std::thread::sleep(std::time::Duration::from_millis(50)); false });
         let target = format!("{session}:dev");
         let ready = || crate::tmux::capture_pane_plain(&target, Some(200)).unwrap_or_default().contains("bypass permissions on");
-        let lost = || rooms::history_page(&project_room(&session), None, 50)["messages"].as_array().unwrap().iter()
+        let lost = || rooms::history_page(&project_room(&session).unwrap(), None, 50)["messages"].as_array().unwrap().iter()
             .filter_map(|m| m["body"].as_str()).filter(|b| b.contains("may be lost")).map(str::to_string).collect::<Vec<_>>();
         assert_eq!(crate::projects::telemetry::pending_receipts(&session, "dev").len(), 1, "claude owes an echo: a row");
         let r = handle_hub_request(&req("hub_agent_restart", serde_json::json!({ "session": session, "agent": "dev" })), None);
@@ -7704,7 +7704,7 @@ while True:
         assert!(wait(&|| crate::tmux::capture_pane_plain(&target, Some(200)).unwrap_or_default().contains("bypass permissions on"), 15000));
         std::thread::sleep(std::time::Duration::from_millis(1500));
         assert!(!submits().iter().any(|l| l.contains("QUEUEWORD")), "never typed again: {:?}", submits());
-        let lost = || rooms::history_page(&project_room(&session), None, 50)["messages"].as_array().unwrap().iter()
+        let lost = || rooms::history_page(&project_room(&session).unwrap(), None, 50)["messages"].as_array().unwrap().iter()
             .filter_map(|m| m["body"].as_str()).filter(|b| b.contains("may be lost")).map(str::to_string).collect::<Vec<_>>();
         assert_eq!(lost().len(), 1, "{:?}", lost());
         assert!(lost()[0].contains("lead's message"), "names the sender, not the turn's own first prompt: {:?}", lost());
@@ -7749,7 +7749,7 @@ while True:
         assert!(wait(&|| crate::tmux::capture_pane_plain(&target, Some(200)).unwrap_or_default().contains("bypass permissions on"), 15000));
         std::thread::sleep(std::time::Duration::from_millis(1500));
         assert!(!submits().iter().any(|l| l.contains("RETAINWORD")), "never typed twice: {:?}", submits());
-        let lost = rooms::history_page(&project_room(&session), None, 50)["messages"].as_array().unwrap().iter()
+        let lost = rooms::history_page(&project_room(&session).unwrap(), None, 50)["messages"].as_array().unwrap().iter()
             .filter_map(|m| m["body"].as_str()).filter(|b| b.contains("may be lost")).count();
         assert_eq!(lost, 1, "reported once");
     }
@@ -7810,7 +7810,7 @@ while True:
             assert!(wait(&|| crate::tmux::capture_pane_plain(&target, Some(200)).unwrap_or_default().contains("bypass permissions on"), 15000));
             std::thread::sleep(std::time::Duration::from_millis(1500));
             assert!(!submits().iter().any(|l| l.contains(&word)), "{case}: never typed again: {:?}", submits());
-            let lost = rooms::history_page(&project_room(&session), None, 50)["messages"].as_array().unwrap().iter()
+            let lost = rooms::history_page(&project_room(&session).unwrap(), None, 50)["messages"].as_array().unwrap().iter()
                 .filter_map(|m| m["body"].as_str()).filter(|b| b.contains("may be lost")).count();
             assert_eq!(lost, 1, "{case}: reported once");
         }
@@ -7851,7 +7851,7 @@ while True:
             assert!(wait(&|| crate::tmux::capture_pane_plain(&target, Some(200)).unwrap_or_default().contains(ready), 15000));
             std::thread::sleep(std::time::Duration::from_millis(1000));
             assert!(!submits().iter().any(|l| l.contains(word)), "{backend}: {:?}", submits());
-            let lost = rooms::history_page(&project_room(&session), None, 50)["messages"].as_array().unwrap().iter()
+            let lost = rooms::history_page(&project_room(&session).unwrap(), None, 50)["messages"].as_array().unwrap().iter()
                 .filter_map(|m| m["body"].as_str()).filter(|b| b.contains("may be lost")).count();
             assert_eq!(lost, 1, "{backend}: exactly one saved record");
             crate::projects::telemetry::backdate_deliveries_for_test(&session, 600);
@@ -7897,7 +7897,7 @@ while True:
         assert!(wait(&|| crate::tmux::capture_pane_plain(&target, Some(200)).unwrap_or_default().contains("bypass permissions on"), 15000));
         std::thread::sleep(std::time::Duration::from_millis(1500));
         assert!(!submits().iter().any(|l| l.contains("DRAINWORD")), "settled by its echo, never typed twice: {:?}", submits());
-        let lost = rooms::history_page(&project_room(&session), None, 50)["messages"].as_array().unwrap().iter()
+        let lost = rooms::history_page(&project_room(&session).unwrap(), None, 50)["messages"].as_array().unwrap().iter()
             .filter_map(|m| m["body"].as_str()).filter(|b| b.contains("may be lost")).count();
         // Its echo came while the killed turn was open, which on claude 2.1.319 means QUEUED
         // (option A): so it is still reported once, and never typed again.
@@ -7923,7 +7923,7 @@ while True:
         let wait = |ok: &dyn Fn() -> bool, ms: u64| (0..ms / 50).any(|_| ok() || { std::thread::sleep(std::time::Duration::from_millis(50)); false });
         assert!(crate::projects::telemetry::pending_receipts(&session, "dev").is_empty(), "a steered line has no row (#276)");
         let lost = || -> Vec<String> {
-            rooms::history_page(&project_room(&session), None, 50)["messages"].as_array().unwrap().iter()
+            rooms::history_page(&project_room(&session).unwrap(), None, 50)["messages"].as_array().unwrap().iter()
                 .filter_map(|m| m["body"].as_str()).filter(|b| b.contains("may be lost")).map(str::to_string).collect()
         };
         let r = handle_hub_request(&req("hub_agent_restart", serde_json::json!({ "session": session, "agent": "dev" })), None);
@@ -8173,7 +8173,7 @@ while True:
             *crate::projects::delivery::BEFORE_DEADLINE_EFFECT.lock().unwrap() = None;
         } }
         let _reset = Reset;
-        let lines = || rooms::history_page(&project_room(&b.session), None, 100)["messages"].as_array().unwrap().iter()
+        let lines = || rooms::history_page(&project_room(&b.session).unwrap(), None, 100)["messages"].as_array().unwrap().iter()
             .filter(|m| m["body"].as_str().is_some_and(|t| t.contains("dev has not become ready"))).count();
         crate::projects::delivery::begin_start(&b.session, "dev", Some(Backend::Pi)).unwrap();
         b.window();
@@ -8294,7 +8294,7 @@ while True:
         struct Reset;
         impl Drop for Reset { fn drop(&mut self) { *crate::projects::delivery::START_TIMEOUT_IN_TEST.lock().unwrap() = None; } }
         let _reset = Reset;
-        let lines = || rooms::history_page(&project_room(&b.session), None, 100)["messages"].as_array().unwrap().iter()
+        let lines = || rooms::history_page(&project_room(&b.session).unwrap(), None, 100)["messages"].as_array().unwrap().iter()
             .filter(|m| m["body"].as_str().is_some_and(|t| t == "[tmm] dev has not become ready after 2 s")).count();
         let now = || std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap().as_nanos();
         // Start A, its watch, then A's release.
@@ -8369,7 +8369,7 @@ while True:
         *BEFORE_KILL_IN_TEST.lock().unwrap() = None;
         let err = r.error.expect("refused").message;
         assert!(err.contains("definition changed") && err.contains("omp") && err.contains("codex"), "{err}");
-        let said = rooms::history_page(&project_room(&session), None, 50)["messages"].as_array().unwrap().iter()
+        let said = rooms::history_page(&project_room(&session).unwrap(), None, 50)["messages"].as_array().unwrap().iter()
             .filter(|m| m["body"].as_str().is_some_and(|b| b.contains("was not started") && b.contains("from omp to codex"))).count();
         assert_eq!(said, 1, "one room line names both backends");
         assert!(window_of_agent(&session, &name).is_none(), "no shell is left to type into");
@@ -8395,7 +8395,7 @@ while True:
         let r = handle_hub_request(&req("hub_agent_restart", serde_json::json!({ "session": b.session, "agent": "dev" })), None);
         assert!(r.error.is_none(), "{:?}", r.error.map(|e| e.message));
         b.hold("NEVERWORD");
-        let lines = || rooms::history_page(&project_room(&b.session), None, 100)["messages"].as_array().unwrap().iter()
+        let lines = || rooms::history_page(&project_room(&b.session).unwrap(), None, 100)["messages"].as_array().unwrap().iter()
             .filter(|m| m["body"].as_str().is_some_and(|t| t == "[tmm] dev has not become ready after 2 s")).count();
         assert!((0..120).any(|_| lines() == 1 || { std::thread::sleep(std::time::Duration::from_millis(50)); false }), "one line at the timeout");
         std::thread::sleep(std::time::Duration::from_millis(1500));
@@ -9123,7 +9123,7 @@ while True:
             );
             assert!(!hub.holds_edge(&session, "dev"),
                 "#256: the interrupt's end edge drops the turn's reply edge at the call site");
-            let msgs = rooms::history_page(&project_room(&session), None, 10);
+            let msgs = rooms::history_page(&project_room(&session).unwrap(), None, 10);
             let msgs = msgs["messages"].as_array().unwrap();
             assert!(
                 msgs.iter().any(|m| m["body"].as_str().unwrap_or("").contains("[tmm] interrupted dev")),
@@ -9513,7 +9513,7 @@ while True:
         assert!(!crate::projects::delivery::is_starting(&session, "homp"), "omp has no ready edge, so nothing is held");
         // The hold's deadline path is the restart's: after the timeout the mark
         // stays and the room says the window never became ready.
-        let said = || rooms::history_page(&project_room(&session), None, 100)["messages"].as_array().unwrap().iter()
+        let said = || rooms::history_page(&project_room(&session).unwrap(), None, 100)["messages"].as_array().unwrap().iter()
             .any(|m| m["body"].as_str().is_some_and(|t| t == "[tmm] hpi has not become ready after 2 s"));
         assert!((0..300).any(|_| said() || { std::thread::sleep(std::time::Duration::from_millis(50)); false }), "the stuck start is reported as a restart's is");
         assert!(crate::projects::delivery::is_starting(&session, "hpi"), "and its lines stay held");

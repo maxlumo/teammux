@@ -108,16 +108,11 @@ pub fn push_stored(msgs: &[HubMsg]) {
 }
 
 /// The room a session's chat lives in: the project's recorded room, or
-/// `proj:<session>` for a room from before v8 and an untracked session. The
-/// one reading, also behind `hub_rpc::project_room`.
-pub fn session_room(session: &str) -> String {
-    session_room_checked(session).unwrap_or_else(|_| format!("proj:{session}"))
-}
-
-/// `session_room`, with a failed project read kept apart from "no project"
-/// (board #437 review P1): `Err` when the store could not be asked, so a
-/// caller that must not guess (the unconfirmed report) can wait instead.
-pub fn session_room_checked(session: &str) -> Result<String, String> {
+/// `proj:<session>` for a room from before v8 and a session with no project. The
+/// ONE reading (board #121), also behind `hub_rpc::project_room`: a FAILED project
+/// read is `Err`, never a room made from the name (board #437 review P1, #118), so
+/// no caller can store or deliver into a room derived from a failed read.
+pub fn session_room(session: &str) -> Result<String, String> {
     crate::projects::resolve_session(session).map(|r| r.room)
 }
 
@@ -490,6 +485,23 @@ pub fn import_legacy() {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// Board #121: ONE room of a session. A positively absent project is
+    /// `proj:<session>`; a renamed one is its persisted room; a FAILED read is `Err`,
+    /// never a room made from the name.
+    #[test]
+    fn the_room_of_a_session_is_the_projects_or_the_default_and_a_failed_read_is_an_error() {
+        let (current, room, id) = crate::projects::tests::renamed_project("r121-room");
+        let absent = format!("r121-none-{}", uuid::Uuid::new_v4());
+        assert_eq!(session_room(&absent), Ok(format!("proj:{absent}")));
+        assert_eq!(session_room(&current), Ok(room.clone()), "the persisted room, not proj:<current>");
+        {
+            let _away = crate::projects::tests::ProjectsUnreadable::now();
+            assert!(session_room(&current).is_err());
+            assert!(session_room(&absent).is_err(), "unknown is not absent when the store cannot be asked");
+        }
+        crate::projects::restore_hold::with_store_for_test(|s| s.delete_project(&id)).ok();
+    }
 
     /// Board #322: the ONE news case table. `hub.test.ts` reads these rows
     /// out of this file and runs `newsKind` over them, so the unread summary

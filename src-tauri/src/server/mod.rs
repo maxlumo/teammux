@@ -116,7 +116,9 @@ impl crate::agent_notifications::RoomPoster for HubRoomPoster {
 /// error is returned, so a numbered consumer retries the post.
 #[cfg(not(any(target_os = "android", target_os = "ios")))]
 fn post_final_with(session: &str, agent: &str, body: &str, reply_to: &[String], mut deliver: impl FnMut(&str, &str)) -> Result<(), String> {
-    let room = hub_rpc::project_room(session);
+    // A failed project read is this post's Err (board #121), like a room that could
+    // not be written: nothing stored, nothing typed, and the consumer retries.
+    let room = hub_rpc::project_room(session)?;
     let row = crate::projects::rooms::post_routed(&room, agent, body, reply_to)?;
     // Typed under the replying agent's label (board #20), like every typed
     // line; the row above keeps the physical sender and recipients.
@@ -159,6 +161,35 @@ pub(crate) fn post_final_for_test(session: &str, agent: &str, body: &str, reply_
 
 #[cfg(all(test, not(any(target_os = "android", target_os = "ios"))))]
 mod reply_edge_tests {
+    /// Board #121: a final reply whose project read FAILS is an error and stores
+    /// nothing (never a row in proj:<current session>, which is not a renamed
+    /// project's room) and types nothing; its numbered consumer retries the post
+    /// (#404 round 6), and the retry lands once in the project's OWN room with the
+    /// reply edge intact.
+    #[test]
+    fn a_final_reply_whose_project_read_fails_stores_nothing_and_its_retry_lands_in_the_right_room() {
+        let (session, room, id) = crate::projects::tests::renamed_project("r121-final");
+        let bodies = |r: &str| -> Vec<String> { crate::projects::rooms::history_page(r, None, 50)["messages"].as_array().unwrap().iter().map(|m| m["body"].as_str().unwrap_or("").to_string()).collect() };
+        let edge = vec!["lead".to_string(), "human".to_string()];
+        let mut typed = Vec::new();
+        let out = {
+            let _away = crate::projects::tests::ProjectsUnreadable::now();
+            super::post_final_with(&session, "dev", "done 121", &edge, |target, _| typed.push(target.to_string()))
+        };
+        assert!(out.is_err(), "{out:?}");
+        assert!(typed.is_empty(), "nothing typed");
+        assert!(bodies(&format!("proj:{session}")).is_empty(), "nothing in the defaulted room");
+        assert!(bodies(&room).is_empty(), "nothing stored yet");
+        super::post_final_with(&session, "dev", "done 121", &edge, |target, _| typed.push(target.to_string())).unwrap();
+        let page = crate::projects::rooms::history_page(&room, None, 5);
+        let rows = page["messages"].as_array().unwrap();
+        assert_eq!(rows.len(), 1, "once");
+        assert_eq!(rows[0]["body"], "done 121");
+        assert_eq!(rows[0]["to"], serde_json::json!(["lead", "human"]), "the reply edge");
+        assert_eq!(typed, vec!["lead"]);
+        crate::projects::restore_hold::with_store_for_test(|s| s.delete_project(&id)).ok();
+    }
+
     /// Board #289: a final reply to a turn the human and lead asked in is
     /// RECORDED to both and TYPED only to lead.
     #[test]
@@ -170,7 +201,7 @@ mod reply_edge_tests {
         super::post_final_with(&session, "dev", "done", &edge, |target, line| typed.push((target.to_string(), line.to_string()))).unwrap();
         assert_eq!(typed.iter().map(|(t, _)| t.as_str()).collect::<Vec<_>>(), vec!["lead"], "never typed to the human");
         assert!(typed[0].1.ends_with("dev: [reply] done"));
-        let room = super::hub_rpc::project_room(&session);
+        let room = super::hub_rpc::project_room(&session).unwrap();
         let page = crate::projects::rooms::history_page(&room, None, 5);
         assert_eq!(page["messages"][0]["to"], serde_json::json!(["lead", "human"]), "recorded to both");
     }
@@ -183,7 +214,7 @@ mod reply_edge_tests {
     fn a_long_reply_is_stored_whole_and_its_typed_line_points_at_the_row() {
         crate::projects::tests::use_test_store();
         let session = format!("tmm-reply-whole-{}", uuid::Uuid::new_v4());
-        let room = super::hub_rpc::project_room(&session);
+        let room = super::hub_rpc::project_room(&session).unwrap();
         let long = format!("{}TAIL-SURVIVES", "y".repeat(10_000));
         let mut typed = Vec::new();
         let edge = vec!["lead".to_string()];
@@ -214,7 +245,7 @@ mod reply_edge_tests {
     fn a_reply_the_room_did_not_record_is_an_error_and_types_nothing() {
         crate::projects::tests::use_test_store();
         let session = format!("tmm-reply-fail-{}", uuid::Uuid::new_v4());
-        let room = super::hub_rpc::project_room(&session);
+        let room = super::hub_rpc::project_room(&session).unwrap();
         let sql = |q: String| crate::projects::telemetry::exec_test_sql(&q);
         sql(format!("CREATE TEMP TRIGGER room404 BEFORE INSERT ON hub_msgs WHEN NEW.room = '{room}' BEGIN SELECT RAISE(ABORT, 'disk full'); END;"));
         let mut typed = Vec::new();

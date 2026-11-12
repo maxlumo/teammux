@@ -117,7 +117,7 @@ mod tests {
             bytes.len()
         };
         let rows = || {
-            let page = crate::projects::rooms::history_page(&crate::projects::rooms::session_room(&session), None, 10);
+            let page = crate::projects::rooms::history_page(&crate::projects::rooms::session_room(&session).unwrap(), None, 10);
             page["messages"].as_array().unwrap().iter().map(|m| m["body"].as_str().unwrap_or("").to_string()).collect::<Vec<_>>()
         };
         let status = || crate::projects::telemetry::derive(&session, "dev", 0);

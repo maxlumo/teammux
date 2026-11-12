@@ -8,22 +8,7 @@ use super::super::test_util::req;
 use crate::projects::rooms;
 use super::tests::{project_with, unique};
 
-/// Board #118: the door's project read FAILS (the test store's `projects` table is
-/// renamed away for the guard's lifetime; the suite is sequential), the store
-/// itself stays up. Restored on drop, even when the test panics.
-struct ProjectsUnreadable;
-impl ProjectsUnreadable {
-    fn now() -> ProjectsUnreadable {
-        crate::projects::restore_hold::with_store_for_test(|s| s.exec_test_sql("ALTER TABLE projects RENAME TO projects_118_away")).unwrap();
-        assert!(crate::projects::project_for_session("any").is_err(), "the project read genuinely fails");
-        ProjectsUnreadable
-    }
-}
-impl Drop for ProjectsUnreadable {
-    fn drop(&mut self) {
-        crate::projects::restore_hold::with_store_for_test(|s| s.exec_test_sql("ALTER TABLE projects_118_away RENAME TO projects")).unwrap();
-    }
-}
+use crate::projects::tests::ProjectsUnreadable;
 
 /// Board #118 (validator's #108 note 56, builder's note 57): a caller with a PREVIOUS
 /// session name (a running agent's TMM_PROJECT after a rename) whose door read FAILS
@@ -74,7 +59,7 @@ fn a_wake_whose_project_read_fails_claims_nothing_and_fires_later_in_its_own_roo
     let old = format!("{current}-before");
     let w = crate::projects::wakes::schedule(&old, "lead", "@lead check the build", crate::projects::now() as i64).unwrap();
     crate::projects::restore_hold::with_store_for_test(|s| s.set_session(&project.id, &current, &old)).unwrap();
-    let room = crate::projects::rooms::session_room(&current);
+    let room = crate::projects::rooms::session_room(&current).unwrap();
     let bodies = |r: &str| -> Vec<String> { rooms::history_page(r, None, 50)["messages"].as_array().unwrap().iter().map(|m| m["body"].as_str().unwrap_or("").to_string()).collect() };
     {
         let _away = ProjectsUnreadable::now();
@@ -96,7 +81,7 @@ fn a_wake_whose_project_read_fails_claims_nothing_and_fires_later_in_its_own_roo
 #[test]
 fn a_failed_re_read_inside_a_method_is_unchecked_or_an_error_never_a_fallback() {
     let current = project_with(&["dev"]);
-    let room = crate::projects::rooms::session_room(&current);
+    let room = crate::projects::rooms::session_room(&current).unwrap();
     let names = crate::address::Names::default();
     let respawned = std::cell::Cell::new(false);
     let permit = crate::projects::start_permit(&current, "dev").unwrap();
@@ -135,7 +120,7 @@ fn an_absent_project_keeps_the_asked_name_and_a_renamed_one_its_current_session_
     crate::projects::restore_hold::with_store_for_test(|s| s.set_session(&project.id, &current, &old)).unwrap();
     let r = handle_hub_request(&req("hub_post", serde_json::json!({ "session": old, "from": "human", "body": "hello by the old name" })), None);
     assert!(r.error.is_none(), "{:?}", r.error.map(|e| e.message));
-    let room = crate::projects::rooms::session_room(&current);
+    let room = crate::projects::rooms::session_room(&current).unwrap();
     assert!(rooms::history_page(&room, None, 10)["messages"].as_array().unwrap().iter().any(|m| m["body"] == "hello by the old name"), "the project's own room");
     crate::projects::restore_hold::with_store_for_test(|s| s.delete_project(&project.id)).ok();
 }

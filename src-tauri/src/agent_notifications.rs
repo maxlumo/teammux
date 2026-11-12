@@ -6,6 +6,8 @@ use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex};
 
 mod payload;
+#[cfg(all(test, not(any(target_os = "android", target_os = "ios"))))]
+mod final_read_tests;
 const MAX_INBOX_BYTES: u64 = 256 * 1024;
 /// The ONE bound on a stored final reply (board #42 AC2): 256 KiB, the bound
 /// every hook payload already has (`MAX_INBOX_BYTES`), so a hook-sourced
@@ -734,8 +736,13 @@ impl AgentNotificationHub {
         // for a backend whose reply lives in its own session store: never
         // searched for by workspace, so two agents of one backend in one
         // project cannot read each other's turn (board #224).
+        //
+        // ONE project read for the whole end (board #121): a FAILED read is not
+        // "unmanaged". It stops here, before the end is recorded or the mark moves,
+        // and the envelope is kept for the next pass, which posts the final into
+        // the project's own room with its reply edge.
         #[cfg(not(any(target_os = "android", target_os = "ios")))]
-        let home = crate::projects::managed_home(&session, &window);
+        let home = crate::projects::managed_home_checked(&session, &window).map_err(|e| Consume::Retain(format!("its project could not be read: {e}")))?;
         #[cfg(any(target_os = "android", target_os = "ios"))]
         let home: Option<PathBuf> = None;
         let normalized = normalize_in(&envelope, home.as_deref())?;
@@ -788,7 +795,9 @@ impl AgentNotificationHub {
 
         let _ = pane;
         #[cfg(not(any(target_os = "android", target_os = "ios")))]
-        let post = if normalized.kind == "completed" { self.auto_post_body(&session, &window, &normalized) } else { self.provider_failure_notice(&session, &window, &normalized) };
+        let managed = home.is_some();
+        #[cfg(not(any(target_os = "android", target_os = "ios")))]
+        let post = if normalized.kind == "completed" { self.auto_post_body(managed, &normalized) } else { self.provider_failure_notice(managed, &session, &window, &normalized) };
         // The notice is for the person too, who reads the room (board #39).
         #[cfg(not(any(target_os = "android", target_os = "ios")))]
         let reply_to = if post.is_some() && normalized.kind == "failed" { with_human(reply_to) } else { reply_to };
@@ -853,7 +862,7 @@ impl AgentNotificationHub {
     /// so direct or adopted agents never auto-post) and a reply worth
     /// posting, whole up to `MAX_STORED_REPLY_BYTES` (board #42).
     #[cfg(not(any(target_os = "android", target_os = "ios")))]
-    fn auto_post_body(&self, session: &str, window: &str, normalized: &Normalized) -> Option<String> {
+    fn auto_post_body(&self, managed: bool, normalized: &Normalized) -> Option<String> {
         // Nothing to post — skip.
         let reply = normalized.full_reply.as_deref().unwrap_or_default();
         if reply.is_empty() {
@@ -864,9 +873,9 @@ impl AgentNotificationHub {
         // participant list and with delivery, so the three cannot drift apart.
         // The resolved window IS the name now (board #120), so the old
         // index → list_panes → name round-trip (which lost the post when a
-        // rename landed between hook fire and consume) is gone.
-        crate::projects::managed_home(session, window)?;
-        Some(stored_reply(reply))
+        // rename landed between hook fire and consume) is gone. `managed` is the
+        // end's one project read (board #121), never a second one.
+        managed.then(|| stored_reply(reply))
     }
 
     /// The ONE notice of a turn that ended on a provider error only a person
@@ -875,9 +884,11 @@ impl AgentNotificationHub {
     /// records it. Managed windows only, like a final reply. The text is
     /// already redacted (`shared::provider_failure`).
     #[cfg(not(any(target_os = "android", target_os = "ios")))]
-    fn provider_failure_notice(&self, session: &str, window: &str, normalized: &Normalized) -> Option<String> {
+    fn provider_failure_notice(&self, managed: bool, session: &str, window: &str, normalized: &Normalized) -> Option<String> {
         let text = crate::projects::model_refused::named(session, window, normalized.provider_error.as_deref()?);
-        crate::projects::managed_home(session, window)?;
+        if !managed {
+            return None;
+        }
         Some(provider_notice_body(&text))
     }
 
@@ -2535,7 +2546,7 @@ mod tests {
         assert!(reply.chars().count() > 9000);
         feed(json!({"hook_event_name": "Stop", "last_assistant_message": reply, "session_id": "c1"}));
 
-        let room = crate::projects::rooms::session_room(&session);
+        let room = crate::projects::rooms::session_room(&session).unwrap();
         let page = crate::projects::rooms::history_page(&room, None, 10);
         let row = page["messages"].as_array().unwrap().iter().find(|m| m["from"] == "dev").expect("the reply is in the room");
         assert_eq!(row["body"].as_str().unwrap(), reply, "stored whole, tail included");

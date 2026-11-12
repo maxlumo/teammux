@@ -81,7 +81,7 @@ resolution as valid is closed:
 | input | source | rule |
 |---|---|---|
 | session | the dispatcher | must be the fold's project's current session (round 4) |
-| room | the fold's project row (`hub_rpc::fold`): its recorded room, else `proj:<session>`, `session_room_checked`'s rule from the same row | never the dispatcher's `room` (reviewer note 65) |
+| room | the fold's project row (`hub_rpc::fold`): its recorded room, else `proj:<session>`, `session_room`'s rule from the same row | never the dispatcher's `room` (reviewer note 65) |
 | project, panes | the fold | a failed read is `failed` (rounds 2, 3) |
 | membership | ONE `managed_state` per live window (the fold reads it once; `home_managed` on each row) | a marker that cannot be READ is `failed`; membership is the marker, the detected CLI kind is display only, so a managed home whose recipe cannot be parsed is still an agent, with the fold's DERIVED state (e.g. `exited`), never `shell` (amendment A, B) |
 | stopped | `managed_names_checked_except(workspace, live windows, reader)`: the homes the fold did NOT observe, through the same reader | an unreadable home is an error, never a smaller count; a home with a live window is never stopped and never read again |

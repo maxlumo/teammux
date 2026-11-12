@@ -416,7 +416,7 @@ fn the_line_is_handed_to_delivery_only_after_the_commit_and_only_once() {
         assert_eq!(crate::projects::asks::body_of(room, msg_seq).as_deref(), Some(body), "the line is the stored message");
         (vec!["dev".to_string()], Vec::new())
     };
-    let room = super::hub_rpc::project_room(&rig.session);
+    let room = super::hub_rpc::project_room(&rig.session).unwrap();
     let p = json!({ "seq": seq, "option": "A" });
     let r = super::hub_rpc::asks::answer(&rig.session, &room, &p, &deliver).unwrap();
     assert_eq!((r["applied"].as_bool(), calls.get()), (Some(true), 1));

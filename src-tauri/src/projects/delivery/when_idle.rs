@@ -179,7 +179,15 @@ pub(super) fn release_command(session: &str, window: &str, target: &str, row: &s
 /// A room line about a held command, under the sender of the line it was
 /// accepted under (its `msg_id`), `tmm` when that line cannot be found.
 fn say_command(session: &str, row: &super::super::store::DeliveryRow, body: &str) {
-    let room = super::super::rooms::session_room(session);
+    // One-shot (board #121): a failed project read drops the line, said here; the
+    // held row's own state is the outcome.
+    let room = match super::super::rooms::session_room(session) {
+        Ok(room) => room,
+        Err(e) => {
+            eprintln!("delivery: '{body}' was not written to the room: its project could not be read: {e}");
+            return;
+        }
+    };
     let from = super::super::rooms::message_by_ref(&room, &row.msg_id).and_then(|m| m["from"].as_str().map(str::to_string)).unwrap_or_else(|| NOTICE_SENDER.to_string());
     if let Err(e) = super::super::rooms::post(&room, &from, body) {
         eprintln!("delivery: '{body}' was not written to the room: {e}");
@@ -320,7 +328,9 @@ pub(super) fn end_held_commands(session: &str, window: &str, ending: Ending) {
 /// held behind it are offered to the window again at once (typed now if its
 /// turn is over, else at its end). `Err` names why not.
 pub fn cancel_command(session: &str, id: i64, from: &str) -> Result<serde_json::Value, String> {
-    let room = super::super::rooms::session_room(session);
+    // The sender check reads the room (board #121): a failed project read refuses the
+    // cancel, never a lookup in a defaulted room that finds no sender and allows it.
+    let room = super::super::rooms::session_room(session).map_err(|e| format!("project lookup failed: {e}"))?;
     let row = telemetry::cancel_held_command(session, id, |row| {
         let sender = super::super::rooms::message_by_ref(&room, &row.msg_id).and_then(|m| m["from"].as_str().map(str::to_string));
         match sender {
@@ -485,7 +495,7 @@ mod tests {
         assert_eq!(typed(), ["/clear"], "the brief waits for the reset to take effect");
         assert_eq!(held_lines(&s, "cl")[0], ("/clear".to_string(), Some(crate::projects::store::CommandHold::Typed)));
         // No effect within the timeout: said once, nothing typed.
-        let room = crate::projects::rooms::session_room(&s);
+        let room = crate::projects::rooms::session_room(&s).unwrap();
         let said = || crate::projects::rooms::history_page(&room, None, 100)["messages"].as_array().unwrap().iter()
             .filter(|m| m["body"].as_str().is_some_and(|b| b.contains("has not taken effect"))).count();
         *START_TIMEOUT_IN_TEST.lock().unwrap() = Some(std::time::Duration::ZERO);
@@ -575,7 +585,7 @@ mod tests {
         fake();
         use crate::projects::store::CommandHold::{Typed, Waiting};
         let brief = "[tmm chat 2026-11-06 10:00] lead: @cl the brief";
-        let room = crate::projects::rooms::session_room(&s);
+        let room = crate::projects::rooms::session_room(&s).unwrap();
         let said = || -> Vec<String> {
             crate::projects::rooms::history_page(&room, None, 100)["messages"].as_array().unwrap().iter()
                 .filter_map(|m| m["body"].as_str().map(str::to_string)).filter(|b| b.starts_with("[tmm] /")).collect()
@@ -632,6 +642,31 @@ mod tests {
         }
     }
 
+    /// Board #121: cancel_command reads the room to find the command's sender (the
+    /// permission check); a FAILED project read refuses the cancel and cancels
+    /// nothing. say_command's room line is one-shot: dropped (logged), never posted
+    /// into proj:<current session>.
+    #[test]
+    fn a_failed_project_read_refuses_a_cancel_and_drops_a_command_line() {
+        let (session, room, pid) = crate::projects::tests::renamed_project("r121-cancel");
+        let bodies = |r: &str| -> Vec<String> { crate::projects::rooms::history_page(r, None, 50)["messages"].as_array().unwrap().iter().map(|m| m["body"].as_str().unwrap_or("").to_string()).collect() };
+        let mid = format!("m121-{pid}");
+        let id = crate::projects::telemetry::record_held_command(&session, "dev", "/clear", &mid, None).unwrap();
+        crate::projects::rooms::post_routed_as(&room, &mid, "lead", "[tmm] /clear → dev waits for its turn to end", &[]).unwrap();
+        let row = crate::projects::telemetry::held_rows(&session, "dev").into_iter().next().unwrap();
+        let cancelled = {
+            let _away = crate::projects::tests::ProjectsUnreadable::now();
+            say_command(&session, &row, "[tmm] said while the store could not be asked");
+            cancel_command(&session, id, "reviewer")
+        };
+        assert!(cancelled.as_ref().is_err_and(|e| e.contains("project lookup failed")), "refused, not guessed: {cancelled:?}");
+        assert_eq!(crate::projects::telemetry::held_rows(&session, "dev").len(), 1, "nothing cancelled");
+        assert!(bodies(&format!("proj:{session}")).is_empty(), "nothing in the defaulted room");
+        assert_eq!(bodies(&room), vec!["[tmm] /clear → dev waits for its turn to end"], "the command line was dropped");
+        assert!(cancel_command(&session, id, "reviewer").is_err_and(|e| e.contains("was sent by lead")), "with a read, the sender check runs");
+        crate::projects::restore_hold::with_store_for_test(|s| s.delete_project(&pid)).ok();
+    }
+
     /// Board #45: a held command is cancelled
     /// by its id, by its sender (a teammate is refused, as for a wake). The
     /// row goes, the room says so under the canceller, the
@@ -643,7 +678,7 @@ mod tests {
         let session = format!("tmm-cancel-{}", uuid::Uuid::new_v4());
         let tm = crate::projects::telemetry::record_held_command;
         let id = tm(&session, "dev", "/clear", "m1", None).unwrap();
-        crate::projects::rooms::post_routed_as(&crate::projects::rooms::session_room(&session), "m1", "lead", "[tmm] /clear → dev waits for its turn to end", &[]).unwrap();
+        crate::projects::rooms::post_routed_as(&crate::projects::rooms::session_room(&session).unwrap(), "m1", "lead", "[tmm] /clear → dev waits for its turn to end", &[]).unwrap();
         crate::projects::telemetry::record_held(&session, "dev", "[tmm chat] the brief", 0, "m2").unwrap();
         let line = crate::projects::telemetry::held_rows(&session, "dev")[1].id;
         let other = cancel_command("elsewhere", id, "lead");
@@ -663,7 +698,7 @@ mod tests {
         let typed = tm(&session, "dev", "/compact", "m1", None).unwrap();
         assert!(crate::projects::telemetry::set_command_typed(typed, true).unwrap());
         assert!(cancel_command(&session, typed, "human").is_ok(), "the human may cancel any");
-        let room: Vec<(String, String)> = crate::projects::rooms::history_page(&crate::projects::rooms::session_room(&session), None, 100)["messages"]
+        let room: Vec<(String, String)> = crate::projects::rooms::history_page(&crate::projects::rooms::session_room(&session).unwrap(), None, 100)["messages"]
             .as_array()
             .cloned()
             .unwrap_or_default()
