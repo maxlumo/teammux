@@ -170,6 +170,18 @@ declarations, derived agent states. Consumed by the `tmm` CLI (agents and
 humans) and the desktop hub UI. See
 [`docs/design-docs/features/tmm-cli.md`](../../design-docs/features/tmm-cli.md).
 
+**The `session` param is resolved once, at the door** (board #118). One project
+read maps the asked name (the current one, or a previous one an agent started
+with) to the project's CURRENT session and its persisted room. When that read
+FAILS (the store could not be asked) the request answers `-32603` with
+`project lookup failed: …`, for every method that takes a `session`, and nothing
+is written or typed; only a positively ABSENT project keeps the default: the
+asked name and `proj:<name>`. The same holds inside a method: a project read
+that fails there is the method's error (a start), or for a routed delivery every
+mention reads `unchecked`, never `stopped` or not-an-agent. A fired wake whose
+project cannot be read is not claimed and fires at the sleeper's next try.
+`tmm` prints the error and exits 1; the app keeps what it last showed.
+
 | Method | Params | Response |
 |--------|--------|----------|
 | `hub_post` | `session`, `body`, `from?` (default `human`), `status?`, `requires_reply?` | The stored message; `status=true` wraps the body as ambient `[tmm status working]` and never delivers mentions |

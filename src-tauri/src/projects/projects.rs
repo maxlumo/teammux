@@ -823,12 +823,42 @@ pub fn set_autostart(id: &str, autostart: bool) -> Result<Value, String> {
 /// it started: after a rename its `tmm send/status/done` would otherwise fail
 /// until someone restarted it, which is not a thing a rename should cost.
 pub fn project_for_session(session: &str) -> Result<Option<store::Project>, String> {
-    with_store(|store| {
-        if let Some(p) = store.project_by_session(session)? {
-            return Ok(Some(p));
-        }
-        store.project_by_prev_session(session)
-    })
+    with_store(|store| project_for_session_in(store, session))
+}
+
+/// `project_for_session` on a store the caller already holds (the ONE lookup: the
+/// session, then the previous session), for a caller that must read it in the same
+/// locked step as a write (a wake's claim, board #118).
+pub(crate) fn project_for_session_in(store: &store::Store, session: &str) -> Result<Option<store::Project>, String> {
+    if let Some(p) = store.project_by_session(session)? {
+        return Ok(Some(p));
+    }
+    store.project_by_prev_session(session)
+}
+
+/// What a session name resolves to (board #118): the project's CURRENT session and
+/// its persisted room, or, for a positively ABSENT project, the asked name and
+/// `proj:<name>` (how a session without a project is served). The ONE mapping of a
+/// project row to (session, room): the hub's door, a fired wake and
+/// `rooms::session_room_checked` all use it.
+pub struct Resolved {
+    pub session: String,
+    pub room: String,
+    pub project: Option<store::Project>,
+}
+
+impl Resolved {
+    pub fn of(asked: &str, project: Option<store::Project>) -> Resolved {
+        let session = project.as_ref().map_or_else(|| asked.to_string(), |p| p.session.clone());
+        let room = project.as_ref().map(|p| p.room.clone()).filter(|r| !r.is_empty()).unwrap_or_else(|| format!("proj:{session}"));
+        Resolved { session, room, project }
+    }
+}
+
+/// `Resolved` for `asked` from ONE project read; a FAILED read is `Err`, never the
+/// asked name (tenet 8: "could not ask" is not "no project").
+pub fn resolve_session(asked: &str) -> Result<Resolved, String> {
+    Ok(Resolved::of(asked, project_for_session(asked)?))
 }
 
 /// Which row `project_for_session` answers with, and by which column (board

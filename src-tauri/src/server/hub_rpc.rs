@@ -155,13 +155,12 @@ fn dispatch_hub(req: &Request, notifications: Option<&crate::agent_notifications
     // finds nothing. Measured the hard way: right after a rename, a tmm call
     // answered "no window named 'builder-2' in session 'tmm-tasks'" — the deaf
     // agent again, one layer below the project lookup that already handled it.
-    let current = crate::projects::project_for_session(asked)
-        .ok()
-        .flatten()
-        .map(|proj| proj.session)
-        .unwrap_or_else(|| asked.to_string());
+    // ONE read (`projects::resolve_session`, board #118): a failed read is this
+    // request's -32603 for every method; the methods reuse its row.
+    let crate::projects::Resolved { session: current, room, project } =
+        crate::projects::resolve_session(asked).map_err(|e| RpcError::Internal(format!("project lookup failed: {e}")))?;
     let session: &str = &current;
-    let room = project_room(session);
+    let ws_of_project = project.as_ref().map(|proj| proj.path.clone());
 
     match req.method.as_str() {
         // Post to the project chat. `from` is the agent name (tmm exports
@@ -193,7 +192,7 @@ fn dispatch_hub(req: &Request, notifications: Option<&crate::agent_notifications
             if agent == from {
                 return Err(RpcError::InvalidParams(format!("'{from}' cannot send a command to itself")));
             }
-            let ws = crate::projects::project_for_session(session).ok().flatten().map(|pr| pr.path);
+            let ws = ws_of_project.clone();
             let panes = crate::tmux::list_panes(session).unwrap_or_default();
             // The room line's id exists before the typing (board #264): each
             // receipt row carries it, and an echo can race the post.
@@ -607,12 +606,8 @@ fn dispatch_hub(req: &Request, notifications: Option<&crate::agent_notifications
             &HandOff {
                 issue: &|who, name, id| issue_brief(session, &room, who, name, id),
                 deliver: &|who, stored| deliver_issued(session, &room, who, stored, false),
-                managed: &|name| {
-                    crate::projects::project_for_session(session)
-                        .ok()
-                        .flatten()
-                        .is_some_and(|proj| crate::projects::is_managed_in(Some(&proj.path), name))
-                },
+                // The door's row (board #118): no second read that could fail into "unmanaged".
+                managed: &|name| ws_of_project.as_deref().is_some_and(|ws| crate::projects::is_managed_in(Some(ws), name)),
                 read: &|session, id| crate::projects::board_get(session, id),
             },
         ),
@@ -633,7 +628,7 @@ fn dispatch_hub(req: &Request, notifications: Option<&crate::agent_notifications
             // line that announces it, in ONE call. Without the key this arm
             // is exactly what it always was.
             if let Some(notify) = p.get("notify") {
-                let ws = crate::projects::project_for_session(session).ok().flatten().map(|proj| proj.path);
+                let ws = ws_of_project.clone();
                 return board_note_notify(session, issue_id, author, body, notify, &NoteIo {
                     read: &|session, id| crate::projects::board_get(session, id),
                     all: &|| match ws.as_deref() {
@@ -838,7 +833,7 @@ fn dispatch_hub(req: &Request, notifications: Option<&crate::agent_notifications
             let agent: &str = &live_agent(session, p)?;
             let team = p.get("team").and_then(|v| v.as_str()).map(str::trim)
                 .ok_or_else(|| RpcError::InvalidParams("missing required param: team (a team, or \"\" to leave)".into()))?;
-            let Some(project) = crate::projects::project_for_session(session).map_err(RpcError::InvalidParams)? else {
+            let Some(project) = crate::projects::project_for_session(session).map_err(|e| RpcError::Internal(format!("project lookup failed: {e}")))? else {
                 return Err(RpcError::InvalidParams(format!("no project for session '{session}'")));
             };
             if crate::projects::managed_home(session, agent).is_none() {
@@ -996,7 +991,7 @@ fn dispatch_hub(req: &Request, notifications: Option<&crate::agent_notifications
             // delivery lock (round 3); a hold that cannot be written refuses
             // the restart before any kill.
             let before = crate::projects::delivery::recipe_backend(session, agent);
-            let launch = launch_backend(session, agent);
+            let launch = launch_backend(session, agent).map_err(RpcError::Internal)?;
             before_kill_in_test();
             let owned = match live {
                 Some(window) => Some(crate::projects::delivery::replace_cli(session, agent, launch, || kill_agent_cli(session, agent, window)).map_err(RpcError::Internal)?),
@@ -1060,7 +1055,13 @@ fn dispatch_hub(req: &Request, notifications: Option<&crate::agent_notifications
                     }
                 };
                 let before = crate::projects::delivery::recipe_backend(session, w);
-                let launch = launch_backend(session, w);
+                let launch = match launch_backend(session, w) {
+                    Ok(launch) => launch,
+                    Err(e) => {
+                        errors.push(serde_json::json!({ "name": w, "error": e }));
+                        continue;
+                    }
+                };
                 let mut owned = None;
                 if let Some(n) = window_of_agent(session, w) {
                     match crate::projects::delivery::replace_cli(session, w, launch, || kill_agent_cli(session, w, n)) {
@@ -1085,7 +1086,7 @@ fn dispatch_hub(req: &Request, notifications: Option<&crate::agent_notifications
             // (once, not on a retry of the failed names).
             let mut kept = Vec::new();
             if only.is_none() {
-                if let Ok(Some(project)) = crate::projects::project_for_session(session) {
+                if let Some(project) = project.as_ref() {
                     for w in crate::projects::spawn::joined_windows(&project.path, team) {
                         if window_of_agent(session, &w).is_some() {
                             let _ = rooms::post(&room, &w, &kept_line(&w, team));
@@ -1237,15 +1238,16 @@ fn before_kill_in_test() {}
 
 #[cfg(not(any(target_os = "android", target_os = "ios")))]
 fn start_agent(session: &str, agent: &str, permit: crate::projects::StartPermit) -> Result<bool, String> {
-    start_agent_owned(session, agent, permit, None, launch_backend(session, agent)).map(|(resumed, _)| resumed)
+    start_agent_owned(session, agent, permit, None, launch_backend(session, agent)?).map(|(resumed, _)| resumed)
 }
 
 /// The backend a start of `agent` will launch (`spawn::launch_backend`), read before the start
 /// writes anything: its hold and its ready watch are both decided on it (board #46 round 2).
 #[cfg(not(any(target_os = "android", target_os = "ios")))]
-fn launch_backend(session: &str, agent: &str) -> Option<crate::backends::Backend> {
-    let project = crate::projects::project_for_session(session).ok().flatten()?;
-    crate::projects::spawn::launch_backend(&project.path, agent)
+fn launch_backend(session: &str, agent: &str) -> Result<Option<crate::backends::Backend>, String> {
+    // A failed project read is the start's error (board #118), never "no backend".
+    let Some(project) = crate::projects::project_for_session(session).map_err(|e| format!("project lookup failed: {e}"))? else { return Ok(None) };
+    Ok(crate::projects::spawn::launch_backend(&project.path, agent))
 }
 
 /// `start_agent` for a start whose hold was already written by its kill
@@ -1277,7 +1279,10 @@ fn start_agent_owned(session: &str, agent: &str, permit: crate::projects::StartP
                 Ok(()) => format!("[tmm] {e}"),
                 Err(se) => format!("[tmm] {e} (and it could not be stopped: {se})"),
             };
-            let _ = crate::projects::rooms::post(&crate::projects::rooms::session_room(session), agent, &line);
+            // Board #118: a failed read posts nothing; the start's error is the answer.
+            if let Ok(room) = crate::projects::rooms::session_room_checked(session) {
+                let _ = crate::projects::rooms::post(&room, agent, &line);
+            }
             return Err(e);
         }
         Err(e) => {
@@ -1336,7 +1341,8 @@ fn start_agent_with(
     respawn: impl FnOnce(&str, &str) -> Result<serde_json::Value, String>,
 ) -> Result<bool, String> {
     let mut resumed = false;
-    if let Ok(Some(project)) = crate::projects::project_for_session(session) {
+    // A failed read is the start's error (board #118), never a fall-through to respawn.
+    if let Some(project) = crate::projects::project_for_session(session).map_err(|e| format!("project lookup failed: {e}"))? {
         let r = resume(&project, session, agent);
         if let Some(r) = r.as_ref().filter(|r| r.status == "refused") {
             return Err(r.error.clone().unwrap_or_else(|| format!("{agent} was not started")));
@@ -2800,7 +2806,12 @@ fn deliver_routed_with(
     if mentions.is_empty() {
         return (Vec::new(), Vec::new());
     }
-    let ws = crate::projects::project_for_session(session).ok().flatten().map(|p| p.path);
+    // A failed project read (board #118) is a tmux that could not be asked: every
+    // mention `unchecked`, nothing typed.
+    let ws = match crate::projects::project_for_session(session) {
+        Ok(project) => project.map(|p| p.path),
+        Err(_) => return (Vec::new(), offline_report(session, room, from, &mentions, &[], None, false)),
+    };
     // A session we cannot list is a session that typed NOTHING, so every
     // mention is unreachable and the sender must still hear it (board #347
     // review P1-B: the whole session being stopped was the one case that
@@ -2996,14 +3007,16 @@ fn next_wake(wakes: &[crate::projects::store::Wake], name: &str) -> serde_json::
 /// rename since scheduling still finds it; recipients are read NOW.
 #[cfg(not(any(target_os = "android", target_os = "ios")))]
 pub(super) fn fire_wake(id: i64) {
-    let Some(w) = crate::projects::wakes::claim(id) else { return };
+    // Board #118: a failed project read claims nothing; the sleeper retries.
+    let (w, crate::projects::Resolved { session, room, .. }) = match crate::projects::wakes::claim_with_project(id) {
+        Ok(Some(claimed)) => claimed,
+        Ok(None) => return,
+        Err(e) => {
+            eprintln!("[wake] {id} not fired: its project could not be read: {e}");
+            return;
+        }
+    };
     let w = &w;
-    let session = crate::projects::project_for_session(&w.session)
-        .ok()
-        .flatten()
-        .map(|p| p.session)
-        .unwrap_or_else(|| w.session.clone());
-    let room = project_room(&session);
     let body = crate::projects::wakes::fired_body(w, crate::projects::now() as i64);
     let recipients = addressed(&session, &body);
     let Ok(msg) = crate::projects::rooms::post_routed(&room, &w.sender, &body, &recipients) else { return };
@@ -3350,7 +3363,7 @@ mod tests {
     /// store (state.db under TMM_STATE_DB) is one file per process, and the
     /// hub's messages now live in it for real — the Bridge double died with
     /// TeamBridge (board #107).
-    fn unique(prefix: &str) -> (String, String) {
+    pub(super) fn unique(prefix: &str) -> (String, String) {
         let session = format!("{prefix}-{}", uuid::Uuid::new_v4());
         let room = format!("proj:{session}");
         (session, room)
@@ -3368,7 +3381,7 @@ mod tests {
     /// per name (the launch recipe is what makes a home managed), so the
     /// handler's "is this a managed agent of THIS project" check has an answer
     /// without a tmux server. Answers its session.
-    fn project_with(names: &[&str]) -> String {
+    pub(super) fn project_with(names: &[&str]) -> String {
         crate::projects::tests::use_test_store();
         let tag = uuid::Uuid::new_v4().simple().to_string()[..8].to_string();
         let ws = crate::config::test_scratch(&format!("tmm-handoff-ws-{tag}"));
@@ -9514,3 +9527,7 @@ while True:
 
 #[cfg(all(test, not(any(target_os = "android", target_os = "ios"))))]
 mod restart_tests;
+
+/// Board #118: a failed project read is an error at the door and inside every method.
+#[cfg(all(test, not(any(target_os = "android", target_os = "ios"))))]
+mod door_tests;

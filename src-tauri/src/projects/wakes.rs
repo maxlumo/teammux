@@ -126,6 +126,22 @@ pub fn claim(id: i64) -> Option<Wake> {
     super::with_store(|s| if s.claim_wake(id, now())? { s.wake_row(id) } else { Ok(None) }).ok().flatten()
 }
 
+/// `claim`, with the wake's project read FIRST, in the same step under the store
+/// lock (board #118): a project read that FAILS is `Err` and claims nothing, so
+/// the wake stays due and the sleeper retries it after its back-off; a positively
+/// absent project is `Some((wake, None))`. A rename cannot land between the read
+/// and the claim (it takes the same lock).
+pub fn claim_with_project(id: i64) -> Result<Option<(Wake, super::Resolved)>, String> {
+    super::with_store(|s| {
+        let Some(row) = s.wake_row(id)? else { return Ok(None) };
+        let project = super::projects::project_for_session_in(s, &row.session)?;
+        if !s.claim_wake(id, now())? {
+            return Ok(None);
+        }
+        Ok(s.wake_row(id)?.map(|w| (w, super::Resolved::of(&row.session, project))))
+    })
+}
+
 fn notify() -> &'static tokio::sync::Notify {
     static N: std::sync::OnceLock<tokio::sync::Notify> = std::sync::OnceLock::new();
     N.get_or_init(tokio::sync::Notify::new)

@@ -61,7 +61,7 @@ pub use managed::{agent_remove, team_remove, team_remove_preview, deliver_chat_l
 pub use managed::tighten_existing;
 pub use skills::{managed_skills_dir, mcp_delete, mcp_list, mcp_save, seed_builtin_skills, skill_delete, skill_file, skill_files, skill_import, skill_load, skill_read, skill_refresh, skill_save, skills_list};
 pub use capture::{SESSION_SETTLE_SECS, capture_loop, capture_once};
-pub use projects::{Refused, adopt, auto_adopt_once, create, delete, down, list, mark_agent_stopped, project_for_session, close_window, record_session_kill, rename, set_archived, set_autostart, start_permit, up, up_agent, StartPermit};
+pub use projects::{Refused, adopt, auto_adopt_once, create, delete, down, list, mark_agent_stopped, project_for_session, resolve_session, Resolved, close_window, record_session_kill, rename, set_archived, set_autostart, start_permit, up, up_agent, StartPermit};
 
 use std::path::PathBuf;
 use std::sync::{Mutex, OnceLock};

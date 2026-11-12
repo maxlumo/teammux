@@ -118,10 +118,7 @@ pub fn session_room(session: &str) -> String {
 /// (board #437 review P1): `Err` when the store could not be asked, so a
 /// caller that must not guess (the unconfirmed report) can wait instead.
 pub fn session_room_checked(session: &str) -> Result<String, String> {
-    Ok(crate::projects::project_for_session(session)?
-        .map(|p| p.room)
-        .filter(|r| !r.is_empty())
-        .unwrap_or_else(|| format!("proj:{session}")))
+    crate::projects::resolve_session(session).map(|r| r.room)
 }
 
 /// One PAGE of `room`'s messages, oldest first, walking backwards:
