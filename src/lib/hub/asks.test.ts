@@ -340,3 +340,65 @@ test('setDraft is a no-op for a closed ask or one the store has no row for (#107
   book.setDraft(8, { text: 'live' });
   assert.deepEqual(book.drafts[8], { text: 'live' });
 });
+
+test('one read of a room in flight: load, ensure and reconcile share it; a push during it is read once after it, and lands (#109 T6)', async () => {
+  let active = 0, peak = 0, calls = 0;
+  const releases: (() => void)[] = [];
+  let answer: unknown[] = [row(7)];
+  const book = new AskBook({
+    hubAskList: async () => { calls++; active++; peak = Math.max(peak, active); await new Promise<void>((r) => releases.push(r)); active--; return { asks: answer }; },
+    hubAskAnswer: async () => { throw new Error('unused'); },
+    hubAskDismiss: async () => { throw new Error('unused'); },
+  } as never);
+  const first = book.load('p', [7]);
+  const ensured = book.ensure('p', [8]);
+  const pushed = book.load('p');
+  const polled = book.reconcile('p');
+  assert.equal(calls, 1, 'one in flight; the others wait or are dropped');
+  answer = [row(7, { state: 'answered', answer_key: 'A', said: 'A · a', closed_at: 2 })];
+  releases.shift()!(); await first;
+  await Promise.resolve(); await Promise.resolve();
+  assert.equal(calls, 2, 'the queued full read starts once the first settles, once');
+  releases.shift()!(); await Promise.all([ensured, pushed, polled]);
+  assert.equal(peak, 1);
+  assert.equal(book.rows[7]!.state, 'answered', 'the pushed close lands');
+});
+
+test('the in-flight read is PER ROOM: A -> B -> A with A still pending never starts a second A; A and B may overlap (#109 T6, leader note 80)', async () => {
+  const active: Record<string, number> = {}, peak: Record<string, number> = {};
+  const releases: Record<string, (() => void)[]> = {};
+  const book = new AskBook({
+    hubAskList: async (s: string) => {
+      active[s] = (active[s] ?? 0) + 1; peak[s] = Math.max(peak[s] ?? 0, active[s]!);
+      await new Promise<void>((r) => (releases[s] ??= []).push(r));
+      active[s]!--; return { asks: [row(s === 'A' ? 1 : 2)] };
+    },
+    hubAskAnswer: async () => { throw new Error('unused'); },
+    hubAskDismiss: async () => { throw new Error('unused'); },
+  } as never);
+  const a1 = book.load('A');
+  const b = book.load('B');
+  const a2 = book.load('A');
+  assert.deepEqual({ A: active.A, B: active.B }, { A: 1, B: 1 }, 'A and B overlap; the second A waits');
+  releases.B!.shift()!(); await b;
+  releases.A!.shift()!(); await a1;
+  await Promise.resolve(); await Promise.resolve();
+  releases.A!.shift()!(); await a2;
+  assert.deepEqual(peak, { A: 1, B: 1 });
+  assert.ok(book.rows[1], 'A s own read, after the stale one, landed');
+});
+
+test('a read that settles after dispose writes nothing; its queued caller settles with it (#109, validator-2 note 123)', async () => {
+  let release!: () => void, calls = 0;
+  const book = new AskBook({
+    hubAskList: async () => { calls++; await new Promise<void>((r) => { release = r; }); return { asks: [row(9)] }; },
+    hubAskAnswer: async () => { throw new Error('unused'); },
+    hubAskDismiss: async () => { throw new Error('unused'); },
+  } as never);
+  const running = book.load('p');
+  const queued = book.load('p');
+  book.dispose();
+  release(); await running; await queued;
+  assert.equal(calls, 1, 'the queued read never ran');
+  assert.deepEqual(Object.keys(book.rows), [], 'nothing written after dispose');
+});

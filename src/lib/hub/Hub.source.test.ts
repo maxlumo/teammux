@@ -159,7 +159,8 @@ test('Hub keeps selection, Back and consequential actions around the extracted S
     '#167: a pending purge cannot be retargeted and a new intent clears its own error');
   assert.match(sidebar, /oncreate=\{\(\) => \{ createOpen = true; sideOpen = false; \}\}/u);
   assert.match(sidebar, /onclose=\{\(\) => \{ sideOpen = false; \}\}/u);
-  assert.match(source, /backLayers\.register\('sidebar', \(\) => \{ if \(compact && !sideOpen\)/u);
+  // #109: a chat JUMPED INTO from the Dashboard returns there instead (Board's floor rule).
+  assert.match(source, /backLayers\.register\('sidebar', \(\) => \{ if \(compact && !sideOpen && !jumped\)/u);
   assert.doesNotMatch(source, /<aside class="sidebar"|function rowInfo|let trashOpen/u,
     'the old view and private fold state have one new owner');
 });
@@ -232,7 +233,7 @@ test('Back keeps the original priority and current live guards in one dispatcher
     reply: 'if (replyTo) { replyTo = null; return true; }',
     files: "if (termOpen && drawerView === 'files' && drawerFilesBack?.()) return true;",
     drawer: 'if (termOpen) { closeDrawer(); return true; }',
-    sidebar: 'if (compact && !sideOpen) { sideOpen = true; return true; }',
+    sidebar: 'if (compact && !sideOpen && !jumped) { sideOpen = true; return true; }',
   };
   for (const [layer, guard] of Object.entries(guards)) {
     // #167 deliberately replaces the busy fallthrough while keeping priority.

@@ -47,7 +47,8 @@
   import { HUMAN, agentHue, quotePreview, stateDotColor, mergeMessages, mergeEvents, backendColor as colorOf, feedBlocks, filterBlocks, mergeStates, pickLead, pickDrawerAgent, addressed, addressedTeam, mentionTokens, mentionedAgents, unreadSenders, stoppedAgents, slashCommand, inputModeSwitch, issueSpans, systemLine, detailWords } from './hub.ts';
   import { issueRef } from './board.ts';
   import { AGENT_TEAM, ASKS, lacksCap } from '../core/login-caps.ts';
-  import { AskBook, isAsk, closingSeq } from './asks.svelte.ts';
+  import { AskBook, isAsk, closingSeq, askerState } from './asks.svelte.ts';
+  import { discussFor, landingFor, stepLanding } from './agent-landing.ts';
   import { resolvePathRef } from '../core/path-links.ts';
   import { createStager } from './attachments.svelte.ts';
   import { ALL_TARGET, attachmentBody, busyTargetsFor, canAddress, lockedSend, targetMembers, targetTeam, teamRoot, teamTarget } from './hub-composer.ts';
@@ -125,7 +126,7 @@
    * `scopeNote` (#364): Single with more servers saved — the sidebar's foot
    * row naming the server shown (`app/ScopeNote.svelte`); null otherwise. */
   let { visible = false, fontSize = 14, mobile = false, openTerminal = () => {}, onSelectSession = (_s) => {}, onGoBack = null, onReselect = null, openAgentConfig = null, openFilesTab = null, openBoardTab = null,
-    union = null, scopeNote = null, selectRequest = null, onPickServer = null } = $props();
+    union = null, scopeNote = null, selectRequest = null, onPickServer = null, jumped = false } = $props();
   const drawerId = $props.id();
 
   // Layout follows the viewport, not the device class (a squeezed desktop
@@ -153,7 +154,7 @@
   let selectionGeneration = 0, alive = true;
   // The loaders go with the page: a queued follow-up read retires instead of
   // asking after the tree is gone (#444 review P1-A residual).
-  onDestroy(() => { alive = false; selectionGeneration++; for (const l of [reload, loadFeed, loadActivity, loadAgents]) l.dispose(); });
+  onDestroy(() => { alive = false; selectionGeneration++; for (const l of [reload, loadFeed, loadActivity, loadAgents]) l.dispose(); askBook.dispose(); });
   let agents = $state([]);          // HubAgent[] for selected session (all windows)
   // Stopped managed agent → its team path (hub_agents, board #258), so a
   // team's "Start stopped" knows which stopped identities are its members.
@@ -450,7 +451,32 @@
     const req = selectRequest;
     if (!req || req.n === selectDone || req.serverId !== serverId()) return;
     selectDone = req.n;
-    untrack(() => { if (req.session && req.session !== selected) selectProject(req.session); });
+    untrack(() => {
+      if (req.session && req.session !== selected) selectProject(req.session);
+      // From the Dashboard (board #109): "show only this agent", bound to the room it was
+      // tapped for; the rules are agent-landing.ts's, the filter is the ONE writer's.
+      landing = landingFor(req, selected, selectionGeneration);
+    });
+  });
+  // The Dashboard's two landings (agent-landing.ts: one wait, one set of rules): the agent
+  // row's filter and the ask card's Discuss. The Hub only feeds what it sees and writes.
+  let landing = $state(null);
+  let discussing = $state(null);
+  $effect(() => {
+    const a = landing, d = discussing;
+    const view = { room: selected, gen: selectionGeneration, here: visible && (scope.eligible ? scope.eligible() : true),
+      roster: managedAgents.map((x) => x.name), rosterKnown: rosterOf === selected };
+    untrack(() => {
+      const sa = stepLanding(a, view);
+      if (sa.next !== a) landing = sa.next;
+      if (sa.apply?.agent) setFilter(sa.apply.agent);
+      const sd = stepLanding(d, view);
+      if (sd.next !== d) discussing = sd.next;
+      // EXACTLY the bubble's Discuss (Feed's AskCard): Reply armed through the one reply
+      // entry for a live asker (a stopped one is refused there, #490), nothing for a gone one.
+      const m = sd.apply?.discuss ? feed.find((x) => String(x.id) === sd.apply.discuss) : null;
+      if (m && askerState(askBook.rows[m.seq]?.asker ?? m.from, agents, stopped) !== 'gone') replyToMessage(m);
+    });
   });
 
   // A room you have visited before renders INSTANTLY from memory when you
@@ -484,6 +510,9 @@
    * are reset to "nothing is fresh" while a room is loading. */
   let openedAt = $state(Infinity);
   let rosterBase = $state(null);
+  /** The room whose roster has ANSWERED in this visit (#109 S9): who is live, stopped or
+   * gone is not known before it, whatever a cached or empty roster says. */
+  let rosterOf = $state('');
   /** A load unfolds (motion.md principle 15, wave 8): while an UNCACHED room
    * loads (`!roomReady`) the feed and roster show skeletons of the coming
    * shape (`.skel-wrap` keeps them invisible for 150ms, so a fast answer never
@@ -530,7 +559,7 @@
     // Entering a room is a revisit: its messages may ask the board again (#340).
     delete issueTriggered[session];
     selected = session;
-    openedAt = Infinity; rosterBase = null; // nothing is fresh until this room has settled
+    openedAt = Infinity; rosterBase = null; rosterOf = ''; // nothing is fresh until this room has settled
     startJoin = ''; // a picker's Join belongs to the project it was opened in (#382)
     clearTimeout(justLoadedTimer); justLoaded = false; // an unfold belongs to the room that loaded
     composerText = hubPrefs.draft(session);
@@ -708,6 +737,7 @@
       if (selected !== s) return;
       if (!alive || request !== rosterReadSequence) return;
       agents = adopt(agents, got);
+      rosterOf = s;
       stoppedTeams = adopt(stoppedTeams, r.stopped_teams ?? {});
       if (Array.isArray(r.labels)) labelsBy = { ...labelsBy, [s]: adopt(labelsBy[s] ?? [], r.labels) };
       // The sidebar chips share this truth (board #8): the roster is the
@@ -896,6 +926,7 @@
     // minted, so a stale continuation can never take a newer request's (or
     // a manual room switch's) reading away.
     jumpIntent = n;
+    discussing = null; // a newer jump cancels a Discuss still waiting for its roster
     let g = 0;
     let row = null;
     let sel = selectionGeneration;
@@ -906,6 +937,13 @@
     const current = () => claimed() && readGen === g;
     try {
       if (alert.server && alert.server !== serverId()) { done.failed(t('hubJumpOtherServer')); return; }
+      // A Hub shown for the first time BY this jump (the Dashboard's note or ask, #109) has
+      // not listed its projects yet: the jump waits for that first answer, through the
+      // list's own loader, before it may say the project is not there.
+      if (!listAnswered) {
+        await reload();
+        if (!centre.isCurrent(n) || jumpIntent !== n || !alive || !visible) return;
+      }
       row = rows.find((r) => r.project.session === alert.session || roomKey(r) === alert.room) ?? null;
       if (!row) { done.failed(t('hubJumpNoProject')); return; }
       if (selected !== row.project.session) {
@@ -920,13 +958,19 @@
       // VISIBLY (the chip changes; Back puts it back). The level is a stored
       // preference and is never touched: the target is revealed instead.
       if (filterAgent) { filterBefore = filterAgent; setFilter('', { jump: n }); filterNote = t('hubJumpFilterCleared'); }
-      revealId = alert.id;
-      if (!feed.some((m) => String(m.id) === alert.id)) {
+      // A target known only by its seq (the Dashboard's ask, #109) takes its id from the
+      // message once it is in hand; every other target is matched by its id, as before.
+      let id = alert.id || String(feed.find((m) => alert.seq && m.seq === alert.seq)?.id ?? '');
+      const hit = (m) => (id ? String(m.id) === id : !!alert.seq && m.seq === alert.seq);
+      revealId = id;
+      if (!feed.some(hit)) {
         const res = await hubLogAround(row.project.session, alert.seq, 100).catch(() => null);
         if (!current()) return;
         if (!res) { done.failed(t('hubJumpLoadFailed')); return; }
         const msgs = res.messages ?? [];
-        if (!msgs.some((m) => String(m.id) === alert.id)) { done.failed(t('hubJumpGone')); return; }
+        const found = msgs.find(hit);
+        if (!found) { done.failed(t('hubJumpGone')); return; }
+        id = String(found.id); revealId = id;
         feed = msgs;
         histSeq = res.oldest_seq ?? 0;
         histMore = (res.has_more ?? false) && histSeq > 0;
@@ -941,8 +985,12 @@
       await settled();
       await new Promise((r) => requestAnimationFrame(() => r(null)));
       if (!current()) return;
-      if (feedView?.showMsg(alert.id)) done.viewed();
-      else done.failed(t('hubJumpGone'));
+      if (feedView?.showMsg(id)) {
+        done.viewed();
+        // Discuss in chat from the Dashboard's card (#109, leader notes 82, 80): decided
+        // once this room's roster is KNOWN, by agent-landing.ts's rules (above).
+        if (alert.discuss) discussing = discussFor(row.project.session, id, selectionGeneration);
+      } else done.failed(t('hubJumpGone'));
     } finally {
       if (jumpIntent === n) jumpIntent = 0;
       centre.consume(n); // one-shot: never replayed, never a newer request's
@@ -2387,7 +2435,9 @@
       backLayers.register('reply', () => { if (replyTo) { replyTo = null; return true; } return false; }),
       backLayers.register('files', () => { if (termOpen && drawerView === 'files' && drawerFilesBack?.()) return true; return false; }),
       backLayers.register('drawer', () => { if (termOpen) { closeDrawer(); return true; } return false; }),
-      backLayers.register('sidebar', () => { if (compact && !sideOpen) { sideOpen = true; return true; } return false; }),
+      // A chat JUMPED INTO (from the Dashboard, board #109) returns there before
+      // the floor lifts the drawer, as Board's and Files' floors do.
+      backLayers.register('sidebar', () => { if (compact && !sideOpen && !jumped) { sideOpen = true; return true; } return false; }),
     ];
     onGoBack(backLayers.back);
     return () => { for (const dispose of disposers) dispose(); };

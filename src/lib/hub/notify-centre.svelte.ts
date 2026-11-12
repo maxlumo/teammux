@@ -21,7 +21,7 @@
 // RESIDENT_KEYS, in each server's own slot, and each runtime builds its own
 // log over its server's store. Entries also carry the server id, and a
 // jump request carries it too, so a late jump cannot act on another server.
-import type { FeedMsg, NewsKind } from './notifications.ts';
+import { toMe, type FeedMsg, type NewsKind } from './notifications.ts';
 
 export const ALERTS_KEY = 'tmux_hub_alerts';
 export const CENTRE_CAP = 50;
@@ -47,8 +47,11 @@ export interface Alert {
 }
 
 /** What a jump needs to find a message (board #432). A bell entry is one; a
- * search hit is another, and a hit is NOT recorded as a notification. */
-export type JumpTarget = Pick<Alert, 'server' | 'room' | 'session' | 'id' | 'seq'> & { key?: string };
+ * search hit is another, and a hit is NOT recorded as a notification. `id` may be
+ * empty when only `seq` is known (the Dashboard's ask, board #109): the jump then
+ * finds the message by its seq. `discuss`: on landing, Discuss in chat as the ask's
+ * bubble does it (Reply armed for a live asker; #109, leader note 82). */
+export type JumpTarget = Pick<Alert, 'server' | 'room' | 'session' | 'id' | 'seq'> & { key?: string; discuss?: boolean };
 /** How a jump reports where it ended. Absent, the bell's own way: the AlertLog
  * entry of the target's `key` is marked viewed or failed. A search passes its
  * own, bound to the search generation that asked, so a late jump cannot close
@@ -94,7 +97,8 @@ export function alertOf(m: FeedMsg & { seq?: number; room?: string; to?: unknown
   return {
     key: `${ctx.room}|${id}`, server: ctx.server, room: ctx.room, session: ctx.session, project: ctx.project,
     seq: Number(m.seq) || 0, id, ts: m.ts ?? Date.now(), from: m.from ?? '',
-    toHuman: Array.isArray(m.to) && m.to.includes('human'), kind: ctx.kind, excerpt: ctx.excerpt, viewed: ctx.viewed,
+    // The ONE "to me" predicate (board #109): the centre's To-me view reads it.
+    toHuman: toMe(m), kind: ctx.kind, excerpt: ctx.excerpt, viewed: ctx.viewed,
   };
 }
 

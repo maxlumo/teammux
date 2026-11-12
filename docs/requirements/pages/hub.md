@@ -482,6 +482,19 @@ Server and CLI only so far; the chat bubble (#107) and the dashboard (#108,
 - Asks need the server capability `asks`; `tmm ask` refuses an older server
   before sending.
 
+## Dashboard view (board #109)
+
+The Board tab opens on the **Dashboard** (a Dashboard · Board switch in the
+page head, remembered per device; only on a server that has the dashboard).
+Top to bottom: **Needs you**, every open ask, answerable in place; **Now**,
+the board's counts (a tap opens the board), the agents counted by state and
+a row for each one working, waiting or needing a person (a tap opens the chat
+showing only that agent; Back returns here), and what finished in the last
+24 hours; **Notes for you**, the three newest messages agents addressed to
+you, unread after the room's read mark (looking here never marks them read),
+a tap opens the chat at that message. Design:
+[dashboard.md](../../design-docs/features/dashboard.md) § The view.
+
 ## Dashboard read (board #108)
 
 Server half of the dashboard (the view is #109): `hub_dashboard` answers a

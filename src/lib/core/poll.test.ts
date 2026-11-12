@@ -147,3 +147,35 @@ test('a throwing task frees the context and reports only when asked', async () =
   load.tick(); await flush();
   assert.equal(calls, 3);
 });
+
+test('retire(key) drops that key s QUEUED follow-up and resolves its callers; the pending read and other keys are untouched (#109)', async () => {
+  let room = 'a';
+  const { answers, task } = held(() => room);
+  const load = single(task, () => room);
+  const first = load();
+  let followed = false;
+  const queued = load().then(() => { followed = true; });
+  room = 'b';
+  const other = load();
+  room = 'a';
+  assert.equal(load.retire('a'), true, 'a follow-up was queued for a');
+  assert.equal(load.retire('a'), false, 'and only once');
+  assert.equal(load.retire('c'), false, 'nothing for a key with no read');
+  await queued;
+  assert.equal(followed, true, 'its callers resolved');
+  answers[0]!.answer(); await first; await flush();
+  assert.deepEqual(answers.map((x) => x.room), ['a', 'b'], 'the retired follow-up never read; b s read is its own');
+  answers[1]!.answer(); await other;
+});
+
+test('a tick answers the read it starts, or resolves at once when skipped (#109)', async () => {
+  const { answers, task } = held();
+  const load = single(task);
+  let done = false;
+  const started = load.tick().then(() => { done = true; });
+  await load.tick();
+  assert.equal(answers.length, 1, 'the second tick was skipped and resolved');
+  assert.equal(done, false, 'the first waits for its read');
+  answers[0]!.answer(); await started;
+  assert.equal(done, true);
+});

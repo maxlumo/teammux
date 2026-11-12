@@ -3612,6 +3612,9 @@
       // 就很好"). The consumed pop re-pushes so the NEXT back has an entry
       // to spend no matter how many layers were peeled.
       if (page === 'hub' && fv.hubGoBack && fv.hubGoBack()) { navPush(); return; }
+      // A chat opened FROM the Dashboard (board #109) returns there, one deep,
+      // through the same slot the chat's board icon uses the other way.
+      if (page === 'hub' && view.jumpedFrom === 'board' && !revealed) { switchTab('board'); return; }
       if (page === 'agents' && fv.agentsGoBack && fv.agentsGoBack()) { navPush(); return; }
       if (page === 'board' && fv.boardGoBack && fv.boardGoBack()) { navPush(); return; }
       if (page === 'board' && view.jumpedFrom && !revealed) { switchTab(view.jumpedFrom); return; }
@@ -4373,7 +4376,7 @@
            mobile keeps the tab layout untouched. -->
       <div class="page-layer" class:hidden={!shown || page !== 'hub'}>
         <Hub visible={shown && page === 'hub'} {fontSize} mobile={layout.isTouchDevice} openTerminal={(s, tgt) => openTerminal(s, tgt)} onSelectSession={(s) => { if (s) showSessionIn(runtime, v, s); }} onGoBack={(fn) => v.hubGoBack = fn} onReselect={(fn) => { v.pageReselect.hub = fn; }} openAgentConfig={(name, kind) => openAgentsConfig(name, kind, runtime, v)} openFilesTab={(s, path, file) => { if (s) showSessionIn(runtime, v, s); if (path || file) v.filesNavReq = { serverId: runtime.id, path, file, n: (v.filesNavReq?.n ?? 0) + 1 }; switchTab('files'); v.jumpedFrom = 'hub'; }} openBoardTab={(s, issue) => { if (s) showSessionIn(runtime, v, s); if (issue) v.boardIssueReq = { serverId: runtime.id, session: s, id: issue, n: (v.boardIssueReq?.n ?? 0) + 1 }; switchTab('board'); v.jumpedFrom = 'hub'; }}
-          union={hubUnionFor} {scopeNote} selectRequest={landingFor(v.hubSelectReq, runtime)} onPickServer={pickServerProject} />
+          union={hubUnionFor} {scopeNote} selectRequest={landingFor(v.hubSelectReq, runtime)} onPickServer={pickServerProject} jumped={v.jumpedFrom === 'board'} />
       </div>
     {/if}
     <!-- The Agents PAGE exists where Agents is a page: the desktop rail. On
@@ -4393,7 +4396,10 @@
     <div class="page-layer" class:hidden={!shown || page !== 'board'}>
       {#if v.hubState.available}
         <Board session={v.filesSession} guardPage="board" visible={shown && page === 'board'} sideCollapsed={shellSideCollapsed} onGoBack={(fn) => v.boardGoBack = fn} issueRequest={landingFor(v.boardIssueReq, runtime)} jumped={!!v.jumpedFrom}
-          union={boardUnionFor} onPickServer={pickServerBoard} {scopeNote} />
+          union={boardUnionFor} onPickServer={pickServerBoard} {scopeNote}
+          onOpenAgent={(s, agent) => { v.hubSelectReq = { serverId: runtime.id, session: s, agent, n: (v.hubSelectReq?.n ?? 0) + 1 }; switchTab('hub'); v.jumpedFrom = 'board'; }}
+          onOpenChat={(s) => { v.hubSelectReq = { serverId: runtime.id, session: s, n: (v.hubSelectReq?.n ?? 0) + 1 }; switchTab('hub'); v.jumpedFrom = 'board'; }}
+          onJumpMessage={(s, m) => { v.hubSelectReq = { serverId: runtime.id, session: s, n: (v.hubSelectReq?.n ?? 0) + 1 }; centre.requestJump({ server: runtime.id, room: m.room ?? `proj:${s}`, session: s, id: String(m.id ?? ''), seq: Number(m.seq) || 0, ...(m.discuss ? { discuss: true } : {}) }); switchTab('hub'); v.jumpedFrom = 'board'; }} />
       {/if}
     </div>
     <div class="page-layer term-page" class:hidden={!shown || page !== 'terminal'} bind:this={v.termPageEl}>

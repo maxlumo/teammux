@@ -3,6 +3,7 @@
 // server and repainted from what it answers; the chat's AskCard draws them, and ticket 2b's
 // dashboard reuses both. Nothing here parses a message body: the row is the structure.
 import type { AskClose, AskRow } from '../core/ws-api.ts';
+import { single } from '../core/poll.ts';
 
 /** A room message that is an ask: the server stores it with kind `ask`. */
 export function isAsk(m: { kind?: unknown } | null | undefined): boolean {
@@ -86,18 +87,30 @@ export class AskBook {
    * STORE's, so a card that unmounts (a socket loss clears the capability) comes back with
    * them; cleared once that ask's close lands, by anyone; dropped on a room change. */
   drafts = $state<Record<number, AskDraft>>({});
-  /** One reconcile in flight; per closed row, the full reads made while its delivery was unknown. */
-  #reconciling = false;
+  /** Per closed row, the full reads made while its delivery was unknown. */
   #nullReads: Record<number, number> = {};
   #session = '';
   #gen = 0;
   #api: Api;
+  /** ONE read of a room's asks in flight, per room: the shared `single()` loader (hub-feed
+   * #444; #109 T6/R2, leader note 110), keyed by the room this book shows. A full read asked
+   * while one runs (a push, an ask the feed shows with no row, a return to the room) is its
+   * ONE follow-up, run when it settles if the book still shows that room; an open-set read (a
+   * poll boundary) is its tick, dropped while one runs. The book keeps only its domain: which
+   * read the task makes (`#wantFull`, consumed when it starts), rows and drafts. */
+  #wantFull = false;
+  #reads = single(() => {
+    const session = this.#session;
+    const full = this.#wantFull || !this.loaded || this.failed;
+    this.#wantFull = false;
+    return full ? this.#full(session) : this.#open(session);
+  }, () => this.#session);
   constructor(api: Api) {
     this.#api = api;
   }
 
   /** Read the room's asks (every one: a closed ask still renders its outcome). */
-  async load(session: string, expect: number[] = []): Promise<void> {
+  load(session: string, expect: number[] = []): Promise<void> {
     if (session !== this.#session) {
       this.#session = session;
       this.rows = {};
@@ -110,9 +123,46 @@ export class AskBook {
       this.#nullReads = {};
       this.loaded = false;
       this.failed = false;
+      this.#gen++;
     }
-    const gen = ++this.#gen;
     for (const seq of expect) this.#asked.add(seq);
+    this.#wantFull = true;
+    return this.#reads();
+  }
+
+  /** Bring loaded rows up to the room at one of its ordinary read boundaries (the feed poll, the
+   * first read after a reconnect, the page shown again; reviewer R1). The steady state is ONE
+   * read of the open set (the server filters it in SQL); a full read, the room-opening one, only
+   * while a row needs it: a loaded-open ask the open set no longer lists (a missed close), an
+   * answered or dismissed row with no delivery yet (the server records it after the close's
+   * push; at most NULL_READS full reads per row), or a last read that failed. It is the room's
+   * loader's tick: dropped while a read of the room runs; a read for another room, or one a
+   * newer room superseded, lands nowhere. */
+  reconcile(session: string): Promise<void> {
+    if (session !== this.#session || !this.loaded || this.failed) return this.load(session);
+    return this.#reads.tick();
+  }
+
+  /** The owner is gone (#109 T3/S8; hub-feed #444: a read queued when its page goes is never
+   * sent): every queued read retires unrun, and none starts after this. */
+  dispose(): void {
+    this.#reads.dispose();
+    // A read already running settles as the loader's own rule says, but lands nowhere: its
+    // generation is stale (validator-2 note 123: no rows written after dispose).
+    this.#gen++;
+  }
+
+  /** Retire a read QUEUED for `session` (not one running): the owner's view or project went
+   * away before it started (#109 S8). True when one was retired, so the owner can mark itself
+   * stale and read at its next entry. */
+  retire(session: string): boolean {
+    return this.#reads.retire(session);
+  }
+
+  async #full(session: string): Promise<void> {
+    const gen = this.#gen;
+    // The asks this read was begun knowing of: only these can be "missing" from its answer.
+    const asked = [...this.#asked];
     try {
       const { asks } = await this.#api.hubAskList(session, true);
       if (gen !== this.#gen || session !== this.#session) return;
@@ -122,50 +172,37 @@ export class AskBook {
       for (const a of asks ?? []) next[a.seq] = mergeAsk(this.rows[a.seq], a);
       this.#setRows(next);
       const missing = { ...this.missing };
-      for (const seq of this.#asked) if (!next[seq]) missing[seq] = true;
+      for (const seq of asked) if (!next[seq]) missing[seq] = true;
       this.missing = missing;
-      this.#asked = new Set();
+      for (const seq of asked) this.#asked.delete(seq);
       this.loaded = true;
       this.failed = false;
     } catch {
       // A failed read keeps what was shown; the next push or open reads again.
-      if (gen === this.#gen && session === this.#session) { this.failed = true; this.#asked = new Set(); }
+      if (gen === this.#gen && session === this.#session) { this.failed = true; for (const seq of asked) this.#asked.delete(seq); }
     }
   }
 
-  /** Bring loaded rows up to the room at one of its ordinary read boundaries (the feed poll, the
-   * first read after a reconnect, the page shown again; reviewer R1). The steady state is ONE
-   * read of the open set (the server filters it in SQL); a full read, the room-opening one, only
-   * while a row needs it: a loaded-open ask the open set no longer lists (a missed close), an
-   * answered or dismissed row with no delivery yet (the server records it after the close's
-   * push; at most NULL_READS full reads per row), or a last read that failed. One in flight; a
-   * read for another room, or one a newer load superseded, lands nowhere. */
-  async reconcile(session: string): Promise<void> {
-    if (this.#reconciling) return;
-    this.#reconciling = true;
+  async #open(session: string): Promise<void> {
+    if (!this.loaded || this.failed) return this.#full(session);
+    const gen = this.#gen;
+    let open: AskRow[];
     try {
-      if (session !== this.#session || !this.loaded || this.failed) { await this.load(session); return; }
-      const gen = this.#gen;
-      let open: AskRow[];
-      try {
-        open = (await this.#api.hubAskList(session, false)).asks ?? [];
-      } catch {
-        if (gen === this.#gen && session === this.#session) this.failed = true;
-        return;
-      }
-      if (gen !== this.#gen || session !== this.#session) return;
-      const listed = new Set(open.map((a) => a.seq));
-      const rows = { ...this.rows };
-      for (const a of open) rows[a.seq] = mergeAsk(rows[a.seq], a);
-      this.#setRows(rows);
-      const unknown = Object.values(rows).filter((r) => noDeliveryYet(r) && (this.#nullReads[r.seq] ?? 0) < NULL_READS);
-      const missed = Object.values(rows).some((r) => r.state === 'open' && !listed.has(r.seq));
-      if (!missed && !unknown.length) return;
-      for (const r of unknown) this.#nullReads[r.seq] = (this.#nullReads[r.seq] ?? 0) + 1;
-      await this.load(session);
-    } finally {
-      this.#reconciling = false;
+      open = (await this.#api.hubAskList(session, false)).asks ?? [];
+    } catch {
+      if (gen === this.#gen && session === this.#session) this.failed = true;
+      return;
     }
+    if (gen !== this.#gen || session !== this.#session) return;
+    const listed = new Set(open.map((a) => a.seq));
+    const rows = { ...this.rows };
+    for (const a of open) rows[a.seq] = mergeAsk(rows[a.seq], a);
+    this.#setRows(rows);
+    const unknown = Object.values(rows).filter((r) => noDeliveryYet(r) && (this.#nullReads[r.seq] ?? 0) < NULL_READS);
+    const missed = Object.values(rows).some((r) => r.state === 'open' && !listed.has(r.seq));
+    if (!missed && !unknown.length) return;
+    for (const r of unknown) this.#nullReads[r.seq] = (this.#nullReads[r.seq] ?? 0) + 1;
+    await this.#full(session);
   }
 
   /** A draft belongs to an OPEN ask this store holds: for a closed or unknown one it is a no-op,

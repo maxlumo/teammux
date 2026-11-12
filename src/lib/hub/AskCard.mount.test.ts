@@ -226,3 +226,48 @@ test('options carry no icon at rest; Answer keeps send and Dismiss x (leader not
     assert.ok(named('Dismiss').querySelector('.command-icon svg'));
   } finally { await app.close(); }
 });
+
+test('compact: Enter on a link inside the question is the link s; Enter on the question toggles it (#109 S10)', async (context) => {
+  const app = await (await compiled).mount(context, { props: { ask: { ...open, question: 'see [the doc](https://example.com) first' }, compact: true, now: 1 }, modules: [],
+    // No layout in the harness: the question is made to overflow its clamp.
+    setup: (w: any) => {
+      Object.defineProperty(w.HTMLElement.prototype, 'scrollHeight', { configurable: true, get() { return this.classList.contains('ask-q') ? 200 : 0; } });
+      Object.defineProperty(w.HTMLElement.prototype, 'clientHeight', { configurable: true, get() { return this.classList.contains('ask-q') ? 60 : 0; } });
+    } });
+  try {
+    const q = app.document.querySelector<HTMLElement>('.ask-q')!;
+    const a = q.querySelector('a')!;
+    const onLink = new app.window.KeyboardEvent('keydown', { key: 'Enter', bubbles: true, cancelable: true });
+    a.dispatchEvent(onLink); await app.flush();
+    assert.equal(onLink.defaultPrevented, false, 'the link keeps its Enter');
+    assert.ok(!q.classList.contains('open'));
+    const onQ = new app.window.KeyboardEvent('keydown', { key: 'Enter', bubbles: true, cancelable: true });
+    q.dispatchEvent(onQ); await app.flush();
+    assert.ok(onQ.defaultPrevented && q.classList.contains('open'), 'Enter on the question toggles it');
+  } finally { await app.close(); }
+});
+
+test('compact: an open question that fits after a resize is plain text again, no role or tab stop (#109, note 95)', async (context) => {
+  const ro: (() => void)[] = [];
+  let scroll = 200;
+  const app = await (await compiled).mount(context, { props: { ask: { ...open, question: 'a long question' }, compact: true, now: 1 }, modules: [],
+    setup: (w: any) => {
+      Object.defineProperty(w.HTMLElement.prototype, 'scrollHeight', { configurable: true, get() { return this.classList.contains('ask-q') ? scroll : 0; } });
+      Object.defineProperty(w.HTMLElement.prototype, 'clientHeight', { configurable: true, get() { return this.classList.contains('ask-q') ? (this.classList.contains('open') ? scroll : 60) : 0; } });
+      // Only LIVE observers fire: a disconnected one is gone, as in a browser.
+      w.ResizeObserver = class { cb: () => void; constructor(cb: () => void) { this.cb = cb; } observe() { ro.push(this.cb); } unobserve() {} disconnect() { const i = ro.indexOf(this.cb); if (i >= 0) ro.splice(i, 1); } };
+    } });
+  try {
+    await app.flush();
+    const q = app.document.querySelector<HTMLElement>('.ask-q')!;
+    assert.equal(q.getAttribute('role'), 'button', 'cut: a toggle');
+    q.click(); await app.flush();
+    assert.ok(q.classList.contains('open'));
+    scroll = 200; for (const cb of [...ro]) cb(); await app.flush();
+    assert.equal(q.getAttribute('role'), 'button', 'still more than three lines: still a toggle');
+    scroll = 40; for (const cb of [...ro]) cb(); await app.flush(); // wider now: it fits in its three lines
+    assert.equal(q.getAttribute('role'), null, 'nothing to fold: plain text');
+    assert.equal(q.getAttribute('tabindex'), null);
+    assert.ok(!q.classList.contains('open'));
+  } finally { await app.close(); }
+});

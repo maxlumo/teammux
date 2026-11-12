@@ -39,12 +39,18 @@
 //                      must still see its failure when a push joined it).
 //   loader.tick()      a poll tick: skipped while a read of the context is
 //                      pending, never queued, because the next tick asks again.
+//                      It answers the read it started (resolved when skipped).
+//   loader.retire(k)   the owner of context `k`'s QUEUED follow-up went away
+//                      (a view hidden, a project left; #109): that follow-up
+//                      retires unrun and its callers resolve; a read of `k`
+//                      already pending is untouched. True when one was retired.
 //   loader.dispose()   the owner is gone: no new read starts, queued ones retire.
 //   poll(tick, ms)     the timer: `tick` every `ms`, once at once with `now`.
 
 export interface Loader {
   (opts?: { report?: boolean }): Promise<void>;
-  tick(): void;
+  tick(): Promise<void>;
+  retire(key: string): boolean;
   dispose(): void;
 }
 
@@ -86,10 +92,18 @@ export function single(task: () => unknown, key: () => string = () => ''): Loade
   }) as Loader;
 
   loader.tick = () => {
-    if (disposed) return;
+    if (disposed) return Promise.resolve();
     const k = key();
-    if (pending.has(k)) return;
-    start(k).catch(() => {});
+    if (pending.has(k)) return Promise.resolve();
+    return start(k).catch(() => {});
+  };
+  loader.retire = (k: string) => {
+    const slot = pending.get(k);
+    const next = slot?.followUp;
+    if (!slot || !next) return false;
+    slot.followUp = null;
+    next.settle(Promise.resolve());
+    return true;
   };
   loader.dispose = () => { disposed = true; };
   return loader;

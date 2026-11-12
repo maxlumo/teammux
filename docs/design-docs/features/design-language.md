@@ -387,6 +387,11 @@ danger semantics.
   matching open-time push (Hub menus, dialogs) keep the consume-and-re-push
   model.
 
+A clamp's LINE COUNT (`line-clamp: n`) is a per-component unitless integer,
+not a token and not a raw px value (leader, #109 note 88): HubSearch 2,
+TurnRail 3, the Board's card title 2 and body 4, the Dashboard's compact ask
+question 3.
+
 ## 2 · Layout skeletons
 
 - A page = optional LEFT SIDEBAR (`var(--sidebar-w)` grid column, `--bg2`,
@@ -402,7 +407,9 @@ danger semantics.
   popstate listener.
 - Sidebar internals are the SHARED atoms in app.css (`.side-h`, `.side-row`,
   `.side-age`, `.side-win*`): components may position them, never restyle
-  them (guarded).
+  them (guarded). A named variant lives with the atom in app.css:
+  `.side-win-name.whole` drops the 16ch cap where the name identifies its
+  row (the Dashboard's agent rows, #109).
 - `.page` must never become a containing block (no resting transform/
   will-change/filter): every fixed popover assumes the VIEWPORT. Any fixed
   sheet pads with `var(--sat)/var(--sab)`, never raw `env()` (0 in the APK).

@@ -270,6 +270,8 @@ function withSlot<M extends Record<string, any>>(module: M, candidateAt?: (url: 
       getHostname: () => (connected ? `${machine || 'anon'}.host` : ''),
       // A login names the build its server runs; `__builds` (machine -> build) says which, absent = an older server.
       getBuild: () => (connected ? ((m.__builds as Record<string, unknown> | undefined)?.[machine] ?? null) : undefined),
+      // The login's `caps` (board #377): `__caps` (a list) says which, absent = the caps this harness never announced.
+      getCaps: () => (connected ? (m.__caps as string[] | undefined) : undefined),
       setOnDisconnect: (fn: () => void) => { onDrop = fn; },
       subscribe: noop, unsubscribe: noop, resubscribeActive: noop,
       addPaneOutputListener: noop, removePaneOutputListener: noop,
@@ -11174,4 +11176,147 @@ test('#491 P1-B: a same-runtime reconnect keeps the jumped page on screen; the r
   assert.equal(h.app.document.querySelector('.reconnect-bar'), null, 'reconnected');
   assert.equal(h.current(), 'Board', 'the network coming back does not take the Board away');
   assert.equal(h.record()?.page, 'hub', 'the saved landing is still Chat');
+});
+
+// Board #109 (leader note 6): an agent row on the Dashboard opens the Hub with
+// "show only this agent" through the Hub's own filter writer, and Back returns
+// to the Dashboard through App's one-deep return slot: the Hub's filter peels
+// first, as every filter does (#432), then the floor gives way (`jumped`).
+test('#109: a Dashboard agent row opens the chat showing that agent, and Back returns to the Dashboard', async (context) => {
+  const counts = { todo: 1, doing: 1, review: 0, done: 0, total: 2 };
+  const rpc = {
+    ...oneRoomHub({ hubAgents: async () => ({ agents: [{ name: 'dev', state: 'running', managed: true, agent: 'codex', window: 1 }] }) }),
+    __caps: ['board_dispatch', 'dashboard', 'asks'],
+    boardCounts: async () => ({ counts: { work: counts } }),
+    askCounts: async () => ({ counts: {} }),
+    boardList: async () => ({ issues: [], statuses: ['todo', 'doing', 'review', 'done'] }),
+    dashboard: async () => ({ session: 'work', asks: [], board: { counts, oldest_doing: null }, stopped: 0, finished: [], labels: [], generated_at: 1,
+      agents: [{ name: 'dev', state: 'running', detail: '', since: 1, issue: null, status: null }] }),
+  };
+  // The phone: Back is the app's there (the desktop's Back is the browser's).
+  const h = await bootApp(context, { ...twoServers({ live: JSON.stringify({ page: 'board' }), parked: JSON.stringify({ page: 'board' }) }), tmux_layout_mode: 'mobile' }, undefined, { ...sandbox, rpc });
+  const front = () => h.app.document.querySelector('.scope-tree:not(.held)')!;
+  for (let i = 0; i < 30 && !front().querySelector('.board-root .dash-agent'); i++) { await h.app.advance(500); await h.settle(); }
+  const row = front().querySelector<HTMLElement>('.board-root .dash-agent');
+  assert.ok(row, 'the Dashboard lists dev');
+  row!.click();
+  for (let i = 0; i < 20 && !front().querySelector('.hub-root .filter-face'); i++) { await h.app.advance(300); await h.settle(); }
+  assert.ok(front().querySelector('.hub-root:not(.hidden), .page-layer:not(.hidden) .hub-root'), 'the Chat page');
+  assert.match(front().querySelector('.hub-root .filter-face')?.textContent ?? '', /dev/u, 'showing only dev, by the Hub s own filter');
+  await h.app.advance(500); await h.settle(); // the page slide has ended, as it has before a person's Back
+  h.app.window.dispatchEvent(new h.app.window.PopStateEvent('popstate', { state: { app: true } }));
+  for (let i = 0; i < 6; i++) { await h.app.advance(100); await h.settle(); }
+  assert.equal(front().querySelector('.hub-root .filter-face'), null, 'the first Back peels the filter');
+  assert.ok(!front().querySelector('.page-layer:not(.hidden) .board-root'), 'and stays in the chat');
+  h.app.window.dispatchEvent(new h.app.window.PopStateEvent('popstate', { state: { app: true } }));
+  for (let i = 0; i < 10 && !front().querySelector('.page-layer:not(.hidden) .board-root .dash'); i++) { await h.app.advance(300); await h.settle(); }
+  assert.ok(front().querySelector('.page-layer:not(.hidden) .board-root .dash'), 'Back returns to the Board, on its Dashboard');
+});
+
+// Board #109 (leader note 82): Discuss in chat from the Dashboard's ask card is the
+// chat bubble's Discuss: the chat opens at the ask with Reply armed for a live asker,
+// and nothing armed for a gone one; the ask stays open.
+test('#109: Discuss on the Dashboard s ask opens the chat at it with Reply armed for a live asker, none for a gone one', async (context) => {
+  for (const [asker, armed] of [['dev', true], ['ghost', false]] as const) {
+    const counts = { todo: 0, doing: 0, review: 0, done: 0, total: 0 };
+    const ask = { id: 'q9', seq: 9, ts: 1_800_000_000_000, from: asker, to: ['human'], body: '@human Which way?', room: 'proj:work', kind: 'ask' };
+    const row = { seq: 9, room: 'proj:work', ts: 1, asker, question: 'Which way?', options: [{ key: 'a', label: 'A' }], recommend: null, issue: null, state: 'open', closed_seq: null, closed_at: null, answer_key: null, said: null, closing: null, delivery: null };
+    const rpc = {
+      ...oneRoomHub({ hubAgents: async () => ({ agents: [{ name: 'dev', state: 'idle', managed: true, agent: 'codex', window: 1 }] }) }, [ask]),
+      __caps: ['board_dispatch', 'dashboard', 'asks'],
+      boardCounts: async () => ({ counts: { work: counts } }),
+      askCounts: async () => ({ counts: { 'proj:work': 1 } }),
+      boardList: async () => ({ issues: [], statuses: ['todo', 'doing', 'review', 'done'] }),
+      hubAskList: async () => ({ asks: [row] }),
+      hubLogAround: async () => ({ messages: [ask], has_more: false }),
+      dashboard: async () => ({ session: 'work', asks: [{ seq: 9, asker, question: 'Which way?' }], board: { counts, oldest_doing: null }, stopped: 0, finished: [], labels: [], generated_at: 1, agents: [] }),
+    };
+    const h = await bootApp(context, { ...twoServers({ live: JSON.stringify({ page: 'board' }), parked: JSON.stringify({ page: 'board' }) }), tmux_layout_mode: 'mobile' }, undefined, { ...sandbox, rpc });
+    const front = () => h.app.document.querySelector('.scope-tree:not(.held)')!;
+    const discuss = () => [...front().querySelectorAll<HTMLButtonElement>('.board-root .dash-asks button')].find((b) => /Discuss in chat/u.test(b.textContent ?? ''));
+    for (let i = 0; i < 30 && !discuss(); i++) { await h.app.advance(500); await h.settle(); }
+    assert.ok(discuss(), `${asker}: the Dashboard s card offers Discuss`);
+    discuss()!.click();
+    const chip = () => front().querySelector('.hub-root .pend-chip.reply');
+    for (let i = 0; i < 20 && !chip() && !(!armed && front().querySelector('.page-layer:not(.hidden) .hub-root .ask-card') && i > 6); i++) { await h.app.advance(300); await h.settle(); }
+    assert.ok(front().querySelector('.page-layer:not(.hidden) .hub-root'), `${asker}: the chat is open`);
+    assert.ok(front().querySelector('.page-layer:not(.hidden) .hub-root .ask-card .ask-opt button'), `${asker}: at the ask, still open`);
+    assert.equal(!!chip(), armed, `${asker}: Reply armed only for a live asker`);
+    if (armed) assert.match(chip()!.textContent ?? '', /Replying to dev/u);
+    await h.app.close();
+  }
+});
+
+// Board #109 S7 (validator-2 note 75): a Notes tap on the Dashboard, the FIRST thing to show
+// the chat (its project list still cold), lands on that message with the jump's own
+// highlight, exactly as on a warm chat.
+test('#109: a Notes tap into a cold chat lands on the message, highlighted', async (context) => {
+  const counts = { todo: 1, doing: 0, review: 0, done: 0, total: 1 };
+  const note = { id: 'n5', seq: 5, ts: 1_800_000_000_000, from: 'dev', to: ['human'], body: 'the build is green', room: 'proj:work', kind: 'msg' };
+  const rpc = {
+    ...oneRoomHub({ hubAgents: async () => ({ agents: [{ name: 'dev', state: 'idle', managed: true, agent: 'codex', window: 1 }] }) }, [note]),
+    __caps: ['board_dispatch', 'dashboard', 'asks'],
+    boardCounts: async () => ({ counts: { work: counts } }),
+    askCounts: async () => ({ counts: {} }),
+    hubAskList: async () => ({ asks: [] }),
+    boardList: async () => ({ issues: [], statuses: ['todo', 'doing', 'review', 'done'] }),
+    hubLogAround: async () => ({ messages: [note], has_more: false }),
+    dashboard: async () => ({ session: 'work', asks: [], board: { counts, oldest_doing: null }, stopped: 0, finished: [], labels: [], generated_at: 1, agents: [] }),
+  };
+  const h = await bootApp(context, { ...twoServers({ live: JSON.stringify({ page: 'board' }), parked: JSON.stringify({ page: 'board' }) }), tmux_layout_mode: 'mobile' }, undefined, { ...sandbox, rpc });
+  const front = () => h.app.document.querySelector('.scope-tree:not(.held)')!;
+  const row = () => front().querySelector<HTMLElement>('.board-root .dash-note-row');
+  for (let i = 0; i < 30 && !row(); i++) { await h.app.advance(500); await h.settle(); }
+  assert.ok(row(), 'a Notes row');
+  row()!.click();
+  const hit = () => front().querySelector('.page-layer:not(.hidden) .hub-root .jump-hit');
+  for (let i = 0; i < 20 && !hit(); i++) { await h.app.advance(300); await h.settle(); }
+  assert.ok(hit(), 'the jump landed on the message with its highlight');
+  await h.app.close();
+});
+
+// Board #109 S9 (validator-2 note 79): a Discuss landing whose room roster has not
+// answered yet decides nothing: no refusal of a declared-but-not-yet-listed live asker,
+// no arming; when the roster answers, Reply is armed for the live asker.
+test('#109: Discuss waits for the room s roster: a live asker is never refused as stopped while it is pending', async (context) => {
+  const counts = { todo: 0, doing: 0, review: 0, done: 0, total: 0 };
+  const ask = { id: 'q9', seq: 9, ts: 1_800_000_000_000, from: 'dev', to: ['human'], body: '@human Which way?', room: 'proj:work', kind: 'ask' };
+  const row = { seq: 9, room: 'proj:work', ts: 1, asker: 'dev', question: 'Which way?', options: [{ key: 'a', label: 'A' }], recommend: null, issue: null, state: 'open', closed_seq: null, closed_at: null, answer_key: null, said: null, closing: null, delivery: null };
+  let gate = false;
+  const held: (() => void)[] = [];
+  const roster = { agents: [{ name: 'dev', state: 'idle', managed: true, agent: 'codex', window: 1 }] };
+  const rpc = {
+    ...oneRoomHub({}, [ask]),
+    // dev is DECLARED (a slot), so a roster that has not answered reads it as stopped.
+    projectList: async () => ({ projects: [{ project: { id: 'p-work', name: 'work', session: 'work', path: '/w', room: 'proj:work' }, live: true, slots: [{ window_name: 'dev', kind: 'agent' }] }] }),
+    hubAgents: () => (gate ? new Promise((ok) => held.push(() => ok(roster))) : Promise.resolve(roster)),
+    __caps: ['board_dispatch', 'dashboard', 'asks'],
+    boardCounts: async () => ({ counts: { work: counts } }),
+    askCounts: async () => ({ counts: { 'proj:work': 1 } }),
+    boardList: async () => ({ issues: [], statuses: ['todo', 'doing', 'review', 'done'] }),
+    hubAskList: async () => ({ asks: [row] }),
+    hubLogAround: async () => ({ messages: [ask], has_more: false }),
+    dashboard: async () => ({ session: 'work', asks: [{ seq: 9, asker: 'dev', question: 'Which way?' }], board: { counts, oldest_doing: null }, stopped: 0, finished: [], labels: [], generated_at: 1, agents: [] }),
+  };
+  const h = await bootApp(context, { ...twoServers({ live: JSON.stringify({ page: 'board' }), parked: JSON.stringify({ page: 'board' }) }), tmux_layout_mode: 'mobile' }, undefined, { ...sandbox, rpc });
+  const front = () => h.app.document.querySelector('.scope-tree:not(.held)')!;
+  const discuss = () => [...front().querySelectorAll<HTMLButtonElement>('.board-root .dash-asks button')].find((b) => /Discuss in chat/u.test(b.textContent ?? ''));
+  for (let i = 0; i < 30 && !discuss(); i++) { await h.app.advance(500); await h.settle(); }
+  assert.ok(discuss(), 'the Dashboard s card offers Discuss');
+  gate = true; // from here, the Hub's roster reads are held
+  discuss()!.click();
+  const card = () => front().querySelector('.page-layer:not(.hidden) .hub-root .ask-card');
+  for (let i = 0; i < 20 && !card(); i++) { await h.app.advance(300); await h.settle(); }
+  assert.ok(card(), 'the chat is open at the ask');
+  const chip = () => front().querySelector('.hub-root .pend-chip.reply');
+  // The reply entry's refusal (#490), not the chat card's own asker note.
+  const refused = () => /cannot receive a reply/u.test(front().querySelector('.hub-root')?.textContent ?? '');
+  assert.equal(!!chip(), false, 'roster pending: nothing armed yet');
+  assert.equal(refused(), false, 'and no refusal of a live asker');
+  gate = false;
+  for (const r of held.splice(0)) r();
+  for (let i = 0; i < 20 && !chip(); i++) { await h.app.advance(300); await h.settle(); for (const r of held.splice(0)) r(); }
+  assert.match(chip()?.textContent ?? '', /Replying to dev/u, 'the roster answered: Reply armed for the live asker');
+  assert.equal(refused(), false);
+  await h.app.close();
 });

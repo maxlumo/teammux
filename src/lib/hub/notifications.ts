@@ -145,6 +145,13 @@ export function toHuman(m: { to?: unknown }): boolean {
   return Array.isArray(m.to) && m.to.includes('human');
 }
 
+/** "To me" (board #109): what the bell records AND names the person. The
+ * notification centre's To-me view and the Dashboard's Notes for you read
+ * this ONE predicate. */
+export function toMe(m: FeedMsg): boolean {
+  return bellKind(m) !== 'none' && toHuman(m);
+}
+
 /** What a message is to the BELL (board #334): a finished task always; a
  * reply or status note only when it is addressed to the human; everything
  * else `none`. ONE eligibility for the centre's record and the cue — record

@@ -47,3 +47,16 @@ test('every polled read is one single() loader, and every timer ticks it (#444)'
   assert.doesNotMatch(read('../terminal/Terminal.svelte'), /let polling = false/u, 'the per-site guard is gone');
   assert.doesNotMatch(read('./poll.ts'), /let running/u, 'the timer holds no in-flight state of its own');
 });
+
+// Board #109 (reviewer R2, leader notes 110, 116): the ask store reads through the same
+// loader, keyed by its room, and keeps no scheduler of its own; a second one (pending map,
+// queue, timer) beside single() is a red test, not a review finding.
+test('AskBook reads through one single() and keeps no scheduler of its own (#109)', () => {
+  const src = read('../hub/asks.svelte.ts');
+  assert.match(src, /import \{ single \} from '\.\.\/core\/poll\.ts';/u, 'it imports the rule');
+  assert.match(src, /#reads = single\(\(\) => \{[\s\S]*?\}, \(\) => this\.#session\);/u, 'one loader, keyed by the room the book shows');
+  assert.doesNotMatch(src, /new Map<string, Promise|#runs\b|#queued\b|#schedule\b|setInterval\(|setTimeout\(/u, 'no pending map, queue or timer of its own');
+  for (const call of ['this.#reads()', 'this.#reads.tick()', 'this.#reads.retire(session)', 'this.#reads.dispose()']) {
+    assert.ok(src.includes(call), `load, reconcile, retire and dispose go through it: ${call}`);
+  }
+});

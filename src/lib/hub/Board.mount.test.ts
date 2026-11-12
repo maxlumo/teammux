@@ -725,7 +725,7 @@ test('the sidebar row carries the open-ask chip, and an empty board with asks is
   let askReads = 0, failAsks = false;
   const app = await (await compiled).mount(context, {
     props: { session: 'fixture', visible: true },
-    setup(window) { window.Element.prototype.getAnimations = () => []; },
+    setup(window) { window.Element.prototype.getAnimations = () => []; window.localStorage.setItem('tmux_board_view', 'board'); },
     modules: [rpc({
       getCaps: () => ['board_dispatch', 'dashboard'],
       projectList: async () => ({ projects: [
@@ -781,7 +781,7 @@ test('a failed ask read keeps the last counts muted, and a failed first one is n
   const published: any[] = [];
   const app = await (await compiled).mount(context, {
     props: { session: 'fixture', visible: true, union: unionFor(published) },
-    setup(window) { window.Element.prototype.getAnimations = () => []; },
+    setup(window) { window.Element.prototype.getAnimations = () => []; window.localStorage.setItem('tmux_board_view', 'board'); },
     modules: [rpc({ getCaps: () => ['dashboard'], askCounts: async () => { if (fail) throw new Error('down'); return { counts: { 'proj:fixture': 2 } }; },
       projectList: async () => ({ projects: [{ project: { id: 'fixture', session: 'fixture', room: 'proj:fixture', name: 'Fixture' }, live: true }] }) })],
   });
@@ -795,7 +795,7 @@ test('a failed ask read keeps the last counts muted, and a failed first one is n
   const first: any[] = [];
   const app2 = await (await compiled).mount(context, {
     props: { session: 'fixture', visible: true, union: unionFor(first) },
-    setup(window) { window.Element.prototype.getAnimations = () => []; },
+    setup(window) { window.Element.prototype.getAnimations = () => []; window.localStorage.setItem('tmux_board_view', 'board'); },
     modules: [rpc({ getCaps: () => ['dashboard'], askCounts: async () => { throw new Error('down'); } })],
   });
   try {
@@ -809,7 +809,7 @@ test('a failed ask read keeps the last counts muted, and a failed first one is n
 test('a project with no recorded room shows its ask chip under proj:<session> (#108)', async (context) => {
   const app = await (await compiled).mount(context, {
     props: { session: 'fixture', visible: true },
-    setup(window) { window.Element.prototype.getAnimations = () => []; },
+    setup(window) { window.Element.prototype.getAnimations = () => []; window.localStorage.setItem('tmux_board_view', 'board'); },
     modules: [rpc({ getCaps: () => ['dashboard'], askCounts: async () => ({ counts: { 'proj:fixture': 3 } }) })],
   });
   try {
@@ -823,7 +823,7 @@ test('a project with no recorded room shows its ask chip under proj:<session> (#
 test('a project whose recorded room is EMPTY shows its row and ask chip under proj:<session> (#108)', async (context) => {
   const app = await (await compiled).mount(context, {
     props: { session: 'fixture', visible: true },
-    setup(window) { window.Element.prototype.getAnimations = () => []; },
+    setup(window) { window.Element.prototype.getAnimations = () => []; window.localStorage.setItem('tmux_board_view', 'board'); },
     modules: [rpc({ getCaps: () => ['dashboard'],
       projectList: async () => ({ projects: [
         { project: { id: 'fixture', session: 'fixture', name: 'Fixture', room: 'proj:fixture' }, live: true },

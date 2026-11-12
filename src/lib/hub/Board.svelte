@@ -38,13 +38,16 @@
   import { feedbackPosition } from '../ui/feedback-position.ts';
   import { copyText } from '../core/clipboard.ts';
   import { scheduleCompletion } from '../ui/feedback-lifetime.ts';
-  import { BOARD_AGREEMENT, BOARD_BLOCKS, BOARD_DISPATCH, DASHBOARD, lacksCap } from '../core/login-caps.ts';
+  import { ASKS, BOARD_AGREEMENT, BOARD_BLOCKS, BOARD_DISPATCH, DASHBOARD, lacksCap } from '../core/login-caps.ts';
   import { draftOf, draftDirty, draftValid, draftPatch, isSubmitChord, rebaseDraft, issueRef, countsOf, applyCounts, visibleBoards, roomOf, boardTitle, chipCols, assigneeView, rememberBackends } from './board.ts';
   import { messageActsSet, messageActsCopyLanded, messageActsCopyFailed, messageActsExpired, MESSAGE_ACTS_IDLE, type MessageActsState } from './message-actions.ts';
   import { scrollFade } from '../core/scrollFade.ts';
   import { flip } from 'svelte/animate';
   import { moveMs, revealMs } from '../ui/motion.ts';
   import { hoverInfo } from '../ui/hover.ts';
+  import Segmented from '../ui/Segmented.svelte';
+  import Dashboard from './Dashboard.svelte';
+  import { boardViewOf, rememberBoardView, type BoardView } from './dashboard.ts';
   import { slideIndicator } from '../ui/indicator.ts';
   import { selectionClickGuard } from '../ui/native-context-menu.ts';
   import ScopeNote, { type ScopeNoteSpec } from '../app/ScopeNote.svelte';
@@ -128,7 +131,23 @@
    * the host's (`onPickServer`: focus that server, land on that board — D2);
    * the board body stays this server's (D3). Null in Single: this server's
    * list, untagged, as before. */
-  let { session = '', visible = true, onGoBack = null, issueRequest = null, embedded = false, createRequest = null, jumped = false, sideCollapsed = false, guardPage = '', union = null, scopeNote = null, onPickServer = null }: { guardPage?: string; session?: string; visible?: boolean; onGoBack?: ((fn: () => boolean) => void) | null; issueRequest?: { session: string; id: number; n: number } | null; embedded?: boolean; createRequest?: { n: number } | null; jumped?: boolean; sideCollapsed?: boolean; union?: { source: BoardUnion; included: readonly { id: string; name: string }[] } | null; scopeNote?: ScopeNoteSpec | null; onPickServer?: ((ref: SessionRef) => void) | null } = $props();
+  let { session = '', visible = true, onGoBack = null, issueRequest = null, embedded = false, createRequest = null, jumped = false, sideCollapsed = false, guardPage = '', union = null, scopeNote = null, onPickServer = null, onOpenAgent = null, onJumpMessage = null, onOpenChat = null }: { onOpenAgent?: ((session: string, agent: string) => void) | null; onJumpMessage?: ((session: string, m: { seq?: number; id?: number | string; discuss?: boolean }) => void) | null; onOpenChat?: ((session: string) => void) | null; guardPage?: string; session?: string; visible?: boolean; onGoBack?: ((fn: () => boolean) => void) | null; issueRequest?: { session: string; id: number; n: number } | null; embedded?: boolean; createRequest?: { n: number } | null; jumped?: boolean; sideCollapsed?: boolean; union?: { source: BoardUnion; included: readonly { id: string; name: string }[] } | null; scopeNote?: ScopeNoteSpec | null; onPickServer?: ((ref: SessionRef) => void) | null } = $props();
+  // The Dashboard view (board #109): the page head's Dashboard · Board switch,
+  // remembered per device, Dashboard by default (owner's D2), only on a server
+  // that announces `dashboard`, never in the Hub drawer's embedded board.
+  let boardView = $state<BoardView>(boardViewOf());
+  // The offer follows the LAST login's answer (#109 S1): a closed socket
+  // (caps undefined) is "not connected", not "no dashboard", so the view stays,
+  // muted, until a login answers again.
+  const capsAtMount = guardOwner.connection.getCaps?.();
+  let dashCap = $state(Array.isArray(capsAtMount) && capsAtMount.includes(DASHBOARD));
+  $effect(() => { if (Array.isArray(loginCaps)) dashCap = loginCaps.includes(DASHBOARD); });
+  const dashOffered = $derived(!embedded && dashCap);
+  // The ask cards follow the last login's answer the same way: a closed socket keeps them
+  // (with their drafts), muted with the rest of the view.
+  let asksCap = $state(Array.isArray(capsAtMount) && capsAtMount.includes(ASKS));
+  $effect(() => { if (Array.isArray(loginCaps)) asksCap = loginCaps.includes(ASKS); });
+  const setBoardView = (v: BoardView) => { boardView = v; rememberBoardView(v); };
 
   // The project sidebar follows the shell-wide collapse (board #200) with the
   // Hub's reveal: pinned at its width, the track's factor moving (reveal.ts).
@@ -1234,6 +1253,9 @@
       <ServerTag name={scope?.tag} />
     </div>
     <span class="spacer"></span>
+    {#if dashOffered && !sel && !creating}
+      <div class="view-switch"><Segmented options={[{ value: 'dashboard', label: t('dashView') }, { value: 'board', label: t('dashBoardView') }]} value={boardView} onchange={setBoardView} ariaLabel={t('dashView')} /></div>
+    {/if}
     {#if !sel && !creating}
       <!-- New issue lives in the page head's top-right (reopened #11:
            "不应该放到最下方…手机操作更友好"). -->
@@ -1244,7 +1266,15 @@
   </div>
   {/if}
   <div class="board" class:drill-fwd={drillAnim === 'fwd'} class:drill-back={drillAnim === 'back'}>
-  {#if !ready && !issues.length}
+  {#if dashOffered && boardView === 'dashboard' && !sel && !creating && cur}
+    <Dashboard api={guardOwner.api} connected={Array.isArray(loginCaps)} now={projectTick} session={cur}
+      asksOn={asksCap} slots={allProjects.find((p) => p.project.session === cur)?.slots ?? []}
+      listen={(fn) => { guardOwner.connection.addTeamMessageListener?.(fn); return () => guardOwner.connection.removeTeamMessageListener?.(fn); }} room={roomOf(allProjects.find((p) => p.project.session === cur)?.project ?? { session: cur })} {visible}
+      onOpenBoard={() => setBoardView('board')}
+      onOpenAgent={(a) => onOpenAgent?.(cur, a)}
+      onJump={(m) => onJumpMessage?.(cur, m)}
+      onOpenChat={() => onOpenChat?.(cur)} />
+  {:else if !ready && !issues.length}
     <div class="empty">…</div>
   {:else if sel}
     <!-- ── one issue: the note thread is the issue's own record ── -->
@@ -1640,6 +1670,10 @@
   .side-toggle { display: none; flex: none; }
   @media (max-width: 760px) {
     .board-root { grid-template-columns: minmax(0, 1fr); }
+    /* #109, measured at 320: the head needed 333.8px of 320 and wrapped New
+       issue alone onto a line. The view switch is the head's second row,
+       full width, and the title row keeps its button. */
+    .view-switch { order: 1; flex: 1 0 100%; }
     .side-toggle { display: inline-flex; }
     /* Drill motion: same 120ms grammar as the app-level page slide and
        AgentsPage. Desktop swaps the content in place — no motion. */

@@ -4,17 +4,23 @@
   // question, the options in focus order with the recommended one marked, an Answer box,
   // Dismiss and Discuss in chat. Closed: the outcome and no live controls. The delivery
   // state sits BESIDE the decision, never merged into it (hub-feed.md § An ask is a bubble).
+  import { untrack } from 'svelte';
   import CommandButton from '../ui/CommandButton.svelte';
   import { renderMarkdown } from '../core/markdown.ts';
   import { t } from '../core/i18n.svelte.ts';
   import { NO_LABELS } from './names.ts';
+  import { agoShort } from './hub.ts';
   import { deliveryWord, noDeliveryYet, type AskerState, type AskDraft } from './asks.svelte.ts';
   import type { AskRow } from '../core/ws-api.ts';
 
   let {
     ask, names = NO_LABELS, asker = 'live' as AskerState, refused = '', error = '', stale = false, busy = false, draft, ondraft,
     onanswer = async (_option?: string, _text?: string) => false, ondismiss = () => {}, ondiscuss = () => {},
+    compact = false, now = 0,
   }: {
+    /** The Dashboard's form (board #109, leader note 88): the asker and the ask's age on the
+     * card, the question clamped and expanded by a tap on it; everything else as in the chat. */
+    compact?: boolean; now?: number;
     ask: AskRow; names?: { shown: (n: string) => string }; asker?: AskerState; refused?: string; error?: string; stale?: boolean; busy?: boolean;
     /** The store's draft for this ask (round 5): read once when the card mounts, written back
      * on every change, so a card that unmounts mid-call comes back with it. */
@@ -41,6 +47,38 @@
   /** `said` is the closing act in its own words: `B · beta — text`, `dismissed: …`,
    * `withdrawn: why — citing …` (asks.md). The card shows it as it is. */
   const said = $derived((ask.said ?? '').replace(/^withdrawn:\s*/u, ''));
+  /** Compact: the question opens on a tap (a tap on a link inside it is the link's). */
+  let qOpen = $state(false);
+  /** Is the clamped question cut? Measured after layout and again on every resize; only a
+   * cut question is a toggle (leader #109 note 87): one that fits is plain text, with no
+   * role, no tab stop and no handler, so it never poses as a control under the 44 px floor. */
+  let qEl = $state<HTMLElement | null>(null);
+  let qCut = $state(false);
+  // The clamp's three lines, measured while collapsed and cut; no width changes it. Kept
+  // OUTSIDE the effect: opening the question must not reset it (validator-2 note 99).
+  let clampH = 0;
+  $effect(() => {
+    const el = qEl;
+    if (!el || !compact) return;
+    void ask.question;
+    // Collapsed, the clamp's own box says whether it cuts. Open, the question is measured
+    // against the three lines' height after each resize: once it fits, there is nothing to
+    // fold, and it is plain text again (#109). `qOpen` is read untracked, so a toggle never
+    // re-runs this effect (and never replaces its observer).
+    const measure = () => untrack(() => {
+      if (!qOpen) { qCut = el.scrollHeight > el.clientHeight + 1; if (qCut) clampH = el.clientHeight; return; }
+      if (clampH && el.scrollHeight <= clampH + 1) { qOpen = false; qCut = false; }
+    });
+    measure();
+    const ro = new ResizeObserver(measure);
+    ro.observe(el);
+    return () => ro.disconnect();
+  });
+  const qToggle = $derived(compact && (qCut || qOpen));
+  function toggleQ(e: Event) {
+    if (!qToggle || (e.target as Element | null)?.closest?.('a')) return;
+    qOpen = !qOpen;
+  }
 
   /** The option this card last tried to send; it stays marked until a send lands (F2). */
   // svelte-ignore state_referenced_locally
@@ -64,7 +102,16 @@
 
 <!-- svelte-ignore a11y_click_events_have_key_events, a11y_no_static_element_interactions -->
 <div class="ask-card" class:closed={!open} onclick={(e) => e.stopPropagation()} data-ask-seq={ask.seq}>
-  <div class="ask-q">{@html renderMarkdown(ask.question)}</div>
+  {#if compact}
+    <div class="ask-meta"><span class="ask-who">{who}</span><span class="side-age">{agoShort(ask.ts, now)}</span></div>
+    <!-- svelte-ignore a11y_no_noninteractive_tabindex -->
+    <div class="ask-q clamp" class:open={qOpen} class:cut={qToggle} bind:this={qEl}
+      role={qToggle ? 'button' : undefined} tabindex={qToggle ? 0 : undefined} aria-expanded={qToggle ? qOpen : undefined}
+      onclick={qToggle ? toggleQ : undefined}
+      onkeydown={qToggle ? (e) => { if ((e.key === 'Enter' || e.key === ' ') && !(e.target as Element | null)?.closest?.('a')) { e.preventDefault(); toggleQ(e); } } : undefined}>{@html renderMarkdown(ask.question)}</div>
+  {:else}
+    <div class="ask-q">{@html renderMarkdown(ask.question)}</div>
+  {/if}
   {#if open}
     {#if ask.options.length}
       <div class="ask-opts" role="group" aria-label={ask.question}>
@@ -106,6 +153,17 @@
 <style>
   .ask-card { display: flex; flex-direction: column; gap: var(--ui-gap); min-width: 0; }
   .ask-q { min-width: 0; overflow-wrap: anywhere; }
+  /* Compact (the Dashboard): a clamp line count is a per-component unitless integer
+     (design-language § clamps); the question opens on a tap. */
+  .ask-q.clamp.cut { cursor: pointer; }
+  .ask-q.clamp { display: -webkit-box; -webkit-box-orient: vertical; -webkit-line-clamp: 3; line-clamp: 3; overflow: hidden; }
+  .ask-q.clamp.open { display: block; -webkit-line-clamp: unset; line-clamp: none; }
+  /* Its markdown's outer paragraph margins would spend clamped lines on blank space. */
+  .ask-q.clamp > :global(:first-child) { margin-top: 0; }
+  .ask-q.clamp > :global(:last-child) { margin-bottom: 0; }
+  .ask-meta { display: flex; align-items: baseline; gap: var(--ui-gap); min-width: 0; }
+  .ask-who { font-weight: 600; font-family: var(--font-display); min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+  .ask-meta > .side-age { margin-left: 0; }
   .ask-opts { display: flex; flex-direction: column; gap: var(--ui-gap); }
   .ask-opt { display: flex; align-items: center; gap: var(--ui-gap); min-width: 0; flex-wrap: wrap; }
   .ask-rec, .ask-when, .ask-delivery { font-size: var(--fs-meta); color: var(--text3); }

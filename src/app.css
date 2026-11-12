@@ -350,7 +350,8 @@ button { font-family: var(--font-display); }
 ::highlight(review-hot) { background-color: color-mix(in srgb, var(--accent) 26%, transparent); }
 button:focus-visible,
 input:focus-visible,
-textarea:focus-visible {
+textarea:focus-visible,
+[role=button]:focus-visible {
   outline: 2px solid var(--accent);
   outline-offset: 2px;
 }
@@ -820,6 +821,9 @@ button.side-win { cursor: pointer; }
 button.side-win:hover { background: var(--surface2); color: var(--text); }
 .side-win img { display: block; }
 .side-win .side-win-name { max-width: 16ch; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+/* `.whole`: a chip whose name IDENTIFIES its row (the Dashboard's agent rows,
+   #109) keeps the whole name; it ellipsizes only past its container. */
+.side-win .side-win-name.whole { max-width: none; }
 /* The chip's dot garnish — TWO wearers, one dress: the Chat sidebar's agent
    STATE (stateDotColor) and the Board sidebar's column STATUS
    (boardStatusColor, board #39). Both speak the app's one status-colour
