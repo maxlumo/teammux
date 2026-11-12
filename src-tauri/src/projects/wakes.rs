@@ -126,19 +126,30 @@ pub fn claim(id: i64) -> Option<Wake> {
     super::with_store(|s| if s.claim_wake(id, now())? { s.wake_row(id) } else { Ok(None) }).ok().flatten()
 }
 
-/// `claim`, with the wake's project read FIRST, in the same step under the store
-/// lock (board #118): a project read that FAILS is `Err` and claims nothing, so
-/// the wake stays due and the sleeper retries it after its back-off; a positively
-/// absent project is `Some((wake, None))`. A rename cannot land between the read
-/// and the claim (it takes the same lock).
-pub fn claim_with_project(id: i64) -> Result<Option<(Wake, super::Resolved)>, String> {
+/// FIRE wake `id` (board #122): its claim and its room line in ONE store transaction
+/// (`Store::wake_fire`), the room from the wake's project read in that same step (#118: a
+/// failed read is `Err`; a positively absent project is `proj:<session>`), its recipients by
+/// the project's names. A failure anywhere rolls the claim back: the wake stays due and the
+/// sleeper retries it after its back-off, never silently consumed. Delivery is the caller's,
+/// AFTER this returns, outside the store lock. None when it is no longer pending.
+pub fn fire_stored(id: i64) -> Result<Option<(Wake, super::Resolved, super::store::HubMsg)>, String> {
     super::with_store(|s| {
-        let Some(row) = s.wake_row(id)? else { return Ok(None) };
-        let project = super::projects::project_for_session_in(s, &row.session)?;
-        if !s.claim_wake(id, now())? {
-            return Ok(None);
-        }
-        Ok(s.wake_row(id)?.map(|w| (w, super::Resolved::of(&row.session, project))))
+        s.wake_fire(id, now(), super::rooms::now_ms(), |s, w| {
+            let project = super::projects::project_for_session_in(s, &w.session)?;
+            // The labels are display metadata: unreadable, every name is its own (names::names).
+            let names = match &project {
+                Some(p) => s.agent_names(&p.id).map(super::names::Names::new).unwrap_or_else(|e| {
+                    eprintln!("[wake] {}: agent labels unreadable, names as they are: {e}", w.id);
+                    super::names::Names::default()
+                }),
+                None => super::names::Names::default(),
+            };
+            let resolved = super::Resolved::of(&w.session, project);
+            let body = fired_body(w, now());
+            let to_json = serde_json::to_string(&names.addressed(&body)).unwrap_or_else(|_| "[]".into());
+            let room = resolved.room.clone();
+            Ok((resolved, room, to_json, body))
+        })
     })
 }
 

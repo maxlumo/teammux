@@ -191,8 +191,7 @@ impl Store {
         compose: impl FnOnce(&serde_json::Value, Option<i64>) -> String,
     ) -> Result<Option<super::HubMsg>, String> {
         let HandoffTarget { session, number, name, room, sender, kind } = *at;
-        self.conn.execute_batch("BEGIN IMMEDIATE;").map_err(|e| format!("hand-off transaction: {e}"))?;
-        let issued = (|| {
+        self.in_transaction("hand-off", || {
             let Some(issue) = self.issue_get(session, number)? else { return Ok(None) };
             let since = self.issue_handoff_last(session, number, name)?;
             let body = compose(&issue, since);
@@ -201,11 +200,7 @@ impl Store {
                 return Err(format!("#{number} left the board while its hand-off was stored"));
             }
             Ok(Some(msg))
-        })();
-        match issued {
-            Ok(v) => { self.conn.execute_batch("COMMIT;").map_err(|e| format!("commit hand-off: {e}"))?; Ok(v) }
-            Err(e) => { let _ = self.conn.execute_batch("ROLLBACK;"); Err(e) }
-        }
+        })
     }
 
     /// The newest hand-off (ms) of THIS issue (the live row, not its public number's

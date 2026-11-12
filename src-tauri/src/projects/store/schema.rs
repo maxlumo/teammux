@@ -152,6 +152,28 @@ impl Store {
         }
     }
 
+    /// Run `f` as ONE `BEGIN IMMEDIATE` transaction on this connection (boards #120, #122): its
+    /// writes are committed together when it answers Ok, rolled back when it answers Err, and
+    /// rolled back too when the COMMIT itself fails (a deferred constraint, a full disk), so
+    /// the connection is never left inside an open transaction for the next caller
+    /// (validator-2, #122 note 8: the next BEGIN failed 'within a transaction').
+    pub(crate) fn in_transaction<T>(&self, what: &str, f: impl FnOnce() -> Result<T, String>) -> Result<T, String> {
+        self.conn.execute_batch("BEGIN IMMEDIATE;").map_err(|e| format!("{what}: begin: {e}"))?;
+        match f() {
+            Ok(v) => match self.conn.execute_batch("COMMIT;") {
+                Ok(()) => Ok(v),
+                Err(e) => {
+                    let _ = self.conn.execute_batch("ROLLBACK;");
+                    Err(format!("{what}: commit: {e}"))
+                }
+            },
+            Err(e) => {
+                let _ = self.conn.execute_batch("ROLLBACK;");
+                Err(e)
+            }
+        }
+    }
+
     /// The version steps, oldest first, each guarded by `version < N`. Runs
     /// inside the transaction `migrate` opened — never call it directly.
     pub(super) fn migrate_steps(&self, version: i64) -> Result<(), String> {
@@ -1069,6 +1091,23 @@ impl Store {
 mod tests {
     use super::super::test_support::*;
     use super::*;
+
+    /// Boards #120, #122 (validator-2 note 8): the one transaction helper both atomic writes
+    /// use. A COMMIT that fails (a deferred foreign key here) is rolled back: nothing it wrote
+    /// stays, and the connection is not left inside it for the next caller.
+    #[test]
+    fn a_failed_commit_leaves_no_write_and_no_open_transaction() {
+        let s = Store::open_memory().unwrap();
+        s.exec_test_sql("CREATE TABLE p120 (id INTEGER PRIMARY KEY); CREATE TABLE c120 (pid INTEGER REFERENCES p120(id) DEFERRABLE INITIALLY DEFERRED);").unwrap();
+        let err = s.in_transaction("t", || s.exec_test_sql("INSERT INTO c120 VALUES (7);")).unwrap_err();
+        assert!(err.starts_with("t: commit:"), "{err}");
+        let rows: i64 = s.conn.query_row("SELECT COUNT(*) FROM c120", [], |r| r.get(0)).unwrap();
+        assert_eq!(rows, 0, "rolled back");
+        assert!(s.conn.is_autocommit(), "no transaction left open");
+        s.in_transaction("t", || s.exec_test_sql("INSERT INTO p120 VALUES (7); INSERT INTO c120 VALUES (7);")).unwrap();
+        let rows: i64 = s.conn.query_row("SELECT COUNT(*) FROM c120", [], |r| r.get(0)).unwrap();
+        assert_eq!(rows, 1, "the next transaction begins and commits");
+    }
 
     /// v24 -> v25 (board #245): every existing agent definition gains
     /// `input_mode = 'queue'`, and a saved `steer` round-trips.

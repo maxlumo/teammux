@@ -597,6 +597,28 @@ mod tests {
         assert_eq!(left, 0);
     }
 
+    /// Boards #120, #122 (leader note 17): the hand-off's transaction through the one helper.
+    /// A COMMIT that fails (a deferred key, violated by a trigger on the fact's INSERT) rolls
+    /// back: no brief row, no fact, the connection not left inside it; the next hand-off works.
+    #[test]
+    fn a_hand_off_whose_commit_fails_stores_nothing_and_leaves_the_connection_usable() {
+        let store = Store::open_memory().unwrap();
+        store.insert_project(&project("alpha")).unwrap();
+        let one = store.issue_save("alpha", None, Some("first"), None, None, None, "human", 100).unwrap();
+        store.exec_test_sql("CREATE TABLE p_h (id INTEGER PRIMARY KEY); CREATE TABLE c_h (pid INTEGER REFERENCES p_h(id) DEFERRABLE INITIALLY DEFERRED);
+            CREATE TEMP TRIGGER bad_fact AFTER INSERT ON issue_handoffs BEGIN INSERT INTO c_h VALUES (1); END;").unwrap();
+        let at = super::super::board::HandoffTarget { session: "alpha", number: one, name: "qa", room: "proj:alpha", sender: "lead", kind: "brief" };
+        let compose = |_: &serde_json::Value, _: Option<i64>| "brief".to_string();
+        let err = store.issue_handoff_issue(&at, "[]", 1_000, compose).unwrap_err();
+        assert!(err.contains("commit"), "{err}");
+        assert!(store.conn.is_autocommit(), "no transaction left open");
+        let rows: i64 = store.conn.query_row("SELECT COUNT(*) FROM hub_msgs WHERE room = 'proj:alpha'", [], |r| r.get(0)).unwrap();
+        assert_eq!((rows, store.issue_handoff_last("alpha", one, "qa").unwrap()), (0, None), "neither the brief nor the fact");
+        store.exec_test_sql("DROP TRIGGER bad_fact;").unwrap();
+        assert!(store.issue_handoff_issue(&at, "[]", 2_000, compose).unwrap().is_some(), "the next hand-off begins and commits");
+        assert_eq!(store.issue_handoff_last("alpha", one, "qa").unwrap(), Some(2_000));
+    }
+
     #[test]
     fn renaming_a_project_moves_its_board_and_closes_the_old_key() {
         let mut store = Store::open_memory().unwrap();

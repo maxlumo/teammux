@@ -3007,23 +3007,21 @@ fn next_wake(wakes: &[crate::projects::store::Wake], name: &str) -> serde_json::
 /// rename since scheduling still finds it; recipients are read NOW.
 #[cfg(not(any(target_os = "android", target_os = "ios")))]
 pub(super) fn fire_wake(id: i64) {
-    // Board #118: a failed project read claims nothing; the sleeper retries.
-    let (w, crate::projects::Resolved { session, room, .. }) = match crate::projects::wakes::claim_with_project(id) {
-        Ok(Some(claimed)) => claimed,
+    // Board #122: the claim, #118's project read, and the room line are ONE store
+    // transaction (claim first, then the read; a failed read rolls the claim back, so #118's
+    // guarantee holds); a failure stores neither, the wake stays due, the sleeper retries.
+    let (w, crate::projects::Resolved { session, room, .. }, msg) = match crate::projects::wakes::fire_stored(id) {
+        Ok(Some(fired)) => fired,
         Ok(None) => return,
         Err(e) => {
-            eprintln!("[wake] {id} not fired: its project could not be read: {e}");
+            eprintln!("[wake] {id} not fired, kept due: {e}");
             return;
         }
     };
-    let w = &w;
-    let body = crate::projects::wakes::fired_body(w, crate::projects::now() as i64);
-    let recipients = addressed(&session, &body);
-    let Ok(msg) = crate::projects::rooms::post_routed(&room, &w.sender, &body, &recipients) else { return };
-    let seq = msg.get("seq").and_then(|v| v.as_i64());
-    let id = msg.get("id").and_then(|v| v.as_str()).unwrap_or_default();
-    // A fired wake has no caller to answer: its room line is the record.
-    let _ = deliver_mentions(&session, &w.sender, &body, &room, seq, id, true);
+    crate::projects::rooms::push_stored(std::slice::from_ref(&msg));
+    // A fired wake has no caller to answer: its room line is the record. Delivery is
+    // outside the store lock.
+    let _ = deliver_mentions(&session, &w.sender, &msg.body, &room, Some(msg.seq), &msg.id, true);
 }
 
 /// One row per live window: name, command, agent detection, derived status,
@@ -9531,3 +9529,7 @@ mod restart_tests;
 /// Board #118: a failed project read is an error at the door and inside every method.
 #[cfg(all(test, not(any(target_os = "android", target_os = "ios"))))]
 mod door_tests;
+
+/// Board #122: a wake's claim and its room line are one store transaction.
+#[cfg(all(test, not(any(target_os = "android", target_os = "ios"))))]
+mod wake_tests;

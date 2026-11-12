@@ -90,6 +90,30 @@ impl Store {
             .map_err(|e| format!("claim wake: {e}"))
     }
 
+    /// FIRE wake `id` (board #122): in ONE transaction on this one connection, claim it, read
+    /// it as it is now, let `compose` resolve its room and compose its line from that row
+    /// (`(extra, room, to_json, body)`), and append the line (kind `msg`, at `ts` ms). The claim
+    /// and the room line are both stored or neither is: a failure anywhere (the project read,
+    /// the room INSERT) rolls the claim back, so the wake stays due and the sleeper retries it.
+    /// None when it is no longer pending (cancelled, or fired by another).
+    pub fn wake_fire<T>(
+        &self,
+        id: i64,
+        now: i64,
+        ts: i64,
+        compose: impl FnOnce(&Store, &Wake) -> Result<(T, String, String, String), String>,
+    ) -> Result<Option<(Wake, T, super::HubMsg)>, String> {
+        self.in_transaction("fire wake", || {
+            if !self.claim_wake(id, now)? {
+                return Ok(None);
+            }
+            let Some(w) = self.wake_row(id)? else { return Ok(None) };
+            let (extra, room, to_json, body) = compose(self, &w)?;
+            let msg = self.hub_append(&room, &uuid::Uuid::new_v4().to_string(), ts, &w.sender, &to_json, "msg", &body)?;
+            Ok(Some((w, extra, msg)))
+        })
+    }
+
     /// A wake by id whatever its state: the row a fire reads AFTER claiming
     /// it (#275), so it posts with the row's CURRENT session, never a
     /// snapshot a rename has since moved.
@@ -112,6 +136,30 @@ impl Store {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// Board #122 (validator-2 note 8): a COMMIT that fails rolls the transaction back, so
+    /// the claim is not left uncommitted and the connection is not left inside it: the next
+    /// fire starts its own transaction and fires the wake once. A deferred foreign key makes
+    /// the COMMIT itself fail.
+    #[test]
+    fn a_failed_commit_rolls_the_fire_back_and_the_next_fire_starts_clean() {
+        let s = Store::open_memory().unwrap();
+        s.exec_test_sql("CREATE TABLE p122 (id INTEGER PRIMARY KEY); CREATE TABLE c122 (pid INTEGER REFERENCES p122(id) DEFERRABLE INITIALLY DEFERRED);").unwrap();
+        let w = s.insert_wake("proj", "lead", "@dev check", 100, 50).unwrap();
+        let compose = |st: &Store, _: &Wake| -> Result<((), String, String, String), String> {
+            st.exec_test_sql("INSERT INTO c122 VALUES (99);")?; // violates the deferred key: COMMIT fails
+            Ok(((), "proj:proj".into(), "[]".into(), "[wake] @dev check".into()))
+        };
+        let err = s.wake_fire(w, 200, 200_000, compose).unwrap_err();
+        assert!(err.contains("commit"), "{err}");
+        let pending: i64 = s.conn.query_row("SELECT COUNT(*) FROM wakes WHERE id = ?1 AND fired_at IS NULL", [w], |r| r.get(0)).unwrap();
+        assert_eq!(pending, 1, "the claim rolled back: still due");
+        let rows: i64 = s.conn.query_row("SELECT COUNT(*) FROM hub_msgs WHERE room = 'proj:proj'", [], |r| r.get(0)).unwrap();
+        assert_eq!(rows, 0, "and its line with it");
+        let fired = s.wake_fire(w, 210, 210_000, |_, _| Ok(((), "proj:proj".into(), "[]".into(), "[wake] @dev check".into()))).unwrap();
+        assert!(fired.is_some(), "the next fire is not 'within a transaction': it fires");
+        assert!(s.wake_fire(w, 220, 220_000, |_, _| Ok(((), "proj:proj".into(), "[]".into(), "x".into()))).unwrap().is_none(), "once");
+    }
 
     #[test]
     fn a_wake_is_claimed_once_and_a_cancel_beats_a_later_claim() {
