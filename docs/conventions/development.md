@@ -752,7 +752,12 @@ pnpm run test:live:docker codex-picker     # board #66: a delivery waits while c
   `env: bun: No such file or directory`). Measured in the built image: each
   `--version` answers its pinned version. kiro-cli 2.37.1 and kimi 2.5.1 have no public pinned install
   measured, so they are not in the image and nothing fakes them. Every CLI's
-  no-update switch is set. The image carries `/etc/teammux-live-rig`, the
+  no-update switch is set. **A rig proves its build by its stamp** (board #122,
+  builder, 2026-11-12): the image's cargo cache mount keeps build output
+  between builds, so an image built for another commit can carry the previous
+  build's binary unless the cache key (`SOURCE_COMMIT`) changes; before any
+  rig evidence counts, read `tmm gateway status` inside it and write the
+  `build` sha next to the pinned tip. A stamp that differs is not evidence. The image carries `/etc/teammux-live-rig`, the
   only place `scripts/scratch-env.mjs` agrees to run (with `/.dockerenv`); on
   the host it refuses and names this command.
 - **Credentials** (owner, 15:26: copy or map them from this system). Only the
