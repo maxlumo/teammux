@@ -155,6 +155,17 @@ pub fn board_block(session: &str, id: i64, add: &[i64], remove: &[i64]) -> Resul
     with_store(|store| store.issue_blocks_set(session, id, add, remove))
 }
 
+/// Board #120: issue the hand-off of issue `id` to `name` (`Store::issue_handoff_issue`): the
+/// brief composed from the live row, stored as a `kind` row of `room`, and the fact recorded,
+/// in one store call. The stored row, for the caller to publish and deliver OUTSIDE the lock.
+pub fn board_handoff_issue(
+    at: &super::store::board::HandoffTarget<'_>,
+    compose: impl FnOnce(&Value, Option<i64>) -> String,
+) -> Result<Option<super::store::HubMsg>, String> {
+    let to = serde_json::to_string(&[at.name]).unwrap_or_else(|_| "[]".into());
+    with_store(|store| store.issue_handoff_issue(at, &to, super::rooms::now_ms(), compose))
+}
+
 pub fn board_delete(session: &str, id: i64) -> Result<bool, String> {
     with_store(|store| store.issue_delete(session, id))
 }

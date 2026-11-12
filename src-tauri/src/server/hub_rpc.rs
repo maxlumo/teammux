@@ -31,6 +31,13 @@ pub(super) mod asks;
 /// The dashboard read (board #108).
 #[cfg(not(any(target_os = "android", target_os = "ios")))]
 pub(super) mod dashboard;
+/// The board hand-off's brief: both forms and "has held it" (boards #377, #120).
+mod brief;
+#[cfg(not(any(target_os = "android", target_os = "ios")))]
+use brief::{board_assign_brief, board_assign_pointer};
+use brief::BRIEF_KIND;
+#[cfg(all(test, not(any(target_os = "android", target_os = "ios"))))]
+use brief::board_assign_notes;
 
 /// The hub dispatcher proper (board #146): every arm is a `Result`, so a
 /// missing param or a store error is a `?` with its wire code already chosen
@@ -598,7 +605,8 @@ fn dispatch_hub(req: &Request, notifications: Option<&crate::agent_notifications
             &room,
             p,
             &HandOff {
-                post: &|who, brief| post_and_deliver(session, &room, who, brief, false),
+                issue: &|who, name, id| issue_brief(session, &room, who, name, id),
+                deliver: &|who, stored| deliver_issued(session, &room, who, stored, false),
                 managed: &|name| {
                     crate::projects::project_for_session(session)
                         .ok()
@@ -1680,10 +1688,14 @@ pub(super) use crate::projects::deliver_chat_line;
 /// honest test of "the save landed and the telling did not".
 #[cfg(not(any(target_os = "android", target_os = "ios")))]
 struct HandOff<'a> {
-    /// Post the brief as `who` and type it into the mentioned pane
-    /// (`post_and_deliver`); the answer is the stored row, with `offline` when
-    /// the mention reached no pane.
-    post: &'a dyn Fn(&str, &str) -> Result<serde_json::Value, String>,
+    /// ISSUE the hand-off of issue `id` to `name` as `who` (board #120, leader note 57):
+    /// the issue read back, "held before" derived from its own record, the brief composed,
+    /// stored as the room's `brief` row and the fact recorded, in ONE store transaction
+    /// (`issue_brief`). The stored row; None when the issue is gone.
+    issue: &'a dyn Fn(&str, &str, i64) -> Result<Option<serde_json::Value>, String>,
+    /// Then, OUTSIDE the store lock: type the stored row into the mentioned pane through the
+    /// one delivery path (`deliver_issued`); the row, with `offline` when it reached no pane.
+    deliver: &'a dyn Fn(&str, serde_json::Value) -> serde_json::Value,
     /// Is `name` a managed agent DECLARED by this project (its home carries the
     /// launch recipe)? Declaration, not liveness: a stopped agent is still this
     /// project's agent, and "not running" is reported as `offline`.
@@ -1836,8 +1848,12 @@ fn board_save(session: &str, room: &str, p: &serde_json::Value, hand: &HandOff) 
     if let (true, Some(name)) = (wants, board_assign_target(assignee, who)) {
         let outcome = board_dispatch(name, (hand.managed)(name), || {
             let issue = issue.as_ref().map_err(|e| format!("#{saved} was saved but could not be read back to build the hand-off: {e}"))?;
-            let brief = board_assign_brief(saved, issue, who, name);
-            (hand.post)(who, &brief)
+            // The brief and the hand-off fact are stored together (board #120, note 57):
+            // a pointer for a name that held this issue before, else the whole issue.
+            // Then it is delivered, outside the store lock. A failed store is an answer:
+            // nothing was stored and nobody holds it.
+            let stored = (hand.issue)(who, name, saved)?.ok_or_else(|| format!("#{saved} is no longer on this board"))?;
+            Ok((hand.deliver)(who, stored))
         });
         answer["dispatch"] = serde_json::json!(outcome.state);
         if let Some(error) = outcome.error {
@@ -2030,112 +2046,10 @@ fn board_dispatch(name: &str, managed: bool, post: impl FnOnce() -> Result<serde
 }
 
 #[cfg(not(any(target_os = "android", target_os = "ios")))]
-/// The characters of note thread a hand-off may carry (board #42). The whole
-/// original title and body ride in full; only the discussion under the issue
-/// gets a budget, so a long thread — or ONE giant note — can never inject an
-/// unbounded wall of text into the agent's pane.
 /// `hub_search` limits (board #432): terms and their total size. `SEARCH_MAX_TERMS` in
 /// `src/lib/hub/hub-search.ts` states the first to the reader; a source test pins the two together.
 pub(crate) const MAX_SEARCH_TERMS: usize = 32;
 const MAX_SEARCH_BYTES: usize = 4096;
-
-const ASSIGN_NOTES_BUDGET: usize = 1200;
-#[cfg(not(any(target_os = "android", target_os = "ios")))]
-/// Below this many characters of remaining budget a partial note is not worth
-/// a fragment: the truncation marker speaks for it instead.
-const NOTE_SLICE_MIN: usize = 48;
-
-#[cfg(not(any(target_os = "android", target_os = "ios")))]
-/// The note thread an assignment carries (board #42: the discussion under an
-/// issue is context the agent must not miss). A block the caller APPENDS to
-/// the brief — a blank line and a counted `Notes (N):` header keep it clearly
-/// apart from the description — or `""` when there are no notes.
-///
-/// Chronological (`at` ascending, whatever order the caller holds), one line
-/// per note with its author; a note's inner whitespace squashes to single
-/// spaces so a note stays a line and the budget stays character math. Lines
-/// stop at `budget` characters in total — a note that does not fit whole is
-/// sliced on the remaining room (dropped when the room is a sliver) — and any
-/// cut ends the block with the one pointer to the rest: `tmm board show <id>`.
-/// Authors and bodies are quoted text: they pass through `unaddressed`.
-fn board_assign_notes(id: i64, notes: &[serde_json::Value], budget: usize) -> String {
-    if notes.is_empty() {
-        return String::new();
-    }
-    let mut ordered: Vec<&serde_json::Value> = notes.iter().collect();
-    ordered.sort_by_key(|n| n["at"].as_i64().unwrap_or(0));
-    let mut lines: Vec<String> = Vec::new();
-    let mut used = 0usize;
-    let mut shown = 0usize; // notes visible at all: whole, or the one budget-cut slice
-    let mut cut = false;
-    for n in &ordered {
-        let body = n["body"].as_str().unwrap_or("").split_whitespace().collect::<Vec<_>>().join(" ");
-        let line = crate::address::unaddressed(&format!("- {}: {body}", n["author"].as_str().unwrap_or("")));
-        let len = line.chars().count();
-        let room = budget.saturating_sub(used);
-        if len <= room {
-            lines.push(line);
-            used += len;
-            shown += 1;
-        } else {
-            if room >= NOTE_SLICE_MIN {
-                let slice: String = line.chars().take(room).collect();
-                lines.push(format!("{}…", slice.trim_end()));
-                shown += 1; // partly visible: the `…` speaks for its rest, not "+1 more"
-            }
-            cut = true;
-            break;
-        }
-    }
-    let more = ordered.len() - shown; // notes the pane never sees at all
-    let tail = if cut || more > 0 {
-        format!("\n…{} — `tmm board show {id}`", if more > 0 { format!(" +{more} more") } else { String::new() })
-    } else {
-        String::new()
-    };
-    format!("\n\nNotes ({}):\n{}{tail}", ordered.len(), lines.join("\n"))
-}
-
-#[cfg(not(any(target_os = "android", target_os = "ios")))]
-/// The hand-off an assignment types into the assignee's pane (board #377):
-/// the ONE brief, from the page, `tmm board assign` and `add --assignee`.
-/// It reads as a hand-off — who assigned it comes FIRST, then the ENTIRE
-/// original title and body (the agent's task input; never an excerpt: the
-/// paste path has no 400-character ceiling), then the note thread under its
-/// own budget, and the instruction to `take` it LAST (boards #42, #51, #79;
-/// owner 2026-08-29: "Assign 给某个 Agent 去做" means the agent starts with the
-/// complete issue plus bounded discussion). Plain English, not an i18n atom:
-/// it is input to an agent.
-///
-/// It leads with an `@mention` so the ONE delivery path types it into that
-/// pane, and `name` (the validated assignee) is the only address in it: the
-/// title, body, notes and `who` are quoted text and become `＠` through the
-/// project's one de-addressing rule (board #367 review P1-A — "修复 @all 的
-/// 投递" would otherwise have typed the hand-off into every pane). The stored
-/// issue is untouched. `issue` is the stored row, notes included.
-fn board_assign_brief(id: i64, issue: &serde_json::Value, who: &str, name: &str) -> String {
-    use crate::address::unaddressed;
-
-    let title = issue["title"].as_str().unwrap_or("").trim();
-    // A titleless issue is named by its id: its body already rides in full.
-    let title = if title.is_empty() { format!("#{id}") } else { unaddressed(title) };
-    let body = issue["body"].as_str().unwrap_or("").trim();
-    // A body that already ends its sentence is not given a second full stop
-    // ("…is quiet.." read as a typo to the agent; found by the validator).
-    let body = if body.is_empty() {
-        ".".to_string()
-    } else if body.ends_with(['.', '。', '!', '?', '！', '？']) {
-        format!(" — {}", unaddressed(body))
-    } else {
-        format!(" — {}.", unaddressed(body))
-    };
-    let notes = issue["notes"].as_array().map(|n| board_assign_notes(id, n, ASSIGN_NOTES_BUDGET)).unwrap_or_default();
-    format!(
-        "@{name} [board #{id}] {} assigned this to you: {title}{body}{notes}\n\
-         Please `tmm board take {id}` to start, note findings on it, move to review when done.",
-        unaddressed(who)
-    )
-}
 
 /// The ONE carrier of a posted line to its readers: store it, route it to the
 /// names it `@mention`s and type it into their panes (`deliver_mentions`).
@@ -2146,6 +2060,36 @@ fn board_assign_brief(id: i64, issue: &serde_json::Value, who: &str, name: &str)
 #[cfg(not(any(target_os = "android", target_os = "ios")))]
 fn post_and_deliver(session: &str, room: &str, from: &str, body: &str, detached: bool) -> Result<serde_json::Value, String> {
     post_and_deliver_found(session, room, from, body, detached).map(|(msg, _found)| msg)
+}
+
+/// Board #120 (note 57): store a hand-off's brief and its fact together, then publish the
+/// row to the room's readers. The composer is `brief.rs`'s, run inside the store call.
+#[cfg(not(any(target_os = "android", target_os = "ios")))]
+fn issue_brief(session: &str, room: &str, who: &str, name: &str, id: i64) -> Result<Option<serde_json::Value>, String> {
+    use crate::projects::rooms;
+    let at = crate::projects::store::board::HandoffTarget { session, number: id, name, room, sender: who, kind: BRIEF_KIND };
+    let stored = crate::projects::board_handoff_issue(&at, |issue, since| match since {
+        Some(since) => board_assign_pointer(id, issue, who, name, since),
+        None => board_assign_brief(id, issue, who, name),
+    })?;
+    Ok(stored.map(|m| { rooms::push_stored(std::slice::from_ref(&m)); rooms::message_json(&m) }))
+}
+
+/// Board #120: deliver a STORED row through the one delivery path, after the store lock
+/// (no tmux I/O under it); the row, with `offline` (#347) when a mention reached no pane.
+#[cfg(not(any(target_os = "android", target_os = "ios")))]
+fn deliver_issued(session: &str, room: &str, from: &str, mut msg: serde_json::Value, detached: bool) -> serde_json::Value {
+    let body = msg.get("body").and_then(|v| v.as_str()).unwrap_or_default().to_string();
+    let seq = msg.get("seq").and_then(|v| v.as_i64());
+    let id = msg.get("id").and_then(|v| v.as_str()).unwrap_or_default().to_string();
+    let (_found, offline) = deliver_mentions(session, from, &body, room, seq, &id, detached);
+    if !offline.is_empty() {
+        let rows: Vec<serde_json::Value> = offline.iter().map(|(name, why)| serde_json::json!({ "name": name, "why": why })).collect();
+        if let Some(obj) = msg.as_object_mut() {
+            obj.insert("offline".into(), serde_json::Value::Array(rows));
+        }
+    }
+    msg
 }
 
 /// `post_and_deliver`, also returning the names a live managed pane was FOUND
@@ -2586,7 +2530,7 @@ fn route_chat_history_hiding(
         if message
             .get("kind")
             .and_then(|value| value.as_str())
-            .is_some_and(|kind| kind != "msg")
+            .is_some_and(|kind| kind != "msg" && kind != BRIEF_KIND)
         {
             continue;
         }
@@ -3412,6 +3356,14 @@ mod tests {
         (session, room)
     }
 
+    /// A managed agent of the workspace `ws`, as the hand-off sees one: its home with a
+    /// launch recipe (the declaration `is_managed_in` reads).
+    fn declare_agent(ws: &std::path::Path, name: &str) {
+        let home = ws.join(".tmm/agents").join(name);
+        std::fs::create_dir_all(&home).unwrap();
+        std::fs::write(home.join("launch.json"), serde_json::json!({ "backend": "kiro", "cmd": "kiro-cli chat --agent x", "team": "" }).to_string()).unwrap();
+    }
+
     /// A registered project in a scratch workspace with one DECLARED agent home
     /// per name (the launch recipe is what makes a home managed), so the
     /// handler's "is this a managed agent of THIS project" check has an answer
@@ -3420,11 +3372,8 @@ mod tests {
         crate::projects::tests::use_test_store();
         let tag = uuid::Uuid::new_v4().simple().to_string()[..8].to_string();
         let ws = crate::config::test_scratch(&format!("tmm-handoff-ws-{tag}"));
-        let recipe = serde_json::json!({ "backend": "kiro", "cmd": "kiro-cli chat --agent x", "team": "" }).to_string();
         for name in names {
-            let home = ws.join(".tmm/agents").join(name);
-            std::fs::create_dir_all(&home).unwrap();
-            std::fs::write(home.join("launch.json"), &recipe).unwrap();
+            declare_agent(&ws, name);
         }
         let label = format!("handoff-{tag}");
         let made = crate::projects::create(&ws.to_string_lossy(), Some(&label), Some(&label), None).expect("project");
@@ -3974,75 +3923,72 @@ mod tests {
         }
     }
 
-    /// Board #377. The brief is the owner's (2026-08-29): who assigned it
-    /// FIRST, the ENTIRE title and body, the notes in order, and the take
-    /// instruction LAST — and the only address in it is the assignee.
+
+
+    /// Board #120 through the real handler: the first hand-off to a name is
+    /// the full brief; the same name again (the person's re-send to an agent
+    /// that was offline included) is the pointer with what it missed; another
+    /// name is new to it; a lookup that fails sends the full brief.
     #[test]
-    fn the_brief_carries_the_whole_issue_and_addresses_only_the_assignee() {
-        let long_body = format!("Step one @lead. {} End.", "x".repeat(2000));
-        let issue = serde_json::json!({
-            "title": "Fix the delivery to @all", "body": long_body, "notes": [
-                { "author": "lead", "body": "second: ask @reviewer", "at": 20 },
-                { "author": "human", "body": "first:\n  check   the cache", "at": 10 },
-            ],
-        });
-        let brief = super::board_assign_brief(7, &issue, "human @all", "builder-2");
-        assert!(brief.starts_with("@builder-2 [board #7] human ＠all assigned this to you: Fix the delivery to ＠all — Step one ＠lead. "), "{brief}");
-        assert!(brief.contains(&format!("{} End.", "x".repeat(2000))), "the WHOLE body, not an excerpt");
-        let first = brief.find("- human: first: check the cache").expect("the first note, squashed to a line");
-        let second = brief.find("- lead: second: ask ＠reviewer").expect("the second note");
-        assert!(first < second, "chronological, whatever order they were stored in");
-        assert!(brief.contains("\n\nNotes (2):\n"), "{brief}");
-        assert!(brief.ends_with("Please `tmm board take 7` to start, note findings on it, move to review when done."), "take LAST: {brief}");
-        assert_eq!(
-            crate::address::mention_names(&brief),
-            vec!["builder-2".to_string()],
-            "title, body, notes and who are quoted text: they route nowhere\n{brief}"
-        );
-        // The brief applies the PRODUCTION budget: a long thread is cut in the
-        // brief itself, and the cut points at the rest.
-        let long_thread = serde_json::json!({
-            "title": "T", "body": "B", "notes": [
-                { "author": "a", "body": "n".repeat(700), "at": 1 },
-                { "author": "b", "body": "n".repeat(700), "at": 2 },
-                { "author": "c", "body": "unreached", "at": 3 },
-            ],
-        });
-        let cut = super::board_assign_brief(7, &long_thread, "human", "dev");
-        assert!(cut.contains("\n… +1 more — `tmm board show 7`\nPlease `tmm board take 7`"), "{cut}");
-        assert!(!cut.contains("unreached") && cut.chars().count() < 1500, "bounded, however long the discussion: {} chars", cut.chars().count());
-        // A body that already ends a sentence gets no second full stop.
-        let ended = serde_json::json!({ "title": "T", "body": "It is quiet.", "notes": [] });
-        assert!(super::board_assign_brief(7, &ended, "human", "dev").contains("T — It is quiet.\nPlease"), "one full stop, not two");
-        let ended_cjk = serde_json::json!({ "title": "T", "body": "已经安静了。", "notes": [] });
-        assert!(super::board_assign_brief(7, &ended_cjk, "human", "dev").contains("T — 已经安静了。\nPlease"));
-        // No notes, no title: nothing appended, the id names the issue.
-        let bare = serde_json::json!({ "title": "  ", "body": "", "notes": [] });
-        assert_eq!(
-            super::board_assign_brief(9, &bare, "human", "dev"),
-            "@dev [board #9] human assigned this to you: #9.\nPlease `tmm board take 9` to start, note findings on it, move to review when done."
-        );
+    fn the_handler_sends_the_full_brief_once_per_name_then_pointers() {
+        let session = project_with(&["dev", "qa", "Dev"]);
+        let room_name = project_room(&session);
+        // The production wiring (`hub_board_save` through the RPC): the brief is posted as
+        // BRIEF_KIND and found again by the production lookup.
+        let briefs = |session: &str| told(session).into_iter().filter(|m| m["kind"] == super::BRIEF_KIND).map(|m| m["body"].as_str().unwrap().to_string()).collect::<Vec<_>>();
+        let created = save_issue(&session, serde_json::json!({ "title": "Ship it", "body": "THE BODY", "assignee": "dev", "who": "lead", "dispatch": true }));
+        // dev is declared but has no pane here: the brief is stored and the delivery says
+        // 'offline', as before the hand-off became one transaction (note 57).
+        assert_eq!(created["dispatch"], "offline", "{created}");
+        let id = issue_id(&created);
+        assert!(briefs(&session)[0].contains("assigned this to you: Ship it — THE BODY."), "first: the full brief, stored as a brief: {:?}", briefs(&session));
+        crate::projects::board_note(&session, id, "qa", "found a bug").unwrap();
+        save_issue(&session, serde_json::json!({ "id": id, "assignee": "dev", "who": "lead", "dispatch": true }));
+        let second = briefs(&session)[1].clone();
+        assert!(second.starts_with(&format!("@dev [board #{id}] lead assigned this to you again: Ship it — 1 new note since you last held it")), "{second}");
+        assert!(!second.contains("THE BODY") && second.contains("- qa: found a bug"), "{second}");
+        // A person's line that names qa on this issue and quotes the words is no hand-off (validator, #120).
+        save_issue(&session, serde_json::json!({ "id": id, "status": "doing", "who": "lead" }));
+        crate::projects::rooms::post(&room_name, "dev", &format!("@qa [board #{id}] question: it says \"assigned this to you\", is that me?")).unwrap();
+        save_issue(&session, serde_json::json!({ "id": id, "assignee": "qa", "who": "lead", "dispatch": true }));
+        assert!(briefs(&session)[2].contains("assigned this to you: Ship it — THE BODY."), "a name that never held it: full: {:?}", briefs(&session)[2]);
+        // Dev and dev are two agents (validator, #120): one's hand-off is never the other's.
+        let case_id = issue_id(&save_issue(&session, serde_json::json!({ "title": "Case", "body": "CASE BODY", "assignee": "Dev", "who": "lead", "dispatch": true })));
+        save_issue(&session, serde_json::json!({ "id": case_id, "assignee": "dev", "who": "lead", "dispatch": true }));
+        let last = briefs(&session).last().cloned().unwrap();
+        assert!(last.starts_with(&format!("@dev [board #{case_id}] lead assigned this to you: Case — CASE BODY.")), "dev never held it: the full brief: {last}");
+        save_issue(&session, serde_json::json!({ "id": case_id, "assignee": "Dev", "who": "lead", "dispatch": true }));
+        assert!(briefs(&session).last().unwrap().starts_with(&format!("@Dev [board #{case_id}] lead assigned this to you again:")), "Dev's second is a pointer");
+        // A store that fails stores nothing: the answer says the hand-off failed, and no
+        // fact is left behind, so the next hand-off of that issue to qa is the full brief.
+        let fresh_id = issue_id(&save_issue(&session, serde_json::json!({ "title": "Lost", "body": "LOST BODY", "who": "lead" })));
+        let down = HandOff { issue: &|_, _, _| Err("database is locked".into()), deliver: &|_, m| m, managed: &|_| true, read: &stored };
+        let first = serde_json::json!({ "session": session, "id": fresh_id, "assignee": "qa", "who": "lead", "dispatch": true });
+        let answer = super::board_save(&session, &room_name, &first, &down).unwrap();
+        assert_eq!((answer["dispatch"].as_str(), answer["dispatch_error"].as_str()), (Some("failed"), Some("database is locked")));
+        save_issue(&session, serde_json::json!({ "id": fresh_id, "assignee": "qa", "who": "lead", "dispatch": true }));
+        assert!(briefs(&session).last().unwrap().contains("assigned this to you: Lost — LOST BODY."), "qa never held it: full");
+        // The brief and its fact are stored together; a delivery that reaches no pane is
+        // 'offline', and the agent still holds it (the brief is in the room).
+        assert_eq!(told(&session).iter().filter(|m| m["kind"] == super::BRIEF_KIND).count(), briefs(&session).len());
+        // Reviewer R1: the project deleted for good and made again under the same name, at
+        // once (the same second): the room and its old briefs stay, the numbering restarts,
+        // and the NEW #1 has never been handed to dev, so dev gets its whole body.
+        let proj = crate::projects::project_for_session(&session).unwrap().expect("project");
+        crate::projects::delete(&proj.id).expect("delete for good");
+        // The deletion removed the agent homes it wrote; the new project declares dev again.
+        declare_agent(std::path::Path::new(&proj.path), "dev");
+        crate::projects::create(&proj.path, Some(&session), Some(&session), None).expect("the same project again");
+        assert_eq!(project_room(&session), room_name, "the room, with its history, is the same");
+        let reborn = issue_id(&save_issue(&session, serde_json::json!({ "title": "Reborn", "body": "NEW BODY", "assignee": "dev", "who": "lead", "dispatch": true })));
+        assert_eq!(reborn, id, "the public number is reused");
+        let last = briefs(&session).last().cloned().unwrap();
+        assert!(last.starts_with(&format!("@dev [board #{id}] lead assigned this to you: Reborn — NEW BODY.")), "a new issue: the full brief: {last}");
+        save_issue(&session, serde_json::json!({ "id": reborn, "assignee": "dev", "who": "lead", "dispatch": true }));
+        assert!(briefs(&session).last().unwrap().starts_with(&format!("@dev [board #{id}] lead assigned this to you again: Reborn")), "and its repeat is a pointer");
     }
 
-    /// Board #42, moved to the server with the brief (#377): the thread is
-    /// chronological, authored, separated, and nothing is appended when there
-    /// is none.
-    #[test]
-    fn the_note_thread_is_chronological_authored_and_separated() {
-        let note = |author: &str, body: &str, at: i64| serde_json::json!({ "author": author, "body": body, "at": at });
-        assert_eq!(super::board_assign_notes(7, &[], 1200), "");
-        let out = super::board_assign_notes(42, &[
-            note("builder-2", "second finding", 20),
-            note("human", "first: check the cache", 10),
-            note("lead", "third — ship it", 30),
-        ], 1200);
-        assert_eq!(out, "\n\nNotes (3):\n- human: first: check the cache\n- builder-2: second finding\n- lead: third — ship it");
-        assert_eq!(
-            super::board_assign_notes(5, &[note("a", "line one\n  line two\n\nline three", 1)], 1200),
-            "\n\nNotes (1):\n- a: line one line two line three",
-            "a note's inner newlines squash to spaces: one note stays ONE line"
-        );
-    }
+
 
     /// Board #42: the budget. One giant note cannot flood the pane, and every
     /// cut points at `tmm board show`.
@@ -4224,7 +4170,7 @@ mod tests {
     fn a_failed_post_after_the_save_is_an_answer_not_an_error() {
         let session = project_with(&["builder-2"]);
         let room_name = project_room(&session);
-        let broken = HandOff { post: &|_, _| Err("the room is full".into()), managed: &|_| true, read: &stored };
+        let broken = HandOff { issue: &|_, _, _| Err("the room is full".into()), deliver: &|_, m| m, managed: &|_| true, read: &stored };
 
         // The create path: one issue exists afterwards, assigned, and the answer
         // says the telling failed.
@@ -4239,7 +4185,7 @@ mod tests {
         // The recovery: saving the same assignee again tells it, and does not
         // file a second issue.
         let seen = std::cell::Cell::new(0);
-        let working = HandOff { post: &|_, brief| { seen.set(seen.get() + 1); assert!(brief.starts_with("@builder-2 ")); Ok(serde_json::json!({})) }, managed: &|_| true, read: &stored };
+        let working = HandOff { issue: &|_, name, _| { seen.set(seen.get() + 1); assert_eq!(name, "builder-2"); Ok(Some(serde_json::json!({}))) }, deliver: &|_, m| m, managed: &|_| true, read: &stored };
         let again = serde_json::json!({ "session": session, "id": id, "assignee": "builder-2", "who": "lead", "dispatch": true });
         let answer = super::board_save(&session, &room_name, &again, &working).unwrap();
         assert_eq!((answer["dispatch"].as_str(), seen.get()), (Some("sent"), 1));
@@ -4247,7 +4193,7 @@ mod tests {
 
         // An agent the project does not declare is never posted to.
         let ghost = serde_json::json!({ "session": session, "id": id, "assignee": "ghost", "who": "lead", "dispatch": true });
-        let nobody = HandOff { post: &|_, _| panic!("no post for an undeclared agent"), managed: &|_| false, read: &stored };
+        let nobody = HandOff { issue: &|_, _, _| panic!("no hand-off for an undeclared agent"), deliver: &|_, m| m, managed: &|_| false, read: &stored };
         assert_eq!(super::board_save(&session, &room_name, &ghost, &nobody).unwrap()["dispatch"], "offline");
     }
 
@@ -4261,7 +4207,7 @@ mod tests {
     fn a_read_back_that_fails_after_the_commit_still_answers_saved() {
         let session = project_with(&["builder-2"]);
         let room_name = project_room(&session);
-        let unreadable = HandOff { post: &|_, _| panic!("nothing to post without the issue"), managed: &|_| true, read: &|_, _| Err("database is locked".into()) };
+        let unreadable = HandOff { issue: &|_, _, _| panic!("nothing to hand off without the issue"), deliver: &|_, m| m, managed: &|_| true, read: &|_, _| Err("database is locked".into()) };
 
         // Asked to hand it over: saved once, the id comes back, and the answer says why nobody was told.
         let params = serde_json::json!({ "session": session, "title": "Ship it", "assignee": "builder-2", "who": "lead", "dispatch": true });

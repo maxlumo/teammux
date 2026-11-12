@@ -9,7 +9,7 @@ use super::registry::{DEFAULT_DSH_SYSTEM, DEFAULT_KIMI_SYSTEM, DEFAULT_OMP_SYSTE
 
 /// Bumped when the schema changes; `migrate` is the only place that knows the
 /// steps. Stored in SQLite's own `user_version` pragma.
-const SCHEMA_VERSION: i64 = 41;
+const SCHEMA_VERSION: i64 = 42;
 
 impl Store {
     /// Ensure the durable half of Board editability exists, then
@@ -795,6 +795,12 @@ impl Store {
             // room. Additive, backfilled from the last change; inside the
             // ladder, foreign keys off (non-negotiable 9).
             self.ensure_issue_done_at()?;
+        }
+        if version < 42 {
+            // v42 (board #120): an issue's hand-offs, by name, removed WITH the issue
+            // (ON DELETE CASCADE), so a recreated project's #1 is never "held" through
+            // the old #1's brief. Additive; inside the ladder, foreign keys off.
+            self.ensure_issue_handoffs()?;
         }
         Ok(())
     }

@@ -47,7 +47,7 @@ pub(crate) fn now_ms() -> i64 {
 }
 
 /// The stored row in the wire shape every consumer already speaks.
-fn message_json(m: &HubMsg) -> serde_json::Value {
+pub(crate) fn message_json(m: &HubMsg) -> serde_json::Value {
     let to: serde_json::Value =
         serde_json::from_str(&m.to_json).unwrap_or_else(|_| serde_json::json!([]));
     serde_json::json!({
@@ -83,8 +83,12 @@ pub fn post_routed_as(
     body: &str,
     to: &[String],
 ) -> Result<serde_json::Value, String> {
+    append_routed(room, id, from, body, to, "msg")
+}
+
+fn append_routed(room: &str, id: &str, from: &str, body: &str, to: &[String], kind: &str) -> Result<serde_json::Value, String> {
     let to_json = serde_json::to_string(to).unwrap_or_else(|_| "[]".into());
-    let stored = with_store(|s| s.hub_append(room, id, now_ms(), from, &to_json, "msg", body))?;
+    let stored = with_store(|s| s.hub_append(room, id, now_ms(), from, &to_json, kind, body))?;
     let json = message_json(&stored);
     let _ = channel().send(json.to_string());
     Ok(json)

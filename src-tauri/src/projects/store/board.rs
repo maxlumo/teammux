@@ -147,6 +147,80 @@ impl Store {
         Ok(())
     }
 
+    /// The v42 shape (board #120): one row per hand-off of an issue to a name, the brief's
+    /// stored ms. It dies with its issue (the cascade; a project's permanent deletion and
+    /// an issue's delete both remove issue rows), which is what makes it the issue's own
+    /// record: the public number is reused after a project is recreated, the row is not.
+    pub(super) fn ensure_issue_handoffs(&self) -> Result<(), String> {
+        self.conn
+            .execute_batch(
+                "CREATE TABLE IF NOT EXISTS issue_handoffs (
+                   issue_id INTEGER NOT NULL REFERENCES issues(id) ON DELETE CASCADE,
+                   name     TEXT NOT NULL,
+                   ts       INTEGER NOT NULL
+                 );
+                 CREATE INDEX IF NOT EXISTS issue_handoffs_pair ON issue_handoffs(issue_id, name, ts);",
+            )
+            .map_err(|e| format!("add Board hand-offs: {e}"))
+    }
+
+    /// Record that issue `number` of `session` was handed to `name` by a brief stored at
+    /// `ts` (ms). False when the issue is not there (deleted meanwhile): nothing is recorded.
+    pub fn issue_handoff_record(&self, session: &str, number: i64, name: &str, ts: i64) -> Result<bool, String> {
+        self.conn
+            .execute(
+                "INSERT INTO issue_handoffs (issue_id, name, ts)
+                   SELECT id, ?3, ?4 FROM issues WHERE session = ?1 AND project_number = ?2",
+                rusqlite::params![session, number, name, ts],
+            )
+            .map(|n| n > 0)
+            .map_err(|e| format!("record a hand-off: {e}"))
+    }
+
+    /// ISSUE a hand-off (board #120, leader note 57): in ONE transaction on this one
+    /// connection, read the live issue `number`, derive whether `name` held it before from its
+    /// own record, compose the brief from that row (`compose(issue, since)`, pure), append it
+    /// to `room` as a `kind` row, and record the hand-off at that row's ts. The brief and the
+    /// fact are both stored or neither is; nothing can come between the read and the writes;
+    /// delivery happens after, outside. None when the issue is not there.
+    pub fn issue_handoff_issue(
+        &self,
+        at: &HandoffTarget<'_>,
+        to_json: &str,
+        ts: i64,
+        compose: impl FnOnce(&serde_json::Value, Option<i64>) -> String,
+    ) -> Result<Option<super::HubMsg>, String> {
+        let HandoffTarget { session, number, name, room, sender, kind } = *at;
+        self.conn.execute_batch("BEGIN IMMEDIATE;").map_err(|e| format!("hand-off transaction: {e}"))?;
+        let issued = (|| {
+            let Some(issue) = self.issue_get(session, number)? else { return Ok(None) };
+            let since = self.issue_handoff_last(session, number, name)?;
+            let body = compose(&issue, since);
+            let msg = self.hub_append(room, &uuid::Uuid::new_v4().to_string(), ts, sender, to_json, kind, &body)?;
+            if !self.issue_handoff_record(session, number, name, msg.ts)? {
+                return Err(format!("#{number} left the board while its hand-off was stored"));
+            }
+            Ok(Some(msg))
+        })();
+        match issued {
+            Ok(v) => { self.conn.execute_batch("COMMIT;").map_err(|e| format!("commit hand-off: {e}"))?; Ok(v) }
+            Err(e) => { let _ = self.conn.execute_batch("ROLLBACK;"); Err(e) }
+        }
+    }
+
+    /// The newest hand-off (ms) of THIS issue (the live row, not its public number's
+    /// history) to `name`, compared byte for byte (`Dev` is not `dev`); None if never.
+    pub fn issue_handoff_last(&self, session: &str, number: i64, name: &str) -> Result<Option<i64>, String> {
+        self.conn
+            .query_row(
+                "SELECT MAX(h.ts) FROM issue_handoffs h JOIN issues i ON i.id = h.issue_id
+                  WHERE i.session = ?1 AND i.project_number = ?2 AND h.name = ?3",
+                rusqlite::params![session, number, name],
+                |r| r.get(0),
+            )
+            .map_err(|e| format!("read the hand-offs: {e}"))
+    }
+
     /// The board's issue in `status` whose LAST CHANGE is oldest (board #108):
     /// `(number, title, assignee, updated_at)`. `updated_at` moves with any
     /// edit or note, so it is "last change", never "in that column since".
@@ -588,9 +662,23 @@ impl Store {
     }
 }
 
+/// A hand-off's context (board #120; code-quality.md § 2: eight parameters or more take
+/// one): which issue (`session`, `number`), to whom (`name`), in which room, by whom
+/// (`sender`) and as which row kind.
+#[derive(Clone, Copy)]
+pub struct HandoffTarget<'a> {
+    pub session: &'a str,
+    pub number: i64,
+    pub name: &'a str,
+    pub room: &'a str,
+    pub sender: &'a str,
+    pub kind: &'a str,
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
 
     fn done_at(store: &Store, id: i64) -> Option<i64> {
         store.conn.query_row("SELECT done_at FROM issues WHERE session = 'proj' AND project_number = ?1", rusqlite::params![id], |r| r.get(0)).unwrap()

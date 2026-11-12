@@ -24,7 +24,7 @@ use std::path::Path;
 mod activity;
 pub mod asks;
 mod agent_names;
-mod board;
+pub(crate) mod board;
 mod projects;
 mod registry;
 mod restore;

@@ -377,7 +377,15 @@ impl Store {
         // Archive is reversible and keeps the board. Permanent delete means
         // the project stops existing: remove its task state before releasing
         // the session name, or a new project with that name would inherit the
-        // old issues (board #41). issue_notes cascade from issues at runtime.
+        // old issues (board #41). issue_notes cascade from issues at runtime. The
+        // hand-off record (board #120) is deleted explicitly first, in this same
+        // transaction, never left to the cascade pragma: a reborn #N must never be
+        // "held" through the old #N (leader, #120 note 38).
+        tx.execute(
+            "DELETE FROM issue_handoffs WHERE issue_id IN (SELECT id FROM issues WHERE session = ?1)",
+            params![session],
+        )
+        .map_err(|e| format!("delete project hand-offs: {e}"))?;
         tx.execute("DELETE FROM issues WHERE session = ?1", params![session])
             .map_err(|e| format!("delete project board: {e}"))?;
         tx.execute("DELETE FROM issue_sequences WHERE session = ?1", params![session])
@@ -523,6 +531,70 @@ mod tests {
             1,
             "permanent project deletion releases its numbering sequence too",
         );
+    }
+
+    /// Board #120 (reviewer R1, leader note 37): an issue's hand-offs are ITS record. They
+    /// die with it, so a recreated project's #1, in the SAME second and with the same
+    /// public number, has never been handed to anyone; names are exact; a fresh store on
+    /// the same file (a restart) answers the same.
+    #[test]
+    fn an_issues_handoffs_are_its_own_and_die_with_it() {
+        let path = crate::config::test_scratch(&format!("tmm-handoffs-{}", &uuid::Uuid::new_v4().simple().to_string()[..8])).join("state.db");
+        let mut store = Store::open(&path).unwrap();
+        store.insert_project(&project("alpha")).unwrap();
+        let one = store.issue_save("alpha", None, Some("first"), None, None, None, "human", 100).unwrap();
+        assert_eq!(store.issue_handoff_last("alpha", one, "dev").unwrap(), None, "never handed");
+        assert!(store.issue_handoff_record("alpha", one, "dev", 100_500).unwrap());
+        assert!(store.issue_handoff_record("alpha", one, "dev", 100_900).unwrap());
+        assert_eq!(store.issue_handoff_last("alpha", one, "dev").unwrap(), Some(100_900), "the newest");
+        assert_eq!(store.issue_handoff_last("alpha", one, "Dev").unwrap(), None, "Dev is not dev");
+        assert!(!store.issue_handoff_record("alpha", 99, "dev", 1).unwrap(), "no such issue: nothing recorded");
+        drop(store);
+        let mut store = Store::open(&path).unwrap();
+        assert_eq!(store.issue_handoff_last("alpha", one, "dev").unwrap(), Some(100_900), "a restart answers the same");
+        // Permanent deletion, then the same project again in the SAME second (created_at 100).
+        // The delete removes the record itself, cascade or not (leader, #120 note 38).
+        store.conn.execute_batch("PRAGMA foreign_keys=OFF;").unwrap();
+        assert!(store.delete_project("alpha").unwrap());
+        store.conn.execute_batch("PRAGMA foreign_keys=ON;").unwrap();
+        let left: i64 = store.conn.query_row("SELECT COUNT(*) FROM issue_handoffs", [], |r| r.get(0)).unwrap();
+        assert_eq!(left, 0, "the hand-offs went with the issues (the cascade)");
+        store.insert_project(&project("alpha")).unwrap();
+        let again = store.issue_save("alpha", None, Some("a different issue"), None, None, None, "human", 100).unwrap();
+        assert_eq!(again, one, "the public number is reused");
+        assert_eq!(store.issue_handoff_last("alpha", again, "dev").unwrap(), None, "but it was never handed to dev");
+        // Note 57: a hand-off is ISSUED in one transaction: the live row read, "held before"
+        // derived, the brief composed from that row, its room row and its fact stored.
+        let at = |number: i64| super::super::board::HandoffTarget { session: "alpha", number, name: "qa", room: "proj:alpha", sender: "lead", kind: "brief" };
+        let compose = |issue: &serde_json::Value, since: Option<i64>| format!("brief for {} since {since:?}", issue["title"].as_str().unwrap_or(""));
+        let first = store.issue_handoff_issue(&at(again), "[\"qa\"]", 150_000, compose).unwrap().expect("the live #1");
+        assert_eq!((first.kind.as_str(), first.body.as_str(), first.ts), ("brief", "brief for a different issue since None", 150_000));
+        let second = store.issue_handoff_issue(&at(again), "[\"qa\"]", 151_000, compose).unwrap().unwrap();
+        assert_eq!(second.body, "brief for a different issue since Some(150000)", "the second derives the first");
+        // Validator's interleave: the project deleted and made again AFTER the hand-off was
+        // issued (its delivery still to come): the fact went with the old issue.
+        store.conn.execute_batch("PRAGMA foreign_keys=OFF;").unwrap();
+        assert!(store.delete_project("alpha").unwrap());
+        store.conn.execute_batch("PRAGMA foreign_keys=ON;").unwrap();
+        store.insert_project(&project("alpha")).unwrap();
+        let third = store.issue_save("alpha", None, Some("third incarnation"), None, None, None, "human", 100).unwrap();
+        assert_eq!(third, one, "the public number again");
+        assert_eq!(store.issue_handoff_last("alpha", third, "qa").unwrap(), None, "the old hand-off is not the new issue's");
+        // Both or neither: a fact that cannot be written takes its brief row with it.
+        let rows = |s: &Store| -> i64 { s.conn.query_row("SELECT COUNT(*) FROM hub_msgs WHERE room = 'proj:alpha'", [], |r| r.get(0)).unwrap() };
+        let before = rows(&store);
+        store.conn.execute_batch("CREATE TEMP TRIGGER no_fact BEFORE INSERT ON issue_handoffs BEGIN SELECT RAISE(ABORT, 'the fact cannot be written'); END;").unwrap();
+        assert!(store.issue_handoff_issue(&at(third), "[\"qa\"]", 160_000, compose).is_err());
+        assert_eq!(rows(&store), before, "the brief row rolled back with its fact");
+        assert_eq!(store.issue_handoff_last("alpha", third, "qa").unwrap(), None);
+        store.conn.execute_batch("DROP TRIGGER no_fact;").unwrap();
+        assert!(store.issue_handoff_issue(&at(99), "[]", 1, compose).unwrap().is_none(), "no such issue: nothing stored");
+        let again = third;
+        // The single-issue delete takes its record too.
+        assert!(store.issue_handoff_record("alpha", again, "dev", 200_000).unwrap());
+        assert!(store.issue_delete("alpha", again).unwrap());
+        let left: i64 = store.conn.query_row("SELECT COUNT(*) FROM issue_handoffs", [], |r| r.get(0)).unwrap();
+        assert_eq!(left, 0);
     }
 
     #[test]
