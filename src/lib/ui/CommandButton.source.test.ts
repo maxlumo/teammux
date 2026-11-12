@@ -160,3 +160,16 @@ test('the panel toggle is a disclosure glyph whose inner chevron alone turns (bo
   const css = await readFile(new URL('../../app.css', import.meta.url), 'utf8');
   assert.match(css, /\.flip:has\(\.turn\) \{ transform: none; \}\s*\n\.flip \.turn \{ transition: transform var\(--t-move\) ease; transform-box: fill-box; transform-origin: center; \}\s*\n\.flip\.on \.turn \{ transform: rotate\(180deg\); \}/u);
 });
+
+// Board #107 F6: a wrapping label is the atom's variant, not a restyle around it. The button
+// grows by its lines and keeps the one-line command's space above and below the text, so a
+// wrapped label never crosses the inset paint (touch: 44 tall, paint inset 6).
+test('the wrap variant keeps the one-line vertical inset in tokens and lets the label wrap (#107 F6)', () => {
+  const wrap = style.match(/\.wrap \{([^}]+)\}/u)?.[1] ?? '';
+  assert.match(wrap, /height:\s*auto;/u);
+  assert.match(wrap, /min-height:\s*var\(--control-height\)/u);
+  assert.match(wrap, /padding-block:\s*calc\(\(var\(--control-height\) - var\(--control-line-height\)\) \/ 2\)/u);
+  assert.doesNotMatch(wrap, /\d+px/u, 'tokens only');
+  assert.match(style, /\.wrap \.command-label \{[^}]*white-space:\s*normal/u);
+  assert.match(style, /\.command-label \{ white-space: nowrap; \}/u, 'every other command stays one line');
+});

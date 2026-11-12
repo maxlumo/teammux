@@ -54,7 +54,7 @@
 import { systemLine, statusNote, boardLine, newsKind, type NewsKind } from './hub.ts';
 import { roomOf } from '../projects/projects.ts';
 
-export type FeedMsg = { id?: number | string; ts?: number; from?: string; body?: string; to?: unknown };
+export type FeedMsg = { id?: number | string; ts?: number; from?: string; kind?: string; body?: string; to?: unknown };
 export type NotifyState = { seen: Set<string>; lastCueAt: number };
 
 /** The placeholder cue (owner will supply options later — see board #57). */
@@ -153,14 +153,16 @@ export function toHuman(m: { to?: unknown }): boolean {
  * entries (HubMsg has no turn identity). Room unread is `newsKind`, wider. */
 export function bellKind(m: FeedMsg): NewsKind {
   const kind = newsKind(m);
-  return kind === 'finished' || kind === 'alert' || (kind !== 'none' && toHuman(m)) ? kind : 'none';
+  return kind === 'finished' || kind === 'alert' || kind === 'ask' || (kind !== 'none' && toHuman(m)) ? kind : 'none';
 }
 
 /** The kinds that RING at a level (notifications.md: done = finished only;
  * replies adds replies; all adds progress notes). An `alert` (board #437:
- * the server's unconfirmed report) rings at every level, like `finished`. */
+ * the server's unconfirmed report) and an `ask` (board #107: a question that
+ * waits for the person) ring at every level, like `finished`. */
 export function levelKinds(level: NotifyLevel): ReadonlySet<NewsKind> {
-  return new Set<NewsKind>(level === 'done' ? ['finished', 'alert'] : level === 'replies' ? ['finished', 'alert', 'reply'] : ['finished', 'alert', 'reply', 'status']);
+  const always: NewsKind[] = ['finished', 'alert', 'ask'];
+  return new Set<NewsKind>(level === 'done' ? always : level === 'replies' ? [...always, 'reply'] : [...always, 'reply', 'status']);
 }
 
 /** Which of a batch's NEVER-SEEN messages ring. `first` marks a room's

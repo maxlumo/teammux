@@ -90,6 +90,15 @@ Pinned with real tmux and the fake codex of #77: `a_live_asker_…`,
 `an_answer_to_an_asker_whose_cli_exited_…`, `an_answer_to_a_stopped_asker_…`,
 `a_same_name_replacement_is_not_the_asker`.
 
+`found` therefore means **handed to the delivery path**: typed into the asker's
+pane, or held until its turn ends or it restarts. It is not a receipt (a held
+line can still be retired when the asker is removed, #116), so the client shows
+it as `Sent to <asker>` / `已发给 <asker>`, never "delivered" (board #107,
+reviewer R2). The server records delivery after the close's push, so a reader
+may see an answered or dismissed row with no delivery yet; the client says so in
+its own words (`no delivery recorded yet`) and reads again (hub-feed.md § the
+ask bubble).
+
 ### The asker is a lifetime, not a name (G1)
 
 An agent removed and created again under the same name is somebody else and

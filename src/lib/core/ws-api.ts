@@ -460,6 +460,16 @@ export function createWsApi(connection: Connection) {
   /** One project's derived summary (board #108, cap `dashboard`). */
   const dashboard = (session: string) =>
     call<Record<string, unknown>>('hub_dashboard', { session });
+  /** Board #107: the room's asks (board #106, cap `asks`), oldest first —
+   * every one with `all`. The answer carries the project's labels. */
+  const hubAskList = (session: string, all = true) =>
+    call<{ asks: AskRow[]; labels?: unknown }>('hub_ask_list', { session, all });
+  /** The person's answer: an option, text, or both. A closed ask is ANSWERED
+   * `{applied: false, refused, ask}` with the winner's row, never an error. */
+  const hubAskAnswer = (session: string, seq: number, option?: string, text?: string) =>
+    call<AskClose>('hub_ask_answer', { session, seq, ...(option ? { option } : {}), ...(text ? { text } : {}) });
+  const hubAskDismiss = (session: string, seq: number) =>
+    call<AskClose>('hub_ask_dismiss', { session, seq });
   const boardGet = (session: string, id: number) =>
     call<BoardIssue>('hub_board_get', { session, id });
   /** Create (no id) or patch (id + only the fields to change). `who` records the
@@ -745,7 +755,7 @@ export function createWsApi(connection: Connection) {
     fsUploadBegin, fsUploadResume, fsUploadAbort, fsConvert, gitCmd, projectList, projectCreate, projectAdopt, projectUp,
     projectDown, projectRename, projectArchive, projectDelete, projectAutostart, hubPost,
     hubCommand, hubLog, hubLogAround, hubSearch, hubFiles, hubMsgArchive, hubMsgRestore, hubMsgPurge, hubRooms,
-    hubUnread, hubRead, systemStatus, hubArchive, hubAgents, boardList, boardCounts, askCounts, dashboard,
+    hubUnread, hubRead, systemStatus, hubArchive, hubAgents, boardList, boardCounts, askCounts, dashboard, hubAskList, hubAskAnswer, hubAskDismiss,
     boardGet, boardSave, boardNote, boardDelete, boardBlock, hubActivity, hubSpawn, hubSpawnTeam,
     hubAgentStop, hubAgentRemove, hubAgentInterrupt, hubAgentInputMode, hubAgentSetTeam, hubAgentRestart, hubAgentFork, hubAgentRename,
     hubTeamRestart, hubTeamRemove, registryList, registrySave, registryDelete, globalPromptGet,
@@ -754,6 +764,17 @@ export function createWsApi(connection: Connection) {
     skillsFile, mcpList, mcpSave, mcpDelete, fsDownloadHttp, fsPreviewBase,
   };
 }
+
+/** Board #106's ask row as the server answers it (websocket-rpc.md `hub_ask`). */
+export type AskOption = { key: string; label: string };
+export type AskRow = {
+  seq: number; room: string; ts: number; asker: string; question: string;
+  options: AskOption[]; recommend: string | null; issue: number | null;
+  state: 'open' | 'answered' | 'dismissed' | 'withdrawn';
+  closed_seq: number | null; closed_at: number | null; answer_key: string | null;
+  said?: string | null; closing: string | null; delivery: string | null;
+};
+export type AskClose = { applied: boolean; refused?: string; ask: AskRow; labels?: unknown };
 
 /** The bound RPC surface of one connection. */
 export type WsApi = ReturnType<typeof createWsApi>;
@@ -802,6 +823,7 @@ export const RPC_KIND = {
   hubRooms: 'read', hubUnread: 'read', hubRead: 'write', systemStatus: 'read',
   hubArchive: 'write', hubAgents: 'read',
   boardList: 'read', boardCounts: 'read', askCounts: 'read', dashboard: 'read', boardGet: 'read',
+  hubAskList: 'read', hubAskAnswer: 'write', hubAskDismiss: 'write',
   boardSave: 'write', boardNote: 'write', boardDelete: 'write', boardBlock: 'write',
   hubActivity: 'read', hubSpawn: 'write', hubSpawnTeam: 'write',
   hubAgentStop: 'write', hubAgentRemove: 'write', hubAgentInterrupt: 'write', hubAgentInputMode: 'write', hubAgentSetTeam: 'write',

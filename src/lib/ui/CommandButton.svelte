@@ -38,13 +38,22 @@
      * for a command with nothing behind it at all. */
     ariaDisabled?: boolean;
     destructiveConfirm?: boolean;
+    /** A long label wraps instead of staying on one line (an ask's options, board #107 F6):
+     * the button grows by its lines and keeps the one-line command's own space above and
+     * below the text, so every line sits inside the inset paint at every control height. */
+    wrap?: boolean;
     onclick?: (event: MouseEvent) => void;
     element?: HTMLButtonElement | null;
-  } & ({ pending?: false; icon?: string } | { pending: boolean; icon: string });
+  } & ({ pending?: false; icon?: string; reserve?: boolean } | { pending: boolean; icon: string; reserve?: boolean } | {
+    /** A command with no icon of its own that can still go pending (an ask's options, board
+     * #107): the atom reserves an EMPTY icon slot, nothing drawn at rest and the pending
+     * spinner in it, so the label never moves. */
+    pending: boolean; reserve: true; icon?: undefined;
+  });
   let {
     label, icon = '', variant = 'secondary', iconOnly = false,
     pressed, expanded, inside = false, bare = false, round = false, controls, hasPopup, title,
-    disabled = false, ariaDisabled = false, pending = false, destructiveConfirm = false,
+    disabled = false, ariaDisabled = false, pending = false, destructiveConfirm = false, wrap = false, reserve = false,
     onclick = () => {}, element = $bindable(null),
   }: Props = $props();
   const compact = $derived(iconOnly || variant === 'icon');
@@ -58,15 +67,15 @@
 
 <button type="button" class="command-button"
   class:primary={solid} class:secondary={variant === 'secondary'}
-  class:danger={variant === 'danger'} class:icon-only={compact} class:solid class:bare={bare && !solid} class:round class:pending class:engaged
+  class:danger={variant === 'danger'} class:icon-only={compact} class:solid class:bare={bare && !solid} class:round class:pending class:engaged class:wrap
   disabled={disabled || pending} aria-disabled={ariaDisabled || undefined} aria-label={title ?? label} aria-busy={pending || undefined}
   aria-pressed={pressed} aria-expanded={expanded} aria-controls={controls} aria-haspopup={hasPopup}
   bind:this={element}
   use:hoverInfo={() => compact ? { title: title ?? label } : title ? { title } : null}
   onclick={(event) => { if (!disabled && !pending) onclick(event); }}>
-  {#if icon}
+  {#if icon || reserve}
     <span class="command-icon" class:spinning={pending} class:flip={disclosure} class:on={disclosure && expanded} aria-hidden="true">
-      <Icon name={pending ? 'refresh' : icon} />
+      {#if pending || icon}<Icon name={pending ? 'refresh' : icon} />{/if}
     </span>
   {/if}
   {#if !compact}<span class="command-label">{label}</span>{/if}
@@ -129,6 +138,9 @@
   .command-icon { display: inline-flex; width: var(--control-icon-size); height: var(--control-icon-size); flex: none; }
   .command-icon :global(svg) { width: 100%; height: 100%; }
   .command-label { white-space: nowrap; }
+  .wrap { height: auto; min-height: var(--control-height); max-width: 100%; justify-content: flex-start; text-align: start;
+    padding-block: calc((var(--control-height) - var(--control-line-height)) / 2); }
+  .wrap .command-label { white-space: normal; overflow-wrap: anywhere; min-width: 0; }
   .spinning { animation: spin 0.6s linear infinite; }
   @media (prefers-reduced-motion: reduce) {
     .command-button, .command-button::before { transition: none; }

@@ -412,12 +412,15 @@ export function agoShort(ts: number, now: number): string {
  * review/done; that and a `done` status note are `finished` (rings at every
  * level); other status notes are `status` (progress, `all` only); the server's
  * own unconfirmed report is `alert` (board #437: rings at every level, since
- * for a self-wake nobody else is told); anything else an agent says is a
+ * for a self-wake nobody else is told); an ask (message kind `ask`, board
+ * #107) is `ask` (rings at every level); anything else an agent says is a
  * `reply`. */
-export type NewsKind = 'none' | 'reply' | 'status' | 'finished' | 'alert';
-export function newsKind(m: { from?: string; body?: string }): NewsKind {
+export type NewsKind = 'none' | 'reply' | 'status' | 'finished' | 'alert' | 'ask';
+export function newsKind(m: { from?: string; kind?: string; body?: string }): NewsKind {
   const from = m.from ?? '';
   if (!from || from === 'human') return 'none';
+  // An agent's question to the person (board #107): kind `ask`, news at every level.
+  if (m.kind === 'ask') return 'ask';
   const line = systemLine(m.body);
   if (line !== null) {
     if (from === 'tmm' && unconfirmedReport(line)) return 'alert';

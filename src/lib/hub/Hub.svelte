@@ -46,7 +46,8 @@
   import { agentNames, applyRename, keepLabels, RESERVED_LABELS } from './names.ts';
   import { HUMAN, agentHue, quotePreview, stateDotColor, mergeMessages, mergeEvents, backendColor as colorOf, feedBlocks, filterBlocks, mergeStates, pickLead, pickDrawerAgent, addressed, addressedTeam, mentionTokens, mentionedAgents, unreadSenders, stoppedAgents, slashCommand, inputModeSwitch, issueSpans, systemLine, detailWords } from './hub.ts';
   import { issueRef } from './board.ts';
-  import { AGENT_TEAM, lacksCap } from '../core/login-caps.ts';
+  import { AGENT_TEAM, ASKS, lacksCap } from '../core/login-caps.ts';
+  import { AskBook, isAsk, closingSeq } from './asks.svelte.ts';
   import { resolvePathRef } from '../core/path-links.ts';
   import { createStager } from './attachments.svelte.ts';
   import { ALL_TARGET, attachmentBody, busyTargetsFor, canAddress, lockedSend, targetMembers, targetTeam, teamRoot, teamTarget } from './hub-composer.ts';
@@ -78,7 +79,7 @@
   // lives on the connection, the calls on the api — both from the one read.
   const {
     projectList, projectUp, projectDown, projectDelete, projectArchive, projectCreate, projectRename, listSessionsWithPanes,
-    hubPost, hubCommand, hubAgentRename, modelsList, boardList, hubAgentSetTeam, hubLog, hubLogAround, hubSearch, hubFiles, hubRooms, hubUnread, hubRead, hubAgents, fsCwd, hubSpawn, hubSpawnTeam, teamsList, hubAgentStop, hubAgentRestart, hubAgentFork, hubTeamRestart, hubTeamRemove, hubActivity, hubAgentRemove, hubAgentInterrupt, hubAgentInputMode, registryList,
+    hubPost, hubCommand, hubAgentRename, modelsList, boardList, hubAskList, hubAskAnswer, hubAskDismiss, hubAgentSetTeam, hubLog, hubLogAround, hubSearch, hubFiles, hubRooms, hubUnread, hubRead, hubAgents, fsCwd, hubSpawn, hubSpawnTeam, teamsList, hubAgentStop, hubAgentRestart, hubAgentFork, hubTeamRestart, hubTeamRemove, hubActivity, hubAgentRemove, hubAgentInterrupt, hubAgentInputMode, registryList,
   } = scope.runtime.api;
   const { addTeamMessageListener, removeTeamMessageListener, addAgentRenamedListener, removeAgentRenamedListener } = scope.runtime.connection;
   // What this server's login says it can do (board #377 caps). Moving a
@@ -91,6 +92,9 @@
     return () => { if (typeof off === 'function') off(); };
   });
   const moveBlocked = $derived(lacksCap(loginCaps, AGENT_TEAM));
+  // Board #107: the room's asks, drawn only once this server is KNOWN to have them.
+  const asksOn = $derived(Array.isArray(loginCaps) && loginCaps.includes(ASKS));
+  const askBook = new AskBook({ hubAskList, hubAskAnswer, hubAskDismiss });
   /* The context a card drag belongs to (board #384, reviewer P1-A): a NEW
      object whenever the project, the page's eligibility, the room's
      readiness or the server's capability changes (a $derived re-runs on any
@@ -582,7 +586,7 @@
     // A jump owns the landing (board #322): no tail, no seen, until it lands.
     following = !jumpIntent;
     if (feed.length && !jumpIntent) scrollFeed(true);
-    await Promise.all([loadFeed(), loadAgents(), loadActivity()]);
+    await Promise.all([loadFeed(), loadAgents(), loadActivity(), asksOn ? askBook.load(session) : null]);
     if (selected === session) {
       // An uncached room's first fill unfolds (the skeleton has been standing
       // in for it); a cached one was already on screen and stays a cut.
@@ -603,7 +607,10 @@
 
   const loadFeed = single(readFeed, () => selected);
   async function readFeed() {
-    if (!selected || windowed) return; // a history window takes no live rows (#322)
+    if (!selected) return;
+    // A history window takes no live rows (#322); its asks' ROWS still reconcile at this
+    // boundary (board #107 round 4): the frozen messages and the read mark stay as they are.
+    if (windowed) { if (asksOn) void askBook.reconcile(selected); return; }
     // The answer must still be about the question: every poller here freezes
     // the project it asked ABOUT and drops the reply if the user has switched
     // meanwhile — a late resolve was merging the OLD room's messages into the
@@ -654,6 +661,8 @@
         // seen keys make the two alert once.
         if (following) scrollFeed(); else newBelow = true;
       }
+      // A feed read is the room's read boundary: loaded asks reconcile with it (board #107 R1).
+      if (asksOn && ours()) void askBook.reconcile(s);
     } catch (e) { throw e; /* hub not available: the loader decides who sees it (#444 review P1-B) */ }
   }
 
@@ -2119,6 +2128,13 @@
     }));
   }
 
+  // An ask the feed shows with no row and no read answered for it yet is read (board #107
+  // F5): a jump, a page or a cache can bring one the push did not.
+  $effect(() => { if (asksOn && selected) askBook.ensure(selected, feed.filter(isAsk).map((m) => m.seq)); });
+
+  // The page shown again is a read boundary for the room's asks too (board #107 R1).
+  $effect(() => { if (visible) untrack(() => { if (asksOn && selected) void askBook.reconcile(selected); }); });
+
   // Live pushes + polling while visible.
   const onPush = (m) => {
     // New-message notification, PRIMARY site (board #72): a push arrives for
@@ -2137,6 +2153,9 @@
     // member does no room work on a push either (D4; reviewer P2-1 on
     // 018d4fa5): no feed merge, no scroll, no roster refresh — the room's
     // state is rebuilt when it is shown (`loadFeed` on show).
+    // The room's asks follow the ROOM, not the page (board #107 F5): an ask or the line
+    // that closed one is read even while hidden, so a bell jump lands on its card.
+    if (asksOn && selected && m?.room === room(selected) && (isAsk(m) || closingSeq(m) !== null)) askBook.load(selected);
     if (!visible) return;
     if (!selected || m?.room !== room(selected)) return;
     // A history window takes no live rows; the to-tail dot says news waits.
@@ -2888,6 +2907,7 @@
         onimagestart={() => viewClaim.begin()}
         onimage={(url, claim, ref) => { if (searchActive && viewClaim.accept(claim)) showShot(viewerOpen(url, ref)); }}
         onreply={replyToMessage}
+        asks={asksOn ? askBook : null} {stopped} ondiscuss={replyToMessage}
         onboard={(id) => {
           if (mobile || compact) { openBoardTab?.(selected, id); return; }
           drawerIssueReq = { session: selected, id, n: (drawerIssueReq?.n ?? 0) + 1 };

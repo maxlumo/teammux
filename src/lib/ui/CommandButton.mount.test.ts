@@ -206,3 +206,21 @@ test('tool metadata does not replace ordinary command variant styling (#157)', a
     } finally { await app.close(); }
   }
 });
+
+// Board #107 (leader note 53): a command with no icon of its own may still go pending. The atom
+// owns an EMPTY reserved slot: nothing drawn at rest, the spinner in the same slot while
+// pending, so the label never moves; contrast and aria-busy are the pending contract's.
+test('the reserve modifier: an empty icon slot at rest, the pending spinner in it, the label in place (#107)', async context => {
+  for (const pending of [false, true]) {
+    const app = await (await compiled).mount(context, { props: { label: 'A · alpha', reserve: true, pending }, modules: [] });
+    try {
+      const button = app.document.querySelector('button')!;
+      const slot = button.querySelector('.command-icon');
+      assert.ok(slot, 'the slot is reserved in both states');
+      assert.equal(!!slot!.querySelector('svg'), pending, pending ? 'the spinner while pending' : 'nothing drawn at rest');
+      assert.equal(button.classList.contains('pending'), pending);
+      assert.equal(button.getAttribute('aria-busy'), pending ? 'true' : null);
+      assert.equal(button.querySelector('.command-label')?.textContent, 'A · alpha');
+    } finally { await app.close(); }
+  }
+});

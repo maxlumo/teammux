@@ -6910,3 +6910,146 @@ test('the sidebar shows every project\'s agents by their labels, and a rename in
     assert.deepEqual(chips(), ['sam'], 'restored while the labels still cannot be read: the known label crossed the archive and back');
   } finally { await app.close(); }
 });
+
+// ── Board #107 F5: the ask store follows the ROOM, not the Hub's visibility ──
+test('an ask pushed while the Hub is hidden is read for its room, so the bell jump lands on an answerable card (#107 F5)', { timeout: 60000 }, async (context) => {
+  const { rpc, pushed } = roomFixture();
+  const ask = { id: 'q9', seq: 9, room: 'proj:fixture', from: 'alice', to: ['human'], kind: 'ask', ts: Date.now(), body: '@human [ask] Which layout?\nA · alpha' };
+  const row = { seq: 9, room: 'proj:fixture', ts: ask.ts, asker: 'alice', question: 'Which layout?', options: [{ key: 'A', label: 'alpha' }], recommend: null, issue: null, state: 'open', closed_seq: null, closed_at: null, answer_key: null, said: null, closing: null, delivery: null };
+  let asks: unknown[] = [];
+  let log: unknown[] = [];
+  const lists: string[] = [];
+  const app = await (await compiledHub()).mount(context, {
+    props: { visible: true },
+    setup(window) { window.Element.prototype.getAnimations = () => []; window.HTMLCanvasElement.prototype.getContext = () => null; window.HTMLMediaElement.prototype.play = () => Promise.resolve(); },
+    modules: [{ ...rpc,
+      getCaps: () => [...rpc.getCaps(), 'asks'],
+      hubLog: async () => ({ messages: log, has_more: false }),
+      hubAskList: async (session: string) => { lists.push(session); return { asks }; },
+    }],
+  });
+  const settle = async () => { for (let i = 0; i < 10; i++) await app.flush(); };
+  try {
+    await settle();
+    assert.ok(lists.includes('fixture'), 'opening the room reads its asks');
+    // Chat open → another page: the Hub is hidden.
+    await app.setProps({ visible: false }); await settle();
+    // A new ask is pushed while hidden; the server has its row.
+    asks = [row]; log = [ask];
+    const before = lists.length;
+    for (const listener of pushed) (listener as (m: unknown) => void)(app.window.JSON.parse(JSON.stringify(ask)));
+    await settle();
+    assert.equal(lists.length, before + 1, 'a hidden Hub still reads the room\'s asks on an ask push');
+    // The bell entry is tapped: the Hub is shown at that room.
+    await app.setProps({ visible: true }); await settle();
+    await app.advance(10000); await settle();
+    const card = app.document.querySelector('[data-ask-seq="9"]');
+    assert.ok(card, 'the ask opened from its bell entry is the card');
+    assert.ok(card!.querySelectorAll('button').length > 0, 'with its controls');
+    assert.equal(app.document.querySelector('.ask-missing'), null, 'never "could not be loaded" for a row the server has');
+  } finally { await app.close(); }
+});
+
+// ── Board #107 R1: loaded asks reconcile at the room's ordinary read boundaries ──
+// No push reaches the client in these cases (a close while "disconnected", a delivery the
+// server records after the close's push): only the feed poll and the page shown again do.
+async function askRoom(context: TestContext, first: unknown[]) {
+  const { rpc } = roomFixture();
+  const msg = (seq: number) => ({ id: `q${seq}`, seq, room: 'proj:fixture', from: 'alice', to: ['human'], kind: 'ask', ts: 1_800_000_000_000 + seq, body: `@human [ask] Q${seq}?\nA · alpha` });
+  const ask = (seq: number, patch: Record<string, unknown> = {}) => ({ seq, room: 'proj:fixture', ts: 1, asker: 'alice', question: `Q${seq}?`, options: [{ key: 'A', label: 'alpha' }], recommend: null, issue: null, state: 'open', closed_seq: null, closed_at: null, answer_key: null, said: null, closing: null, delivery: null, ...patch });
+  let rows = first;
+  let fail = false;
+  const lists: boolean[] = [];
+  const app = await (await compiledHub()).mount(context, {
+    props: { visible: true },
+    setup(window) { window.Element.prototype.getAnimations = () => []; window.HTMLCanvasElement.prototype.getContext = () => null; window.HTMLMediaElement.prototype.play = () => Promise.resolve(); },
+    modules: [{ ...rpc,
+      getCaps: () => [...rpc.getCaps(), 'asks'],
+      hubLog: async () => ({ messages: [msg(9)], has_more: false }),
+      hubAskList: async (_s: string, all = true) => { lists.push(all); if (fail) throw new Error('down'); return { asks: (rows as any[]).filter((r) => all || r.state === 'open') }; },
+    }],
+  });
+  const settle = async () => { for (let i = 0; i < 12; i++) await app.flush(); };
+  await settle();
+  const card = () => app.document.querySelector('[data-ask-seq="9"]');
+  return { app, settle, card, lists, ask, set: (next: unknown[]) => { rows = next; }, fail: (v: boolean) => { fail = v; } };
+}
+const at9 = { state: 'answered', said: 'A · alpha', answer_key: 'A', closed_at: 1_800_000_060_000 };
+
+test('a close missed while disconnected shows closed, without controls, after the ordinary feed poll (#107 R1)', { timeout: 60000 }, async (context) => {
+  const h = await askRoom(context, []);
+  try {
+    h.set([h.ask(9)]); await h.app.advance(10000); await h.settle();
+    assert.ok(h.card()?.querySelectorAll('button').length, 'the open card, with controls');
+    h.set([h.ask(9, { ...at9, delivery: 'found' })]);   // closed elsewhere; no push arrives
+    await h.app.advance(10000); await h.settle();
+    assert.equal(h.card()?.querySelector('.ask-state')?.textContent, 'Answered');
+    assert.equal(h.card()?.querySelectorAll('button').length, 0, 'no live controls');
+  } finally { await h.app.close(); }
+});
+
+test('answered with no delivery yet: the later delivery appears on a passive client at the next poll (#107 R1)', { timeout: 60000 }, async (context) => {
+  // The room opens on the row the close's push read: answered, its delivery not recorded yet.
+  const h = await askRoom(context, [{ seq: 9, room: 'proj:fixture', ts: 1, asker: 'alice', question: 'Q9?', options: [{ key: 'A', label: 'alpha' }], recommend: null, issue: null, closed_seq: null, closing: null, ...at9, delivery: null }]);
+  try {
+    assert.equal(h.card()?.querySelector('.ask-delivery')?.textContent, 'no delivery recorded yet', 'the client\'s own words, none of the server\'s');
+    h.set([h.ask(9, { ...at9, delivery: 'found' })]);
+    await h.app.advance(10000); await h.settle();
+    assert.equal(h.card()?.querySelector('.ask-delivery')?.textContent, 'Sent to alice');
+    const full = h.lists.filter((all) => all).length;
+    await h.app.advance(10000); await h.settle();
+    assert.equal(h.lists.filter((all) => all).length, full, 'known: the steady state reads the open set only');
+    assert.equal(h.lists.at(-1), false);
+  } finally { await h.app.close(); }
+});
+
+test('a failed reconcile marks the card and recovers at the next boundary by itself; showing the page again is a boundary (#107 R1)', { timeout: 60000 }, async (context) => {
+  const h = await askRoom(context, []);
+  try {
+    h.set([h.ask(9)]); await h.app.advance(10000); await h.settle();
+    h.fail(true); await h.app.advance(10000); await h.settle();
+    assert.equal(h.card()?.querySelector('.ask-stale')?.textContent, 'Could not refresh this question.');
+    h.fail(false); h.set([h.ask(9, { state: 'dismissed', said: 'dismissed: no', closed_at: 1_800_000_060_000, delivery: 'found' })]);
+    await h.app.setProps({ visible: false }); await h.settle();
+    await h.app.setProps({ visible: true }); await h.settle();
+    assert.equal(h.card()?.querySelector('.ask-state')?.textContent, 'Dismissed', 'shown again: reconciled without waiting for a poll');
+    assert.equal(h.card()?.querySelector('.ask-stale'), null);
+  } finally { await h.app.close(); }
+});
+
+// Board #107 round 4 (validator-2 notes 67-68): the bell leads into a HISTORY WINDOW, and there
+// readFeed returned before the ask reconcile. The rows reconcile at the same poll boundary
+// while the window is frozen; the window's messages and the read mark stay as they are.
+test('in a history window a close missed with no push shows closed after the ordinary poll; the window and the read mark are untouched (#107 round 4)', { timeout: 60000 }, async (context) => {
+  const f0 = jumpFixture();
+  const target = { ...f0.around[2], kind: 'ask', body: '@human [ask] Which layout?\nA · alpha' };
+  const around = [f0.around[0], f0.around[1], target, f0.around[3], f0.around[4]];
+  const ask = (patch: Record<string, unknown> = {}) => ({ seq: 50, room: 'proj:other', ts: 1_050, asker: 'alice', question: 'Which layout?', options: [{ key: 'A', label: 'alpha' }], recommend: null, issue: null, state: 'open', closed_seq: null, closed_at: null, answer_key: null, said: null, closing: null, delivery: null, ...patch });
+  let row = ask();
+  const lists: boolean[] = [];
+  const f = jumpFixture({
+    getCaps: () => ['board_dispatch', 'spawn_join', 'agent_team', 'asks'],
+    hubLogAround: async () => ({ has_more: true, newer_more: true, oldest_seq: 48, messages: around }),
+    hubAskList: async (_s: string, all = true) => { lists.push(all); return { asks: all || row.state === 'open' ? [row] : [] }; },
+  });
+  const app = await mountJump(context, f.rpc);
+  try {
+    await until(app, () => !!app.document.querySelector('.proj-row[aria-label^="other"]'));
+    const centre = centreOf(app);
+    centre.record({ ...alertFor(), kind: 'ask' });
+    centre.requestJump(centre.items[0]);
+    const card = () => app.document.querySelector('[data-ask-seq="50"]');
+    await until(app, () => !!card()?.querySelector('button'));
+    assert.ok(card()?.querySelectorAll('button').length, 'the jump lands on the open card');
+    assert.ok(app.document.querySelector('.to-tail'), 'a history window');
+    const shown = () => [...app.document.querySelectorAll('[data-msg]')].map((e) => e.getAttribute('data-msg'));
+    const before = shown();
+    row = ask({ state: 'answered', said: 'A · alpha', answer_key: 'A', closed_at: 1_800_000_060_000, delivery: 'found' });  // answered elsewhere; no push
+    await app.advance(10000); await until(app, () => !!card()?.querySelector('.ask-state'));
+    assert.equal(card()?.querySelector('.ask-state')?.textContent, 'Answered');
+    assert.equal(card()?.querySelectorAll('button').length, 0, 'no live controls');
+    assert.deepEqual(shown(), before, 'the frozen window\'s messages are unchanged');
+    assert.equal(app.document.querySelector('[data-msg="id209"]'), null, 'no tail rows joined it');
+    assert.equal(JSON.parse(app.window.localStorage.getItem('tmux_hub_seen') ?? '{}').other, undefined, 'the read mark did not move');
+  } finally { await app.close(); }
+});

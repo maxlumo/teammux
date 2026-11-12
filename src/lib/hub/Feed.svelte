@@ -21,6 +21,8 @@
   import { FONT_CHANGE_EVENT } from '../app/fonts.svelte.ts';
   import { askTurns, blockKey } from './hub-turns.ts';
   import { NO_LABELS } from './names.ts';
+  import AskCard from './AskCard.svelte';
+  import { isAsk as isAskMessage, askerState } from './asks.svelte.ts';
   import { parseQuote, TAIL_GAP, bottomGap, tailAfterScroll, markMentions, showMentions, mentionedAgents, splitImages, toolColor, pickAnchor, toolEventParts, elideTail, foldedCommandArgs, markIssueRefs, foldLines, statusNote, noteStateColor, runtimeLabel, agentHue, sysParts, sysVerbColor, boardLine, boardStatusColor, promptParts, sameDay, continuesRun, perLineOf, STEPS_ROWS, stateIsLive } from './hub.ts';
 
   let {
@@ -36,6 +38,10 @@
      * tail, so nothing here follows, marks seen or writes the tail — the
      * to-tail control asks Hub for the latest page instead (`onlatest`). */
     windowed = false, onlatest = () => {},
+    /** Board #107: the room's asks (an `AskBook`) when the server has the `asks`
+     * capability, else null (an ask is then the plain message an older client shows);
+     * `stopped` names the declared-stopped agents; `ondiscuss` is Hub's reply entry. */
+    asks = null, stopped = [], ondiscuss = null,
   } = $props();
 
   // A resize snapshot belongs to one room. Tool disclosures, copied-label
@@ -961,7 +967,12 @@
               {#if quote && rawOpen !== key}
                 <blockquote class="m-quote" class:folded><span class="m-quote-who">{names.shown(quote.from)} · {quote.time}</span> {quote.excerpt}</blockquote>
               {/if}
-              {#if b.command && rawOpen !== key}
+              {#if asks && isAskMessage(m) && asks.rows[m.seq] && rawOpen !== key}
+                {@const row = asks.rows[m.seq]}
+                <AskCard ask={row} {names} asker={askerState(row.asker, agents, stopped)} refused={asks.refused[m.seq] ?? ''} error={asks.errors?.[m.seq] ?? ''} stale={asks.failed} draft={asks.drafts?.[m.seq]} ondraft={(d) => asks.setDraft?.(m.seq, d)} busy={!!asks.busy[m.seq]}
+                  onanswer={(option, words) => asks.answer(m.seq, option, words)} ondismiss={() => asks.dismiss(m.seq)}
+                  ondiscuss={() => { if (askerState(row.asker, agents, stopped) !== 'gone') ondiscuss?.(m); }} />
+              {:else if b.command && rawOpen !== key}
                 <!-- The command in the bubble's own atoms, as plain text (no
                      markdown: arguments are data): the recipients in the
                      mention dialect, the name in the rendered inline-
@@ -976,6 +987,9 @@
                        Raw view and agent messages render in full. -->
                   {@html markIssueRefs(markMentions(renderMarkdown(folded ? foldBody(parts.text, !!quote) : parts.text), knownNames, names), issueSet)}
                 {/if}
+              {/if}
+              {#if asks && isAskMessage(m) && !asks.rows[m.seq] && (asks.failed || asks.missing?.[m.seq]) && rawOpen !== key}
+                <p class="ask-missing" role="status">{t('askNotLoaded')}</p>
               {/if}
               <!-- One unfold control for a folded command and a folded text. -->
               {#if folded && parts.images.length}
@@ -1290,6 +1304,7 @@
      now yields to — would have nothing to grab. Head and meta already opt
      out: a drag that starts on the words must not smear into chrome. */
   .m-body { min-width: 0; display: flow-root; user-select: text; -webkit-user-select: text; }
+  .ask-missing { font-size: var(--fs-meta); color: var(--text3); }
   .m-body > :global(p:nth-last-child(2)) { display: inline; }
   /* The leading @recipient — the address — reads apart from the words
      without shouting: weight and a quiet accent lean, no chip, no box. */

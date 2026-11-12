@@ -260,17 +260,17 @@ impl Store {
     /// watermark — `seq` when the client has one, else its legacy `ts` — oldest
     /// first (board #322, the unread summary). Only the first 256 characters
     /// of a body come back: the news rule reads a marker prefix, never prose.
-    pub fn hub_above(&self, room: &str, after_seq: Option<i64>, after_ts: i64) -> Result<Vec<(i64, String, String)>, String> {
+    pub fn hub_above(&self, room: &str, after_seq: Option<i64>, after_ts: i64) -> Result<Vec<(i64, String, String, String)>, String> {
         let mut stmt = self
             .conn
             .prepare_cached(
-                "SELECT seq, sender, substr(body, 1, 256) FROM hub_msgs
+                "SELECT seq, sender, kind, substr(body, 1, 256) FROM hub_msgs
                  WHERE room = ?1 AND (CASE WHEN ?2 IS NULL THEN ts > ?3 ELSE seq > ?2 END)
                  ORDER BY seq",
             )
             .map_err(|e| format!("prepare hub above: {e}"))?;
         let rows = stmt
-            .query_map(rusqlite::params![room, after_seq, after_ts], |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)))
+            .query_map(rusqlite::params![room, after_seq, after_ts], |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?)))
             .map_err(|e| format!("query hub above: {e}"))?;
         Ok(rows.filter_map(Result::ok).collect())
     }

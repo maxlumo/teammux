@@ -358,13 +358,26 @@ test('the placeholder cue asset exists where CUE_SRC points', () => {
 test('newsKind is the server\'s one rule: rooms.rs news_kind_is_one_rule, read here (#322)', () => {
   const rust = readFileSync(new URL('../../../src-tauri/src/projects/rooms.rs', import.meta.url), 'utf8');
   const table = rust.slice(rust.indexOf('fn news_kind_is_one_rule'), rust.indexOf('fn unread_counts_news_above'));
-  const rows = [...table.matchAll(/^\s*\(("(?:[^"\\]|\\.)*"), ("(?:[^"\\]|\\.)*"), "([a-z]+)"\),$/gmu)];
+  const rows = [...table.matchAll(/^\s*\(("(?:[^"\\]|\\.)*"), "([a-z]+)", ("(?:[^"\\]|\\.)*"), "([a-z]+)"\),$/gmu)];
   assert.ok(rows.length >= 16, `the shared table was found: ${rows.length} rows`);
   // Rust's \u{XXXX} escape is JSON's \uXXXX.
   const str = (lit: string) => JSON.parse(lit.replace(/\\u\{([0-9a-f]{4})\}/giu, '\\u$1')) as string;
-  for (const [, from, body, kind] of rows) {
-    assert.equal(newsKind({ from: str(from!), body: str(body!) }), kind, `${from}: ${body}`);
+  for (const [, from, msgKind, body, kind] of rows) {
+    assert.equal(newsKind({ from: str(from!), kind: msgKind, body: str(body!) }), kind, `${from} ${msgKind}: ${body}`);
   }
+  assert.ok(rows.some(([, , msgKind, , kind]) => msgKind === 'ask' && kind === 'ask'), 'the table has the ask rows (#107)');
+});
+
+test('an ask is news at every level: unread, a bell entry, rings at done/replies/all, not while looking, not on a first page (#107)', () => {
+  const ask = { from: 'lead', kind: 'ask', to: ['human'], body: '@human [ask] Which layout?\nA · own row (recommended)' };
+  assert.equal(newsKind(ask), 'ask');
+  assert.equal(bellKind(ask), 'ask');
+  for (const level of NOTIFY_LEVELS) assert.deepEqual(notifiable([ask], { ...away, level }).map((m) => m.body), [ask.body], `rings at ${level}`);
+  assert.deepEqual(notifiable([ask], { first: false, away: false }), [], 'not while the reader is looking');
+  assert.deepEqual(notifiable([ask], { first: true, away: true }), [], 'a first page is history, never news');
+  // The same words typed as an ordinary message are a reply, not an ask.
+  assert.equal(newsKind({ ...ask, kind: 'msg' }), 'reply');
+  assert.deepEqual(notifiable([{ ...ask, kind: 'msg' }], { ...away, level: 'done' }), [], 'a reply does not ring at done');
 });
 
 test('the server\'s unconfirmed report is an alert: unread, a bell entry, rings at every level, and only its own shape (#437)', () => {

@@ -223,6 +223,9 @@ pub enum NewsKind {
     Status,
     Finished,
     Alert,
+    /// An agent's question to the person (board #107): kind `ask` (board #106). News at
+    /// every level, like `finished` and `alert`.
+    Ask,
 }
 
 impl NewsKind {
@@ -233,6 +236,7 @@ impl NewsKind {
             NewsKind::Status => "status",
             NewsKind::Finished => "finished",
             NewsKind::Alert => "alert",
+            NewsKind::Ask => "ask",
         }
     }
 }
@@ -240,9 +244,12 @@ impl NewsKind {
 /// The lifecycle markers (TS `systemLine`).
 const SYS_MARKERS: [&str; 3] = ["[tmm] ", "\u{26a1} ", "\u{2714} "];
 
-pub fn news_kind(sender: &str, body: &str) -> NewsKind {
+pub fn news_kind(sender: &str, kind: &str, body: &str) -> NewsKind {
     if sender.is_empty() || sender == "human" {
         return NewsKind::None;
+    }
+    if kind == "ask" {
+        return NewsKind::Ask;
     }
     if let Some(line) = SYS_MARKERS.iter().find_map(|m| body.strip_prefix(m)) {
         if sender == crate::projects::delivery::NOTICE_SENDER && unconfirmed_report(line) {
@@ -343,8 +350,8 @@ pub fn unread(room: &str, after_seq: Option<i64>, after_ts: i64) -> Option<serde
     let hidden = crate::projects::archived_ids(room);
     let mut count = 0;
     let (mut first, mut last) = (0, 0);
-    for (seq, sender, body) in &rows {
-        if news_kind(sender, body) == NewsKind::None {
+    for (seq, sender, kind, body) in &rows {
+        if news_kind(sender, kind, body) == NewsKind::None {
             continue;
         }
         if !hidden.is_empty() && is_hidden(room, *seq, &hidden) {
@@ -489,32 +496,36 @@ mod tests {
     /// line, `("<sender>", "<body>", "<kind>"),`.
     #[test]
     fn news_kind_is_one_rule() {
-        let cases: &[(&str, &str, &str)] = &[
-            ("human", "@lead go", "none"),
-            ("", "orphan", "none"),
-            ("lead", "here is the plan", "reply"),
-            ("lead", "[tmm] spawned dev", "none"),
-            ("lead", "[tmm] board #12 todo → doing — start", "none"),
-            ("lead", "[tmm] board #12 doing → review — ship it", "finished"),
-            ("lead", "[tmm] board #12 review → done", "finished"),
-            ("lead", "[tmm] board #x doing → review", "none"),
-            ("lead", "\u{26a1} board #3 doing → done — old marker", "finished"),
-            ("lead", "\u{2714} restarted dev", "none"),
-            ("lead", "[tmm done] shipped #12", "finished"),
-            ("lead", "[tmm status done] wrapped up", "finished"),
-            ("lead", "[tmm status running] compiling", "status"),
-            ("lead", "[tmm status running]   ", "reply"),
-            ("lead", "[tmm done]", "reply"),
-            ("lead", "[tmm]no space", "reply"),
-            ("tmm", "[tmm] unconfirmed dev — no confirmation was seen for lead's message of 08:40; it may be waiting in its composer, or the confirmation is late. Look at its pane first; do not resend or press Enter because of this line alone.", "alert"),
-            ("tmm", "[tmm] unconfirmed 工程师 — no confirmation was seen for engineer's message of 08:40; it may be waiting in its composer, or the confirmation is late. Look at its pane first; do not resend or press Enter because of this line alone.", "alert"),
-            ("lead", "[tmm] unconfirmed dev — no confirmation was seen for a quote", "none"),
-            ("tmm", "[tmm] unconfirmed — no confirmation was seen for nobody", "none"),
-            ("tmm", "[tmm] unconfirmed dev, I think", "none"),
-            ("tmm", "[tmm] restored after a host reboot", "none"),
+        let cases: &[(&str, &str, &str, &str)] = &[
+            ("human", "msg", "@lead go", "none"),
+            ("", "msg", "orphan", "none"),
+            ("lead", "msg", "here is the plan", "reply"),
+            ("lead", "msg", "[tmm] spawned dev", "none"),
+            ("lead", "msg", "[tmm] board #12 todo → doing — start", "none"),
+            ("lead", "msg", "[tmm] board #12 doing → review — ship it", "finished"),
+            ("lead", "msg", "[tmm] board #12 review → done", "finished"),
+            ("lead", "msg", "[tmm] board #x doing → review", "none"),
+            ("lead", "msg", "\u{26a1} board #3 doing → done — old marker", "finished"),
+            ("lead", "msg", "\u{2714} restarted dev", "none"),
+            ("lead", "msg", "[tmm done] shipped #12", "finished"),
+            ("lead", "msg", "[tmm status done] wrapped up", "finished"),
+            ("lead", "msg", "[tmm status running] compiling", "status"),
+            ("lead", "msg", "[tmm status running]   ", "reply"),
+            ("lead", "msg", "[tmm done]", "reply"),
+            ("lead", "msg", "[tmm]no space", "reply"),
+            ("tmm", "msg", "[tmm] unconfirmed dev — no confirmation was seen for lead's message of 08:40; it may be waiting in its composer, or the confirmation is late. Look at its pane first; do not resend or press Enter because of this line alone.", "alert"),
+            ("tmm", "msg", "[tmm] unconfirmed 工程师 — no confirmation was seen for engineer's message of 08:40; it may be waiting in its composer, or the confirmation is late. Look at its pane first; do not resend or press Enter because of this line alone.", "alert"),
+            ("lead", "msg", "[tmm] unconfirmed dev — no confirmation was seen for a quote", "none"),
+            ("tmm", "msg", "[tmm] unconfirmed — no confirmation was seen for nobody", "none"),
+            ("tmm", "msg", "[tmm] unconfirmed dev, I think", "none"),
+            ("tmm", "msg", "[tmm] restored after a host reboot", "none"),
+            ("lead", "ask", "@human [ask] Which layout?\nA · own row (recommended)", "ask"),
+            ("lead", "ask", "@human [ask] a question with [tmm status running] in it", "ask"),
+            ("human", "ask", "@human [ask] the person never asks", "none"),
+            ("lead", "msg", "@human [ask] typed by hand, not an ask", "reply"),
         ];
-        for (sender, body, want) in cases {
-            assert_eq!(news_kind(sender, body).as_str(), *want, "{sender}: {body:?}");
+        for (sender, kind, body, want) in cases {
+            assert_eq!(news_kind(sender, kind, body).as_str(), *want, "{sender} {kind}: {body:?}");
         }
     }
 

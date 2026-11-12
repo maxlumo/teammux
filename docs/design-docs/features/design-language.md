@@ -1078,6 +1078,17 @@ showing hover paints there is harmless and keeps a synthetic-hover test rig hone
   second layer of the same hover. Today the roster card's Stop only (board
   #211, owner 2026-09-20: "停止按钮就不用加背景了，就红色方块我直接点就行"); a
   toolbar's icon commands stay in the wash family.
+- A command whose label may run to several lines takes `CommandButton`'s
+  `wrap` modifier (board #107 F6: an ask's options): the label wraps, the
+  button grows by its lines and keeps the one-line command's own space above
+  and below the text (`padding-block: (--control-height −
+  --control-line-height) / 2`), so every line stays inside the inset paint
+  at every control height (touch 44 with a 6 inset). Restyling a button's
+  height around the atom is not this; every other command stays one line.
+- A command with no icon of its own that can still go pending takes the
+  `reserve` modifier (board #107: an ask's options): the atom keeps an EMPTY
+  icon slot, nothing drawn at rest, the pending spinner in that same slot, so
+  the label never moves and the pending contract (contrast, aria-busy) holds.
 
 **A prose link is accent at rest and underlined only on hover (board #478, 2026-10-28).** Owner: "这里链接，不要高亮
 下划线显示了，只是鼠标放上去才有下划线，减少注意力分散". The browser's default underline on every path and URL in a

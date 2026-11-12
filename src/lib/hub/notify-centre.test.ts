@@ -94,5 +94,6 @@ test('a stored alert entry survives a reload: the unconfirmed report is a bell e
   const { bellEntry } = await import('./notify-centre.svelte.ts');
   assert.equal(bellEntry({ kind: 'alert', toHuman: false }), true);
   assert.equal(bellEntry({ kind: 'finished', toHuman: false }), true);
+  assert.equal(bellEntry({ kind: 'ask', toHuman: false }), true, 'an ask is a bell entry (#107)');
   assert.equal(bellEntry({ kind: 'reply', toHuman: false }), false, 'agent↔agent talk is still room unread only');
 });
