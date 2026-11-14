@@ -28,12 +28,15 @@ The position is `nvidia-smi`'s index only when no earlier card failed to read
 (a card that fails is left out). Touch has no hover card, so the phone
 drawer keeps DISK and shows all four: CPU, MEM, DISK, GPU (VRAM percent);
 the GPU's utilization has no touch surface (round 4, reviewer note 42,
-leader's ruling). On touch in Aggregate, where the server's name sits beside
-the reading, a GPU host's strip is two rows: the name, then the four
-readings, and the drawer reserves both (round 6). Everywhere else it is one
-24 px row. Known limit: on a 320 px phone, CPU 100%, a three-digit
+leader's ruling). In Aggregate, where the server's name sits beside the
+reading, a SHOWN name takes its own row on every layout: the strip is two
+rows (the name, then the readings) and the sidebar or drawer reserves both
+(#102 round 6 for touch + GPU; #103 for every layout, by the owner's
+delegation 2026-11-14). Single, a tagless Aggregate and a reading that
+renders nothing stay one 24 px row (#103: the row count is derived from
+the same rendered parts as the strip). Known limit: on a 320 px phone, CPU 100%, a three-digit
 MEM and GPU 100% together are 1.5 px too wide and every value shows an
-ellipsis (design doc, § GPUs). The strip is 24 px high (#326) and its readout gets 201 px
+ellipsis (design doc, § GPUs). The one-row strip is 24 px high (#326) and its readout gets 201 px
 on the desktop beside the scratch button; four metrics need 242 px or more
 in any form (measured), so one had to leave, and DISK changes slowest
 (leader's ruling, #102 note 5; the owner was asked). Without a GPU, or when
@@ -47,7 +50,8 @@ the reading fails, the strip is exactly the three above.
   current page's shared side drawer opens, then occupies that drawer's bottom
   row above the safe area. It never draws or reserves a row under the main
   terminal/content area.
-- **Compact, quiet monitor treatment.** The whole strip is 24px high. CPU,
+- **Compact, quiet monitor treatment.** The strip is one 24px row, two
+  (48px) only when a shown server name takes its own row (#103). CPU,
   MEM, and DISK keep their natural widths and flow left — never three equal
   columns. They form one unboxed readout with only restrained 4px
   accent/purple/green (and, with a GPU, orange) dots, muted labels, and clear mono values. There are no
