@@ -838,3 +838,69 @@ test('a project whose recorded room is EMPTY shows its row and ask chip under pr
     assert.equal(row.querySelector('.side-win.asks .b-count')?.textContent, '2');
   } finally { await app.close(); }
 });
+
+// Board #123: below the 760 compact width the Board's sidebar is its drawer; the desktop
+// shell's ONE toggle reaches it through the reselect the Board registers there (none when
+// wide: the wide sidebar follows the shell's pref), and the Board reports it shown.
+test('below 760 the Board registers a reselect that opens and closes its drawer, and says so (#123)', async context => {
+  for (const narrow of [true, false]) {
+    let reselect: (() => void) | undefined;
+    const shown: boolean[] = [];
+    const app = await (await compiled).mount(context, {
+      props: { session: 'fixture', visible: true, onReselect: (fn: (() => void) | undefined) => { reselect = fn; }, onSideOpen: (o: boolean) => { shown.push(o); } },
+      setup(window) {
+        window.Element.prototype.getAnimations = () => [];
+        window.matchMedia = (media: string) => Object.assign(new window.EventTarget(), { media, matches: narrow && media === '(max-width: 760px)', onchange: null, addListener() {}, removeListener() {} });
+      },
+      modules: [rpc({})],
+    });
+    try {
+      await flush(app);
+      if (!narrow) { assert.equal(reselect, undefined, 'wide: nothing registered, the shell pref drives it'); continue; }
+      const drawer = () => app.document.querySelector('aside.sidebar')!;
+      assert.ok(drawer().classList.contains('side-sheet'));
+      reselect!(); await flush(app);
+      assert.ok(drawer().classList.contains('open'), 'the shell toggle opens the drawer');
+      assert.equal(shown.at(-1), true);
+      reselect!(); await flush(app);
+      assert.equal(drawer().classList.contains('open'), false, 'and closes it');
+      assert.equal(shown.at(-1), false);
+    } finally { await app.close(); }
+  }
+});
+
+// Validator note 10 on 01928336: open the drawer below 760, widen past it, narrow again. The
+// backdrop belongs to the SHEET, so at the wide structure (a column, no sheet) there is no
+// scrim to take the shell toggle's tap; back below 760 the open drawer and its scrim return.
+test('the Board drawer backdrop follows the sheet across a width change: narrow→wide→narrow (#123)', async context => {
+  let narrow = true;
+  const listeners = new Set<() => void>();
+  let reselect: (() => void) | undefined;
+  const app = await (await compiled).mount(context, {
+    props: { session: 'fixture', visible: true, onReselect: (fn: (() => void) | undefined) => { reselect = fn; } },
+    setup(window) {
+      window.Element.prototype.getAnimations = () => [];
+      window.matchMedia = (media: string) => {
+        const mq = Object.assign(new window.EventTarget(), { media, onchange: null, addListener() {}, removeListener() {} }) as any;
+        Object.defineProperty(mq, 'matches', { get: () => narrow && media === '(max-width: 760px)' });
+        mq.addEventListener = (_: string, fn: () => void) => { listeners.add(fn); };
+        mq.removeEventListener = (_: string, fn: () => void) => { listeners.delete(fn); };
+        return mq;
+      };
+    },
+    modules: [rpc({})],
+  });
+  const resize = async (to: boolean) => { narrow = to; for (const fn of listeners) fn(); await flush(app); };
+  try {
+    await flush(app);
+    reselect!(); await flush(app);
+    const scrim = () => app.document.querySelector('.side-scrim');
+    assert.ok(scrim(), 'open below 760: the drawer and its scrim');
+    await resize(false);
+    assert.equal(scrim(), null, 'wide: a column, no sheet, so no backdrop over the shell toggle');
+    assert.equal(app.document.querySelector('aside.sidebar')!.classList.contains('side-sheet'), false);
+    await resize(true);
+    assert.ok(app.document.querySelector('aside.sidebar.open'), 'narrow again: the drawer is still open');
+    assert.ok(scrim(), 'with its scrim');
+  } finally { await app.close(); }
+});

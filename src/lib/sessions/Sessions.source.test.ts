@@ -53,12 +53,12 @@ test('sidebar section headers speak the shared .side-h dialect', () => {
 
 test('the phone s session sheet is ONE list: the foreign rows are handed to Projects and merged INTO it, never appended; "phone" is the host s (#357, #371)', async () => {
   // The component never decides what a phone is: the host passes the sheet s
-  // own condition (App: isTouchDevice && narrowVp, the same as `.side-sheet`).
+  // own condition (App: narrowVp since #123, the same as `.side-sheet`).
   assert.match(source, /onPickServer = null, foreignInline = false/u);
   assert.doesNotMatch(source, /foreignInline = \$derived|const foreignInline/u, 'no second definition of "phone" in the component');
   const app = await readFile(new URL('../../App.svelte', import.meta.url), 'utf8');
-  assert.match(app, /union=\{sessionsUnionFor\} onPickServer=\{pickServerPane\} foreignInline=\{layout\.isTouchDevice && narrowVp\}/u);
-  assert.match(app, /class:side-sheet=\{layout\.isTouchDevice && narrowVp\}/u, 'the same condition as the sheet itself');
+  assert.match(app, /union=\{sessionsUnionFor\} onPickServer=\{pickServerPane\} foreignInline=\{narrowVp\}/u);
+  assert.match(app, /class:side-sheet=\{narrowVp\}/u, 'the same condition as the sheet itself');
   // #371: the rows are DRAWN by the host (the pick action is Sessions s) but
   // PLACED by Projects, among this server s rows, by the one comparator. #357
   // appended them after the whole project list, past the fold of a long one.

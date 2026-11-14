@@ -846,7 +846,9 @@ test('the sidebar collapses and expands by the same reveal, from ONE control tha
 test("re-selecting the Hub's rail tab toggles the sidebar (boards #199, #201)", () => {
   // Owner 2026-09-14 14:10: "左侧选项卡图标，选中点击也能展开，也能折叠".
   assert.match(source, /onReselect = null/u, 'a registration prop, like onGoBack');
-  assert.match(source, /onReselect\?\.\(\(\) => \{ if \(!compact\) void setSidebar\(!sideCollapsed\); \}\);/u,
+  // #123: on the desktop shell below the compact width it drives the compact drawer;
+  // the phone (mobile) keeps its own opener and the reselect opens nothing there.
+  assert.match(source, /onReselect\?\.\(\(\) => \{ if \(!compact\) void setSidebar\(!sideCollapsed\); else if \(!mobile\) sideOpen = !sideOpen; \}\);/u,
     'desktop only — the phone has no rail; a sheet has its own opener');
 });
 

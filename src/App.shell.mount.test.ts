@@ -11320,3 +11320,38 @@ test('#109: Discuss waits for the room s roster: a live asker is never refused a
   assert.equal(refused(), false);
   await h.app.close();
 });
+
+// ── Board #123: the desktop layout below the 760 px compact width ──────────────
+// A foldable's inner screen (≈717 CSS px, measured from the owner's screenshot) or any
+// desktop window under 760: the shell draws the rail and ITS sidebar toggle, the Terminal
+// page its compact one-column structure. The one toggle drives that structure: the list is
+// the shared side-sheet, opened and closed as a transient, and the persisted collapsed pref
+// is not written. Mouse here (the cause is width, not touch: measured either way).
+test('below 760 the desktop shell toggle opens and closes the Terminal list as a sheet, and writes no pref (#123)', async (context) => {
+  const { app, settle } = await bootApp(context, {
+    ...twoServers({ live: legacyNav('work:1.0'), parked: legacyNav('work:9.0') }),
+    tmux_layout_mode: 'desktop',
+    tmux_hub_sidebar: '0',
+  }, undefined, {
+    setup(window) {
+      window.matchMedia = (media: string) => Object.assign(new window.EventTarget(), {
+        media, matches: media === '(max-width: 760px)', onchange: null, addListener() {}, removeListener() {},
+      });
+    },
+  });
+  const side = () => app.document.querySelector<HTMLElement>('.term-side')!;
+  const toggle = () => app.document.querySelector<HTMLButtonElement>('.shell-side-toggle button')!;
+  assert.ok(app.document.querySelector('main.with-rail'), 'the desktop shell');
+  assert.ok(side().classList.contains('side-sheet'), 'the list is the sheet below 760, touch or not');
+  assert.equal(side().classList.contains('open'), false, 'closed: all the room is the terminal\'s');
+  assert.equal(toggle().getAttribute('aria-expanded'), 'false', 'the icon says what is shown');
+  const pref = () => app.window.localStorage.getItem('tmux_hub_sidebar');
+  const before = pref();
+  toggle().click(); await settle();
+  assert.ok(side().classList.contains('open'), 'the toggle opens the sheet');
+  assert.equal(toggle().getAttribute('aria-expanded'), 'true');
+  toggle().click(); await settle();
+  assert.equal(side().classList.contains('open'), false, 'and closes it');
+  assert.equal(toggle().getAttribute('aria-expanded'), 'false');
+  assert.equal(pref(), before, 'the persisted sidebar pref is not written below 760');
+});

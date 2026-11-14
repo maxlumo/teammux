@@ -1,6 +1,7 @@
 <script>
   import { untrack } from 'svelte';
   import { useServerScope } from '../app/server-context.ts';
+  import { layout } from '../app/layout.svelte.ts';
   import ServerTag from '../ui/ServerTag.svelte';
   import { titleFit } from '../ui/title-fit.ts';
   import { Terminal } from '@xterm/xterm';
@@ -1998,9 +1999,11 @@
         DEFAULT (`tmux_winswitcher` unset), that was what a fresh install
         looked like (measured 2026-08-19: no `.win-bar` in the DOM, xterm at
         top: 0). A phone still gets the floating chip alone: there the
-        terminal needs every pixel of height.
+        terminal needs every pixel of height. The phone LAYOUT, not a touch
+        screen (board #123): a desktop layout under touch keeps its head row,
+        where the shell's sidebar toggle stands.
       -->
-      {#if isMobile}
+      {#if layout.isTouchDevice}
         <div class="win-collapsed-anchor appear">
           <AgentChip
             agent={curAgent}

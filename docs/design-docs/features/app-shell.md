@@ -567,6 +567,46 @@ convention. The base now points right (closed = "expand"), so the open
 state turns it left, at the pane (measured: open `<`, closed `>`); pin in
 `CommandButton.source.test.ts`.
 
+### One toggle, one sidebar per page, driven by the page's current structure (2026-11-14, #123)
+
+Owner, 2026-11-14, two screenshots from a foldable's inner screen with the
+Desktop layout: the Chat sidebar toggle did nothing, and the Terminal page
+left its top half to the sessions list. Measured (own gateway + Chromium,
+`temp/123-evidence`): that screen is ≈717×776 CSS px (the 46 px rail is 93
+screenshot px), and both defects reproduce at that width with a MOUSE too;
+at 900×820 and 980×740 neither does, touch or mouse. The cause was two
+definitions of "phone layout": the SHELL decided by the layout setting
+(`layout.isTouchDevice`: the rail and its one sidebar toggle), the PAGES by
+width ≤ 760 (the Hub's `compact = mobile || narrow`, the Terminal grid's
+one column, the Board's drawer). A desktop shell below 760 (a foldable's
+inner screen, any narrow window) had the shell's toggle wired to a sidebar
+the page was not using.
+
+**Rule.** The layout decides WHAT is shown (rail or bottom bar); the width
+decides each page's STRUCTURE (≥ 760 its sidebar is a column, below it a
+sheet); the input capability decides target sizes and hover
+(`any-pointer: coarse`); none of the three is read from another's flag.
+The shell's ONE toggle drives the page's current structure: at ≥ 760 the
+shared `sidebarCollapsed` pref (unchanged); below it the page's sheet, as a
+transient that writes no pref: the Hub's and the Board's project drawers
+through the reselect each registers, the Terminal list (`.term-side` is the
+shared `.side-sheet` whenever narrow, not only on touch) through
+`sessListOpen`, so closed gives the terminal all the room. The toggle's
+`aria-expanded` is what is shown (`shellSideShown`; the Hub and the Board
+report their drawer, `onSideOpen`). On the desktop shell a sheet stands
+beside the rail (`left: --shell-left`, parked past it when closed so it never
+takes the rail's taps), the toggle stays above it (z 27 below 760) so the
+control that opened it closes it, the page head and the sheet head make its
+room, and a page's own drawer opener is not drawn beside it. The system
+status bar, which has no sidebar column to sit under there, parks as on touch
+and is the open sheet's last row (it had covered the terminal's key bar). The
+Terminal's collapsed window switcher keeps its head row unless the LAYOUT is
+the phone's (it read the touch capability, so a desktop under touch lost the
+head row and the shell toggle lay over the first terminal line). The phone
+layout (no rail, `--shell-left` 0) and the ≥ 760 desktop are unchanged.
+Pins: `App.shell.mount.test.ts`, `Hub.mount.test.ts`, `Board.mount.test.ts`
+(each #123, red before the change).
+
 ### The chosen tab is marked by ONE highlight that travels (2026-09-04, #86)
 
 **Current scope:** the desktop rail retains its travelling wash. The phone

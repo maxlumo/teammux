@@ -52,6 +52,11 @@ export class ServerView {
   boardGoBack = $state.raw<Back>(null);
   sessionsGoBack = $state.raw<Back>(null);
   pageReselect: Record<string, (() => void) | undefined> = {};
+  /** The Hub's compact project drawer is open (board #123): what the shell's one
+   * sidebar toggle shows below the 760 compact width. */
+  hubSideOpen = $state(false);
+  /** The Board's compact project drawer is open (board #123), likewise. */
+  boardSideOpen = $state(false);
   /** Files' reading mode asks for the whole screen (board #226). */
   filesImmersive = $state(false);
   /** The Terminal page's own elements, which the window's sidebar motion and

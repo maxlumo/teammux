@@ -7053,3 +7053,41 @@ test('in a history window a close missed with no push shows closed after the ord
     assert.equal(JSON.parse(app.window.localStorage.getItem('tmux_hub_seen') ?? '{}').other, undefined, 'the read mark did not move');
   } finally { await app.close(); }
 });
+
+// ── Board #123: the desktop shell below the 760 compact width ─────────────────
+// The Hub is compact by WIDTH (its project list is the drawer), the shell desktop by
+// LAYOUT (its one sidebar toggle is the page's reselect). The reselect drives the drawer
+// the page is using, and the page reports it so the toggle's icon says what is shown.
+// On the phone layout (mobile) the reselect still does nothing: its drawer has its own opener.
+test('below 760 on the desktop shell the reselect opens and closes the compact project drawer, and says so (#123)', { timeout: 60000 }, async (context) => {
+  for (const mobile of [false, true]) {
+    const { rpc } = roomFixture();
+    let reselect: (() => void) | null = null;
+    const shown: boolean[] = [];
+    const app = await (await compiledHub()).mount(context, {
+      props: { visible: true, mobile, onReselect: (fn: () => void) => { reselect = fn; }, onSideOpen: (o: boolean) => { shown.push(o); } },
+      setup(window) {
+        window.Element.prototype.getAnimations = () => [];
+        window.HTMLCanvasElement.prototype.getContext = () => null;
+        window.matchMedia = (media: string) => Object.assign(new window.EventTarget(), { media, matches: media === '(max-width: 760px)', onchange: null, addListener() {}, removeListener() {} });
+      },
+      modules: [rpc],
+    });
+    try {
+      for (let i = 0; i < 10; i++) await app.flush();
+      const drawer = () => app.document.querySelector('aside.sidebar')!;
+      assert.ok(drawer().classList.contains('side-sheet'), 'compact by width: the list is the drawer');
+      assert.equal(drawer().classList.contains('open'), false);
+      reselect!(); for (let i = 0; i < 3; i++) await app.flush();
+      if (mobile) {
+        assert.equal(drawer().classList.contains('open'), false, 'the phone layout: unchanged, the reselect opens nothing');
+      } else {
+        assert.ok(drawer().classList.contains('open'), 'the shell toggle opens the drawer');
+        assert.equal(shown.at(-1), true, 'and the page says it is shown');
+        reselect!(); for (let i = 0; i < 3; i++) await app.flush();
+        assert.equal(drawer().classList.contains('open'), false, 'and closes it');
+        assert.equal(shown.at(-1), false);
+      }
+    } finally { await app.close(); }
+  }
+});

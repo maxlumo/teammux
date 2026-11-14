@@ -125,7 +125,7 @@
    * own list, as before (Single, or a host without the notion).
    * `scopeNote` (#364): Single with more servers saved — the sidebar's foot
    * row naming the server shown (`app/ScopeNote.svelte`); null otherwise. */
-  let { visible = false, fontSize = 14, mobile = false, openTerminal = () => {}, onSelectSession = (_s) => {}, onGoBack = null, onReselect = null, openAgentConfig = null, openFilesTab = null, openBoardTab = null,
+  let { visible = false, fontSize = 14, mobile = false, openTerminal = () => {}, onSelectSession = (_s) => {}, onGoBack = null, onReselect = null, onSideOpen = null, openAgentConfig = null, openFilesTab = null, openBoardTab = null,
     union = null, scopeNote = null, selectRequest = null, onPickServer = null, jumped = false } = $props();
   const drawerId = $props.id();
 
@@ -2387,8 +2387,11 @@
   // #199 opened it; #201 makes it a toggle: "选中点击也能展开，也能折叠"). Desktop
   // only — the phone has no rail; its sheet has its own opener in the header.
   $effect(() => {
-    onReselect?.(() => { if (!compact) void setSidebar(!sideCollapsed); });
+    // Board #123: the shell's one toggle drives the CURRENT structure: below the
+    // 760 compact width on the desktop shell, the compact project drawer.
+    onReselect?.(() => { if (!compact) void setSidebar(!sideCollapsed); else if (!mobile) sideOpen = !sideOpen; });
   });
+  $effect(() => { onSideOpen?.(compact && sideOpen); });
 
   // The lightbox is the topmost transient layer: back peels it first.
   // One open = one immutable record { src, ref } (board #447): what the viewer shows and the
@@ -2771,7 +2774,8 @@
       <div class="page-head chat-head" class:compact-tools={compact}>
         <!-- The phone reaches the project list here, as a drawer. No chip strip:
              separate conversations are chosen deliberately, not flicked past. -->
-        {#if compact}
+        {#if compact && mobile}
+          <!-- The phone's opener; the desktop shell's one toggle opens it there (#123). -->
           <CommandButton variant="icon" icon="menu" label={t('hubProjects')}
             expanded={sideOpen} controls="hub-sidebar" onclick={() => sideOpen = true} />
         {/if}

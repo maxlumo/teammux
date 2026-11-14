@@ -132,7 +132,7 @@ test('Terminal navigation and page layer exist without an active target', () => 
   // desktop — no desktop rule reads it (review, 2026-09-03).
   assert.match(source, /<div class="terminal-empty">[\s\S]*?<button class="chip-btn" onclick=\{openSessionsList\}>/u);
   const opener = /function openSessionsList\(\) \{([\s\S]*?)\n  \}/u.exec(source)?.[1] ?? '';
-  assert.match(opener, /if \(layout\.isTouchDevice\) \{ sessListOpen = true; return; \}/u);
+  assert.match(opener, /if \(layout\.isTouchDevice \|\| narrowVp\) \{ sessListOpen = true; return; \}/u, 'a sheet wherever the list is one: touch, or narrow (#123)');
   assert.match(opener, /termSideEl\?\.querySelector\('\.sessions \.content \[tabindex="0"\], \.sessions \.content button'\)\?\.focus\(\)/u,
     'desktop: focus the list itself, never the SideHandle separator');
   assert.match(source, /<aside class="term-side"[^>]*bind:this=\{v\.termSideEl\}>/u);
@@ -159,11 +159,13 @@ test('the session list lives inside the Terminal page, sheeted on a phone', () =
   // the old media gate (a media-gated sheet disagreed with the Hub's wider
   // compact and stacked the sidebar into the page; owner, 2026-08-30).
   const aside = source.match(/<aside class="term-side"[\s\S]*?<\/aside>/u)?.[0] ?? '';
-  assert.match(aside, /class:side-sheet=\{layout\.isTouchDevice && narrowVp\}/u);
+  // #123: the sheet is the narrow STRUCTURE, touch or not (a desktop shell below 760).
+  assert.match(aside, /class:side-sheet=\{narrowVp\}/u);
   assert.match(aside, /class:sheet=\{layout\.isTouchDevice\}/u);
-  assert.match(aside, /class:open=\{layout\.isTouchDevice && narrowVp && sessListOpen\}/u);
+  assert.match(aside, /class:open=\{narrowVp && sessListOpen\}/u);
   assert.match(aside, /onPick=\{\(\) => sessListOpen = false\}/u);
   // The terminal's session chip opens that same sheet on a phone.
+  // #123: the phone's own opener only; the desktop shell's one toggle opens the sheet there.
   assert.match(source, /onOpenSessions=\{layout\.isTouchDevice \? \(\) => sessListOpen = true : null\}/u);
   // The phone Back gesture uses this sheet as Terminal's FLOOR (board #58),
   // matching Chat/Board: a bare Terminal lifts it; once open it falls through
@@ -1311,13 +1313,14 @@ test('one shell-wide sidebar state: the Terminal page and the system status foll
   assert.match(source, /const shellSideCollapsed = \$derived\(shell && !layout\.isTouchDevice && appPrefs\.sidebarCollapsed\);/u);
   assert.match(source, /<main class:with-rail=\{[^}]+\} class:touch-layout=\{[^}]+\} class:side-collapsed=\{shellSideCollapsed\} class:side-page=\{pageHasSidebar\}/u);
   // ③a-4: the shell's toggle is the fallback for a page no tree registered.
-  assert.match(source, /const toggleShellSide = \(\) => appPrefs\.setSidebarCollapsed\(!appPrefs\.sidebarCollapsed\);[\s\S]{0,200}?const shellReselect = \{ terminal: toggleShellSide, board: toggleShellSide \};/u, '#199 on every page, a toggle since #201');
+  // #123: below the compact width the Terminal's reselect drives its sheet (toggleTermSide).
+  assert.match(source, /const toggleShellSide = \(\) => appPrefs\.setSidebarCollapsed\(!appPrefs\.sidebarCollapsed\);[\s\S]{0,800}?const toggleTermSide = \(\) => \{ if \(narrowVp\) sessListOpen = !sessListOpen; else toggleShellSide\(\); \};[\s\S]{0,200}?const shellReselect = \{ terminal: toggleTermSide, board: toggleShellSide \};/u, '#199 on every page, a toggle since #201');
   assert.match(source, /<Board session=\{v\.filesSession\} guardPage="board" visible=\{shown && page === 'board'\} sideCollapsed=\{shellSideCollapsed\}/u);
   // The Terminal page's track is the Hub's technique: factor, gate, pin, hidden at rest.
   assert.match(source, /const unpin = pinTrack\(termSideEl, 'end'\);\s*\n\s*void moveTrack\(termPageEl, '--side-open', collapsed \? 1 : 0\)\.then\(unpin\);/u);
   assert.match(source, /\.page-layer\.term-page:global\(\.moving\) \{ transition: --side-open var\(--t-move\) ease-out; \}/u);
   assert.match(source, /\.with-rail\.side-collapsed \.page-layer\.term-page \{ --side-open: 0; \}/u);
-  assert.match(source, /\.with-rail\.side-collapsed \.page-layer\.term-page:not\(:global\(\.moving\)\) > \.term-side \{ visibility: hidden; \}/u);
+  assert.match(source, /\.with-rail\.side-collapsed \.page-layer\.term-page:not\(:global\(\.moving\)\) > \.term-side:not\(\.side-sheet\) \{ visibility: hidden; \}/u, 'the narrow sheet is the transient\'s, not the pref\'s (#123)');
   assert.match(source, /\.term-side:global\(\.pin-end\) \{ justify-self: end; \}/u);
   // The system status retracts with it, on the same tempo, unreachable at rest.
   const sys = source.match(/\.with-rail\.side-collapsed \.sys-sidebar \{([^}]+)\}/u)?.[1] ?? '';
@@ -1339,7 +1342,7 @@ test('THE sidebar toggle is one fixed shell node at the content area\'s top-left
   const rail = source.match(/<nav\s+class="rail"[\s\S]*?<\/nav>/u)?.[0] ?? '';
   assert.doesNotMatch(rail, /CommandButton|panel-left|rail-head/u, 'the rail is brand + tabs again; no toggle, no head group, no rule');
   assert.match(source, /<img class="rail-brand"[^>]*\/>\s*\n\s*\{#each railSlots as slot \(slot\)\}/u, 'the brand is followed by the tabs');
-  assert.match(source, /<\/nav>\s*\n(?:\s*<!--[\s\S]*?-->\s*\n)?\s*\{#if pageHasSidebar && !switching\}\s*<div class="shell-side-toggle">\s*<CommandButton variant="secondary" iconOnly icon="panel-left" expanded=\{!appPrefs\.sidebarCollapsed\} inside\s+label=\{appPrefs\.sidebarCollapsed \? t\('hubSidebarExpand'\) : t\('hubSidebarCollapse'\)\}\s+onclick=\{toggleShellSidebar\} \/>\s*<\/div>\s*\{\/if\}\s*\{\/if\}/u,
+  assert.match(source, /<\/nav>\s*\n(?:\s*<!--[\s\S]*?-->\s*\n)?\s*\{#if pageHasSidebar && !switching\}\s*<div class="shell-side-toggle">\s*<CommandButton variant="secondary" iconOnly icon="panel-left" expanded=\{shellSideShown\} inside\s+label=\{shellSideShown \? t\('hubSidebarCollapse'\) : t\('hubSidebarExpand'\)\}\s+onclick=\{toggleShellSidebar\} \/>\s*<\/div>\s*\{\/if\}\s*\{\/if\}/u,
     'rendered once, beside the rail, under the desktop-connected guard AND only on a page that has the sidebar (#219); a quiet surface so it reads over a terminal');
   // #219 (owner: "files页面里，多显示了折叠左侧边栏的按钮，还有设置这些页面也都没兼容好"):
   // Files, Settings and Agents have no primary sidebar — no toggle, no head room.
@@ -1347,7 +1350,9 @@ test('THE sidebar toggle is one fixed shell node at the content area\'s top-left
   assert.match(source, /class:side-collapsed=\{shellSideCollapsed\} class:side-page=\{pageHasSidebar\}/u,
     'the collapsed state stays app-wide (#200); which page is on screen is a second class');
   assert.equal([...source.matchAll(/icon="panel-left"/gu)].length, 1, 'ONE node — never one per state or per page');
-  assert.match(source, /function toggleShellSidebar\(\) \{\s*\n\s*\(\(storageHeld \? null : view\.pageReselect\[page\]\) \?\? toggleShellSide\)\(\);/u,
+  // #123: the icon says what is SHOWN, the page's sheet below the compact width.
+  assert.match(source, /const shellSideShown = \$derived\(!narrowVp \? !appPrefs\.sidebarCollapsed/u);
+  assert.match(source, /function toggleShellSidebar\(\) \{\s*\n\s*\(\(storageHeld \? null : view\.pageReselect\[page\]\) \?\? shellReselect\[page\] \?\? toggleShellSide\)\(\);/u,
     'the same act as a reselect: the page\'s delegate, else the shared state');
   const style = source.match(/<style>[\s\S]*<\/style>/u)?.[0] ?? '';
   const seat = style.match(/\.shell-side-toggle \{([^}]*)\}/u)?.[1] ?? '';

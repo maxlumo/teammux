@@ -3787,9 +3787,15 @@
   const pageHasSidebar = $derived(SIDEBAR_PAGES.has(page));
   // A reselect TOGGLES (owner, 2026-09-14: "选中点击也能展开，也能折叠"; board #201).
   const toggleShellSide = () => appPrefs.setSidebarCollapsed(!appPrefs.sidebarCollapsed);
+  // Board #123: ONE toggle, one sidebar per page, driven by the page's CURRENT
+  // structure. Below the 760 compact width the pages keep their compact forms
+  // (a foldable's inner screen, ≈717 CSS px, a narrow desktop window): there the
+  // Terminal list is the side-sheet, opened and closed as a transient, and the
+  // persisted pref (the wide sidebar's) is not written.
+  const toggleTermSide = () => { if (narrowVp) sessListOpen = !sessListOpen; else toggleShellSide(); };
   /** What a reselect does on a page none of whose pages registered one: the
    * shell's, not a server's (③a-4). */
-  const shellReselect = { terminal: toggleShellSide, board: toggleShellSide };
+  const shellReselect = { terminal: toggleTermSide, board: toggleShellSide };
   // The Terminal page moves its track the way the Hub does (reveal.ts): the
   // sidebar pinned at its width, the factor moving, xterm fitted once at rest.
   const termPageEl = $derived(view.termPageEl);
@@ -3806,8 +3812,12 @@
   // if it has one (the Hub animates with its reading anchor), else the shared
   // state directly.
   function toggleShellSidebar() {
-    ((storageHeld ? null : view.pageReselect[page]) ?? toggleShellSide)();
+    ((storageHeld ? null : view.pageReselect[page]) ?? shellReselect[page] ?? toggleShellSide)();
   }
+  /** What the one toggle's icon says is shown (#123): below 760 the page's compact
+   * sidebar (the Terminal sheet, the Hub drawer), else the shared pref. */
+  const shellSideShown = $derived(!narrowVp ? !appPrefs.sidebarCollapsed
+    : page === 'terminal' ? sessListOpen : page === 'hub' ? !!view.hubSideOpen : page === 'board' ? !!view.boardSideOpen : !appPrefs.sidebarCollapsed);
   function railActivate(slot) {
     if (railDrags.consumeClick()) return;
     if (slot === 'prefs') togglePrefs();
@@ -3859,7 +3869,7 @@
   // 2026-09-03). The SideHandle is skipped on purpose — it is a separator,
   // not the list.
   function openSessionsList() {
-    if (layout.isTouchDevice) { sessListOpen = true; return; }
+    if (layout.isTouchDevice || narrowVp) { sessListOpen = true; return; }
     termSideEl?.querySelector('.sessions .content [tabindex="0"], .sessions .content button')?.focus();
   }
   // The Terminal sheet's own condition (touch AND ≤760px — the old media
@@ -4104,8 +4114,8 @@
          it through `.side-toggle-row` / `.page-head` (app.css). -->
     {#if pageHasSidebar && !switching}
       <div class="shell-side-toggle">
-        <CommandButton variant="secondary" iconOnly icon="panel-left" expanded={!appPrefs.sidebarCollapsed} inside
-          label={appPrefs.sidebarCollapsed ? t('hubSidebarExpand') : t('hubSidebarCollapse')}
+        <CommandButton variant="secondary" iconOnly icon="panel-left" expanded={shellSideShown} inside
+          label={shellSideShown ? t('hubSidebarCollapse') : t('hubSidebarExpand')}
           onclick={toggleShellSidebar} />
       </div>
     {/if}
@@ -4375,7 +4385,7 @@
            switches. Desktop-eligible only (needs width + the desktop server):
            mobile keeps the tab layout untouched. -->
       <div class="page-layer" class:hidden={!shown || page !== 'hub'}>
-        <Hub visible={shown && page === 'hub'} {fontSize} mobile={layout.isTouchDevice} openTerminal={(s, tgt) => openTerminal(s, tgt)} onSelectSession={(s) => { if (s) showSessionIn(runtime, v, s); }} onGoBack={(fn) => v.hubGoBack = fn} onReselect={(fn) => { v.pageReselect.hub = fn; }} openAgentConfig={(name, kind) => openAgentsConfig(name, kind, runtime, v)} openFilesTab={(s, path, file) => { if (s) showSessionIn(runtime, v, s); if (path || file) v.filesNavReq = { serverId: runtime.id, path, file, n: (v.filesNavReq?.n ?? 0) + 1 }; switchTab('files'); v.jumpedFrom = 'hub'; }} openBoardTab={(s, issue) => { if (s) showSessionIn(runtime, v, s); if (issue) v.boardIssueReq = { serverId: runtime.id, session: s, id: issue, n: (v.boardIssueReq?.n ?? 0) + 1 }; switchTab('board'); v.jumpedFrom = 'hub'; }}
+        <Hub visible={shown && page === 'hub'} {fontSize} mobile={layout.isTouchDevice} openTerminal={(s, tgt) => openTerminal(s, tgt)} onSelectSession={(s) => { if (s) showSessionIn(runtime, v, s); }} onGoBack={(fn) => v.hubGoBack = fn} onReselect={(fn) => { v.pageReselect.hub = fn; }} onSideOpen={(o) => { v.hubSideOpen = o; }} openAgentConfig={(name, kind) => openAgentsConfig(name, kind, runtime, v)} openFilesTab={(s, path, file) => { if (s) showSessionIn(runtime, v, s); if (path || file) v.filesNavReq = { serverId: runtime.id, path, file, n: (v.filesNavReq?.n ?? 0) + 1 }; switchTab('files'); v.jumpedFrom = 'hub'; }} openBoardTab={(s, issue) => { if (s) showSessionIn(runtime, v, s); if (issue) v.boardIssueReq = { serverId: runtime.id, session: s, id: issue, n: (v.boardIssueReq?.n ?? 0) + 1 }; switchTab('board'); v.jumpedFrom = 'hub'; }}
           union={hubUnionFor} {scopeNote} selectRequest={landingFor(v.hubSelectReq, runtime)} onPickServer={pickServerProject} jumped={v.jumpedFrom === 'board'} />
       </div>
     {/if}
@@ -4395,7 +4405,7 @@
     </div>
     <div class="page-layer" class:hidden={!shown || page !== 'board'}>
       {#if v.hubState.available}
-        <Board session={v.filesSession} guardPage="board" visible={shown && page === 'board'} sideCollapsed={shellSideCollapsed} onGoBack={(fn) => v.boardGoBack = fn} issueRequest={landingFor(v.boardIssueReq, runtime)} jumped={!!v.jumpedFrom}
+        <Board session={v.filesSession} guardPage="board" visible={shown && page === 'board'} sideCollapsed={shellSideCollapsed} onGoBack={(fn) => v.boardGoBack = fn} issueRequest={landingFor(v.boardIssueReq, runtime)} jumped={!!v.jumpedFrom} onReselect={(fn) => { v.pageReselect.board = fn; }} onSideOpen={(o) => { v.boardSideOpen = o; }}
           union={boardUnionFor} onPickServer={pickServerBoard} {scopeNote}
           onOpenAgent={(s, agent) => { v.hubSelectReq = { serverId: runtime.id, session: s, agent, n: (v.hubSelectReq?.n ?? 0) + 1 }; switchTab('hub'); v.jumpedFrom = 'board'; }}
           onOpenChat={(s) => { v.hubSelectReq = { serverId: runtime.id, session: s, n: (v.hubSelectReq?.n ?? 0) + 1 }; switchTab('hub'); v.jumpedFrom = 'board'; }}
@@ -4407,16 +4417,16 @@
            screen, a slide-over sheet on a phone (opened from the switcher's
            session tag). Kept MOUNTED so its polling and expansion state
            survive; `visible` pauses the poll while the page is hidden. -->
-      <aside class="term-side" class:side-sheet={layout.isTouchDevice && narrowVp} class:sheet={layout.isTouchDevice} class:open={layout.isTouchDevice && narrowVp && sessListOpen} bind:this={v.termSideEl}>
-        {#if !layout.isTouchDevice}<SideHandle />{/if}
+      <aside class="term-side" class:side-sheet={narrowVp} class:sheet={layout.isTouchDevice} class:open={narrowVp && sessListOpen} bind:this={v.termSideEl}>
+        {#if !layout.isTouchDevice && !narrowVp}<SideHandle />{/if}
         <Sessions {openTerminal} activeTarget={v.terminalTarget}
           onGoBack={(fn) => v.sessionsGoBack = fn}
-          visible={shown && page === 'terminal' && (!layout.isTouchDevice || sessListOpen)}
+          visible={shown && page === 'terminal' && ((!layout.isTouchDevice && !narrowVp) || sessListOpen)}
           onPick={() => sessListOpen = false}
-          union={sessionsUnionFor} onPickServer={pickServerPane} foreignInline={layout.isTouchDevice && narrowVp} foreignProjects={projectClocks} {scopeNote}
+          union={sessionsUnionFor} onPickServer={pickServerPane} foreignInline={narrowVp} foreignProjects={projectClocks} {scopeNote}
           chips={false} />
       </aside>
-      {#if layout.isTouchDevice && sessListOpen}
+      {#if (layout.isTouchDevice || narrowVp) && sessListOpen}
         <button class="side-scrim" aria-label={t('close')} onclick={() => sessListOpen = false}></button>
       {/if}
       <div class="term-main">
@@ -4608,6 +4618,8 @@
      popovers (rail 12, menus 24). The heads' reservations live in app.css. */
   .shell-side-toggle {
     position: fixed; z-index: 11;
+    /* Below the compact width the page's sidebar is a sheet (z 26, #123): the one
+       toggle stays above it, so the control that opened it closes it. */
     left: calc(46px + var(--side-toggle-x));
     /* Fixed like the rail, so it adds the status-bar inset itself (#332). */
     top: calc(var(--sat) + (var(--page-head-h) - var(--control-height)) / 2);
@@ -4793,6 +4805,17 @@
     padding-bottom: calc(var(--sys-sidebar-h) + var(--sab));
   }
 
+  /* Board #123: the desktop shell below the compact width has no sidebar column to
+     sit under, so the bar parks as on touch until a page's sheet is open, then is
+     that sheet's last row, beside the rail; it never lies over the page (it had
+     covered the terminal's key bar). */
+  @media (max-width: 760px) {
+    .with-rail .sys-sidebar { display: none; width: min(300px, 86vw); z-index: 27; }
+    .with-rail:has(:global(.page-layer:not(.hidden) .side-sheet.open)) .sys-sidebar {
+      display: flex; width: min(300px, 86vw); padding-inline: 6px; visibility: visible;
+    }
+  }
+
   /* Connected mobile: bottom tab bar in thumb reach. Hidden while the
      keyboard is up so immersive typing (terminal, editor) costs nothing —
      the ONLY writer of that class is App's viewport handler. */
@@ -4905,11 +4928,12 @@
   .page-layer.term-page { display: grid; --side-open: 1; grid-template-columns: minmax(0, calc(var(--sidebar-w) * var(--side-open))) minmax(0, 1fr); min-height: 0; overflow: hidden; }
   .page-layer.term-page:global(.moving) { transition: --side-open var(--t-move) ease-out; }
   .with-rail.side-collapsed .page-layer.term-page { --side-open: 0; }
-  .with-rail.side-collapsed .page-layer.term-page:not(:global(.moving)) > .term-side { visibility: hidden; }
+  .with-rail.side-collapsed .page-layer.term-page:not(:global(.moving)) > .term-side:not(.side-sheet) { visibility: hidden; }
   .term-side:global(.pin-end) { justify-self: end; }
   .term-side { position: relative; display: flex; flex-direction: column; min-width: 0; min-height: 0; border-right: 1px solid var(--border); background: var(--bg2); }
   .term-main { position: relative; display: flex; flex-direction: column; min-width: 0; min-height: 0; }
   @media (max-width: 760px) {
+    .shell-side-toggle { z-index: 27; }
     .page-layer.term-page { grid-template-columns: minmax(0, 1fr); }
     /* The sheet geometry/motion is the SHARED .side-sheet dialect in app.css
        (owner, 2026-08-30: one drawer for Chat/Terminal/Board). */

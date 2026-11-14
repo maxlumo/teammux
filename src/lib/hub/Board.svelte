@@ -131,7 +131,7 @@
    * the host's (`onPickServer`: focus that server, land on that board — D2);
    * the board body stays this server's (D3). Null in Single: this server's
    * list, untagged, as before. */
-  let { session = '', visible = true, onGoBack = null, issueRequest = null, embedded = false, createRequest = null, jumped = false, sideCollapsed = false, guardPage = '', union = null, scopeNote = null, onPickServer = null, onOpenAgent = null, onJumpMessage = null, onOpenChat = null }: { onOpenAgent?: ((session: string, agent: string) => void) | null; onJumpMessage?: ((session: string, m: { seq?: number; id?: number | string; discuss?: boolean }) => void) | null; onOpenChat?: ((session: string) => void) | null; guardPage?: string; session?: string; visible?: boolean; onGoBack?: ((fn: () => boolean) => void) | null; issueRequest?: { session: string; id: number; n: number } | null; embedded?: boolean; createRequest?: { n: number } | null; jumped?: boolean; sideCollapsed?: boolean; union?: { source: BoardUnion; included: readonly { id: string; name: string }[] } | null; scopeNote?: ScopeNoteSpec | null; onPickServer?: ((ref: SessionRef) => void) | null } = $props();
+  let { session = '', visible = true, onGoBack = null, issueRequest = null, embedded = false, createRequest = null, jumped = false, sideCollapsed = false, guardPage = '', union = null, scopeNote = null, onPickServer = null, onOpenAgent = null, onJumpMessage = null, onOpenChat = null, onReselect = null, onSideOpen = null }: { onReselect?: ((fn: (() => void) | undefined) => void) | null; onSideOpen?: ((open: boolean) => void) | null; onOpenAgent?: ((session: string, agent: string) => void) | null; onJumpMessage?: ((session: string, m: { seq?: number; id?: number | string; discuss?: boolean }) => void) | null; onOpenChat?: ((session: string) => void) | null; guardPage?: string; session?: string; visible?: boolean; onGoBack?: ((fn: () => boolean) => void) | null; issueRequest?: { session: string; id: number; n: number } | null; embedded?: boolean; createRequest?: { n: number } | null; jumped?: boolean; sideCollapsed?: boolean; union?: { source: BoardUnion; included: readonly { id: string; name: string }[] } | null; scopeNote?: ScopeNoteSpec | null; onPickServer?: ((ref: SessionRef) => void) | null } = $props();
   // The Dashboard view (board #109): the page head's Dashboard · Board switch,
   // remembered per device, Dashboard by default (owner's D2), only on a server
   // that announces `dashboard`, never in the Hub drawer's embedded board.
@@ -197,6 +197,10 @@
   let sideOpen = $state(false);    // compact: the hamburger DRAWER (same dialect
                                    // as Chat/Terminal — reopened #11, no more
                                    // second-page drilldown)
+  // Board #123: below the compact width the shell's one sidebar toggle drives this
+  // drawer (the wide sidebar follows the shell's pref, so nothing is registered there).
+  $effect(() => { onReselect?.(narrowVp ? () => { sideOpen = !sideOpen; } : undefined); });
+  $effect(() => { onSideOpen?.(narrowVp && sideOpen); });
   // UNSAVED WORK blocks the silent follow — a dirty edit or typed create
   // data alike (board #11; #29 review): the prop moving under either would
   // reset the view and wipe it with no confirm, bypassing the shared
@@ -1045,7 +1049,7 @@
     if (e.key !== 'Escape') return;
     if (shotView) return; // the Lightbox's own window handler closes it first
     if (pendingDiscard || pendingDelete) return; // the ConfirmDialog's own capture handler closes itself
-    if (sideOpen) { sideOpen = false; e.stopPropagation(); return; }
+    if (narrowVp && sideOpen) { sideOpen = false; e.stopPropagation(); return; } // only a SHOWN drawer takes Escape (#123)
     if (submitting) { e.stopPropagation(); return; } // the request answers first
     if (sel && (dirty || noteDirty)) { pendingDiscard = () => { sel = null; }; e.stopPropagation(); return; }
     if (creating && createDirty) { pendingDiscard = () => { creating = false; }; e.stopPropagation(); return; }
@@ -1220,7 +1224,9 @@
       <ScopeNote note={scopeNote} />
     </div>
   </aside>
-  {#if sideOpen}
+  <!-- The backdrop is the SHEET's (#123): the same gate as the sheet, so a widened
+       window (a column, no sheet) leaves none over the shell toggle. -->
+  {#if narrowVp && sideOpen}
     <!-- svelte-ignore a11y_click_events_have_key_events -->
     <!-- svelte-ignore a11y_no_static_element_interactions -->
     <div class="side-scrim" onclick={() => (sideOpen = false)}></div>

@@ -579,11 +579,15 @@ button:disabled {
    2026-08-30). 0,3,0 outranks every scoped base; svelte-check cannot see a
    specificity loss, so the Board source test pins this shape. */
 .side-sheet.side-sheet.side-sheet {
-  position: fixed; z-index: 26; inset: 0 auto 0 0;
+  /* Beside the desktop rail, never over it (board #123: a desktop shell below the
+     760 compact width keeps the rail usable; --shell-left is 0 on the phone). */
+  position: fixed; z-index: 26; inset: 0 auto 0 var(--shell-left, 0px);
   width: min(300px, 86vw);
   padding-top: var(--sat);
   border-right: none;
-  transform: translateX(-100%);
+  /* Parked past the screen edge, the rail's width included: a closed sheet must
+     not lie over the rail and take its taps. */
+  transform: translateX(calc(-100% - var(--shell-left, 0px)));
   box-shadow: none;
   transition: transform var(--t-move) ease, box-shadow var(--t-move) ease;
   /* The sheet keeps its OWN compositor layer for its whole mounted life.
@@ -608,7 +612,7 @@ button:disabled {
 @media (prefers-reduced-motion: reduce) { .side-sheet.side-sheet.side-sheet { transition: none; } }
 /* Its scrim (a <button> in some pages — strip the chrome). */
 .side-scrim {
-  position: fixed; inset: 0; z-index: 25;
+  position: fixed; inset: 0 0 0 var(--shell-left, 0px); z-index: 25;
   background: rgba(0, 0, 0, 0.45);
   border: none; padding: 0;
   animation: fade-in var(--t-move) ease-out;
@@ -640,6 +644,20 @@ button:disabled {
    Agents have no sidebar, no toggle, and no room to make. */
 .with-rail.side-page.side-collapsed .page-head { padding-left: calc(var(--side-toggle-x) * 2 + var(--control-height)); }
 @media (prefers-reduced-motion: reduce) { .with-rail.side-page .page-head { transition: none; } }
+/* Board #123: the desktop shell below the 760 compact width (a foldable's inner
+   screen, a narrow window). Each page's sidebar is its sheet, opened by the ONE
+   shell toggle, which stands over it: the page head and the sheet's head make its
+   room whatever the wide sidebar's pref says, and a page's own drawer opener is not
+   drawn beside it (one control per job). */
+@media (max-width: 760px) {
+  .with-rail.side-page .page-head { padding-left: calc(var(--side-toggle-x) * 2 + var(--control-height)); }
+  .with-rail .side-toggle-row {
+    min-height: var(--page-head-h); box-sizing: border-box; margin-top: calc(-1 * var(--side-toggle-x));
+    padding-top: 0; padding-bottom: 0; padding-left: calc(var(--side-toggle-x) + var(--control-height));
+    display: flex; align-items: center;
+  }
+  .with-rail .page-head .side-toggle.side-toggle { display: none; }
+}
 /* The title NEVER becomes a squeezed vertical strip: it keeps one line and
    ellipsizes (a 4-character name wrapped to four 36px-wide lines between
    five action buttons — owner report, skill editor on a phone). */
