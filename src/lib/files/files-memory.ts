@@ -50,6 +50,15 @@ export interface BrowsePosition {
   file?: string;
 }
 
+/** An editor's unsaved working copy (board #126). Its baseline is not here: the text
+ * last known on disk is the store's (`saved`), one per file, beside it (ruling 16). */
+export interface EditDraft {
+  text: string;
+  /** The instance whose editor made it dirty (#126 ruling 7): only it, or a save or
+   * discard of THIS text, clears it; a clean exit of another instance never does. */
+  owner: unknown;
+}
+
 export interface FilesMemory {
   /** Where this session was left, or undefined on a first visit. */
   position(session: string): BrowsePosition | undefined;
@@ -95,12 +104,34 @@ export interface FilesMemory {
   seal(reason: unknown): void;
   /** Has the record been sealed? A new download must not start. */
   sealed(): boolean;
-  /** Per-server memory a switch drops: the browse positions. */
+  /** The unsaved edit of `path` in `session`, if an editor left one (board #126):
+   * the Hub's drawer Files is unmounted when the Hub turns compact, and the next
+   * instance, or the page's, wakes in the editor with it. */
+  draft(session: string, path: string): EditDraft | undefined;
+  /** The text last known on disk for `path` (set when a Files instance reads it, and
+   * by a settled save from the snapshot it sent): every instance's baseline, so dirty
+   * is `current ≠ saved` in whichever instance shows the file (#126 ruling 16). */
+  saved(session: string, path: string): string | undefined;
+  setSaved(session: string, path: string, text: string): void;
+  /** Be told whenever a baseline moves (a save settled, a read landed), so every mounted
+   * instance recomputes its dirty state. Returns the unsubscribe. */
+  watchSaved(fn: () => void): () => void;
+  /** Keep that working copy (its owner is the writer). */
+  keepDraft(session: string, path: string, draft: EditDraft): void;
+  /** Drop it only when `when` says the stored copy is the caller's to drop (its owner,
+   * or the very text a save just wrote); answers whether it dropped one. */
+  dropDraft(session: string, path: string, when: (draft: EditDraft) => boolean): boolean;
+  /** Per-server memory a switch drops: the browse positions (never a draft:
+   * unsaved text is the person's). */
   reset(): void;
 }
 
 export function createFilesMemory(): FilesMemory {
   const browsed = new Map<string, BrowsePosition>();
+  const drafts = new Map<string, EditDraft>();
+  const saves = new Map<string, string>();
+  const watchers = new Set<() => void>();
+  const draftKey = (session: string, path: string) => `${session}\n${path}`;
   const taken = new WeakSet<object>();
   const inFlight = new Map<string, PartWriter>();
   const cancels = new Map<string, AbortController>();
@@ -110,6 +141,23 @@ export function createFilesMemory(): FilesMemory {
 
   return {
     position: (session) => browsed.get(session),
+    draft: (session, path) => drafts.get(draftKey(session, path)),
+    saved: (session, path) => saves.get(draftKey(session, path)),
+    setSaved(session, path, text) {
+      const key = draftKey(session, path);
+      if (saves.get(key) === text) return;
+      saves.set(key, text);
+      for (const fn of [...watchers]) fn();
+    },
+    watchSaved(fn) { watchers.add(fn); return () => { watchers.delete(fn); }; },
+    keepDraft(session, path, draft) { drafts.set(draftKey(session, path), draft); },
+    dropDraft(session, path, when) {
+      const key = draftKey(session, path);
+      const d = drafts.get(key);
+      if (!d || !when(d)) return false;
+      drafts.delete(key);
+      return true;
+    },
     park: (session, at) => { browsed.set(session, at); },
     consumed: (request) => taken.has(request),
     consume: (request) => { taken.add(request); },

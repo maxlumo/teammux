@@ -206,3 +206,35 @@ test('a sealed record refuses a new attempt, and the release awaits every one it
   m.seal('other');
   assert.equal(m.sealed(), true, 'idempotent');
 });
+
+test('an unsaved edit is kept per session and file; only its owner or the saved text drops it; reset never does (#126)', () => {
+  const m = createFilesMemory();
+  const drawer = {}, page = {};
+  m.keepDraft('a', '/w/x.md', { text: 'new', owner: drawer });
+  assert.equal(m.draft('a', '/w/x.md')?.text, 'new');
+  assert.equal(m.draft('b', '/w/x.md'), undefined, 'another session\'s file is another draft');
+  assert.equal(m.draft('a', '/w/y.md'), undefined);
+  m.reset();
+  assert.equal(m.draft('a', '/w/x.md')?.text, 'new', 'unsaved text is the person\'s, not memory to drop');
+  assert.equal(m.dropDraft('a', '/w/x.md', (d) => d.owner === page), false, 'a clean exit of ANOTHER instance drops nothing');
+  assert.equal(m.dropDraft('a', '/w/x.md', (d) => d.text === 'older'), false, 'a save of other text drops nothing');
+  assert.equal(m.dropDraft('a', '/w/x.md', (d) => d.text === 'new'), true, 'a save of THIS text drops it');
+  assert.equal(m.draft('a', '/w/x.md'), undefined);
+});
+
+test('the saved baseline is one per session and file, and every watcher is told when it moves (#126 ruling 16)', () => {
+  const m = createFilesMemory();
+  let told = 0;
+  const stop = m.watchSaved(() => { told++; });
+  assert.equal(m.saved('a', '/w/x.md'), undefined);
+  m.setSaved('a', '/w/x.md', 'O');
+  m.setSaved('a', '/w/x.md', 'O');
+  assert.equal(told, 1, 'only a move is news');
+  m.setSaved('a', '/w/x.md', 'A');
+  assert.equal(m.saved('a', '/w/x.md'), 'A');
+  assert.equal(m.saved('b', '/w/x.md'), undefined, 'another session\'s file');
+  assert.equal(told, 2);
+  stop();
+  m.setSaved('a', '/w/x.md', 'B');
+  assert.equal(told, 2, 'an unsubscribed instance is not told');
+});

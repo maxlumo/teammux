@@ -2286,3 +2286,208 @@ test('edit A, open a FOLDER bookmark, discard, Back: A returns in its read view 
     assert.doesNotMatch(app.document.querySelector('.files')?.textContent ?? '', /A DRAFT/u);
   } finally { await app.close(); }
 });
+
+// Board #126 (builder's #124 audit, measured on main): the Hub's drawer Files is unmounted
+// when the Hub turns compact (a window under 760, or a fold), and its editor's text died
+// with it. The working copy is the server's Files record's: a remount wakes in the editor
+// on the same file with the same text, still dirty, and the guarded exit still asks;
+// Discard or Save ends it, and the next remount wakes on the preview.
+test('an unsaved edit survives the drawer being unmounted and remounted; Discard and Save end it (#126)', async context => {
+  const writes: string[] = [];
+  const app = await (await remount).mount(context, {
+    props: { visible: true, session: 'fixture', singlePane: true, shown: true, navRequest: { file: '/fixture/AGENTS.md', n: 1 } },
+    modules: [dirRpc({ fsWrite: async (_p: string, text: string) => { writes.push(text); return {}; } })],
+    pendingImports: ['highlight.js/'],
+  });
+  const area = () => app.document.querySelector<HTMLTextAreaElement>('.editor-layer textarea');
+  const type = async (text: string) => { const a = area()!; a.value = text; a.dispatchEvent(new app.window.Event('input', { bubbles: true })); await settle(app as App); };
+  try {
+    await settle(app as App);
+    button(app as App, 'Edit').click(); await settle(app as App);
+    await type('# Rules\n\nunsaved line');
+    await cycle(app);   // the Hub turned compact, then wide again
+    assert.equal(area()?.value, '# Rules\n\nunsaved line', 'the editor wakes with the unsaved text');
+    assert.equal(button(app as App, 'Save').disabled, false, 'still dirty');
+    // The guarded exit still asks: Back over a dirty editor is the discard dialog.
+    button(app as App, 'Back').click(); await settle(app as App);
+    assert.ok(app.document.querySelector('[role=alertdialog]'), 'the editor’s own discard confirmation');
+    button(app as App, 'Discard').click(); await settle(app as App);
+    await cycle(app);
+    assert.equal(area(), null, 'discarded: nothing to wake in');
+    // Save ends it too.
+    if (at(app as App) !== 'preview AGENTS.md') { row(app as App, 'AGENTS.md'); await settle(app as App); }
+    button(app as App, 'Edit').click(); await settle(app as App);
+    await type('# Rules\n\nsaved line');
+    button(app as App, 'Save').click(); await settle(app as App);
+    assert.deepEqual(writes, ['# Rules\n\nsaved line']);
+    await cycle(app);
+    assert.equal(area(), null, 'saved: the remount wakes on the preview, not an editor');
+    assert.equal(at(app as App), 'preview AGENTS.md');
+  } finally { await app.close(); }
+});
+
+// Validator-2's HOLD on d3622363 (note 6, leader's ruling 7): the stored working copy has an
+// OWNER. A clean exit of ANOTHER instance never clears it; and a save that settles after its
+// instance unmounted clears the copy it saved (the store's, not the dead component's), never
+// a later editor's newer text.
+const pair = compileMount(new URL('./Files.pair.test.svelte', import.meta.url), [new URL('../core/ws.ts', import.meta.url)], { serverScope: true });
+const host = (a: Remount, h: string) => ({
+  area: () => a.document.querySelector<HTMLTextAreaElement>(`${h} .editor-layer textarea`),
+  button: (label: string) => { const e = a.document.querySelector<HTMLButtonElement>(`${h} button[aria-label="${label}"]`); assert.ok(e, `${h} ${label}`); return e!; },
+  type: async (text: string) => { const e = a.document.querySelector<HTMLTextAreaElement>(`${h} .editor-layer textarea`)!; e.value = text; e.dispatchEvent(new a.window.Event('input', { bubbles: true })); await settle(a as App); },
+});
+
+test('a pristine page leaving the editor cannot erase the drawer\'s dirty copy of the same file (#126 F1)', async (context) => {
+  const app = await (await pair).mount(context, {
+    props: { page: true, drawer: true, pageRequest: { file: '/fixture/AGENTS.md', n: 1 }, drawerRequest: { file: '/fixture/AGENTS.md', n: 2 } },
+    modules: [dirRpc()], pendingImports: ['highlight.js/'],
+  });
+  const page = host(app as Remount, '.page-host'), drawer = host(app as Remount, '.drawer-host');
+  try {
+    await settle(app as App);
+    page.button('Edit').click(); await settle(app as App);
+    drawer.button('Edit').click(); await settle(app as App);
+    await drawer.type('# Rules\n\nDRAWER-UNSAVED');
+    page.button('Back').click(); await settle(app as App);   // clean: asks nothing, leaves its editor
+    assert.equal(app.document.querySelector('[role=alertdialog]'), null, 'the clean page asks nothing');
+    await app.setProps({ drawer: false }); await settle(app as App);   // the Hub turned compact
+    await app.setProps({ drawer: true }); await settle(app as App);
+    assert.equal(drawer.area()?.value, '# Rules\n\nDRAWER-UNSAVED', 'the drawer\'s text is still the drawer\'s');
+  } finally { await app.close(); }
+});
+
+test('a save settling after its instance unmounted clears the copy it saved, never a later editor\'s (#126 F2)', async (context) => {
+  for (const later of [false, true]) {
+    let finish: () => void = () => {};
+    let disk = '# Rules\n\n[Next](next.md)';
+    const app = await (await remount).mount(context, {
+      props: { visible: true, session: 'fixture', singlePane: true, shown: true, navRequest: { file: '/fixture/AGENTS.md', n: 1 } },
+      modules: [dirRpc({ fsRead: async () => ({ content: disk }), fsWrite: (_p: string, text: string) => new Promise((ok) => { finish = () => { disk = text; ok({}); }; }) })],
+      pendingImports: ['highlight.js/'],
+    });
+    const one = host(app as Remount, '');
+    try {
+      await settle(app as App);
+      one.button('Edit').click(); await settle(app as App);
+      await one.type('# Rules\n\nSAVED');
+      one.button('Save').click(); await settle(app as App);   // the write is in flight
+      await app.setProps({ shown: false }); await settle(app as App);
+      if (later) {
+        // A new instance resumed the copy and typed more before the old save settled.
+        await app.setProps({ shown: true }); await settle(app as App);
+        await one.type('# Rules\n\nSAVED and LATER');
+        finish(); await settle(app as App);
+        await app.setProps({ shown: false }); await settle(app as App);
+        await app.setProps({ shown: true }); await settle(app as App);
+        assert.equal(one.area()?.value, '# Rules\n\nSAVED and LATER', 'the later editor\'s newer text is kept');
+      } else {
+        finish(); await settle(app as App);
+        await app.setProps({ shown: true }); await settle(app as App);
+        assert.equal(one.area(), null, 'saved while gone: the remount wakes on the preview, not a stale dirty editor');
+      }
+    } finally { finish(); await settle(app as App); await app.close(); }
+  }
+});
+
+// Validator-2's round-1 HOLD on 9d1c4944 (note 11, ruling 12): a save completes against the
+// SNAPSHOT it sent. Type A, Save, type B while the write is pending, the write of A lands:
+// the editor stays dirty (B is not saved), and B survives the drawer's unmount and remount.
+test('a save completes against the text it sent: typing during the write stays dirty and survives a remount (#126 F3)', async (context) => {
+  let finish: () => void = () => {};
+  let disk = '# Rules\n\n[Next](next.md)';
+  const writes: string[] = [];
+  const app = await (await remount).mount(context, {
+    props: { visible: true, session: 'fixture', singlePane: true, shown: true, navRequest: { file: '/fixture/AGENTS.md', n: 1 } },
+    modules: [dirRpc({ fsRead: async () => ({ content: disk }), fsWrite: (_p: string, text: string) => new Promise((ok) => { writes.push(text); finish = () => { disk = text; ok({}); }; }) })],
+    pendingImports: ['highlight.js/'],
+  });
+  const one = host(app as Remount, '');
+  try {
+    await settle(app as App);
+    one.button('Edit').click(); await settle(app as App);
+    await one.type('# Rules\n\nA');
+    one.button('Save').click(); await settle(app as App);   // the write of A is in flight
+    await one.type('# Rules\n\nA then B');                    // B, typed while it is pending
+    finish(); await settle(app as App);                       // A lands
+    assert.deepEqual(writes, ['# Rules\n\nA'], 'only A was written');
+    assert.equal(one.area()?.value, '# Rules\n\nA then B');
+    assert.equal(one.button('Save').disabled, false, 'B is not saved: still dirty');
+    await app.setProps({ shown: false }); await settle(app as App);   // the Hub turned compact
+    await app.setProps({ shown: true }); await settle(app as App);
+    assert.equal(one.area()?.value, '# Rules\n\nA then B', 'B survives the remount');
+    assert.equal(one.button('Save').disabled, false, 'and is still dirty');
+  } finally { finish(); await settle(app as App); await app.close(); }
+});
+
+// Validator-2's round-2 HOLD on 12a6dbed (note 15, ruling 16): the saved BASELINE was per
+// instance while the working copy was shared. Type A, Save(A) pending, remount, the resumed
+// editor goes back to the original O, Save(A) lands: O is now unsaved (the file holds A), so
+// it must read dirty and survive another remount. The baseline lives in the store beside the
+// draft; both settlement orders (before and after the remount) are covered.
+test('the saved baseline is the store\'s: a later intent equal to the old original stays dirty after a settled save (#126 F4)', async (context) => {
+  for (const settleBefore of [false, true]) {
+    let finish: () => void = () => {};
+    const O = '# Rules\n\n[Next](next.md)';
+    let disk = O;
+    const app = await (await remount).mount(context, {
+      props: { visible: true, session: 'fixture', singlePane: true, shown: true, navRequest: { file: '/fixture/AGENTS.md', n: 1 } },
+      modules: [dirRpc({ fsRead: async () => ({ content: disk }), fsWrite: (_p: string, text: string) => new Promise((ok) => { finish = () => { disk = text; ok({}); }; }) })],
+      pendingImports: ['highlight.js/'],
+    });
+    const one = host(app as Remount, '');
+    try {
+      await settle(app as App);
+      one.button('Edit').click(); await settle(app as App);
+      await one.type('# Rules\n\nA');
+      one.button('Save').click(); await settle(app as App);   // Save(A) in flight
+      await app.setProps({ shown: false }); await settle(app as App);   // compact
+      if (settleBefore) { finish(); await settle(app as App); }         // Save(A) lands while the drawer is gone
+      await app.setProps({ shown: true }); await settle(app as App);
+      if (settleBefore) {
+        // Saved while gone: the remount wakes on A's preview; edit it back to O.
+        assert.equal(one.area(), null, 'saved while gone: no stale editor');
+        one.button('Edit').click(); await settle(app as App);
+        await one.type(O);
+      } else {
+        assert.equal(one.area()?.value, '# Rules\n\nA', 'the resumed editor holds A');
+        await one.type(O);                                     // a later intent: back to O (like Undo)
+        finish(); await settle(app as App);                    // Save(A) lands: the file holds A
+      }
+      assert.equal(one.button('Save').disabled, false, `O is unsaved against A (${settleBefore ? 'settled before' : 'after'} the remount)`);
+      await app.setProps({ shown: false }); await settle(app as App);
+      await app.setProps({ shown: true }); await settle(app as App);
+      assert.equal(one.area()?.value, O, 'O survives another remount');
+      assert.equal(one.button('Save').disabled, false, 'still dirty');
+    } finally { finish(); await settle(app as App); await app.close(); }
+  }
+});
+
+// Reviewer's note 22 (measured by builder-2 and validator-2, note 26): a moved baseline alone
+// must not make an instance the writer. A pristine page editor (O) stays mounted beside the
+// drawer; the drawer saves A, types B while it is pending, A lands: the page's O now differs
+// from the saved A, but it was not typed, so it must not overwrite the drawer's B. Both
+// mount orders, because which effect runs last decided it.
+test('a moved baseline never makes a pristine editor overwrite another\'s unsaved text, in either mount order (#126 R)', async (context) => {
+  for (const drawerFirst of [false, true]) {
+    let finish: () => void = () => {};
+    let disk = '# Rules\n\n[Next](next.md)';
+    const app = await (await pair).mount(context, {
+      props: { page: true, drawer: true, drawerFirst, pageRequest: { file: '/fixture/AGENTS.md', n: 1 }, drawerRequest: { file: '/fixture/AGENTS.md', n: 2 } },
+      modules: [dirRpc({ fsRead: async () => ({ content: disk }), fsWrite: (_p: string, text: string) => new Promise((ok) => { finish = () => { disk = text; ok({}); }; }) })],
+      pendingImports: ['highlight.js/'],
+    });
+    const page = host(app as Remount, '.page-host'), drawer = host(app as Remount, '.drawer-host');
+    try {
+      await settle(app as App);
+      page.button('Edit').click(); await settle(app as App);
+      drawer.button('Edit').click(); await settle(app as App);
+      await drawer.type('# Rules\n\nA');
+      drawer.button('Save').click(); await settle(app as App);
+      await drawer.type('# Rules\n\nA then B');
+      finish(); await settle(app as App);
+      await app.setProps({ drawer: false }); await settle(app as App);
+      await app.setProps({ drawer: true }); await settle(app as App);
+      assert.equal(drawer.area()?.value, '# Rules\n\nA then B', `the drawer keeps its B (${drawerFirst ? 'drawer' : 'page'} mounted first)`);
+    } finally { finish(); await settle(app as App); await app.close(); }
+  }
+});

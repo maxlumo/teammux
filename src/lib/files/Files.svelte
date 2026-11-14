@@ -353,7 +353,14 @@
   }
   let currentFile = $state(null); // { path, name, stat, content }
   let editContent = $state('');
-  let editOriginal = $state('');
+  // The editor's baseline is the STORE's (#126 ruling 16): the text last known on disk for
+  // the file on screen, shared by every instance and moved by a save settling anywhere.
+  let savedTick = $state(0);
+  $effect(() => memory.watchSaved(() => { savedTick++; }));
+  const editOriginal = $derived.by(() => {
+    void savedTick;
+    return currentFile ? memory.saved(session, currentFile.path) ?? currentFile.content ?? '' : '';
+  });
   let undoStack = $state([]);
   // Refs for the three stacked editor layers (line-number gutter, syntax
   // highlight, and the transparent textarea on top). The textarea is the only
@@ -932,7 +939,40 @@
     const w = wake;
     if (!w?.ready || loading) return;
     wake = null;
-    if (fileNav.isCurrentFile(w.gen) && untrack(() => view === 'list')) void openFileRef(w.file);
+    if (fileNav.isCurrentFile(w.gen) && untrack(() => view === 'list')) {
+      void openFileRef(w.file)?.then?.(() => {
+        // The file woke with an unsaved edit (#126): back into its editor.
+        if (view === 'preview' && currentFile?.path === w.file && memory.draft(session, w.file)) startEdit();
+      });
+    }
+  });
+  // Board #126: the editor's working copy lives in the server's Files record while
+  // this instance shows it, so an unmount (the drawer under a compact Hub) keeps it.
+  // Any exit made HERE (save, discard, Back, another file) leaves the editor and
+  // drops it; only the unmount, which runs no effect, keeps it.
+  // The copy has an OWNER (ruling 7): this instance clears only a copy it owns, so a
+  // clean exit here never erases another instance's dirty text of the same file.
+  const self = {};
+  const mine = (d) => d.owner === self;
+  // WHO WRITES (reviewer, note 22): a moved baseline alone never makes this instance the
+  // writer. It writes the stored copy only when its OWN text changed since its last run
+  // (the person typed or undid here), or when it already owns the stored copy, or when no
+  // copy is stored (its unsaved text is then protected without overwriting anyone's).
+  let draftPath = '';
+  let lastText = '';
+  $effect(() => {
+    const path = view === 'edit' ? currentFile?.path ?? '' : '';
+    const text = editContent, original = editOriginal;
+    untrack(() => {
+      if (draftPath && draftPath !== path) memory.dropDraft(session, draftPath, mine);
+      const typed = draftPath === path && text !== lastText;
+      draftPath = path;
+      lastText = text;
+      if (!path) return;
+      if (text === original) { memory.dropDraft(session, path, mine); return; }
+      const stored = memory.draft(session, path);
+      if (typed || !stored || mine(stored)) memory.keepDraft(session, path, { text, owner: self });
+    });
   });
 
   // The embedder can read where this instance is (the drawer's maximize
@@ -1103,6 +1143,7 @@
         // review comment is made against it, and highlights are painted only
         // while the listing's revision is this one.
         currentFile = { ...file, content: r.content, revision: r.revision };
+        memory.setSaved(session, file.path, r.content);
         wrapLines = defaultWrapForMime(stat.mime_hint || '');
         enterView('preview');
       } else if (/\.pptx$/i.test(name)) {
@@ -1235,6 +1276,7 @@
         const r = await fsRead(file.path);
         if (currentFile !== file) return;
         currentFile.content = r.content;
+        memory.setSaved(session, file.path, r.content);
         currentFile.revision = r.revision;
         currentFile = currentFile; // trigger reactivity
         reviewRefresh++; // the review cards are read again (#434): no live sync
@@ -1256,8 +1298,13 @@
 
   function startEdit() {
     loadHljs(); // the editor's highlight overlay follows the same lazy load
-    editContent = currentFile.content;
-    editOriginal = currentFile.content;
+    // An unsaved working copy of this file, left by an instance that was unmounted
+    // (the drawer when the Hub turns compact, board #126), is the editor's again.
+    const kept = memory.draft(session, currentFile.path);
+    if (memory.saved(session, currentFile.path) === undefined) memory.setSaved(session, currentFile.path, currentFile.content);
+    editContent = kept?.text ?? editOriginal;
+    // Resumed, the copy is this instance's now: its save or discard ends it.
+    if (kept) memory.keepDraft(session, currentFile.path, { ...kept, owner: self });
     undoStack = [];
     wrapLines = defaultWrapForMime(currentFile?.stat?.mime_hint || '');
     view = 'edit';
@@ -1321,14 +1368,26 @@
   });
 
   async function saveFile() {
+    // What this save writes, captured now: it may settle after this instance is gone
+    // (the drawer under a compact Hub, #126 F2), so it ends the STORED copy itself, and
+    // only while that copy is still this text (a later editor's newer text stays).
+    const savedPath = currentFile.path, savedText = editContent, savedSession = session;
     try {
-      await fsWrite(currentFile.path, editContent);
-      editOriginal = editContent;
-      currentFile.content = editContent;
-      // The text on screen is no longer the one the server hashed: until the
-      // next read there is no revision, so nothing is painted or added (#434).
-      currentFile.revision = undefined;
-      undoStack = [];
+      await fsWrite(savedPath, savedText);
+      // The baseline moves in the STORE, for every instance showing this file (ruling 16).
+      memory.setSaved(savedSession, savedPath, savedText);
+      memory.dropDraft(savedSession, savedPath, (d) => d.text === savedText);
+      // It completes against the SNAPSHOT it sent (#126 F3, ruling 12): the file now
+      // holds savedText, and the editor stays dirty iff the person typed past it while
+      // the write was in flight (that newer text is not saved, and its stored copy
+      // stays). Nothing here touches an editor that has moved to another file.
+      if (currentFile?.path === savedPath) {
+        currentFile.content = savedText;
+        // The text on screen is no longer the one the server hashed: until the
+        // next read there is no revision, so nothing is painted or added (#434).
+        currentFile.revision = undefined;
+        if (editContent === savedText) undoStack = [];
+      }
     } catch (e) {
       error = e.message;
     }

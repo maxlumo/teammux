@@ -1087,6 +1087,48 @@ Infer MIME from image file extension, not from parent markdown file's mime_hint.
 ### Every way out of the editor asks once — through one helper
 `Files.svelte` has ONE exit for the editor, `leaveEditor(run)`: with no unsaved edits the move runs at once; with edits it is parked as `pendingAct = { kind: 'leave', run }` behind the shared ConfirmDialog and runs on confirm. Cancel drops the move — nothing is queued. Until 2026-09-03 only the back button asked; the session/pane switch, the follow-the-real-cwd rule and the drawer's "look here" (`navRequest`) each set `view = 'list'` outright and the text was silently gone (review finding, highest priority). The decision is pure and unit-tested in `file-view-state.ts`: `leaveDecision({ view, edited })` and `cwdFollowStep(reported, lastSourceDir, guard)`. The follow step commits `lastSourceDir` BEFORE the dialog, so a cancelled follow is skipped for that event and the same cwd does not ask again on the next effect run (it would otherwise re-prompt every time the tab regains visibility). `leaveEditor` reads `view`/`isEdited` under `untrack` because its callers are `$effect`s that must not re-run on every keystroke. When a session switch and a cwd follow both want to move in the same event, the later (follow) replaces the earlier pending move — following the real cwd already outranks the parked position.
 
+### An unmount is not a way out: the editor's working copy is the server's (board #126, 2026-11-14)
+`leaveEditor` guards every exit a PERSON takes, but the Hub's drawer Files can also be
+unmounted under them: the Hub renders its drawer only while not compact (`mobile ||
+width ≤ 760`), so a desktop window narrowed under 760 or a foldable folded on Auto
+dropped the drawer's Files instance and its component-local `editContent` with it
+(builder's #124 audit, measured on main b01a8a1d; reproduced in Chromium: drawer editor
+typed at 900, narrowed to 700 or 411, widened again: no editor, the text gone, nothing
+asked). The working copy now lives in the server's Files record (`FilesMemory.draft` /
+`keepDraft` / `dropDraft`, keyed by session and path, so the drawer's and the page's
+instances read the same draft for the same file): written while an editor shows it and
+differs from the text it opened on, and kept by an unmount, which runs no effect. The copy
+has an OWNER, the instance that made it dirty (or resumed it): an exit made in an
+instance (discard, Back, another file) drops only a copy it owns, so a clean Files page
+leaving its editor never erases the drawer's dirty text of the same file (validator-2's
+HOLD on d3622363, F1). A save ends the STORED copy itself when its write settles, and
+only while the stored text is the text it wrote: a save that settles after its instance
+was unmounted leaves no stale dirty editor to wake in, and a later editor's newer text of
+that file is kept (F2). **The baseline and the working copy live together, per file**
+(ruling 16, after F3 and F4): the store holds, per session and path, `saved`, the text
+last known on disk (set whenever an instance reads the file, and by a settled save from
+the snapshot it sent), beside the draft. No instance keeps a baseline of its own: every
+instance derives dirty as `current ≠ saved` and is told when `saved` moves
+(`watchSaved`), so a save settling anywhere, even in an instance that is gone, re-judges
+every editor showing that file. Hence: typing past a pending save stays dirty (F3); a
+later intent equal to the pre-save text (O, after Save(A)) is dirty against A and kept
+(F4); an instance drops the draft only when its text equals `saved`, or by its own
+explicit exit. **A moved baseline never makes an instance the writer** (reviewer, note 22;
+measured with the drawer mounted before the page, the app's order): a pristine page editor
+whose text became "dirty" only because a save elsewhere moved `saved` had overwritten the
+drawer's newer unsaved text, and which one won was effect order. An instance writes the
+stored copy only when its own text changed since its last run (typed or undone there),
+when it already owns the stored copy, or when none is stored. Measured consequence in the real app: the server writes the file before
+its reply reaches the browser, so an editor resumed while the reply is still held reads
+the saved text from disk and is clean (Undo has nothing to undo; the undo stack is per
+editing session and not kept). The next instance's parked file wakes
+(#479) and, with a draft, goes straight back into its editor, still dirty, so the guarded
+exit asks again; Edit on that file from either instance takes the draft. `reset` never
+drops a draft: unsaved text is the person's. The undo stack and the caret are not kept
+(the undo stack is per editing session). Pins: `Files.mount.test.ts` (#126, #126 F1, #126 F2, #126 F3, #126 F4, #126 R in both mount orders, with
+the page+drawer pair fixture `Files.pair.test.svelte`), `files-memory.test.ts` (#126),
+each red before.
+
 ## Motion
 
 The file browser follows [motion.md](motion.md). A directory load KEEPS the
