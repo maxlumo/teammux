@@ -40,6 +40,9 @@ export const hoverCard = {
     if (shown) hiddenAt = Date.now();
     shown = null;
   },
+  /** Whether the card on screen is the one this getter opened: the card closes itself (a key, a scroll,
+   * a resize) without telling its opener, so a tap toggle asks here (board #124 note 26). */
+  isShowing(live: (() => HoverInfo | null | undefined) | undefined): boolean { return !!live && shown?.live === live; },
   /** True right after a hide: the pointer is wandering between targets. */
   get warm(): boolean { return Date.now() - hiddenAt < 400; },
 };

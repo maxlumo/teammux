@@ -1557,3 +1557,98 @@ test('an inline omp member keeps its stored own-tools switch through an unrelate
     assert.equal(JSON.parse(writes[0].members)[0].agent.omp_tools, true, 'an unrelated edit never turns it off');
   } finally { await app.close(); }
 });
+
+// Board #124 (validator note 28, leader note 29): a fold or an unfold moves the Agents editor between its two
+// hosts (the desktop page, Settings' guest on the phone). The working copy lives in the server's state, so the
+// other host shows the same editor with the same draft, still dirty, and the guarded exit still governs it.
+let hostsCompiled: ReturnType<typeof compileMount> | undefined;
+const hostsFixture = () => hostsCompiled ??= compileMount(new URL('./AgentsHosts.test.svelte', import.meta.url), [new URL('../core/ws.ts', import.meta.url)], { serverScope: true });
+const hosts = (app: App) => (app.window as unknown as { __hosts: { host: string; section: string } }).__hosts;
+const shownEditor = (app: App) => {
+  const host = [...app.document.querySelectorAll<HTMLElement>('.host-page, .host-settings')].find((h) => !h.hidden);
+  return host?.querySelector<HTMLTextAreaElement>('.editor textarea') ?? null;
+};
+async function settleHosts(app: App) { for (let i = 0; i < 12; i++) await app.flush(); }
+async function openIn(app: App, name: string) {
+  await settleHosts(app);
+  const host = [...app.document.querySelectorAll<HTMLElement>('.host-page, .host-settings')].find((h) => !h.hidden)!;
+  const row = [...host.querySelectorAll<HTMLButtonElement>('.side-row')].find((b) => b.querySelector('.r-name')?.textContent === name);
+  assert.ok(row, `${name} in the shown host`); row.click(); await settleHosts(app);
+}
+async function type(app: App, value: string) {
+  const field = shownEditor(app)!;
+  field.value = value; field.dispatchEvent(new app.window.Event('input', { bubbles: true }));
+  await settleHosts(app);
+}
+const shownCommand = (app: App, name: string) => {
+  const host = [...app.document.querySelectorAll<HTMLElement>('.host-page, .host-settings')].find((h) => !h.hidden)!;
+  return host.querySelector<HTMLButtonElement>(`[aria-label="${name}"]`);
+};
+
+test('a fold keeps an unsaved agent definition: the phone\'s Settings shows it, still dirty (#124 note 28)', async context => {
+  const app = await (await hostsFixture()).mount(context, { modules: [rpc()] });
+  try {
+    await openIn(app, 'alpha'); await type(app, 'UNSAVED-AGENT-124-SENTINEL');
+    hosts(app).host = 'settings'; await settleHosts(app);
+    assert.equal(app.document.querySelector('.host-page'), null, 'the desktop page is gone, as in App');
+    assert.equal(shownEditor(app)?.value, 'UNSAVED-AGENT-124-SENTINEL', 'the same draft in the other host');
+    assert.equal(shownCommand(app, 'Save')?.disabled, false, 'still dirty: Save is offered');
+    shownCommand(app, 'Cancel')!.click(); await settleHosts(app);
+    assert.ok(app.document.querySelector('.host-settings [role=alertdialog]'), 'the guarded exit still asks');
+  } finally { await app.close(); }
+});
+
+test('an unfold keeps it too, and edits made after it are what the phone shows on the next fold (#124 note 28)', async context => {
+  const app = await (await hostsFixture()).mount(context, { modules: [rpc()] });
+  try {
+    hosts(app).host = 'settings'; await settleHosts(app);
+    await openIn(app, 'alpha'); await type(app, 'typed on the phone');
+    hosts(app).host = 'page'; await settleHosts(app);
+    assert.equal(shownEditor(app)?.value, 'typed on the phone', 'the desktop page shows the phone\'s draft');
+    await type(app, 'then on the desktop');
+    hosts(app).host = 'settings'; await settleHosts(app);
+    assert.equal(shownEditor(app)?.value, 'then on the desktop', 'the kept guest adopts the newer draft, not its own stale copy');
+    shownCommand(app, 'Cancel')!.click(); await settleHosts(app);
+    shownCommand(app, 'Discard')!.click(); await settleHosts(app);
+    assert.equal(shownEditor(app), null, 'discarded');
+    hosts(app).host = 'page'; await settleHosts(app);
+    assert.equal(shownEditor(app), null, 'a discard clears the draft for both hosts');
+  } finally { await app.close(); }
+});
+
+// Board #124 round 2 (validator note 42, leader note 44): a host switch while the instructions for every agent
+// are still being READ. The shared draft must not hand the new host a copy stuck at "loading": the host that
+// adopts it restarts the read and completes it into the shared draft.
+for (const [from, to] of [['page', 'settings'], ['settings', 'page']] as const) {
+  test(`a switch ${from} -> ${to} while the global instructions are read finishes the read in the new host (#124 note 42)`, async context => {
+    const replies: ((v: unknown) => void)[] = [];
+    const app = await (await hostsFixture()).mount(context, { modules: [rpc({
+      globalPromptGet: () => new Promise((yes) => { replies.push(yes); }),
+    })] });
+    try {
+      if (from === 'settings') { hosts(app).host = 'settings'; await settleHosts(app); }
+      await openIn(app, 'Instructions for every agent');
+      assert.equal(replies.length, 1, 'the first read is in flight');
+      hosts(app).host = to; await settleHosts(app);
+      for (const r of replies) r({ text: 'BACKEND-GLOBAL-SLOW-124', path: '/c/AGENTS.md', max_bytes: 24576 });
+      await settleHosts(app);
+      assert.equal(shownEditor(app)?.value, 'BACKEND-GLOBAL-SLOW-124', 'the new host shows the text the server answered');
+      assert.equal(shownEditor(app)?.disabled, false, 'and it is editable, not loading forever');
+      assert.equal(shownCommand(app, 'Save')?.disabled, true, 'a fresh read is not a change');
+    } finally { await app.close(); }
+  });
+}
+
+test('a loaded, edited global instructions draft crosses a switch as typed, still dirty (#124 note 42 control)', async context => {
+  const app = await (await hostsFixture()).mount(context, { modules: [rpc({
+    globalPromptGet: async () => ({ text: 'stored', path: '/c/AGENTS.md', max_bytes: 24576 }),
+  })] });
+  try {
+    await openIn(app, 'Instructions for every agent');
+    assert.equal(shownEditor(app)?.value, 'stored');
+    await type(app, 'stored, then edited');
+    hosts(app).host = 'settings'; await settleHosts(app);
+    assert.equal(shownEditor(app)?.value, 'stored, then edited');
+    assert.equal(shownCommand(app, 'Save')?.disabled, false, 'still dirty');
+  } finally { await app.close(); }
+});

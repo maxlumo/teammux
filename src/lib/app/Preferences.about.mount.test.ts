@@ -44,13 +44,15 @@ test('About names this app\'s build and the server\'s, dim while they are the sa
   const { app, rows } = await about(context, { serverInfo: { hostname: 'devbox', machineId: 'm', build: SAME } });
   try {
     const r = rows();
-    assert.deepEqual(r.map((x) => x.label), ['Teammux', 'Server', 'Source', 'License']);
+    assert.deepEqual(r.map((x) => x.label), ['Teammux', 'Server', 'Screen', 'Source', 'License']);
+    // Board #124: the screen this app has, the instrument of Auto's rule on a device.
+    assert.match(r[2]!.value, /^\d+ × \d+ @ [\d.]+ · (Desktop|Mobile) \((Auto|Desktop|Mobile)\)$/u, r[2]!.value);
     assert.equal(r[0]!.value, 'v1.0.0 · 46392f16 · 2026-10-14 07:40 UTC');
     assert.equal(r[1]!.value, 'v1.0.0 · 46392f16 · 2026-10-14 07:40 UTC');
     assert.doesNotMatch(r[1]!.el.textContent!, /devbox/, 'the label is the word; the focus is named by the Settings head, not by a hostname that wraps a phone column');
     assert.equal(app.document.querySelector('.about-build.mismatch'), null);
     assert.equal(app.document.querySelector('.about-mismatch'), null);
-    assert.equal(r[3]!.value, 'MIT');
+    assert.equal(r[4]!.value, 'MIT');
   } finally { await app.close(); }
 });
 
@@ -73,7 +75,7 @@ test('an older server is "unknown", never blank and never a mismatch; offline th
   } finally { await old.app.close(); }
   const off = await about(context, { connected: false, serverInfo: { hostname: '', machineId: '', build: null } });
   try {
-    assert.deepEqual(off.rows().map((x) => x.label), ['Teammux', 'Source', 'License']);
+    assert.deepEqual(off.rows().map((x) => x.label), ['Teammux', 'Screen', 'Source', 'License']);
   } finally { await off.app.close(); }
 });
 

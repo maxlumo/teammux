@@ -179,7 +179,7 @@ test('Files toggle/disclosure tools announce state, including empty panels (#157
 });
 
 test('Files shared Back keeps the existing linked-preview history (#157)', async context => {
-  const app = await (await compiled).mount(context, { props: { visible: true, session: 'fixture' }, modules: [rpc()] });
+  const app = await (await compiled).mount(context, { setup(w) { w.localStorage.setItem('tmux_layout_mode', 'mobile'); }, props: { visible: true, session: 'fixture' }, modules: [rpc()] });
   try {
     await settle(app);
     app.document.querySelector<HTMLButtonElement>('.file-main')!.click(); await settle(app);
@@ -1588,7 +1588,7 @@ test('a directory link is a browser-history entry like any directory: one pushSt
 });
 
 test('a directory link lists the directory, and Back returns to the preview that held the link (#431)', async context => {
-  const app = await (await compiled).mount(context, { props: { visible: true, session: 'fixture' }, modules: [dirRpc()] });
+  const app = await (await compiled).mount(context, { setup(w) { w.localStorage.setItem('tmux_layout_mode', 'mobile'); }, props: { visible: true, session: 'fixture' }, modules: [dirRpc()] });
   try {
     await settle(app);
     row(app, 'AGENTS.md'); await settle(app);
@@ -1600,7 +1600,7 @@ test('a directory link lists the directory, and Back returns to the preview that
 });
 
 test('a link to the directory already listed is a step of its own, on an empty or a full history (#431 review P1)', async context => {
-  const app = await (await compiled).mount(context, { props: { visible: true, session: 'fixture' }, modules: [dirRpc()] });
+  const app = await (await compiled).mount(context, { setup(w) { w.localStorage.setItem('tmux_layout_mode', 'mobile'); }, props: { visible: true, session: 'fixture' }, modules: [dirRpc()] });
   try {
     await settle(app);
     // Empty history: the link is the only step.
@@ -1626,7 +1626,7 @@ test('a link to the directory already listed is a step of its own, on an empty o
 });
 
 test('preview -> linked preview -> directory unwinds through both previews (#431 review P1)', async context => {
-  const app = await (await compiled).mount(context, { props: { visible: true, session: 'fixture' }, modules: [dirRpc()] });
+  const app = await (await compiled).mount(context, { setup(w) { w.localStorage.setItem('tmux_layout_mode', 'mobile'); }, props: { visible: true, session: 'fixture' }, modules: [dirRpc()] });
   try {
     await settle(app);
     row(app, 'AGENTS.md'); await settle(app);
@@ -1641,7 +1641,7 @@ test('preview -> linked preview -> directory unwinds through both previews (#431
 });
 
 test('preview -> directory -> preview -> directory unwinds each step once (#431 review P1)', async context => {
-  const app = await (await compiled).mount(context, { props: { visible: true, session: 'fixture' }, modules: [dirRpc()] });
+  const app = await (await compiled).mount(context, { setup(w) { w.localStorage.setItem('tmux_layout_mode', 'mobile'); }, props: { visible: true, session: 'fixture' }, modules: [dirRpc()] });
   try {
     await settle(app);
     row(app, 'AGENTS.md'); await settle(app);
@@ -1658,7 +1658,7 @@ test('preview -> directory -> preview -> directory unwinds each step once (#431 
 });
 
 test('a link, then a directory by hand, then Back twice reaches the preview once (#431 review P1)', async context => {
-  const app = await (await compiled).mount(context, { props: { visible: true, session: 'fixture' }, modules: [dirRpc()] });
+  const app = await (await compiled).mount(context, { setup(w) { w.localStorage.setItem('tmux_layout_mode', 'mobile'); }, props: { visible: true, session: 'fixture' }, modules: [dirRpc()] });
   try {
     await settle(app);
     row(app, 'AGENTS.md'); await settle(app);
@@ -1730,7 +1730,7 @@ test('a listing that answers after Back does not cover the preview Back returned
 // its own origin. The link entry carries that preview's linked-file history.
 for (const browse of ['a file', 'a subdirectory'] as const) {
   test(`preview -> linked preview -> directory -> ${browse} -> Back still reaches the first preview (#431 review P1)`, async context => {
-    const app = await (await compiled).mount(context, { props: { visible: true, session: 'fixture' }, modules: [dirRpc()] });
+    const app = await (await compiled).mount(context, { setup(w) { w.localStorage.setItem('tmux_layout_mode', 'mobile'); }, props: { visible: true, session: 'fixture' }, modules: [dirRpc()] });
     try {
       await settle(app);
       row(app, 'AGENTS.md'); await settle(app);
@@ -1758,7 +1758,7 @@ test('an HTML preview whose base is refused still reads, says so, and Refresh mi
     () => Promise.reject(new Error('its directory is too wide to share as a preview scope')),
     () => Promise.resolve({ url: 'https://gw.example/dl/s/9/1.2/sig/L3A/site/', prefix: 'https://gw.example/dl/s/' }),
   ];
-  const app = await (await compiled).mount(context, { props: { visible: true, session: 'fixture' }, pendingImports: ['highlight.js'], modules: [rpc({
+  const app = await (await compiled).mount(context, { setup(w) { w.localStorage.setItem('tmux_layout_mode', 'mobile'); }, props: { visible: true, session: 'fixture' }, pendingImports: ['highlight.js'], modules: [rpc({
     fsList: async () => ({ path: '/fixture', entries: [{ name: 'index.html', path: '/fixture/index.html', type: 'file', size: 40 }] }),
     fsStat: async (path: string) => ({ path, is_text: true, writable: true, readable: true, size: 40, mime_hint: 'text/html' }),
     fsRead: async () => ({ content: '<link rel="stylesheet" href="s.css"><p>Report</p>' }),

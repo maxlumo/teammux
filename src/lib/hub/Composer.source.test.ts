@@ -251,8 +251,8 @@ test('measured signature actions reuse shared commands without hardcoded avoidan
   // keeps its own edge (validator 06:19: typing must not open its floor).
   assert.match(source, /:global\(html:not\(\.keyboard-open\) main\.touch-layout:not\(\.immersive\)\) \.composer \{ border-bottom: 0; \}/u, 'one line where the band meets the tab bar');
   const app = await readFile(new URL('../../App.svelte', import.meta.url), 'utf8');
-  assert.match(app, /class:touch-layout=\{shell && layout\.isTouchDevice\}/u);
-  assert.match(app, /\{#if shell && layout\.isTouchDevice\}\s*<nav class="tabbar"/u, 'the bar is drawn under the same condition');
+  assert.match(app, /class:touch-layout=\{shell && layout\.phone\}/u);
+  assert.match(app, /\{#if shell && layout\.phone\}\s*<nav class="tabbar"/u, 'the bar is drawn under the same condition');
   const hides = [...app.matchAll(/^\s*([^\n{]*)\.tabbar \{ display: none; \}/gmu)].map((m) => m[1]!.trim());
   assert.deepEqual(hides, [':global(html.keyboard-open)', '.immersive'], 'the bar hides for exactly the two reasons the selector excludes');
   assert.match(rule('.compose-shell'), /padding: var\(--tool-inset-block\) var\(--menu-item-padding-x\)/u);

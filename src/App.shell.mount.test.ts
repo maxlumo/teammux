@@ -367,6 +367,7 @@ test('a reconnect to the SAME server through the form keeps the handle and the t
     setup(window) {
       window.localStorage.clear();
       window.localStorage.setItem('tmux_locale', 'en');
+      window.localStorage.setItem('tmux_layout_mode', 'mobile'); // its settings entry is the phone head's
       window.localStorage.setItem('tmux_address', 'ws://a:9899');
       window.localStorage.setItem('tmux_token', 'tokA');
       window.localStorage.setItem('tmux_servers', JSON.stringify([
@@ -677,6 +678,88 @@ const twoServers = (nav: { live: string; parked: string }) => ({
 
 const twoServerApp = (context: TestContext, nav: { live: string; parked: string }) =>
   bootApp(context, twoServers({ live: legacyNav(nav.live), parked: legacyNav(nav.parked) }));
+
+// Board #124: Auto follows the SCREEN. A foldable folded is a phone (outer screen ≈411 × 960 CSS px), unfolded
+// a desktop (the owner's inner screen, 717 × 776), and the switch is live: no reload, the same page and the same
+// terminal session on screen, in both orientations of the inner screen and back.
+test('Auto switches layout live on fold and unfold, keeping the page and the terminal session (#124)', async (context) => {
+  const size = (w: any, width: number, height: number) => {
+    Object.defineProperty(w, 'innerWidth', { configurable: true, value: width });
+    Object.defineProperty(w, 'innerHeight', { configurable: true, value: height });
+  };
+  const { app, settle, onScreen } = await bootApp(context, twoServers({ live: legacyNav('work:1.0'), parked: legacyNav('work:2.0') }), undefined,
+    { setup: (w) => size(w, 411, 960) });
+  const shell = () => app.document.querySelector('.tabbar') ? 'phone' : app.document.querySelector('nav.rail') ? 'desktop' : 'none';
+  assert.equal(app.window.localStorage.getItem('tmux_layout_mode'), null, 'Auto: nothing chosen');
+  assert.equal(shell(), 'phone', 'folded: the outer screen is a phone');
+  assert.equal(onScreen(), 'work:1.0');
+  for (const [w, h, want, what] of [
+    [717, 776, 'desktop', 'unfolded'], [776, 717, 'desktop', 'unfolded, rotated'], [411, 960, 'phone', 'folded again'], [717, 776, 'desktop', 'unfolded again'],
+  ] as const) {
+    size(app.window, w, h);
+    app.window.dispatchEvent(new app.window.Event('resize'));
+    await settle();
+    assert.equal(shell(), want, `${what} (${w} × ${h})`);
+    assert.equal(onScreen(), 'work:1.0', `${what}: the same terminal session, no reload`);
+  }
+});
+
+// Board #124 (leader note 11): Back belongs to the PLATFORM. The Android app keeps its system Back gesture on the
+// inner screen, where Auto draws the desktop layout, so the app still owns the history stack there; a desktop
+// browser keeps the browser's own Back.
+for (const android of [true, false]) {
+  test(`desktop layout on ${android ? 'the Android app: Settings is a Back step' : 'a desktop browser: the browser keeps its Back'} (#124)`, async (context) => {
+    const { app, settle } = await bootApp(context, twoServers({ live: legacyNav('work:1.0'), parked: legacyNav('work:2.0') }), undefined, {
+      setup: (w) => {
+        Object.defineProperty(w, 'innerWidth', { configurable: true, value: 717 });
+        Object.defineProperty(w, 'innerHeight', { configurable: true, value: 776 });
+        if (android) {
+          Object.defineProperty(w.navigator, 'userAgent', { value: 'Mozilla/5.0 (Linux; Android 16) Chrome/148' });
+          w.__TAURI_INTERNALS__ = {};
+        }
+      },
+    });
+    assert.ok(app.document.querySelector('nav.rail'), 'the inner screen draws the desktop layout');
+    const before = app.window.history.length;
+    const gear = [...app.document.querySelectorAll<HTMLButtonElement>('.gear-btn, .rail-btn')]
+      .find((b) => /settings/iu.test(`${b.getAttribute('aria-label') ?? ''} ${b.textContent ?? ''}`));
+    gear!.click();
+    await settle();
+    assert.ok(app.document.querySelector('.preferences'), 'Settings is open');
+    assert.equal(app.window.history.length - before, android ? 1 : 0, android ? 'the app pushed a step for the system Back' : 'no step: the browser\'s Back stays the browser\'s');
+    if (!android) return;
+    // The system Back gesture pops to the app's seed entry; the router spends the step on Settings.
+    app.window.dispatchEvent(new app.window.PopStateEvent('popstate', { state: { app: true } }));
+    await settle();
+    assert.equal(app.document.querySelector('.preferences'), null, 'the system Back closed Settings');
+  });
+}
+
+// Board #124 (validator note 30): the Back stack's owner changes at a live switch. A Settings opened on the
+// phone pushed an entry for the phone's router; unfolded in a desktop browser that router is gone, so closing
+// Settings must close it here and not spend an entry nobody handles. And the other way round.
+for (const [from, to] of [[[411, 960], [900, 820]], [[900, 820], [411, 960]]] as const) {
+  test(`Settings opened at ${from.join('×')} closes after a live switch to ${to.join('×')} (#124)`, async (context) => {
+    const size = (w: any, [width, height]: readonly [number, number]) => {
+      Object.defineProperty(w, 'innerWidth', { configurable: true, value: width });
+      Object.defineProperty(w, 'innerHeight', { configurable: true, value: height });
+    };
+    const { app, settle } = await bootApp(context, twoServers({ live: legacyNav('work:1.0'), parked: legacyNav('work:2.0') }), undefined,
+      { setup: (w) => size(w, from) });
+    const gear = () => [...app.document.querySelectorAll<HTMLButtonElement>('.tabbar button, .gear-btn, .rail-btn')]
+      .find((b) => /settings/iu.test(`${b.getAttribute('aria-label') ?? ''} ${b.textContent ?? ''}`))!;
+    gear().click(); await settle();
+    assert.ok(app.document.querySelector('.preferences:not([hidden])') && !app.document.querySelector('.page-layer.hidden .preferences'), 'Settings is open');
+    size(app.window, to); app.window.dispatchEvent(new app.window.Event('resize')); await settle();
+    const backs: number[] = [];
+    const real = app.window.history.back.bind(app.window.history);
+    app.window.history.back = () => { backs.push(1); real(); };
+    gear().click(); await settle(); await settle();
+    const open = [...app.document.querySelectorAll('.page-layer')].some((l) => !l.classList.contains('hidden') && l.querySelector('.preferences'));
+    assert.equal(open, false, 'the same control closed Settings in the new layout');
+    assert.equal(backs.length, 0, 'and spent no history entry the new layout has no router for');
+  });
+}
 
 test('A→B→A through the switcher restores each server s own navigation', async (context) => {
   // The regression that would have caught P1-a (reviewer, 2026-10-10): the
@@ -1287,6 +1370,7 @@ test('a failed switch s Back that discovers a merge can still start a download (
   const machineAt: MachineAt = (url, n) => (url.includes('//c') ? '' : n === 1 ? '' : 'm-a');
   const { app, settle, switchTo } = await bootApp(context, {
     ...aliasAndCanonical(legacyNav('work:1.0')),
+    tmux_layout_mode: 'mobile', // it reaches Files through the tab bar
     tmux_servers: JSON.stringify([
       { id: 'alias', name: 'home', address: 'ws://a:9899', token: 'tok', named: true },
       { id: 'canon', name: 'canonical', address: 'ws://b:9899', token: 'tok', machineId: 'm-a', named: true },

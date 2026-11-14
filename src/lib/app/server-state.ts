@@ -31,6 +31,7 @@ import { createDownloads, type DownloadStore } from '../files/downloads.svelte.t
 import { SUSPEND } from '../files/download.ts';
 import { createBackendCatalog, type BackendCatalog } from '../core/agents.ts';
 import { createReviewState, type ReviewState } from '../files/review-state.ts';
+import { createAgentsDraft, type AgentsDraftStore } from '../hub/agents-draft.svelte.ts';
 
 type Store = Pick<Storage, 'getItem' | 'setItem' | 'removeItem'>;
 
@@ -54,6 +55,9 @@ export interface ServerState {
   /** Review comments' memory (board #434): unsaved notes, the recipient
    * choice generations, and the live Hub composers feedback lands in. */
   review: ReviewState;
+  /** The Agents editor's working copy (board #124): both of its hosts read it, so a fold or an unfold that
+   * moves the editor keeps an unsaved definition. Memory only. */
+  agents: AgentsDraftStore;
 }
 
 /** Re-read what a server's state keeps of its slots (board #335 ③b): an
@@ -72,6 +76,7 @@ export function createServerState(storage: Store): ServerState {
     files: { memory: createFilesMemory(), downloads: createDownloads() },
     backends: createBackendCatalog(),
     review: createReviewState(),
+    agents: createAgentsDraft(),
   };
 }
 

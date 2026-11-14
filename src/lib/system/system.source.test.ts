@@ -40,7 +40,7 @@ test('fail-soft: a failed load keeps the last reading; nothing renders before th
 });
 
 test('the full reading is the ONE hover card, never a native title (motion.md §1.16, board #86)', () => {
-  assert.match(source, /<div class="sysvitals appear" class:two-rows=\{twoRows\} use:hoverInfo=\{detail\}>/u, 'the corner wears the shared hover card');
+  assert.match(source, /<div class="sysvitals appear" class:two-rows=\{twoRows\} use:hoverInfo=\{\{ get: detail, tap: true \}\}>/u, 'the corner wears the shared hover card, opened by a tap under a coarse input (#124)');
   assert.ok(!/title=/u.test(source), 'no native title beside the card — a second tooltip species');
   assert.match(source, /sysDetail\(status\)/u, 'the card spells the full numbers the corner abbreviates');
 });

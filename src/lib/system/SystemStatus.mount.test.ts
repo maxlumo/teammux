@@ -179,3 +179,75 @@ test('a named reading with nothing to show draws no strip and reports one row (#
     assert.equal(host.rows, 1, 'the host is told one row');
   } finally { await app.unmount(); }
 });
+
+// Board #124 (leader notes 14, 17): under a finger in the DESKTOP layout (a foldable's inner screen) the strip
+// keeps its desktop form, CPU MEM GPU, and DISK stays on the card; a finger cannot hover, so a TAP opens the
+// card the strip declares tap-free, and the next press anywhere else closes it. No touch screen: a click is a
+// click and opens nothing.
+for (const touch of [true, false]) {
+  test(`desktop layout, ${touch ? 'a touch screen: a tap opens the strip\'s card' : 'no touch screen: a click opens nothing'} (#124)`, { timeout: 60000 }, async (context) => {
+    const f = await gpuFixture();
+    const app = await f.mount(context, { modules: [], setup(w) {
+      w.Element.prototype.getAnimations = () => [];
+      w.localStorage.setItem('tmux_layout_mode', 'desktop');
+      // jsdom's window has `ontouchstart`, i.e. a touch screen; a mouse-only computer has not.
+      if (!touch) delete (w as { ontouchstart?: unknown }).ontouchstart;
+    } });
+    try {
+      (app.window as unknown as { __gpu: { reading: unknown } }).__gpu.reading = { ...base, gpu: { name: 'NVIDIA L4', count: 1, util_pct: 100, mem_used: 16 * G, mem_total: 22 * G }, gpus: null };
+      context.mock.timers.tick(20_000);
+      await until(app, () => !!app.document.querySelector('.sysvitals'));
+      assert.deepEqual([...app.document.querySelectorAll('.sysvitals .sv-k')].map((e) => e.textContent), ['CPU', 'MEM', 'GPU'], 'the desktop form');
+      app.document.querySelector<HTMLElement>('.sysvitals')!.click();
+      await app.flush(); await app.flush();
+      if (!touch) { assert.equal(app.document.querySelector('.hover-card'), null); return; }
+      const hc = app.document.querySelector('.hover-card');
+      assert.ok(hc, 'the tap opened the card');
+      assert.ok([...hc!.querySelectorAll('dt')].some((t) => /Disk|磁盘/u.test(t.textContent ?? '')), 'DISK is reachable by touch');
+      app.document.body.dispatchEvent(new app.window.Event('pointerdown', { bubbles: true }));
+      await app.flush(); await app.flush();
+      assert.equal(app.document.querySelector('.hover-card'), null, 'a press elsewhere closed it');
+    } finally { await app.unmount(); }
+  });
+}
+
+// Board #124 note 26 (validator, real Chromium finger): a tap is pointerdown, pointerup, pointerLEAVE (the finger
+// lifted), then click. The leave of a lifted finger is not the pointer moving away, so it must not close the card
+// the tap opened; else the second tap's click finds it closed and opens it again instead of closing it.
+test('desktop layout under a finger: the second tap on the strip closes its card; Escape-free, in the real event order (#124)', { timeout: 60000 }, async (context) => {
+  const f = await gpuFixture();
+  const app = await f.mount(context, { modules: [], setup(w) {
+    w.Element.prototype.getAnimations = () => [];
+    w.localStorage.setItem('tmux_layout_mode', 'desktop');
+  } });
+  try {
+    (app.window as unknown as { __gpu: { reading: unknown } }).__gpu.reading = { ...base, gpu: null, gpus: null };
+    context.mock.timers.tick(20_000);
+    await until(app, () => !!app.document.querySelector('.sysvitals'));
+    const strip = app.document.querySelector<HTMLElement>('.sysvitals')!;
+    const touch = (type: string, Ctor: typeof Event = app.window.Event) => {
+      const e = new Ctor(type, { bubbles: type !== 'pointerleave', cancelable: true });
+      Object.defineProperty(e, 'pointerType', { value: 'touch' });
+      strip.dispatchEvent(e);
+    };
+    const tap = async () => {
+      touch('pointerdown'); touch('pointerup'); touch('pointerleave'); touch('click', app.window.MouseEvent as unknown as typeof Event);
+      await app.flush(); await app.flush();
+    };
+    await tap();
+    assert.ok(app.document.querySelector('.hover-card'), 'the first tap opened the card, and the lifted finger\u2019s leave kept it');
+    await tap();
+    assert.equal(app.document.querySelector('.hover-card'), null, 'the second tap closed it');
+    await tap();
+    assert.ok(app.document.querySelector('.hover-card'), 'a third opens it again');
+    // Closed by the card's own dismissals (a key, a scroll, a resize), the next tap OPENS it: the strip asks
+    // the one card what is on screen, it does not trust its own memory of having opened it.
+    for (const close of ['keydown', 'scroll', 'resize']) {
+      app.window.dispatchEvent(new app.window.Event(close));
+      await app.flush(); await app.flush();
+      assert.equal(app.document.querySelector('.hover-card'), null, `${close} closed it`);
+      await tap();
+      assert.ok(app.document.querySelector('.hover-card'), `after ${close}, one tap opens it`);
+    }
+  } finally { await app.unmount(); }
+});

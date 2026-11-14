@@ -52,7 +52,7 @@ test('App: desktop only, inside the server scope, closed when a switch starts; t
   // panel mounted beside `<ServerScope>` would keep answering from the facade.
   // ③a-4: one panel, in the FOCUSED tree only — a tree out of focus has none.
   const keyed = app.slice(app.indexOf('{#each members as runtime (runtime)}'), app.indexOf('</ServerScope>'));
-  assert.match(keyed, /\{#if !layout\.isTouchDevice && connected && shown\}\s*<ScratchPanel open=\{scratchOpen\} live=\{!switching\}/u);
+  assert.match(keyed, /\{#if !layout\.phone && connected && shown\}\s*<ScratchPanel open=\{scratchOpen\} live=\{!switching\}/u);
   assert.match(app, /\$effect\(\(\) => \{ if \(switching\) scratchOpen = false; \}\);/u);
   // The reset's own ORDER is not this pin's subject (since #335 ②b-1 it gives
   // up the server handle's lease first); that the panel closes there is.

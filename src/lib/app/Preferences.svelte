@@ -16,6 +16,7 @@
   import { t, i18n, setLocale } from '../core/i18n.svelte.ts';
   import { buildParts, buildsDiffer, clockOf, uiBuild, uiLicense, type BuildInfo } from '../core/build-info.ts';
   import { layout } from './layout.svelte.ts';
+  import { PHONE_BELOW } from './layout-rule.ts';
   import { fonts, uiFont, displayFont, availableFamilies } from './fonts.svelte.ts';
   import { UI_ZOOM_MIN, UI_ZOOM_MAX, UI_ZOOM_STEP } from './ui-zoom.ts';
   import { terminalPrefs, LINE_HEIGHT_MIN, LINE_HEIGHT_MAX } from './terminal-prefs.svelte.ts';
@@ -56,7 +57,9 @@
     onShowQr = () => {},
     onGoBack = null,
     onDrill = () => {},
+    canSpend = (pushed: unknown) => !!pushed,
     showAgents = false,
+    onAgentsMoved = () => {},
     guests = [],
     guestShown = null,
     guestHeld = '',
@@ -117,11 +120,17 @@
     /** Open the connection QR code (board #403): an explicit command, because the code carries the token. */
     onShowQr?: () => void | Promise<void>;
     onGoBack?: ((fn: () => boolean) => void) | null;
-    onDrill?: () => boolean | void;
+    onDrill?: () => number | boolean | void;
+    /** Whether an entry `onDrill` pushed may still be spent with history.back() (board #124): only while the
+     * host's router that pushed it is installed. */
+    canSpend?: (pushed: unknown) => boolean;
     /** Touch only: the agent configuration is a CATEGORY here rather than a page
      *  of its own (nav-state's agentsLivesInSettings). The desktop rail keeps
      *  its own Agents page, so this stays false there. */
     showAgents?: boolean;
+    /** The agent categories left Settings while one was shown (an unfold, board #124): the host shows them
+     * where they live now. Their working copy is the server's (agents-draft), so nothing is asked. */
+    onAgentsMoved?: () => void;
     /** Every bound member's GUEST scope (board #335 ③a, reviewer P1-C on the
      * ③ plan): its runtime and state. Each member keeps its own Agents editor,
      * mounted on first open and kept, so a focus change never destroys a
@@ -185,6 +194,16 @@
    * then shown again for a fresh confirmation. */
   let discardAsk = $state<string | null>(null);
   $effect(() => { if (connectionModeFrozen || !pendingInputs || pendingInputs.key !== discardAsk) discardAsk = null; });
+
+  // The screen line in About (board #124): the viewport in CSS px and its device pixel ratio,
+  // read live (a fold, a rotation, a resized window), never cached.
+  const readScreen = () => ({ w: Math.round(window.innerWidth), h: Math.round(window.innerHeight), dpr: Math.round((window.devicePixelRatio || 1) * 1000) / 1000 });
+  let screen = $state(readScreen());
+  $effect(() => {
+    const on = () => { screen = readScreen(); };
+    window.addEventListener('resize', on);
+    return () => window.removeEventListener('resize', on);
+  });
 
   const TAB_KEY = 'tmux_settings_tab';
   const storedTab = localStorage.getItem(TAB_KEY);
@@ -512,9 +531,13 @@
   }
 
   $effect(() => {
-    if ((!showShortcuts && tab === 'shortcuts') || (!showAgents && AGENT_TABS.includes(tab))) {
+    if (!showShortcuts && tab === 'shortcuts') {
       // A capability correction uses the same exit guard, without drilling.
       untrack(() => selectTab('appearance', undefined, undefined, false));
+    } else if (!showAgents && AGENT_TABS.includes(tab)) {
+      // The agent categories moved away (an unfold) or went (no Hub). The editor's working copy is the
+      // server's, not this guest's (board #124), so leaving loses nothing and asks nothing.
+      untrack(() => { selectTab('appearance', undefined, undefined, false, false); onAgentsMoved(); });
     }
   });
   let commandsOwner: string | null = null;
@@ -602,8 +625,8 @@
     measure();
     return { destroy: () => observer.disconnect() };
   }
-  let drillPushed = false;
-  function closeCat() { catOpen = false; drillAnim = 'back'; drillPushed = false; }
+  let drillPushed: unknown = 0;
+  function closeCat() { catOpen = false; drillAnim = 'back'; drillPushed = 0; }
   $effect(() => {
     onGoBack?.(() => {
       // The embedded AgentsPage peels its OWN layers first (delete dialog, then
@@ -628,7 +651,7 @@
     return () => { tab = back.tab; catOpen = back.catOpen; };
   }
 
-  function selectTab(value: string, applied = () => {}, current = () => true, drill = true) {
+  function selectTab(value: string, applied = () => {}, current = () => true, drill = true, ask = true) {
     const intent = ++navigation;
     // The guest the choice was made for: a confirmation that answers after
     // focus moved commits nothing for the next one.
@@ -641,7 +664,7 @@
       if (!alive || intent !== navigation || !current() || guestShown !== guestAt) return;
       // Only an accepted category jump may push, persist or forward an edit.
       if (drill) {
-        if (!catOpen && isCompact()) { drillAnim = 'fwd'; drillPushed = !!onDrill(); }
+        if (!catOpen && isCompact()) { drillAnim = 'fwd'; drillPushed = onDrill(); }
         catOpen = true;
       }
       tab = value;
@@ -656,7 +679,7 @@
       localStorage.setItem(TAB_KEY, value);
       applied();
     };
-    const guard = agentsGuard();
+    const guard = ask ? agentsGuard() : null;
     // Ask the shown guest whenever its editor would change: leaving the agent
     // categories (as before), or a choice that moves its own section — also
     // from a non-agent category, where the page shows it on another section.
@@ -753,7 +776,7 @@
         <!-- Compact only: the way back to the category list (the back gesture
              does the same through onGoBack). -->
         <span class="back"><CommandButton variant="icon" icon="arrow-left" label={t('settings')}
-          onclick={() => drillPushed ? history.back() : closeCat()} /></span>
+          onclick={() => canSpend(drillPushed) ? history.back() : closeCat()} /></span>
         <h1>{tabs.find((x) => x.id === tab)?.label() ?? t('settings')}</h1>
         </div>
       </div>
@@ -814,7 +837,7 @@
             </div>
           </div>
           <div class="preference-row">
-            <div class="pref-label"><strong class="config-field-label">{t('layout')}</strong></div>
+            <div class="pref-label" use:hoverInfo={{ get: () => ({ title: t('layout'), text: t('layoutHint').replace('{px}', String(PHONE_BELOW)) }), tap: true }}><strong class="config-field-label">{t('layout')}</strong></div>
             <div class="pref-control">
             <Segmented value={layout.mode} onchange={(m) => layout.set(m)} ariaLabel={t('layout')}
               options={[{ value: 'auto', label: t('layoutAuto') }, { value: 'desktop', label: t('layoutDesktop') }, { value: 'mobile', label: t('layoutMobile') }]} />
@@ -834,7 +857,7 @@
             </div>
           {/if}
           <div class="preference-row">
-            <div class="pref-label" use:hoverInfo={() => ({ title: t('uiFontBody'), text: t('uiFontBodyHint') })}><strong class="config-field-label">{t('uiFontBody')}</strong></div>
+            <div class="pref-label" use:hoverInfo={{ get: () => ({ title: t('uiFontBody'), text: t('uiFontBodyHint') }), tap: true }}><strong class="config-field-label">{t('uiFontBody')}</strong></div>
             <fieldset class="pref-control config-fields" aria-busy={fontState.ui.pending}>
               <div class="font-field">
                 <Select bind:value={uiFontInput} editable fontPreview options={fontOptions.ui}
@@ -847,7 +870,7 @@
             </fieldset>
           </div>
           <div class="preference-row">
-            <div class="pref-label" use:hoverInfo={() => ({ title: t('uiFontDisplay'), text: t('uiFontDisplayHint') })}><strong class="config-field-label">{t('uiFontDisplay')}</strong></div>
+            <div class="pref-label" use:hoverInfo={{ get: () => ({ title: t('uiFontDisplay'), text: t('uiFontDisplayHint') }), tap: true }}><strong class="config-field-label">{t('uiFontDisplay')}</strong></div>
             <fieldset class="pref-control config-fields" aria-busy={fontState.display.pending}>
               <div class="font-field">
                 <Select bind:value={displayFontInput} editable fontPreview options={fontOptions.display}
@@ -866,7 +889,7 @@
                what this page is (2026-09-24: "Terminal 的一些风格设置，都应该算
                到 Appearance 里面"), and the one-row Terminal category is gone. -->
           <div class="preference-row">
-            <div class="pref-label" use:hoverInfo={() => ({ title: t('fontFamily'), text: t('fontFamilyHint') })}><strong class="config-field-label">{t('fontFamily')}</strong></div>
+            <div class="pref-label" use:hoverInfo={{ get: () => ({ title: t('fontFamily'), text: t('fontFamilyHint') }), tap: true }}><strong class="config-field-label">{t('fontFamily')}</strong></div>
             <fieldset class="pref-control config-fields" aria-busy={fontState.mono.pending}>
               <div class="font-field">
                 <Select bind:value={fontInput} editable fontPreview emptyFace="var(--font-mono)" options={fontOptions.mono}
@@ -1001,6 +1024,13 @@
             </div>
             {#if differ}<div class="config-note about-mismatch appear" role="status">{t('aboutMismatch')}</div>{/if}
           {/if}
+          <!-- The screen this app has, read live (board #124, leader note 2): the
+               viewport in CSS px, its device pixel ratio, and the layout chosen.
+               It is the device acceptance's instrument for Auto's rule. -->
+          <div class="preference-row">
+            <div class="pref-label"><strong class="config-field-label">{t('aboutScreen')}</strong></div>
+            <div class="pref-control"><small class="config-note connection-id about-value" data-screen>{screen.w} × {screen.h} @ {screen.dpr} · {t(layout.phone ? 'layoutMobile' : 'layoutDesktop')} ({t(layout.mode === 'auto' ? 'layoutAuto' : layout.mode === 'desktop' ? 'layoutDesktop' : 'layoutMobile')})</small></div>
+          </div>
           <div class="preference-row">
             <div class="pref-label"><strong class="config-field-label">{t('aboutSource')}</strong></div>
             <div class="pref-control"><a class="config-note about-link" href="https://github.com/maxlumo/teammux" target="_blank" rel="noopener">github.com/maxlumo/teammux</a></div>
@@ -1141,7 +1171,7 @@
 <!-- The ask is voided (the effect above) by a block, a claim or a change of
      the pending set; the COMMIT carries the confirmed key and the host
      re-validates it on its own (reviewer P1-D2 on 18a3bff4 / ed593949). -->
-<ConfirmDialog open={discardAsk !== null} compact={layout.isTouchDevice}
+<ConfirmDialog open={discardAsk !== null} compact={layout.phone}
   title={t('pendingInputsDiscardTitle')} note={t('pendingInputsDiscardNote')}
   confirmLabel={t('pendingInputsDiscard')} confirmIcon="trash"
   onconfirm={() => { const key = discardAsk; discardAsk = null; if (key) onDiscardPending?.(key); }} oncancel={() => { discardAsk = null; }} />

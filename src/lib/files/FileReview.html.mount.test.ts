@@ -104,7 +104,7 @@ test('select in the frame → ＋ → saved with the LINE-model range; the highl
   modules.reviewList = (async (target: object) => ({ ...target, revision: 'r1', annotations })) as never;
   const app = await (await compiled).mount(context, {
     props: { visible: true, session: 'fixture' }, modules: [modules, realMap], pendingImports: ['highlight.js'],
-    setup(win) { frames(win, loads); (win as any).CSS = { highlights: new Map() }; (win as any).Highlight = class extends Set {}; },
+    setup(win) { win.localStorage.setItem('tmux_layout_mode', 'mobile'); frames(win, loads); (win as any).CSS = { highlights: new Map() }; (win as any).Highlight = class extends Set {}; },
   });
   try {
     await settle(app);
@@ -226,7 +226,7 @@ test('a re-read with the same text at new offsets maps through the NEW source, n
   modules.reviewList = (async (target: object) => ({ ...target, revision: rev, annotations: [] })) as never;
   const app = await (await compiled).mount(context, {
     props: { visible: true, session: 'fixture' }, modules: [modules, realMap], pendingImports: ['highlight.js'],
-    setup(win) { frames(win, { n: 0 }); },
+    setup(win) { win.localStorage.setItem('tmux_layout_mode', 'mobile'); frames(win, { n: 0 }); },
   });
   try {
     await settle(app);

@@ -11,7 +11,7 @@
   import { t } from '../core/i18n.svelte.ts';
   import { rememberedAddresses, type Suggestion } from './servers.ts';
   import { endpointOf, isBulkInsert, parseConnectionLink } from '../core/connection-link.ts';
-  import { layout } from './layout.svelte.ts';
+  import { input } from './layout.svelte.ts';
   import CommandButton from '../ui/CommandButton.svelte';
 
   let {
@@ -171,7 +171,7 @@
     {/if}
   </label>
 
-  {#if onscan && layout.isTouchDevice}
+  {#if onscan && input.coarse}
     <CommandButton label={t('scanQr')} icon="maximize" onclick={scan} />
   {/if}
 

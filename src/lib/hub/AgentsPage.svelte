@@ -1,6 +1,7 @@
 <script>
   import { untrack } from 'svelte';
   import { registerLeaveGuard } from '../app/leave-guards.ts';
+  import { categoryOfDraft } from './agents-draft.svelte.ts';
   import { useServerScope } from '../app/server-context.ts';
   // AgentsPage — the agent configuration page, in the Hub page format
   // (ui-unification.md "Page skeleton"): a real sidebar (bg2, .side-h,
@@ -254,7 +255,9 @@
     // Where this editor lives inside its page, when the host has more than
     // one place (Preferences' guest sections; #335 ③b).
     ...(guardReveal ? { reveal: guardReveal } : {}),
-    dirty: () => untrack(() => dirty || saving || removing),
+    // Only the host that owns the working copy answers for it (#124): a hidden
+    // host's stale copy would ask a second time about the same draft.
+    dirty: () => untrack(() => drafts.owner === me && (dirty || saving || removing)),
     ask: () => new Promise((resolve) => {
       // A dialog of its own is already open: the user is answering that one.
       if (untrack(() => pending || pendingExit)) { resolve(false); return; }
@@ -602,22 +605,27 @@
 
   // ── The app-wide instructions ─────────────────────────────────────────
   function startGlobal() {
-    requestLeave(async () => {
+    requestLeave(() => {
       closeAll();
-      const generation = epoch;
       editingGlobal = { text: '', path: '', max_bytes: 24 * 1024, loading: true };
       rememberDraft();
-      try {
-        const r = await globalPromptGet();
-        if (generation !== epoch) return;
-        editingGlobal = { text: r.text ?? '', path: r.path ?? '', max_bytes: r.max_bytes ?? 24 * 1024, loading: false };
-        rememberDraft();
-      } catch (e) {
-        if (generation !== epoch) return;
-        error = String(e?.message ?? e);
-        editingGlobal.loading = false; editingGlobal.failed = true;
-      }
+      void readGlobal();
     });
+  }
+  /** The read behind a loading editor, into THIS host's working copy (and so the shared draft). A host that
+   * adopts a copy still loading runs it again (board #124 note 42): the host that started it may be gone. */
+  async function readGlobal() {
+    const generation = epoch;
+    try {
+      const r = await globalPromptGet();
+      if (generation !== epoch) return;
+      editingGlobal = { text: r.text ?? '', path: r.path ?? '', max_bytes: r.max_bytes ?? 24 * 1024, loading: false };
+      rememberDraft();
+    } catch (e) {
+      if (generation !== epoch) return;
+      error = String(e?.message ?? e);
+      editingGlobal.loading = false; editingGlobal.failed = true;
+    }
   }
   const globalBytes = $derived(editingGlobal ? new TextEncoder().encode(editingGlobal.text.trim()).length : 0);
 
@@ -858,6 +866,53 @@
   function pretty(json) {
     try { return JSON.stringify(JSON.parse(json), null, 2); } catch { return json || '[]'; }
   }
+
+  // ── The working copy outlives this host (board #124, leader note 29) ──────
+  // A fold or an unfold moves the editor between the desktop page and the
+  // phone's Settings guest; the working copy lives in the server's state
+  // (hub/agents-draft.svelte.ts), which both hosts read. The host on screen
+  // owns it and mirrors every change; a host shown again adopts the newer one.
+  const drafts = scope.state.agents;
+  const me = {};
+  let myRev = -1;
+  function snapshotDraft() {
+    if (!draft) return null;
+    return { kind: draft.kind, value: $state.snapshot(draft.value), creating, original, harness: draft.kind === 'agent' && harnessDefault };
+  }
+  const sameDraft = (a, b) => JSON.stringify(a) === JSON.stringify(b);
+  function adoptDraft(held) {
+    closeAll();
+    if (!held) return;
+    const value = JSON.parse(JSON.stringify(held.value)); // a plain copy: the snapshot stays the store's
+    if (held.kind === 'agent') { editing = value; isNew = held.creating; }
+    else if (held.kind === 'team') { editingTeam = value; teamIsNew = held.creating; }
+    else if (held.kind === 'mcp') { editingMcp = value; mcpIsNew = held.creating; }
+    else if (held.kind === 'global') { editingGlobal = value; if (value.loading) void readGlobal(); }
+    else {
+      editingSkill = value; skillIsNew = held.creating; descEditing = false;
+      if (!held.creating && value.name) loadSkillFiles(value.name); else { skFiles = []; skText = ''; }
+    }
+    original = held.original;
+    if (!section) { cat = categoryOfDraft(held); categoryOpen = true; }
+  }
+  // The host that mounts takes what the other host left (synchronously, before
+  // its first mirror could overwrite it with an empty editor).
+  untrack(() => { if (drafts.held) adoptDraft(drafts.held); myRev = drafts.adopt(me); });
+  $effect(() => {
+    if (!visible) return;
+    const rev = drafts.rev;
+    untrack(() => {
+      if (rev !== myRev) adoptDraft(drafts.held);
+      myRev = drafts.adopt(me);
+    });
+  });
+  $effect(() => {
+    const snap = snapshotDraft();
+    untrack(() => {
+      if (drafts.owner !== me || sameDraft(snap, drafts.held)) return;
+      myRev = drafts.write(me, snap);
+    });
+  });
 
 </script>
 

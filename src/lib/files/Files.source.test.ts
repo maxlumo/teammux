@@ -307,7 +307,7 @@ test('reading mode: the header hides as a cut, the return floats above the safe 
   // Reading mode is offered on the touch layout only, never for an image, a
   // video or a sound (the Lightbox / the players are their own surface), and it does not
   // outlive the preview or the page.
-  assert.match(source, /let readingEligible = \$derived\(layout\.isTouchDevice && view === 'preview' && !!currentFile\n\s+&& !\['image', 'video', 'audio'\]\.includes\(mimeCategory\(currentFile\.stat\?\.mime_hint\)\)\);/u);
+  assert.match(source, /let readingEligible = \$derived\(layout\.phone && view === 'preview' && !!currentFile\n\s+&& !\['image', 'video', 'audio'\]\.includes\(mimeCategory\(currentFile\.stat\?\.mime_hint\)\)\);/u);
   assert.match(source, /\$effect\(\(\) => \{ if \(!readingEligible \|\| !visible\) reading = false; \}\);/u);
   assert.match(source, /\$effect\(\(\) => \{ onimmersive\?\.\(reading\); \}\);/u, 'the host hides its chrome from this one signal');
   // Back order: the viewer, then reading mode, then the file menu.
@@ -375,7 +375,7 @@ test('the door opens App s ONE server popover and is shown by the tag rule (#358
   assert.ok(!/ServerList|loadServers|focusServer|currentServerId/u.test(source), 'no second switcher: Files imports nothing of the registry');
   // App hands Files the SAME toggle and open state the rail and Settings use.
   assert.match(app, /<Files [\s\S]*?onServers=\{toggleServerMenu\} serversOpen=\{serverMenuOpen\} serversControls=\{serverPickerId\} \/>/u);
-  assert.match(app, /onServers=\{connected && layout\.isTouchDevice \? toggleServerMenu : null\} serversOpen=\{serverMenuOpen\} serversControls=\{serverPickerId\}/u, '(Settings phone row: the same three)');
+  assert.match(app, /onServers=\{connected && layout\.phone \? toggleServerMenu : null\} serversOpen=\{serverMenuOpen\} serversControls=\{serverPickerId\}/u, '(Settings phone row: the same three)');
 });
 
 // #366 (owner 2026-10-14: "你切换的按钮单独占了一整行…把它放到路径的最左侧，用一个

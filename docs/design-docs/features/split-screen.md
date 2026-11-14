@@ -52,7 +52,7 @@ multi-listener.
   single `terminalTarget` stays the source of truth for the Files page, nav
   pills, narrow-screen fallback, and persistence; the active cell mirrors into
   it via `assignCell`.
-- **Gating**: `splitEligible = !isTouchDevice && innerWidth >= 900` (a
+- **Gating**: `splitEligible = !layout.phone && innerWidth >= 900` (a
   `window.resize` effect keeps it live). Narrowing below 900 px collapses to the
   single Terminal on cell 0's pane; widening restores. Mobile never mounts
   SplitView.

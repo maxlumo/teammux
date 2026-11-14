@@ -71,7 +71,7 @@ const GLOBAL: Record<string, Record<string, string>> = {
   // the centre's Mute and both bells read the same fact.
   'hub/notify-switch.svelte.ts': { on: 'a preference', permission: 'this device\'s platform permission' },
   'app/terminal-prefs.svelte.ts': { state: 'a preference' },
-  'app/layout.svelte.ts': { mode: 'a preference' },
+  'app/layout.svelte.ts': { mode: 'a preference', vw: 'this window\'s viewport', vh: 'this window\'s viewport', coarse: 'this device\'s input' },
   'app/server-mode.svelte.ts': { current: 'THIS computer\'s own server, not the connected one', started: 'one subscription per page' },
   'core/i18n.svelte.ts': { i18n: 'a preference' },
   'test/ssr.ts': { harness: 'test-only' },

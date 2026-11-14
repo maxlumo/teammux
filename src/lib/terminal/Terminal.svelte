@@ -2003,7 +2003,7 @@
         screen (board #123): a desktop layout under touch keeps its head row,
         where the shell's sidebar toggle stands.
       -->
-      {#if layout.isTouchDevice}
+      {#if layout.phone}
         <div class="win-collapsed-anchor appear">
           <AgentChip
             agent={curAgent}

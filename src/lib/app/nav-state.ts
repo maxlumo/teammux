@@ -61,8 +61,8 @@ export function landingPage(page: Page, jumpedFrom: string | null): Page {
  * jump. The desktop rail is untouched — there Agents is a page with its own
  * draggable icon.
  */
-export function agentsLivesInSettings(isTouchDevice: boolean): boolean {
-  return isTouchDevice;
+export function agentsLivesInSettings(phone: boolean): boolean {
+  return phone;
 }
 
 /** A Settings category that a saved page name resolves into, or null. */
@@ -77,9 +77,9 @@ export type SettingsCategory = 'agents';
  */
 export function restoreNav(
   saved: unknown,
-  isTouchDevice: boolean,
+  phone: boolean,
 ): { page: Page; settingsTab: SettingsCategory | null } {
-  if (saved === 'agents' && agentsLivesInSettings(isTouchDevice)) {
+  if (saved === 'agents' && agentsLivesInSettings(phone)) {
     return { page: 'prefs', settingsTab: 'agents' };
   }
   return { page: restorePage(saved), settingsTab: null };

@@ -255,10 +255,14 @@ test('the dialog: hidden characters are refused with their own message, naming n
 // ─── #403: scanning fills the dialog's form and never submits ───────────
 
 const scanButton = (app: { document: Document }) => [...app.document.querySelectorAll<HTMLButtonElement>('.dlg button')].find((b) => /^scan qr code$/iu.test((b.textContent ?? '').trim()));
-async function scanDialog(context: import('node:test').TestContext, layout: string, scan: (() => Promise<string | null>) | null, submitted: unknown[] = []) {
+async function scanDialog(context: import('node:test').TestContext, layout: string, scan: (() => Promise<string | null>) | null, submitted: unknown[] = [], touch = true) {
   const app = await (await compiled).mount(context, {
     props: { oncancel: () => {}, onsubmit: (c: unknown) => { submitted.push(c); }, onscan: scan },
-    setup(window) { window.localStorage.setItem('tmux_locale', 'en'); window.localStorage.setItem('tmux_layout_mode', layout); },
+    setup(window) {
+      window.localStorage.setItem('tmux_locale', 'en'); window.localStorage.setItem('tmux_layout_mode', layout);
+      // jsdom's window has `ontouchstart`, i.e. a touch screen; a mouse-only computer has not.
+      if (!touch) delete (window as { ontouchstart?: unknown }).ontouchstart;
+    },
     modules: [],
   });
   for (let i = 0; i < 8 && !app.document.querySelector('.dlg input'); i++) await app.flush();
@@ -279,9 +283,11 @@ test('the dialog: on a touch layout a scanned link fills address, token and sock
   } finally { await app.close(); }
 });
 
-test('the dialog: no Scan command on a desktop layout, nor when the host offers no scanner', async context => {
-  const desktop = await scanDialog(context, 'desktop', async () => null);
-  try { assert.equal(scanButton(desktop), undefined); } finally { await desktop.close(); }
+test('the dialog: Scan follows the INPUT, not the layout (board #124): none without a touch screen, there on a touch screen in the desktop layout', async context => {
+  const mouse = await scanDialog(context, 'desktop', async () => null, [], false);
+  try { assert.equal(scanButton(mouse), undefined, 'a mouse-only computer has no camera to aim'); } finally { await mouse.close(); }
+  const unfolded = await scanDialog(context, 'desktop', async () => null);
+  try { assert.ok(scanButton(unfolded), "a foldable's inner screen draws the desktop layout and still scans"); } finally { await unfolded.close(); }
 });
 
 test('the dialog hands its own lifetime to the scan: closing the dialog aborts it', async context => {

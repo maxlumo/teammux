@@ -46,6 +46,15 @@ Which of the two the owner's phone hit is measured by a diagnostic APK (branch `
 
 The rules are `src/lib/app/keyboard-fit.ts` (tests: `keyboard-fit.test.ts`), and App's keyboard effect is their one caller (`App.source.test.ts` pins it, and the desktop-only zoom cleanup). Negative controls: the old growing maximum and a removed native-path unpan each turn a test red. NOT measured on a device: no emulator or phone is reachable from this host, so the owner's phone is the final check. The teal bubble in the same screenshot is the pinned ask (hub-feed.md), as designed.
 
+## A foldable is a phone folded and a desktop unfolded (board #124, 2026-11-14)
+
+On Auto the layout follows the screen, not the touch capability: the viewport's smallest side under
+600 CSS px draws the phone layout, at or above it the desktop layout (Android's sw600dp), re-decided
+live on fold, unfold and rotation. The Android app owns Back in both layouts, because the system Back
+gesture exists on the inner screen too. The rule, the owner's screens in CSS px and the open DPR limit
+are in [app-shell.md](app-shell.md#auto-follows-the-screen-layout-input-and-back-are-three-answers-2026-11-14-124);
+Settings → About → Screen reads the device for the acceptance.
+
 ## Element fullscreen (board #454, 2026-10-25)
 
 The owner wanted the video player's fullscreen in the app (2026-10-25: "如果没什么困难，就给我支持上呗"). wry 0.54.2's `RustWebChromeClient.onShowCustomView` calls `callback.onCustomViewHidden()` at once, so the page's `requestFullscreen()` was cancelled. That class is final and regenerated from the wry crate into the gitignored `generated/` folder on every build, so it cannot be edited or extended.

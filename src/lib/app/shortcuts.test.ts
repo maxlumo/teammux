@@ -137,7 +137,7 @@ test('App’s handler reads only the registry: one lookup, one need check, one r
   assert.match(dispatch, /const def = shortcutDef\(actionOf\(shortcutFromEvent\(event\)\)\);\s*if \(!def \|\| def\.need\(host\)\) return '';/u);
   const prefs = await readFile(new URL('./Preferences.svelte', import.meta.url), 'utf8');
   assert.match(prefs, /function recordShortcut[\s\S]*?const value = shortcutFromEvent\(event\);/u, 'the recorder parses through the same entry');
-  assert.match(app, /const shortcutsOn = \$derived\(!layout\.isTouchDevice\);/u, 'the gate is the desktop form factor');
+  assert.match(app, /const shortcutsOn = \$derived\(!layout\.phone\);/u, 'the gate is the desktop form factor');
   assert.match(app, /showShortcuts=\{shortcutsOn\}/u);
   assert.doesNotMatch(app, /showShortcuts=\{isTauriDesktop\}/u);
   // Every rail page shows its binding on hover.

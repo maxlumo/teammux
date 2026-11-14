@@ -324,7 +324,7 @@ test('a pending feedback is bound to the preview: Back, hide, a server switch or
       modules.reviewFeedback = (async () => (pending === 'review_feedback' && hold ? held.promise : block)) as never;
       modules.projectList = (async () => (pending !== 'review_feedback' && hold ? held.promise : list())) as never;
       const landed: string[] = [];
-      const app = await mount(context, { props: { visible: true, session: 'fixture', navRequest: null, onfeedback: (s: string) => landed.push(s) }, modules: [modules], setup(win) { win.localStorage.clear(); } });
+      const app = await mount(context, { props: { visible: true, session: 'fixture', navRequest: null, onfeedback: (s: string) => landed.push(s) }, modules: [modules], setup(win) { win.localStorage.clear(); win.localStorage.setItem('tmux_layout_mode', 'mobile'); } });
       try {
         await settle(app);
         await app.setScope({ eligible: true });
@@ -685,7 +685,7 @@ test('the editor being typed in is scrolled into view when a re-place moves it, 
   const scrolled: string[] = [];
   const app = await mount(context, {
     props: { visible: true, session: 'fixture' }, modules: [modules],
-    setup(win) { fakeHighlights(win); fakeLayout(win, layout); win.HTMLElement.prototype.scrollIntoView = function () { scrolled.push(this.className); }; },
+    setup(win) { win.localStorage.setItem('tmux_layout_mode', 'mobile'); fakeHighlights(win); fakeLayout(win, layout); win.HTMLElement.prototype.scrollIntoView = function () { scrolled.push(this.className); }; },
   });
   try {
     await settle(app);

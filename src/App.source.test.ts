@@ -69,7 +69,8 @@ test('a scan is one operation, registered synchronously at the tap and ended by 
   assert.match(source, /\{#each scanOp \? \[scanOp\] : \[\] as op \(op\)\}\s*<ScanDialog compact=\{narrowVp\} onscanned=\{\(text\) => op\.end\(text\)\} oncancel=\{\(\) => op\.end\(null\)\} onpicking=\{\(on\) => \{ op\.picking = on; \}\} \/>/u, 'a callback can only end the operation it was made for');
   assert.match(source, /onscan=\{scanQr\}/u);
   assert.match(source, /onScan=\{scanQr\}/u);
-  assert.doesNotMatch(source, /isAndroid|barcode|startNativeScan/u, 'one scan on every platform: the Android webview asks for the camera like a browser (wry bridges the permission)');
+  // `isAndroid` itself is the Back owner's (board #124); what stays forbidden is a platform branch in the scan.
+  assert.doesNotMatch(source, /barcode|startNativeScan|isAndroid[^\n]*scan|scan[^\n]*isAndroid/iu, 'one scan on every platform: the Android webview asks for the camera like a browser (wry bridges the permission)');
   const ending = source.match(/const scanQr = [^\n]*/u)?.[0] ?? '';
   assert.doesNotMatch(ending, /onConnected|connect|submit|recordServer/u, 'a scan hands back text and nothing else');
 });
@@ -132,7 +133,7 @@ test('Terminal navigation and page layer exist without an active target', () => 
   // desktop — no desktop rule reads it (review, 2026-09-03).
   assert.match(source, /<div class="terminal-empty">[\s\S]*?<button class="chip-btn" onclick=\{openSessionsList\}>/u);
   const opener = /function openSessionsList\(\) \{([\s\S]*?)\n  \}/u.exec(source)?.[1] ?? '';
-  assert.match(opener, /if \(layout\.isTouchDevice \|\| narrowVp\) \{ sessListOpen = true; return; \}/u, 'a sheet wherever the list is one: touch, or narrow (#123)');
+  assert.match(opener, /if \(layout\.phone \|\| narrowVp\) \{ sessListOpen = true; return; \}/u, 'a sheet wherever the list is one: touch, or narrow (#123)');
   assert.match(opener, /termSideEl\?\.querySelector\('\.sessions \.content \[tabindex="0"\], \.sessions \.content button'\)\?\.focus\(\)/u,
     'desktop: focus the list itself, never the SideHandle separator');
   assert.match(source, /<aside class="term-side"[^>]*bind:this=\{v\.termSideEl\}>/u);
@@ -161,20 +162,20 @@ test('the session list lives inside the Terminal page, sheeted on a phone', () =
   const aside = source.match(/<aside class="term-side"[\s\S]*?<\/aside>/u)?.[0] ?? '';
   // #123: the sheet is the narrow STRUCTURE, touch or not (a desktop shell below 760).
   assert.match(aside, /class:side-sheet=\{narrowVp\}/u);
-  assert.match(aside, /class:sheet=\{layout\.isTouchDevice\}/u);
+  assert.match(aside, /class:sheet=\{layout\.phone\}/u);
   assert.match(aside, /class:open=\{narrowVp && sessListOpen\}/u);
   assert.match(aside, /onPick=\{\(\) => sessListOpen = false\}/u);
   // The terminal's session chip opens that same sheet on a phone.
   // #123: the phone's own opener only; the desktop shell's one toggle opens the sheet there.
-  assert.match(source, /onOpenSessions=\{layout\.isTouchDevice \? \(\) => sessListOpen = true : null\}/u);
+  assert.match(source, /onOpenSessions=\{layout\.phone \? \(\) => sessListOpen = true : null\}/u);
   // The phone Back gesture uses this sheet as Terminal's FLOOR (board #58),
   // matching Chat/Board: a bare Terminal lifts it; once open it falls through
   // and stays open, so Back can never close→open cycle. A Chat jump returns
   // to Chat before the ordinary floor lift.
   const jumpAt = source.indexOf("if (page === 'terminal' && view.jumpedFrom && !revealed)");
-  const liftAt = source.indexOf("if (page === 'terminal' && layout.isTouchDevice && narrowVp && !sessListOpen)");
+  const liftAt = source.indexOf("if (page === 'terminal' && layout.phone && narrowVp && !sessListOpen)");
   assert.ok(jumpAt >= 0 && liftAt > jumpAt, 'a Chat return slot outranks the Terminal floor');
-  assert.match(source, /if \(page === 'terminal' && layout\.isTouchDevice && narrowVp && !sessListOpen\) \{\s*sessListOpen = true;\s*navPush\(\);\s*return;\s*\}/u,
+  assert.match(source, /if \(page === 'terminal' && layout\.phone && narrowVp && !sessListOpen\) \{\s*sessListOpen = true;\s*navPush\(\);\s*return;\s*\}/u,
     'bare compact Terminal lifts the session drawer and replenishes history');
   assert.ok(!/page === 'terminal' && sessListOpen[^\n]*sessListOpen = false/u.test(source),
     'an open floor never peels closed — no open/close loop');
@@ -298,7 +299,7 @@ test('the phone keeps the shipped order — the gesture is desktop-only', () => 
   // hidden second one) while a touch layout keeps the shipped sequence.
   assert.match(
     source,
-    /const tabs = \$derived\(\(\) => \{[\s\S]*?if \(!layout\.isTouchDevice\) return railSlots\.filter\(\(s\) => s !== RAIL_GAP && s !== 'prefs'\);/u,
+    /const tabs = \$derived\(\(\) => \{[\s\S]*?if \(!layout\.phone\) return railSlots\.filter\(\(s\) => s !== RAIL_GAP && s !== 'prefs'\);/u,
   );
   assert.match(source, /const tabs = \$derived[\s\S]*?if \(hubEligible\) t\.push\('hub'\);[\s\S]*?t\.push\('terminal'\);/u,
     'the touch branch is unchanged');
@@ -323,7 +324,7 @@ test('the desktop rail keeps Agents as a draggable page icon', () => {
   // The whole point of scoping this to touch: nothing about the rail changes.
   assert.match(source, /agents:\s*\{ icon: 'bots',\s*label: 'agentsTitle' \}/u, 'still a rail item, wearing the crowd glyph the roster\'s All tab wears (owner, 2026-09-23: "tab 栏上的 icon 也用我们新画的吧")');
   assert.match(rail, /\{#each railSlots as slot \(slot\)\}/u, 'still the user’s draggable order');
-  assert.match(source, /\{#if v\.hubState\.available && !agentsLivesInSettings\(layout\.isTouchDevice\)\}\s*<div class="page-layer" class:hidden=\{!shown \|\| page !== 'agents'\}>/u,
+  assert.match(source, /\{#if v\.hubState\.available && !agentsLivesInSettings\(layout\.phone\)\}\s*<div class="page-layer" class:hidden=\{!shown \|\| page !== 'agents'\}>/u,
     'and still a page layer — but not mounted on touch, where Settings owns the only instance');
 });
 
@@ -332,7 +333,7 @@ test('every route into the agent config goes through ONE device-aware entry', ()
   // call openAgentsConfig, which asks nav-state where Agents lives.
   assert.match(
     source,
-    /function openAgentsConfig\(name = null, kind = 'agent', runtime = bound\(\), v = view\) \{[\s\S]*?if \(agentsLivesInSettings\(layout\.isTouchDevice\)\) \{[\s\S]*?prefsOpenReq = \{ tab: kind === 'team' \? 'teams' : 'agents'[\s\S]*?if \(page !== 'prefs'\) togglePrefs\(\);[\s\S]*?\} else \{\s*switchTab\('agents'\);/u,
+    /function openAgentsConfig\(name = null, kind = 'agent', runtime = bound\(\), v = view\) \{[\s\S]*?if \(agentsLivesInSettings\(layout\.phone\)\) \{[\s\S]*?prefsOpenReq = \{ tab: kind === 'team' \? 'teams' : 'agents'[\s\S]*?if \(page !== 'prefs'\) togglePrefs\(\);[\s\S]*?\} else \{\s*switchTab\('agents'\);/u,
   );
   // The Hub's "configure agent" item: Settings on a phone, the page on a desktop.
   // #258: a team name's menu asks for its team editor through the same entry.
@@ -342,7 +343,7 @@ test('every route into the agent config goes through ONE device-aware entry', ()
 });
 
 test('a saved `agents` page never strands a phone on an unreachable layer', () => {
-  assert.match(source, /const nav = restoreNav\(s\.page, layout\.isTouchDevice\);\s*page = nav\.page;/u,
+  assert.match(source, /const nav = restoreNav\(s\.page, layout\.phone\);\s*page = nav\.page;/u,
     'restore asks nav-state, which redirects agents → Settings on touch');
   assert.match(source, /if \(nav\.settingsTab\) prefsOpenReq = \{ tab: nav\.settingsTab, n: \+\+prefsOpenSeq \};/u);
   // The redirect effect is one of the writers, so the sequence must NOT be read
@@ -353,7 +354,7 @@ test('a saved `agents` page never strands a phone on an unreachable layer', () =
   // bus probe — is corrected by the same rule in the redirect effect.
   assert.match(
     source,
-    /if \(page === 'agents' && agentsLivesInSettings\(layout\.isTouchDevice\)\) \{\s*page = 'prefs';\s*prefsOpenReq = \{ tab: 'agents', n: \+\+prefsOpenSeq \};/u,
+    /if \(page === 'agents' && agentsLivesInSettings\(layout\.phone\)\) \{\s*page = 'prefs';(?:\s*\/\/[^\n]*)*\s*const held = untrack\(\(\) => serverStates\.get\(bound\(\)\)\?\.agents\.held\);\s*prefsOpenReq = \{ tab: held \? sectionOfDraft\(held\) : 'agents', n: \+\+prefsOpenSeq \};/u,
   );
 });
 
@@ -365,7 +366,7 @@ test('Settings only offers the category when there is a bus and no Agents page',
   // ③b: the Hub capability is the server IN FRONT's — the member a walk
   // reveals, else the focus (reviewer P1-2 on 99566068).
   assert.match(source, /const frontHub = \$derived\(revealed \? viewOf\(revealed\)\.hubState\.available : hubEligible\);/u);
-  assert.match(source, /showAgents=\{frontHub && agentsLivesInSettings\(layout\.isTouchDevice\)\}/u);
+  assert.match(source, /showAgents=\{frontHub && agentsLivesInSettings\(layout\.phone\)\}/u);
   // ③a: one guest per member, the focused one shown (reviewer P1-C).
   assert.match(source, /guests=\{members\.map\(\(runtime\) => \(\{ runtime, state: serverStates\.get\(runtime\), tag: serverTag\(tagScope, runtime\.id\) \}\)\)\} guestShown=\{front\}\s*guestHeld=\{storageHeld \? t\('migrationBlockedNote'\) : ''\}\s*visible=\{page === 'prefs' && !switching\}/u, 'and whether the page is on screen (③a: a kept, hidden page s guest takes no input)');
   // Since #335 ②b-2 a landing is delivered only to the tree it names, so the
@@ -426,7 +427,7 @@ test('Terminal confirmations delegate before jump-back or drawer floor without a
   assert.match(source, /const fv = front \? viewOf\(front\) : view;/u);
   const delegate = source.indexOf("if (page === 'terminal' && fv.sessionsGoBack?.())");
   const jump = source.indexOf("if (page === 'terminal' && view.jumpedFrom && !revealed)");
-  const floor = source.indexOf("if (page === 'terminal' && layout.isTouchDevice && narrowVp && !sessListOpen)");
+  const floor = source.indexOf("if (page === 'terminal' && layout.phone && narrowVp && !sessListOpen)");
   assert.ok(delegate >= 0 && delegate < jump && delegate < floor);
   assert.match(source, /if \(page === 'terminal' && fv\.sessionsGoBack\?\.\(\)\) \{ navPush\(\); return; \}/u);
   assert.match(source, /onGoBack=\{\(fn\) => v\.sessionsGoBack = fn\}/u, 'registered in its tree s view (③a-4)');
@@ -1104,7 +1105,7 @@ test('one system-vitals strip serves desktop sidebar and an open phone drawer (b
   assert.match(source, /load=\{\(\) => bound\(\)\?\.api\.systemStatus\(\)/u, 'load is INJECTED, from the bound runtime — the component never imports ws');
   assert.match(source, /sysMounted = \$derived\(connected\)/u,
     'connected clients share one sampler; layout only decides visibility');
-  assert.match(source, /<main[^>]*class:touch-layout=\{shell && layout\.isTouchDevice\}/u,
+  assert.match(source, /<main[^>]*class:touch-layout=\{shell && layout\.phone\}/u,
     'touch mode is explicit on the shell');
   assert.match(source, /\{#if sysMounted\}[\s\S]{0,1600}<aside class="sys-sidebar compact-tools"[\s\S]{0,100}<SystemStatus/u,
     'mount gate wraps the sidebar strip');
@@ -1123,7 +1124,7 @@ test('one system-vitals strip serves desktop sidebar and an open phone drawer (b
   // 它放到我们的系统状态栏里"), desktop only, sized from the shared control
   // tokens so the bar reserves room instead of clipping it — and so a touch
   // device on the DESKTOP layout still gets a 44px target.
-  assert.match(source, /<aside class="sys-sidebar compact-tools"[\s\S]{0,400}\{#if !layout\.isTouchDevice\}\s*\n\s*<button\s*\n\s*class="sys-scratch"/u,
+  assert.match(source, /<aside class="sys-sidebar compact-tools"[\s\S]{0,400}\{#if !layout\.phone\}\s*\n\s*<button\s*\n\s*class="sys-scratch"/u,
     'the control sits beside the readings, in the one status bar');
   const ctl = source.slice(source.indexOf('class="sys-scratch"'), source.indexOf('><Icon name="terminal" size={14} /></button>'));
   assert.match(ctl, /aria-label=\{t\('scratchTitle'\)\}/u);
@@ -1208,11 +1209,17 @@ test('a typed address ends the running reconnect loop before it connects (review
 
 test('the back-gesture history dance is the phone’s; a desktop browser keeps its Back (2026-09-03)', () => {
   // The seed + re-push + popstate router protect the PHONE's back gesture
-  // (app-shell.md). On a desktop layout there is no gesture, and the same
-  // dance swallowed the browser's Back for good.
-  assert.match(source, /function navPush\(\) \{\s*if \(!layout\.isTouchDevice\) return false;\s*history\.pushState\(\{ app: true \}, ''\);\s*return true;\s*\}/u);
-  assert.match(source, /\$effect\(\(\) => \{\s*if \(!layout\.isTouchDevice\) return;[^]*?window\.addEventListener\('popstate', handler\);/u,
-    'the popstate router installs only on the touch layout, and re-evaluates when the layout mode changes');
+  // (app-shell.md). On a desktop browser there is no gesture, and the same
+  // dance swallowed the browser's Back for good. The Android app owns Back in
+  // EITHER layout (board #124, leader note 11): an unfolded inner screen draws
+  // the desktop layout and still has the system Back gesture.
+  assert.match(source, /const ownsBack = \$derived\(isAndroid \|\| layout\.phone\);/u);
+  assert.match(source, /function navPush\(\) \{\s*if \(!ownsBack \|\| !router\) return 0;\s*history\.pushState\(\{ app: true \}, ''\);\s*return router;\s*\}/u);
+  // An entry is spent only by the router that pushed it (#124 note 30): a live switch removes the router.
+  assert.match(source, /const spendable = \(pushed\) => !!pushed && pushed === router;/u);
+  assert.match(source, /if \(spendable\(prefsPushed\)\) history\.back\(\);/u);
+  assert.match(source, /\$effect\(\(\) => \{\s*if \(!ownsBack\) return;[^]*?window\.addEventListener\('popstate', handler\);/u,
+    'the popstate router installs only where Back is the app\'s, and re-evaluates when that changes');
   // A caller only spends an entry it really pushed.
   assert.match(source, /prefsPushed = navPush\(\);/u);
   assert.doesNotMatch(source, /navPush\(\); prefsPushed = true;/u);
@@ -1233,7 +1240,7 @@ test('navigation is reachable by keyboard: no nav item opts out of the Tab order
 });
 
 test('the server registry has an entry on the touch layout (2026-09-03)', () => {
-  assert.match(source, /onServers=\{connected && layout\.isTouchDevice \? toggleServerMenu : null\}/u,
+  assert.match(source, /onServers=\{connected && layout\.phone \? toggleServerMenu : null\}/u,
     'Settings gets the opener only where the rail (and its switcher) does not exist');
   // Board #319 (owner 2026-10-08): the row, the hover card and the switch
   // panel name the current server as its registry row does — one derived.
@@ -1310,7 +1317,7 @@ test('a second click on the active rail tab hands the page a reselect — the Hu
 test('one shell-wide sidebar state: the Terminal page and the system status follow the Hub\'s collapse; reselect opens it on every page (board #200)', async () => {
   // Owner 2026-09-14: "左侧边栏收起的时候，底下的系统状态显示也要收起，而且这个折叠收起在不同的
   // 页面是同步的，不然我点击chat terminal board，展开状态不一致".
-  assert.match(source, /const shellSideCollapsed = \$derived\(shell && !layout\.isTouchDevice && appPrefs\.sidebarCollapsed\);/u);
+  assert.match(source, /const shellSideCollapsed = \$derived\(shell && !layout\.phone && appPrefs\.sidebarCollapsed\);/u);
   assert.match(source, /<main class:with-rail=\{[^}]+\} class:touch-layout=\{[^}]+\} class:side-collapsed=\{shellSideCollapsed\} class:side-page=\{pageHasSidebar\}/u);
   // ③a-4: the shell's toggle is the fallback for a page no tree registered.
   // #123: below the compact width the Terminal's reselect drives its sheet (toggleTermSide).
@@ -1721,4 +1728,11 @@ test('the visualViewport path reads the keyboard against the current window (boa
   assert.match(source, /const kb = viewportKeyboard\(h, window\.innerHeight, window\.innerWidth, resting, focused, KB_OPEN_THRESHOLD\);/u);
   assert.match(source, /resting = \{ height: window\.innerHeight, width: window\.innerWidth \};/u, 'the resting height is taken with nothing focused, with its width');
   assert.doesNotMatch(source, /const kbOpen = h < fullHeight - KB_OPEN_THRESHOLD;/u, 'no remembered height decides it');
+});
+
+test('under a finger the rail buttons are the 44 px touch floor; a mouse keeps 34 × 32 (#124 AC4)', () => {
+  // A foldable's inner screen draws the desktop layout under touch; measured at 717 × 776 before: 34 × 32.
+  assert.match(source, /\.rail-btn \{\s*width: 34px; height: 32px;/u, 'the pointer size is unchanged');
+  const coarse = [...source.matchAll(/@media \(any-pointer: coarse\) \{([\s\S]*?)\n  \}/gu)].map((m) => m[1] ?? '');
+  assert.match(coarse[0] ?? '', /\.rail-btn \{ width: 44px; height: 44px; \}/u, 'in the file\'s one coarse block');
 });

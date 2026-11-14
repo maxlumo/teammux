@@ -24,7 +24,7 @@ const saved = (...servers: { address: string; token: string; socket?: string }[]
   tmux_servers: JSON.stringify(servers.map((s, i) => ({ id: `s${i}`, name: `s${i}`, address: s.address, token: s.token, ...(s.socket ? { socket: s.socket } : {}) }))),
 });
 
-async function mount(context: TestContext, saved: Record<string, string>, userAgent?: string, extraProps: Record<string, unknown> = {}) {
+async function mount(context: TestContext, saved: Record<string, string>, userAgent?: string, extraProps: Record<string, unknown> = {}, touch = true) {
   const calls: string[] = [];
   let release!: (cfg: typeof LOCAL) => void;
   const answer = new Promise<typeof LOCAL>(yes => { release = yes; });
@@ -37,6 +37,8 @@ async function mount(context: TestContext, saved: Record<string, string>, userAg
       window.localStorage.setItem('tmux_locale', 'en');
       for (const [k, v] of Object.entries(saved)) window.localStorage.setItem(k, v);
       if (userAgent) Object.defineProperty(window.navigator, 'userAgent', { value: userAgent });
+      // jsdom's window has `ontouchstart`, i.e. a touch screen; a mouse-only computer has not.
+      if (!touch) delete (window as { ontouchstart?: unknown }).ontouchstart;
       (window as unknown as { __TAURI__: unknown }).__TAURI__ = {
         core: { invoke: (cmd: string) => { calls.push(cmd); return cmd === 'get_local_config' ? answer : Promise.reject(new Error(cmd)); } },
       };
@@ -394,9 +396,14 @@ const SCAN = 'button[aria-label="Scan QR code"], .command-button';
 const scanButton = (app: Mounted) => [...app.document.querySelectorAll<HTMLButtonElement>('button')].find(b => /^scan qr code$/iu.test((b.textContent ?? '').trim()));
 const scanning = (text: string | null) => ({ onScan: async () => text });
 
-test('the Scan command is a phone command: absent on a desktop layout, absent when the host offers no scanner, present on touch', async context => {
-  const desktop = await mount(context, { tmux_layout_mode: 'desktop' }, undefined, scanning(null));
-  assert.equal(scanButton(desktop), undefined, 'a desktop layout offers no scan');
+test('the Scan command follows the INPUT (board #124): absent without a touch screen', async context => {
+  const mouse = await mount(context, { tmux_layout_mode: 'desktop' }, undefined, scanning(null), false);
+  assert.equal(scanButton(mouse), undefined, 'a mouse-only computer offers no scan');
+});
+
+test('the Scan command follows the INPUT (board #124): present on a touch screen in the desktop layout', async context => {
+  const unfolded = await mount(context, { tmux_layout_mode: 'desktop' }, undefined, scanning(null));
+  assert.ok(scanButton(unfolded), "a foldable's inner screen draws the desktop layout and still scans");
 });
 
 test('a touch layout with no scanner offered shows no Scan command', async context => {

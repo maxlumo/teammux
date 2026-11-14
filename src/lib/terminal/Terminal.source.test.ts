@@ -217,7 +217,7 @@ test('collapsing the switcher hides the chips, not the desktop page head', () =>
   // the bar entirely made a fresh desktop install the only page in the app
   // with no header (measured 2026-08-19: no .win-bar, xterm at top 0).
   // #123: the phone LAYOUT, not the touch capability (a desktop under touch keeps its head).
-  assert.match(source, /\{#if layout\.isTouchDevice\}\s*<div class="win-collapsed-anchor appear">/u);
+  assert.match(source, /\{#if layout\.phone\}\s*<div class="win-collapsed-anchor appear">/u);
   const desktopCollapsed = /\{:else\}\s*<div class="win-bar page-head">[\s\S]*?<\/div>/u.exec(source)?.[0] ?? '';
   assert.match(desktopCollapsed, /\{@render nameStack\(\)\}/u);
   assert.match(desktopCollapsed, /chevron="left"/u, 'the chip stays the expand control');

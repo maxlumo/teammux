@@ -33,6 +33,7 @@
   import { findBestAddress, classifyAddress, ADDRESS_LABELS, isAddressViable, noteAddressUnreachable, createConnection, createWsApi, createConnectionRegistry } from './lib/core/ws.ts';
   import { t } from './lib/core/i18n.svelte.ts';
   import { layout } from './lib/app/layout.svelte.ts';
+  import { sectionOfDraft } from './lib/hub/agents-draft.svelte.ts';
   import { applyFontVars } from './lib/app/fonts.svelte.ts';
   import { normalizeUiZoom, stepUiZoom, UI_ZOOM_DEFAULT } from './lib/app/ui-zoom.ts';
   import { agentsLivesInSettings, defaultPage, landingPage, restoreNav, retarget } from './lib/app/nav-state.ts';
@@ -77,7 +78,7 @@
   import { cycleItem, dispatchShortcut, shortcutLabel } from './lib/app/shortcuts.ts';
   import { isShortcutInputTarget, shortcuts } from './lib/app/shortcuts.svelte.ts';
   import { installExternalLinkHandler } from './lib/core/external-links.ts';
-  import { isTauri, isTauriDesktop, tauriReady } from './lib/core/platform.ts';
+  import { isAndroid, isTauri, isTauriDesktop, tauriReady } from './lib/core/platform.ts';
   import { localServerLine, localServer } from './lib/app/server-mode.svelte.ts';
   import { flip } from 'svelte/animate';
   import { moveMs } from './lib/ui/motion.ts';
@@ -758,9 +759,12 @@
     // On touch the agent configuration is a Settings CATEGORY, so `agents` as a
     // page has no tab icon and no swipe stop — whatever route set it (a saved
     // state, a deep link, an older build), it becomes Settings opened there.
-    if (page === 'agents' && agentsLivesInSettings(layout.isTouchDevice)) {
+    if (page === 'agents' && agentsLivesInSettings(layout.phone)) {
       page = 'prefs';
-      prefsOpenReq = { tab: 'agents', n: ++prefsOpenSeq };
+      // A fold with an editor open (board #124): Settings opens on the section
+      // the working copy lives in, so the same editor is what is shown.
+      const held = untrack(() => serverStates.get(bound())?.agents.held);
+      prefsOpenReq = { tab: held ? sectionOfDraft(held) : 'agents', n: ++prefsOpenSeq };
     }
   });
 
@@ -791,7 +795,7 @@
   let nextCellId = 0;
   const SPLIT_MIN_WIDTH = 900;
   let wideEnough = $state(typeof window !== 'undefined' && window.innerWidth >= SPLIT_MIN_WIDTH);
-  let splitEligible = $derived(!layout.isTouchDevice && (layout.forceDesktop || wideEnough));
+  let splitEligible = $derived(!layout.phone && (layout.forceDesktop || wideEnough));
   // ONE status sampler for the connected client (board #85). Desktop keeps
   // it visible in the primary sidebar; touch CSS reveals the same instance
   // only while a shared .side-sheet is open — never one poller per page.
@@ -828,7 +832,7 @@
   $effect(() => {
     const root = document.documentElement.style;
     root.setProperty('--shell-top', shell ? '0px' : '49px');
-    root.setProperty('--shell-left', shell && !layout.isTouchDevice ? '46px' : '0px');
+    root.setProperty('--shell-left', shell && !layout.phone ? '46px' : '0px');
   });
   // The Hub needs only the server-side bus (hub_* degrades method-not-found
   // without it, same probe). Its LAYOUT adapts: three columns on
@@ -953,11 +957,11 @@
   // Settings is a PAGE (ui-unification.md "Settings as a page"), not a modal.
   // The gear toggles into it and back to where you were.
   let pageBeforePrefs = 'terminal';
-  let prefsPushed = false;
+  let prefsPushed = 0;
   function togglePrefs() {
     if (page === 'prefs') {
-      if (prefsPushed) history.back();
-      else { page = pageBeforePrefs; slidePage('slide-in-left'); }
+      if (spendable(prefsPushed)) history.back();
+      else { page = pageBeforePrefs; slidePage('slide-in-left'); prefsPushed = 0; }
     } else {
       view.jumpedFrom = null; // opening Settings is a direct choice (#491 review P1-A)
       pageBeforePrefs = page; page = 'prefs'; slidePage('slide-in-right');
@@ -2315,7 +2319,7 @@
     showPaneIn(runtime, v, '', '');
     // Nothing left to show: the empty state offers the session list (which
     // used to BE the fallback page).
-    if (v === view && page === 'terminal' && layout.isTouchDevice) sessListOpen = true;
+    if (v === view && page === 'terminal' && layout.phone) sessListOpen = true;
   }
 
   function doDisconnect() {
@@ -2734,7 +2738,7 @@
    * draft in it. Before any guest exists it mounts on demand, as always. */
   let prefsKept = $state(false);
   $effect(() => {
-    if (page === 'prefs' && hubEligible && agentsLivesInSettings(layout.isTouchDevice)) prefsKept = true;
+    if (page === 'prefs' && hubEligible && agentsLivesInSettings(layout.phone)) prefsKept = true;
   });
   /** What both server lists show about the connection (ServerList `link`). */
   const serverLink = $derived({
@@ -3419,7 +3423,7 @@
       // `agents` resolves to Settings opened at its Agents category — there is
       // no Agents tab to land on there. The tab is the PERSON's, so it
       // survives even when nothing could be attributed to a server.
-      const nav = restoreNav(s.page, layout.isTouchDevice);
+      const nav = restoreNav(s.page, layout.phone);
       page = nav.page;
       if (nav.settingsTab) prefsOpenReq = { tab: nav.settingsTab, n: ++prefsOpenSeq };
     } catch { page = defaultPage(); }
@@ -3538,7 +3542,7 @@
     // Named for the tree that asked (③a, reviewer P1-1): only that server's
     // editor takes it, on touch (Preferences' guest) as on the desktop page.
     if (name && runtime) v.agentsEditReq = { serverId: runtime.id, name, kind, n: (v.agentsEditReq?.n ?? 0) + 1 };
-    if (agentsLivesInSettings(layout.isTouchDevice)) {
+    if (agentsLivesInSettings(layout.phone)) {
       prefsOpenReq = { tab: kind === 'team' ? 'teams' : 'agents', n: ++prefsOpenSeq };
       if (page !== 'prefs') togglePrefs();
     } else {
@@ -3562,14 +3566,27 @@
   // setting. navPush reports whether it pushed, so a caller that later spends
   // the entry with history.back() (the gear, Settings' drill) only does so
   // when its push was real.
+  // Who owns Back (board #124, leader note 11): the platform with a system Back
+  // gesture (the Android app, in either layout) or the phone layout (a phone's
+  // browser, as before); a desktop browser keeps the browser's Back.
+  const ownsBack = $derived(isAndroid || layout.phone);
+  // An entry is spendable only by the router that pushed it (board #124,
+  // validator note 30): a live switch to a desktop browser removes the router,
+  // and a history.back() then would pop an entry nobody handles while the
+  // page it was meant to close stays. navPush returns the installed router's
+  // number (0: nothing pushed); `spendable` asks whether that router is still
+  // the one installed.
+  let router = 0, routerSeq = 0;
   function navPush() {
-    if (!layout.isTouchDevice) return false;
+    if (!ownsBack || !router) return 0;
     history.pushState({ app: true }, '');
-    return true;
+    return router;
   }
+  const spendable = (pushed) => !!pushed && pushed === router;
 
   $effect(() => {
-    if (!layout.isTouchDevice) return; // desktop: the browser's Back is the browser's
+    if (!ownsBack) return; // a desktop browser: the browser's Back is the browser's
+    router = ++routerSeq;
     const handler = (e) => {
       // The shell's OWN dialogs are the first layers (#317): a dialog is modal,
       // so a Back that peeled a page layer behind it would act on something
@@ -3629,7 +3646,7 @@
       // #58): a bare page lifts the session drawer. Once open, Back falls
       // through to the final re-push — it must never peel closed and then
       // re-open on the next gesture (an open/close cycle).
-      if (page === 'terminal' && layout.isTouchDevice && narrowVp && !sessListOpen) {
+      if (page === 'terminal' && layout.phone && narrowVp && !sessListOpen) {
         sessListOpen = true;
         navPush();
         return;
@@ -3637,14 +3654,14 @@
       // Settings peels its open category back to the list first; only a
       // back with nothing to peel leaves the page.
       if (page === 'prefs' && prefsGoBack && prefsGoBack()) { return; }
-      if (page === 'prefs') { page = pageBeforePrefs; slidePage('slide-in-left'); prefsPushed = false; return; }
+      if (page === 'prefs') { page = pageBeforePrefs; slidePage('slide-in-left'); prefsPushed = 0; return; }
       // At sessions root, re-push to prevent exit
       navPush();
     };
     window.addEventListener('popstate', handler);
     // Seed one entry
     navPush();
-    return () => window.removeEventListener('popstate', handler);
+    return () => { window.removeEventListener('popstate', handler); router = 0; };
   });
   // ── The rail's icon ORDER is the user's, and remembered ─────────────────
   // Press a rail icon and drag it up or down (owner, 2026-08-29: "在桌面版的左
@@ -3777,7 +3794,7 @@
   // 不一致"): the Hub's toggle writes appPrefs.sidebarCollapsed; the Terminal
   // page's and the Board's sidebars and the system-status bar follow it, and a
   // rail reselect on any of the three pages opens it again (#199).
-  const shellSideCollapsed = $derived(shell && !layout.isTouchDevice && appPrefs.sidebarCollapsed);
+  const shellSideCollapsed = $derived(shell && !layout.phone && appPrefs.sidebarCollapsed);
   // Only three pages HAVE the primary sidebar; the toggle and the page-head
   // room it takes exist there alone (board #219, owner 2026-09-20: "files页面里，
   // 多显示了折叠左侧边栏的按钮，还有设置这些页面也都没兼容好"). The collapsed state
@@ -3839,7 +3856,7 @@
     // On DESKTOP the rail IS the order, so keyboard previous/next page follows
     // the icons the user arranged rather than a second, hidden sequence. The
     // gap is not a page and the gear is not a cycle stop (it toggles).
-    if (!layout.isTouchDevice) return railSlots.filter((s) => s !== RAIL_GAP && s !== 'prefs');
+    if (!layout.phone) return railSlots.filter((s) => s !== RAIL_GAP && s !== 'prefs');
     // Same order as the tab bar: files sits LEFT of the agent
     // config (owner, 2026-08-28: "手机下边的栏文件放到agent配置左侧吧").
     // Agents is NOT a stop here: on touch it is a Settings category, and a
@@ -3869,7 +3886,7 @@
   // 2026-09-03). The SideHandle is skipped on purpose — it is a separator,
   // not the list.
   function openSessionsList() {
-    if (layout.isTouchDevice || narrowVp) { sessListOpen = true; return; }
+    if (layout.phone || narrowVp) { sessListOpen = true; return; }
     termSideEl?.querySelector('.sessions .content [tabindex="0"], .sessions .content button')?.focus();
   }
   // The Terminal sheet's own condition (touch AND ≤760px — the old media
@@ -3909,7 +3926,7 @@
    * tab switches, entering/leaving Settings — speaks the same 120ms grammar:
    * deeper/rightward enters from the right, back/leftward from the left. */
   function slidePage(dir) {
-    if (!layout.isTouchDevice || slideAnim) return;
+    if (!layout.phone || slideAnim) return;
     slideAnim = dir;
     requestAnimationFrame(() => {
       setTimeout(() => { slideAnim = ''; }, SLIDE_ANIMATION_MS);
@@ -3931,7 +3948,7 @@
     get sidebarPage() { return pageHasSidebar; },
     goTo(target) {
       if (target === 'prefs') { if (page !== 'prefs') togglePrefs(); return; }
-      if (target === 'agents' && agentsLivesInSettings(layout.isTouchDevice)) { openAgentsConfig(); return; }
+      if (target === 'agents' && agentsLivesInSettings(layout.phone)) { openAgentsConfig(); return; }
       switchTab(target);
     },
     cyclePage(direction) {
@@ -3972,7 +3989,7 @@
     },
     toggleScratch() { scratchOpen = !scratchOpen; },
   };
-  const shortcutsOn = $derived(!layout.isTouchDevice);
+  const shortcutsOn = $derived(!layout.phone);
   $effect(() => {
     if (!shortcutsOn) return;
     const onShortcut = (event) => {
@@ -3987,7 +4004,7 @@
   });
 </script>
 
-<main class:with-rail={shell && !layout.isTouchDevice} class:touch-layout={shell && layout.isTouchDevice} class:side-collapsed={shellSideCollapsed} class:side-page={pageHasSidebar} class:immersive={view.filesImmersive && page === 'files'} class:sys-two-rows={sysRows === 2}>
+<main class:with-rail={shell && !layout.phone} class:touch-layout={shell && layout.phone} class:side-collapsed={shellSideCollapsed} class:side-page={pageHasSidebar} class:immersive={view.filesImmersive && page === 'files'} class:sys-two-rows={sysRows === 2}>
   <!-- Shell chrome. Every nav item is in the Tab order (no tabindex="-1" —
        review, 2026-09-03: the whole nav was unreachable by keyboard) and wears
        the global button:focus-visible ring; the current page is aria-current.
@@ -4007,7 +4024,7 @@
         <button class="gear-btn" class:active={page === 'prefs'} aria-label={t('settings')} use:hoverInfo={() => ({ title: t('settings') })} onclick={togglePrefs}><span class="tab-glyph" class:on={page === 'prefs'}><Icon name="gear" size={16} /></span></button>
       </div>
     </nav>
-  {:else if !layout.isTouchDevice}
+  {:else if !layout.phone}
     <!-- The icons are the USER's order (railOrder → nav-order.ts), so this is a
          list rather than six hardcoded buttons. The brand is not part of it: it
          is the app's mark, not a page. The gap between the two shipped groups —
@@ -4147,7 +4164,7 @@
     <aside class="sys-sidebar compact-tools" aria-label="Server system status">
       <SystemStatus load={() => bound()?.api.systemStatus() ?? Promise.reject(new Error('not connected'))} visible={connected}
         owner={scopeRuntime} tag={sysOwnerName} bind:rows={sysRows} />
-      {#if !layout.isTouchDevice}
+      {#if !layout.phone}
         <button
           class="sys-scratch"
           class:open={scratchOpen}
@@ -4298,7 +4315,7 @@
       {savedServers}
       connectionMode={connMode} onConnectionMode={(m) => { void setConnectionMode(m); }} connectionModeFrozen={migrationBlocked}
       {pendingInputs} onDiscardPending={discardPendingInputs}
-      {serverName} onServers={connected && layout.isTouchDevice ? toggleServerMenu : null} serversOpen={serverMenuOpen} serversControls={serverPickerId}
+      {serverName} onServers={connected && layout.phone ? toggleServerMenu : null} serversOpen={serverMenuOpen} serversControls={serverPickerId}
       {optimizing} {linkCopied}
       onClose={togglePrefs}
       onTheme={setTheme}
@@ -4307,8 +4324,9 @@
       onOptimize={optimizeConnection}
       onShare={shareConnectionLink} onShowQr={showConnectionQr}
       onGoBack={(fn) => prefsGoBack = fn}
-      onDrill={() => navPush()}
-      showAgents={frontHub && agentsLivesInSettings(layout.isTouchDevice)}
+      onDrill={() => navPush()} canSpend={spendable}
+      showAgents={frontHub && agentsLivesInSettings(layout.phone)}
+      onAgentsMoved={() => { if (page === 'prefs' && hubAvailable && !agentsLivesInSettings(layout.phone)) switchTab('agents'); }}
       guests={members.map((runtime) => ({ runtime, state: serverStates.get(runtime), tag: serverTag(tagScope, runtime.id) }))} guestShown={front}
       guestHeld={storageHeld ? t('migrationBlockedNote') : ''}
       visible={page === 'prefs' && !switching}
@@ -4385,7 +4403,7 @@
            switches. Desktop-eligible only (needs width + the desktop server):
            mobile keeps the tab layout untouched. -->
       <div class="page-layer" class:hidden={!shown || page !== 'hub'}>
-        <Hub visible={shown && page === 'hub'} {fontSize} mobile={layout.isTouchDevice} openTerminal={(s, tgt) => openTerminal(s, tgt)} onSelectSession={(s) => { if (s) showSessionIn(runtime, v, s); }} onGoBack={(fn) => v.hubGoBack = fn} onReselect={(fn) => { v.pageReselect.hub = fn; }} onSideOpen={(o) => { v.hubSideOpen = o; }} openAgentConfig={(name, kind) => openAgentsConfig(name, kind, runtime, v)} openFilesTab={(s, path, file) => { if (s) showSessionIn(runtime, v, s); if (path || file) v.filesNavReq = { serverId: runtime.id, path, file, n: (v.filesNavReq?.n ?? 0) + 1 }; switchTab('files'); v.jumpedFrom = 'hub'; }} openBoardTab={(s, issue) => { if (s) showSessionIn(runtime, v, s); if (issue) v.boardIssueReq = { serverId: runtime.id, session: s, id: issue, n: (v.boardIssueReq?.n ?? 0) + 1 }; switchTab('board'); v.jumpedFrom = 'hub'; }}
+        <Hub visible={shown && page === 'hub'} {fontSize} mobile={layout.phone} openTerminal={(s, tgt) => openTerminal(s, tgt)} onSelectSession={(s) => { if (s) showSessionIn(runtime, v, s); }} onGoBack={(fn) => v.hubGoBack = fn} onReselect={(fn) => { v.pageReselect.hub = fn; }} onSideOpen={(o) => { v.hubSideOpen = o; }} openAgentConfig={(name, kind) => openAgentsConfig(name, kind, runtime, v)} openFilesTab={(s, path, file) => { if (s) showSessionIn(runtime, v, s); if (path || file) v.filesNavReq = { serverId: runtime.id, path, file, n: (v.filesNavReq?.n ?? 0) + 1 }; switchTab('files'); v.jumpedFrom = 'hub'; }} openBoardTab={(s, issue) => { if (s) showSessionIn(runtime, v, s); if (issue) v.boardIssueReq = { serverId: runtime.id, session: s, id: issue, n: (v.boardIssueReq?.n ?? 0) + 1 }; switchTab('board'); v.jumpedFrom = 'hub'; }}
           union={hubUnionFor} {scopeNote} selectRequest={landingFor(v.hubSelectReq, runtime)} onPickServer={pickServerProject} jumped={v.jumpedFrom === 'board'} />
       </div>
     {/if}
@@ -4393,7 +4411,7 @@
          touch the only instance is the one Settings embeds, so this layer is not
          mounted there — two live copies would both load and both claim a back
          chain. -->
-    {#if v.hubState.available && !agentsLivesInSettings(layout.isTouchDevice)}
+    {#if v.hubState.available && !agentsLivesInSettings(layout.phone)}
       <div class="page-layer" class:hidden={!shown || page !== 'agents'}>
         <AgentsPage visible={shown && page === 'agents'} guardPage="agents" onGoBack={(fn) => v.agentsGoBack = fn} editRequest={landingFor(v.agentsEditReq, runtime)} />
       </div>
@@ -4417,16 +4435,16 @@
            screen, a slide-over sheet on a phone (opened from the switcher's
            session tag). Kept MOUNTED so its polling and expansion state
            survive; `visible` pauses the poll while the page is hidden. -->
-      <aside class="term-side" class:side-sheet={narrowVp} class:sheet={layout.isTouchDevice} class:open={narrowVp && sessListOpen} bind:this={v.termSideEl}>
-        {#if !layout.isTouchDevice && !narrowVp}<SideHandle />{/if}
+      <aside class="term-side" class:side-sheet={narrowVp} class:sheet={layout.phone} class:open={narrowVp && sessListOpen} bind:this={v.termSideEl}>
+        {#if !layout.phone && !narrowVp}<SideHandle />{/if}
         <Sessions {openTerminal} activeTarget={v.terminalTarget}
           onGoBack={(fn) => v.sessionsGoBack = fn}
-          visible={shown && page === 'terminal' && ((!layout.isTouchDevice && !narrowVp) || sessListOpen)}
+          visible={shown && page === 'terminal' && ((!layout.phone && !narrowVp) || sessListOpen)}
           onPick={() => sessListOpen = false}
           union={sessionsUnionFor} onPickServer={pickServerPane} foreignInline={narrowVp} foreignProjects={projectClocks} {scopeNote}
           chips={false} />
       </aside>
-      {#if (layout.isTouchDevice || narrowVp) && sessListOpen}
+      {#if (layout.phone || narrowVp) && sessListOpen}
         <button class="side-scrim" aria-label={t('close')} onclick={() => sessListOpen = false}></button>
       {/if}
       <div class="term-main">
@@ -4455,7 +4473,7 @@
             <Terminal target={v.terminalTarget} session={v.terminalSession} {fontSize}
               visible={shown && page === 'terminal'} active={!held}
               splitEligible={splitEligible} splitActive={splitOn(v)} splitLayout={v.splitLayout} onSetLayout={setLayout}
-              onOpenSessions={layout.isTouchDevice ? () => sessListOpen = true : null}
+              onOpenSessions={layout.phone ? () => sessListOpen = true : null}
               onSwitchPane={(t) => showPaneIn(runtime, v, '', t)} onPaneExit={(t) => paneExitFallback(t, runtime, v)} />
           {/if}
         </div>
@@ -4477,7 +4495,7 @@
       {/if}
       </div>
     </div>
-    {#if !layout.isTouchDevice && connected && shown}
+    {#if !layout.phone && connected && shown}
       <ScratchPanel open={scratchOpen} live={!switching} edge={scratchEdge} {fontSize}
         onclose={() => (scratchOpen = false)} onedge={setScratchEdge} />
     {/if}
@@ -4489,7 +4507,7 @@
 
   <InstallPrompt />
   <HoverCard />
-  {#if shell && layout.isTouchDevice}
+  {#if shell && layout.phone}
     <nav class="tabbar" inert={!!switching}>
       <!-- Foreground-only selection (owner, 2026-09-05: "保持没有背景色，只有
            前景色的一个高亮样式…没有选中灰色 选中后前景有颜色" — the WeChat/
@@ -4553,7 +4571,7 @@
        owner asked for, and a coarse pointer gets a bigger HIT AREA instead,
        bounded by the bar (.sys-scratch::after).
        A deliberate size trade-off, not a proof that nobody taps: the control
-       hangs off `!layout.isTouchDevice`, which is an overridable LAYOUT
+       hangs off `!layout.phone`, which is an overridable LAYOUT
        choice (layout.svelte.ts), so a touch user who forces Desktop reads
        false here and gets the 20px paint with the wider hit box. */
     --sys-ctl: 20px;
@@ -4688,6 +4706,11 @@
     .sys-scratch::after {
       content: ''; position: absolute; inset: -2px -6px;
     }
+    /* The rail's buttons are the 44 px touch floor (board #124 AC4): a foldable's inner screen draws
+       the desktop layout, and a 34 × 32 button on a 4 px pitch leaves no room for a hit overlay, so the
+       button itself grows; the 46 px rail holds 44, and the shortest desktop-layout screen (600, Auto's
+       threshold) holds every slot (measured, app-shell.md). */
+    .rail-btn { width: 44px; height: 44px; }
   }
   @media (prefers-reduced-motion: reduce) { .sys-scratch { transition: none; } }
   .bell-badge {

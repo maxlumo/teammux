@@ -58,7 +58,7 @@
   let status = $state<SystemStatus | null>(null);
   // Touch has no hover card (ui/hover.ts), so its strip keeps every reading
   // the card would carry that fits (board 102, round 4).
-  const parts = $derived(sysParts(status, { touch: layout.isTouchDevice }));
+  const parts = $derived(sysParts(status, { touch: layout.phone }));
   // The row count and the render gate below are ONE definition: the parts drawn.
   const twoRows = $derived(sysRows(parts, { tag }) === 2);
   $effect(() => { rows = twoRows ? 2 : 1; });
@@ -108,7 +108,7 @@
        categorical dots aid scanning, muted labels orient, and only the mono
        readings use full ink. The hover card carries the complete reading.
        The owner's name leads it when there is one (the one tag atom). -->
-  <div class="sysvitals appear" class:two-rows={twoRows} use:hoverInfo={detail}>
+  <div class="sysvitals appear" class:two-rows={twoRows} use:hoverInfo={{ get: detail, tap: true }}>
     <ServerTag name={tag} />
     <span class="sv-line">
     {#each parts as p (p.k)}

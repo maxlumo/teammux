@@ -82,7 +82,7 @@ which stays the last item in the rail as the app-wide convention.
 Owner, 2026-10-09: "帮我再加一个全局可呼出的 Terminal 菜单…有点像 iTerm 或 Ghost
 里的那种全局 Terminal 模式…可以放到桌面版的左下角。至于是从下侧还是左侧弹出，可以加个按钮让我自己去设定…这个
 Terminal 只是临时用的，并且跟你的项目没有关系". Desktop only (the #316 gate,
-`!layout.isTouchDevice`).
+`!layout.phone`).
 
 - **Doors.** A control in the SYSTEM STATUS BAR, beside the vitals
   (`aria-pressed`, hover card with its shortcut), and the registry shortcut
@@ -115,7 +115,7 @@ Terminal 只是临时用的，并且跟你的项目没有关系". Desktop only (
   24×32), bounded by the bar's own box: an overlay taller than the strip would
   take clicks from the sidebar content above it, where this control is not.
   A deliberate size trade-off, not a proof that nobody taps (review #339, P2):
-  the control hangs off `!layout.isTouchDevice`, which is an overridable LAYOUT
+  the control hangs off `!layout.phone`, which is an overridable LAYOUT
   choice (`layout.svelte.ts`), so a touch user who forces Desktop reads false
   here and gets the 20px paint with the wider hit box.
   The paint stays 20px with the dense-group corner, and the background is
@@ -252,7 +252,7 @@ paint (#339).
 ## The tab slide belongs to the swipe, not to the app
 
 `switchTab` plays a one-shot `slide-in-left/right` on the page layer — but only
-on a TOUCH layout (`layout.isTouchDevice`, 2026-08-19). It is the visual half
+on a TOUCH layout (`layout.phone`, 2026-08-19). It is the visual half
 of the swipe gesture: content follows the finger, so the direction carries
 meaning. A desktop switches tabs by clicking a rail button, where nothing moved
 horizontally and the slide just made the page lurch (owner report) — most
@@ -336,7 +336,7 @@ hidden partitions retain the original visibility gates.
 
 **The shell's own dialogs are asked before the bottom-of-stack floor** (board #403, validator, 2026-10-16). On a fresh login page the stack is only `[initial, seed]`, so the first Back arrives with `state` null. The router used to test that floor first and re-push, which swallowed the Back before any layer was asked: the QR scan dialog was open with its camera live, and Back neither closed it nor released the camera (measured in real Chromium; the unit tests dispatched a synthetic `popstate` with `state {app:true}`, which a Back from `[initial, seed]` never delivers). The scan, Add server, the saved server's details and the QR dialog are now peeled FIRST, whatever state the pop carries, each followed by the same re-push a consumed pop always gets; the floor check comes after them. That is the smaller fix than a history entry of the scan's own: the entry would have had to be popped again when the scan ended another way (Cancel, a result, the background), with the pop it causes swallowed, a second piece of history bookkeeping beside `prefsPushed`. Add server opened from the header's server menu, with no Settings entry under it, had the same gap and is covered by the same order. Pinned on the real `window.history` (App.shell.mount.test.ts "#403: from a fresh login page ..." and "... from Settings, on the real history stack ...") and by App.source.test.ts.
 
-**The dance is the phone's** (review, 2026-09-03). Everything above — the seed, the re-push after a consumed pop, the `popstate` router — is gated on `layout.isTouchDevice`, and `navPush()` is a no-op that returns `false` on a desktop layout. A desktop browser has no back gesture to protect, and the unconditional seed + re-push had made the app a page you could not Back out of: the browser's Back button did nothing, forever. On the phone nothing changed. Callers that later spend an entry with `history.back()` (the gear's toggle via `prefsPushed`, Settings' compact drill via `onDrill`'s return value → `drillPushed`) only do so when their push was real, so a narrow desktop window never `history.back()`s out of the app. The gate is reactive: switching the layout mode in Settings installs or removes the router live (entries already pushed before a switch to desktop are simply popped by the browser with nothing listening). `App.source.test.ts` pins the gate. Files' own `navPush` (a page-local push, Files-owned) still pushes on desktop; those entries are consumed silently by Back until the app's real root is reached — harmless, but the one remaining desktop push.
+**The dance is the phone's** (review, 2026-09-03). Everything above — the seed, the re-push after a consumed pop, the `popstate` router — is gated on `ownsBack` (`isAndroid || layout.phone`, board #124: the Android app keeps its system Back gesture in the desktop layout of an unfolded inner screen), and `navPush()` is a no-op that returns `false` in a desktop browser. A desktop browser has no back gesture to protect, and the unconditional seed + re-push had made the app a page you could not Back out of: the browser's Back button did nothing, forever. On the phone nothing changed. Callers that later spend an entry with `history.back()` (the gear's toggle via `prefsPushed`, Settings' compact drill via `onDrill`'s return value → `drillPushed`) only do so when their push was real, so a narrow desktop window never `history.back()`s out of the app. The gate is reactive: switching the layout mode in Settings installs or removes the router live (entries already pushed before a switch to desktop are simply popped by the browser with nothing listening). `App.source.test.ts` pins the gate. Files' own `navPush` (a page-local push, Files-owned) still pushes on desktop; those entries are consumed silently by Back until the app's real root is reached — harmless, but the one remaining desktop push.
 
 ### Where you left off is persisted, and the tab is part of it
 
@@ -606,6 +606,113 @@ head row and the shell toggle lay over the first terminal line). The phone
 layout (no rail, `--shell-left` 0) and the ≥ 760 desktop are unchanged.
 Pins: `App.shell.mount.test.ts`, `Hub.mount.test.ts`, `Board.mount.test.ts`
 (each #123, red before the change).
+
+### Auto follows the screen; layout, input and Back are three answers (2026-11-14, #124)
+
+Owner, 2026-11-14: "auto模式能够识别外屏和内屏 外屏默认手机ui内屏桌面ui". Auto used to mean "has
+touch" (`layout.isTouchDevice`), so a foldable got the phone UI on its inner screen too, and one flag
+answered three questions. Now each has its own definition:
+
+- **`layout.phone`** (`app/layout.svelte.ts`) decides what is SHOWN: rail or tab bar, Agents in Settings,
+  split views, the sessions sheet, the page slide, shortcuts, Files' reading mode. Desktop and Mobile in
+  Settings override it; on Auto it is `autoPhone` (`app/layout-rule.ts`, the ONE place the number lives):
+  the phone layout when the viewport's SMALLEST side is under `PHONE_BELOW` = 600 CSS px on a screen that
+  can be touched. That is Android's own tablet rule (sw600dp): it does not flip on rotation and names no
+  device. A screen that cannot be touched keeps the desktop layout however small its window (leader,
+  #124 note 20): a narrow browser window on a laptop is not a phone, and its compact structure below 760
+  already fits it. The
+  viewport is followed live (`resize`), so a fold, an unfold or a rotation re-decides it without a
+  reload; the page and the terminal session stay (`App.shell.mount.test.ts`, red on the touch rule).
+- **`input.coarse`** decides what the input can DO: any pointer that reports coarse, else the touch
+  capability. It gates the QR Scan command (a camera is a phone's, in either layout) and the hover
+  card's tap opener (below). Touch-sized targets stay the CSS `any-pointer: coarse` rule.
+- **Back** belongs to the platform (leader, #124 note 11): the app owns the history stack wherever the
+  platform has a system Back gesture, i.e. the Android app (`isAndroid`) in EITHER layout, and in the
+  phone layout of a phone's browser as before; a desktop browser keeps the browser's Back
+  (`ownsBack`; the mount test is red when the layout alone decides). The phone layout keeps owning its
+  Back stack everywhere, as before; Android's system gesture adds the desktop layout on that platform
+  (leader, #124 note 20).
+
+**Measured** (Playwright 1.60 / Chromium 148, a private gateway at the #124 tip, `temp/124-evidence`):
+- *The live switch.* One page session on Auto under touch, 411×960 → 717×776 → 776×717 → 411×960:
+  the layout follows each step with no reload, and the Chat page, the open room, a half-typed composer
+  text and its focus all survive (both shells render the same always-mounted page tree, so the draft
+  is never saved or restored; it simply stays). The Terminal's session survives too, on the same xterm
+  node.
+- *Touch targets in the desktop layout under touch* (717×776, 900×820, 980×740; every visible control's
+  hit extent sampled with `elementFromPoint`). The rail's buttons were 34 × 32 and are now 44 × 44 under
+  `any-pointer: coarse` (a mouse keeps 34 × 32); the 46 px rail holds them, and its 8 slots (6 pages,
+  the bell, the server switcher; no more exist) end at 588 of a 600 px tall screen, Auto's shortest
+  desktop. Every other control under 44 there is the SAME size on the phone layout at 410×950: the
+  dense tool rows at 30 (Files' tools and breadcrumb, the chat head; the owner's compact rule above),
+  the composer's agent chips at 36, the terminal's key bar at 24 tall, the Sessions chip at 28, the
+  Board's New issue at 28 × 26, the project list's add and ⋯ at 24. Under touch these follow the input,
+  not the layout, so a foldable gets the phone's targets in either layout; raising them is a change to
+  the phone too, outside #124.
+- *The matrix* (410×950, 450×720 phone; 717×776, 704×1000, 900×820, 980×740 desktop under touch; 1280
+  mouse; dark and light; Chat, Terminal, Files, Board): 56 of 56 with the expected layout, no horizontal
+  overflow, no control cut at the edge, no hover card opened by a finger's normal navigation taps (the
+  passive sites' tap opener is measured on its own, above), no page error.
+- *What a live switch keeps* (round 1, validator notes 28 and 30, leader note 29). A host the switch
+  unmounts takes its component-local state with it. The one such host with an editor is the Agents
+  editor: the desktop's Agents page or the phone's Settings guest. Its working copy (the definition, new
+  or edited, and what it is dirty against) lives in the server's state (`hub/agents-draft.svelte.ts`,
+  memory only), which both hosts read: the host on screen owns and mirrors it, a host shown again
+  adopts the newer revision, and only the owner answers the leave guard. A save or a discard clears it.
+  A fold opens Settings on the draft's own section; an unfold that drops the agent categories from
+  Settings opens the Agents page and asks nothing, because nothing is left behind. The discard question
+  itself, if it was open, does not travel (the draft stays, as after "Keep editing"). A copy still
+  loading (the instructions for every agent being read) is never handed over as loading: the host that
+  adopts it runs the read again into the shared draft (validator note 42). Measured in
+  Chromium both ways (900×820 ↔ 411×960, touch): the Agents editor, the Files editor, the Board's
+  new-issue form, a Settings field, the New Project dialog, the project rename and the Add server
+  dialog keep their text (the others' hosts are the same component in both layouts).
+- *Back at a live switch* (leader, #124 notes 31 and 59). A receipt for an entry the app pushed
+  (`prefsPushed`, Settings' drill) is spent only by the router that pushed it (`spendable`); a router
+  installed after a switch seeds a fresh base, so a close acts on the page, never on a stale receipt.
+  The app's leftover `{app:true}` entries are NOT popped when ownership ends: the app does not count
+  its entries (the router re-pushes after every consumed pop), and a `history.go(-n)` with a wrong
+  count could navigate out of the document, a worse failure than an inert press. Cost (inferred from
+  the source, count not measured): each time ownership begins the router seeds one entry, and each
+  layer opened while it owns Back pushes one; none is popped when ownership ends. So in a desktop
+  BROWSER, repeated fold and unfold accumulate inert Back presses with no bound, and the browser's own
+  Back leaves the page only after them, the same kind of case as the manual Desktop/Mobile switch in
+  § the dance. The Android app owns Back in both layouts, so its router is never removed and it is not
+  affected. This amends note 31's "popped or taken over" to "taken over".
+- *Known gap on a fold*, beside #125: the Hub drawer's Files editor loses its text when the Hub turns compact, on a fold as in a
+  desktop window narrowed below 760 (the drawer renders only when not compact; width-driven and on main
+  before #124), filed as #126.
+- *Compact desktop* (600-760 wide, leader note 2): at 704×1000 the desktop layout draws its compact
+  component forms, #123's structure: the rail with the pages' sheets (Chat's project drawer, the
+  Terminal's session sheet, the Board's drawer) driven by the shell's one toggle. A known state, no new
+  breakpoint.
+
+The owner's 2026 foldables (his table, physical px), converted at each model's assumed DPR (Samsung
+2.625, Apple 3, OPPO/vivo/Xiaomi 2.75-3; none measured on a device here):
+
+| screen | physical px | CSS px (smallest side) | Auto |
+|---|---|---|---|
+| outer, narrowest | 1120 × 1712 | 427 at 2.625, 373 at 3 | phone |
+| outer, widest | 1398 × 2616 | 533 at 2.625, 466 at 3 | phone |
+| inner, the owner's (measured from his screenshot) | — | 717 × 776 | desktop |
+| inner, widest | 2312 × 2504 | 881 at 2.625, 771 at 3 | desktop |
+| inner, narrowest | 1672 × 2364 | 637 at 2.625, **557 at 3** | desktop at 2.625, **phone at 3** |
+
+The last row is the open limit: 600 stays a hypothesis until the owner's own screens are read. Settings
+→ About → Screen shows `innerWidth × innerHeight @ devicePixelRatio · the layout (the mode)`, live; it is
+the device acceptance's instrument, and the leader rules the number again from that reading
+(`layout-rule.test.ts` holds the table).
+
+**The hover card under a finger** (leader, #124 notes 14-17). A finger never hovers, so the card arms on
+a mouse's dwell (`pointerType`) or a keyboard's focus in either layout. Where the element has NO tap
+action of its own, its call site declares it (`use:hoverInfo={{ get, tap: true }}`) and under
+`input.coarse` a tap opens the same card; a second tap or a press anywhere else closes it. Declared,
+never guessed: the status strip (CPU MEM [GPU] in the desktop form, DISK and the GPU lines on the card)
+and Settings' passive labels (the three font pickers, Layout). Known gaps, unchanged by #124: an
+icon-only control's name is its `aria-label` and its hover card, so a sighted touch user does not see it
+(the phone layout has always had this); a row whose tap opens or selects (servers, sessions, panes,
+projects, agents, issues, files) has its detail card out of reach by touch in both layouts, filed as
+the unassigned improvement #125.
 
 ### The chosen tab is marked by ONE highlight that travels (2026-09-04, #86)
 

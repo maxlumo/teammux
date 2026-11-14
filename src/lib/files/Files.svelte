@@ -210,7 +210,7 @@
   // singlePane: the embedder (Hub's drawer) opts into the phone view chain —
   // its column is 320–900px of a WIDE window, so the window-width heuristic
   // lies there (owner, 2026-08-28: "文件的侧边栏可以是类似手机的单页模式").
-  let splitEligible = $derived(!singlePane && !layout.isTouchDevice && (layout.forceDesktop || wideEnough));
+  let splitEligible = $derived(!singlePane && !layout.phone && (layout.forceDesktop || wideEnough));
   /** The list column is ON SCREEN beside a view (#366 review P1): two panes
    * AND the 900px the stylesheet's `.preview-open .files-left` rule needs —
    * forced Desktop below 900 takes the split DOM yet hides the list. The ONE
@@ -1066,7 +1066,7 @@
    * A layer over the preview, so Back exits it first; it does not survive a
    * view change or a page switch (the tab bar must be back before either). */
   let reading = $state(false);
-  let readingEligible = $derived(layout.isTouchDevice && view === 'preview' && !!currentFile
+  let readingEligible = $derived(layout.phone && view === 'preview' && !!currentFile
     && !['image', 'video', 'audio'].includes(mimeCategory(currentFile.stat?.mime_hint)));
   $effect(() => { if (!readingEligible || !visible) reading = false; });
   $effect(() => { onimmersive?.(reading); });

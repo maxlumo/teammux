@@ -197,6 +197,11 @@ test('the phone reaches the server registry from the top of Settings (2026-09-03
 });
 
 
+test('Layout says what Auto means on its label\'s card, opened by hover or a tap, with the ONE threshold (#124)', () => {
+  assert.match(source, /<div class="pref-label" use:hoverInfo=\{\{ get: \(\) => \(\{ title: t\('layout'\), text: t\('layoutHint'\)\.replace\('\{px\}', String\(PHONE_BELOW\)\) \}\), tap: true \}\}>/u);
+  assert.match(source, /import \{ PHONE_BELOW \} from '\.\/layout-rule\.ts';/u, 'the number is the rule\'s, not a second copy');
+});
+
 test('settings controls use labels and values, not a subtitle under every row (board #87)', () => {
   for (const key of [
     'themeHint', 'languageHint', 'layoutHint', 'hubFeedLevelHint', 'hubStepsRowsHint',
@@ -255,12 +260,12 @@ test('the three font pickers demonstrate themselves and name their scope (board 
   // #156 retires dense here: a font value shares the Agent form's body step,
   // even though it previews a different family.
   for (const [sel, hint] of [
-    [/bind:value=\{fontInput\} editable fontPreview emptyFace="var\(--font-mono\)"/u, /use:hoverInfo=\{\(\) => \(\{ title: t\('fontFamily'\), text: t\('fontFamilyHint'\) \}\)\}/u],
-    [/bind:value=\{uiFontInput\} editable fontPreview/u, /use:hoverInfo=\{\(\) => \(\{ title: t\('uiFontBody'\), text: t\('uiFontBodyHint'\) \}\)\}/u],
-    [/bind:value=\{displayFontInput\} editable fontPreview/u, /use:hoverInfo=\{\(\) => \(\{ title: t\('uiFontDisplay'\), text: t\('uiFontDisplayHint'\) \}\)\}/u],
+    [/bind:value=\{fontInput\} editable fontPreview emptyFace="var\(--font-mono\)"/u, /use:hoverInfo=\{\{ get: \(\) => \(\{ title: t\('fontFamily'\), text: t\('fontFamilyHint'\) \}\), tap: true \}\}/u],
+    [/bind:value=\{uiFontInput\} editable fontPreview/u, /use:hoverInfo=\{\{ get: \(\) => \(\{ title: t\('uiFontBody'\), text: t\('uiFontBodyHint'\) \}\), tap: true \}\}/u],
+    [/bind:value=\{displayFontInput\} editable fontPreview/u, /use:hoverInfo=\{\{ get: \(\) => \(\{ title: t\('uiFontDisplay'\), text: t\('uiFontDisplayHint'\) \}\), tap: true \}\}/u],
   ] as const) {
     assert.match(source, sel, `the picker previews: ${sel}`);
-    assert.match(source, hint, `its scope is explained on hover: ${hint}`);
+    assert.match(source, hint, `its scope is explained on hover, and by a tap under a finger (#124): ${hint}`);
   }
   // The mechanism lives in the ONE Select (rule 6), opt-in per instance.
   const select = await readFile(new URL('../ui/Select.svelte', import.meta.url), 'utf8');
