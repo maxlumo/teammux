@@ -443,6 +443,16 @@ consumer). Its seat, its click, its state, the heads' room and #123's below-760
 behaviour are unchanged. Under a coarse pointer it is 44×44 (#124). Pins:
 `App.source.test.ts`, `CommandButton.source.test.ts`, `motion.source.test.ts`.
 
+**Expanded, it says collapse (board #128).** Owner, 2026-11-14 18:41, after #127:
+"展开后 应该按钮变为向左收起的按钮 不应该是三个横杠了". The glyph follows the state the label
+already announces: collapsed, the three lines (expand); shown, the existing `chevron-left`
+(collapse toward the sidebar). Two unrelated glyphs, so it is a SWAP, not a turn (motion.md
+principle 4's exception): `CommandButton` turns only an up/down chevron (one glyph read two
+ways, the roster's); a horizontal chevron is no longer a turning disclosure (no consumer
+used it; its aria-expanded and engaged wash are unchanged). No background in either state
+(#127). Pins: `App.source.test.ts`, `App.shell.mount.test.ts` (#128, wide and below 760),
+`CommandButton.mount.test.ts`, `CommandButton.source.test.ts`.
+
 **Seat (board #217).** Owner, 2026-09-20, with two reference frames
 (`.tmm/uploads/mu9nqemo-804b2fd0.webp`, `mu9nqlt0-f7bda893.webp`): "折叠按钮放到
 侧边栏上吧，类似这个设计我觉得挺好的" — the toggle at the sidebar head's LEFT end

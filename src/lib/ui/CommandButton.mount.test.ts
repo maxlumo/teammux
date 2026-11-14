@@ -31,15 +31,19 @@ test('disclosure chevrons turn with the controlled expanded state through the sh
   }
 });
 
-test('a horizontal disclosure chevron turns the same way (board #174: the sidebar collapse control)', async context => {
+// Board #128: only an up/down chevron is ONE glyph read two ways and turns. A horizontal
+// chevron is swapped (the shell's sidebar toggle: three lines to expand, the left chevron to
+// collapse, unrelated glyphs; motion.md principle 4's exception). It keeps the disclosure's
+// state and wash: aria-expanded, engaged while open when the region is elsewhere.
+test('a horizontal chevron is not turned; its disclosure state and wash stay (board #174 → #128)', async context => {
   for (const expanded of [false, true]) {
     const app = await (await compiled).mount(context, {
       props: { label: 'Sidebar', icon: 'chevron-right', variant: 'icon', expanded, controls: 'sidebar' }, modules: [],
     });
     try {
       const icon = app.document.querySelector('.command-icon')!;
-      assert.ok(icon.classList.contains('flip'), 'one glyph that turns, never two icons');
-      assert.equal(icon.classList.contains('on'), expanded);
+      assert.equal(icon.classList.contains('flip'), false, 'a horizontal chevron is swapped, never turned');
+      assert.equal(icon.classList.contains('on'), false);
       assert.equal(app.document.querySelector('button')!.classList.contains('engaged'), expanded,
         'a disclosure of content elsewhere wears the engaged wash while open');
     } finally { await app.close(); }
@@ -52,7 +56,7 @@ test('a horizontal disclosure chevron turns the same way (board #174: the sideba
   });
   try {
     assert.ok(!app.document.querySelector('button')!.classList.contains('engaged'));
-    assert.ok(app.document.querySelector('.command-icon')!.classList.contains('on'), 'the glyph still turns');
+    assert.equal(app.document.querySelector('.command-icon')!.classList.contains('on'), false, 'not turned');
     assert.equal(app.document.querySelector('button')!.getAttribute('aria-expanded'), 'true');
   } finally { await app.close(); }
 });

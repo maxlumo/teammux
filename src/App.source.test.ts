@@ -1349,8 +1349,8 @@ test('THE sidebar toggle is one fixed shell node at the content area\'s top-left
   const rail = source.match(/<nav\s+class="rail"[\s\S]*?<\/nav>/u)?.[0] ?? '';
   assert.doesNotMatch(rail, /CommandButton|panel-left|rail-head/u, 'the rail is brand + tabs again; no toggle, no head group, no rule');
   assert.match(source, /<img class="rail-brand"[^>]*\/>\s*\n\s*\{#each railSlots as slot \(slot\)\}/u, 'the brand is followed by the tabs');
-  assert.match(source, /<\/nav>\s*\n(?:\s*<!--[\s\S]*?-->\s*\n)?\s*\{#if pageHasSidebar && !switching\}\s*<div class="shell-side-toggle">\s*<CommandButton variant="icon" iconOnly icon="menu" expanded=\{shellSideShown\} inside\s+label=\{shellSideShown \? t\('hubSidebarCollapse'\) : t\('hubSidebarExpand'\)\}\s+onclick=\{toggleShellSidebar\} \/>\s*<\/div>\s*\{\/if\}\s*\{\/if\}/u,
-    'rendered once, beside the rail, under the desktop-connected guard AND only on a page that has the sidebar (#219); since #127 the bare three-line menu glyph in both states (owner, 2026-11-14 17:41: "和手机模式一样三个横线就可以…展开以后 折叠的按钮不要背景色了")');
+  assert.match(source, /<\/nav>\s*\n(?:\s*<!--[\s\S]*?-->\s*\n)?\s*\{#if pageHasSidebar && !switching\}\s*<div class="shell-side-toggle">\s*<CommandButton variant="icon" iconOnly icon=\{shellSideShown \? 'chevron-left' : 'menu'\} expanded=\{shellSideShown\} inside\s+label=\{shellSideShown \? t\('hubSidebarCollapse'\) : t\('hubSidebarExpand'\)\}\s+onclick=\{toggleShellSidebar\} \/>\s*<\/div>\s*\{\/if\}\s*\{\/if\}/u,
+    'rendered once, beside the rail, under the desktop-connected guard AND only on a page that has the sidebar (#219); since #127 the bare icon command in both states (owner, 2026-11-14 17:41: "和手机模式一样三个横线就可以…展开以后 折叠的按钮不要背景色了"), and since #128 the three lines to expand, the left chevron to collapse (owner, 18:41: "展开后 应该按钮变为向左收起的按钮 不应该是三个横杠了")');
   // #219 (owner: "files页面里，多显示了折叠左侧边栏的按钮，还有设置这些页面也都没兼容好"):
   // Files, Settings and Agents have no primary sidebar — no toggle, no head room.
   assert.match(source, /const SIDEBAR_PAGES = new Set\(\['hub', 'terminal', 'board'\]\);\s*\n\s*const pageHasSidebar = \$derived\(SIDEBAR_PAGES\.has\(page\)\);/u);

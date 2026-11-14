@@ -11439,3 +11439,35 @@ test('below 760 the desktop shell toggle opens and closes the Terminal list as a
   assert.equal(toggle().getAttribute('aria-expanded'), 'false');
   assert.equal(pref(), before, 'the persisted sidebar pref is not written below 760');
 });
+
+// Board #128 (owner, 2026-11-14 18:41: "展开后 应该按钮变为向左收起的按钮 不应该是三个横杠了"):
+// the one shell toggle shows the three lines while the sidebar is collapsed (expand) and the
+// collapse-left chevron while it is shown; a swap, not a turn (the chevron is not rotated).
+for (const narrow of [false, true]) test(`the shell sidebar toggle is the three lines when collapsed and a left chevron when shown, never turned, ${narrow ? 'below 760' : 'wide'} (#128)`, async (context) => {
+  {
+    const { app, settle } = await bootApp(context, {
+      ...twoServers({ live: legacyNav('work:1.0'), parked: legacyNav('work:9.0') }),
+      tmux_layout_mode: 'desktop',
+      tmux_hub_sidebar: '0',
+    }, undefined, {
+      setup(window) {
+        window.matchMedia = (media: string) => Object.assign(new window.EventTarget(), {
+          media, matches: narrow && media === '(max-width: 760px)', onchange: null, addListener() {}, removeListener() {},
+        });
+      },
+    });
+    const toggle = () => app.document.querySelector<HTMLButtonElement>('.shell-side-toggle button')!;
+    const glyph = () => {
+      const svg = toggle().querySelector('svg')!;
+      const lines = svg.querySelectorAll('line').length, poly = svg.querySelector('polyline')?.getAttribute('points') ?? '';
+      return lines === 3 && !poly ? 'menu' : poly === '15 18 9 12 15 6' ? 'chevron-left' : `other(${lines},${poly})`;
+    };
+    const turned = () => toggle().querySelector('.command-icon')!.classList.contains('flip');
+    for (let i = 0; i < 2; i++) {
+      const shown = toggle().getAttribute('aria-expanded') === 'true';
+      assert.equal(glyph(), shown ? 'chevron-left' : 'menu', `${narrow ? 'narrow' : 'wide'}: ${shown ? 'shown → collapse-left' : 'collapsed → three lines'}`);
+      assert.equal(turned(), false, 'a swap, never a turn');
+      toggle().click(); await settle();
+    }
+  }
+});

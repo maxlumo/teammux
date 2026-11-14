@@ -4128,10 +4128,12 @@
          is exactly what a left-edge seat avoids. Its click is the page's own
          reselect delegate (#199/#201): the Hub keeps its reading anchor,
          Terminal/Board their reveal effects (#200). The heads make room for
-         it through `.side-toggle-row` / `.page-head` (app.css). -->
+         it through `.side-toggle-row` / `.page-head` (app.css). Its glyph (#128,
+         owner 2026-11-14 18:41): three lines to expand, the left chevron to
+         collapse; unrelated glyphs, so a swap, not a turn (motion.md principle 4). -->
     {#if pageHasSidebar && !switching}
       <div class="shell-side-toggle">
-        <CommandButton variant="icon" iconOnly icon="menu" expanded={shellSideShown} inside
+        <CommandButton variant="icon" iconOnly icon={shellSideShown ? 'chevron-left' : 'menu'} expanded={shellSideShown} inside
           label={shellSideShown ? t('hubSidebarCollapse') : t('hubSidebarExpand')}
           onclick={toggleShellSidebar} />
       </div>

@@ -59,10 +59,11 @@
   const compact = $derived(iconOnly || variant === 'icon');
   const solid = $derived(variant === 'primary' || (variant === 'danger' && destructiveConfirm));
   const engaged = $derived((variant === 'icon' || (variant === 'secondary' && iconOnly)) && (pressed === true || (expanded === true && !inside)));
-  // A disclosure glyph turns instead of swapping (motion.md 4): a chevron, vertical
-  // for a roster (board #174). The shell's sidebar toggle is the three-line `menu`
-  // glyph since board #127 and does not turn.
-  const disclosure = $derived(!pending && expanded !== undefined && icon.startsWith('chevron-'));
+  // A disclosure glyph turns instead of swapping (motion.md 4): an up/down chevron, a
+  // roster's (board #174), is ONE glyph read two ways. A horizontal chevron is not:
+  // the shell's sidebar toggle SWAPS the three-line `menu` (expand) for `chevron-left`
+  // (collapse), unrelated glyphs, and must not be turned (boards #127, #128).
+  const disclosure = $derived(!pending && expanded !== undefined && (icon === 'chevron-up' || icon === 'chevron-down'));
 </script>
 
 <button type="button" class="command-button"

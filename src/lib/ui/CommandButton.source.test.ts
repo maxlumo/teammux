@@ -156,7 +156,7 @@ test('icon-command ink clears 3:1 on normal and selected cards in both themes (#
 // glyph, which does not turn; the drawn `panel-left` window and its turning `.turn` chevron
 // (#202/#215) are removed whole, with the atom's special case for them.
 test('the sidebar toggle glyph is the three-line menu; the panel-left drawing and its turning part are gone (board #127)', async () => {
-  assert.match(source, /const disclosure = \$derived\(!pending && expanded !== undefined && icon\.startsWith\('chevron-'\)\);/u, 'only a chevron turns');
+  assert.match(source, /const disclosure = \$derived\(!pending && expanded !== undefined && \(icon === 'chevron-up' \|\| icon === 'chevron-down'\)\);/u, 'only an up/down chevron turns; a horizontal one is swapped (#128)');
   assert.doesNotMatch(source, /panel-left/u);
   const icon = await readFile(new URL('./Icon.svelte', import.meta.url), 'utf8');
   assert.doesNotMatch(icon, /panel-left|class="turn"/u, 'no drawing left for it');
