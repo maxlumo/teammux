@@ -97,8 +97,10 @@ directory, or the server's home directory when no session is open yet.
 - Menu Open and row Open both protect an unsaved editor. Menu Delete still
   requires confirmation; Back closes the menu before leaving the current view.
 - Star button → bookmark current directory
-- A file or folder row's menu (right-click / long-press) and the file preview
-  header's star → bookmark that path (#494); the same list, the same toggle
+- A file or folder row's menu (right-click / long-press), the file preview
+  header's star and the file information page's star → bookmark that path
+  (#494; the info page's star: owner 2026-11-14 17:39, "预览或者看它详情信息页面的
+  时候有收藏按钮"); the same list, the same toggle
 - A bookmark click opens through the path-link door: a folder lists, a file
   opens its preview, a gone path shows the missing-file line; an unsaved
   editor is asked first

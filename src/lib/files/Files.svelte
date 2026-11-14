@@ -2215,6 +2215,8 @@
         {#if isPreviewable(currentFile?.stat, currentFile?.name)}
           <CommandButton variant="icon" icon="eye" label={t('preview')} onclick={() => loadPreviewContent(currentFile)} />
         {/if}
+        <CommandButton variant="icon" icon={isBookmarked(currentFile?.path) ? 'star-filled' : 'star'} label={t('filesBookmarkEntry')}
+          pressed={isBookmarked(currentFile?.path)} onclick={() => toggleBookmark(currentFile.path)} />
         <CommandButton variant="icon" icon="download" label={t('filesDownload')} onclick={() => handleDownload(currentFile.path)} />
         <CommandButton variant="icon" icon="copy" label={t('filesCopyPath')} onclick={() => copyPath(currentFile.path)} />
       </div>

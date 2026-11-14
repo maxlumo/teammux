@@ -2491,3 +2491,24 @@ test('a moved baseline never makes a pristine editor overwrite another\'s unsave
     } finally { finish(); await settle(app as App); await app.close(); }
   }
 });
+
+test('the file information page has the same bookmark toggle as the preview header (owner 2026-11-14)', async context => {
+  const saved: string[][] = [];
+  const app = await (await compiled).mount(context, {
+    props: { visible: true, session: 'fixture' },
+    modules: [rpc({ saveBookmarks: async (list: string[]) => { saved.push([...list]); return {}; } })],
+  });
+  try {
+    await settle(app);
+    app.document.querySelector<HTMLButtonElement>('.file-main')!.click(); await settle(app);
+    button(app, 'File information').click(); await settle(app);
+    assert.ok(app.document.querySelector('.info-body'), 'the info page is shown');
+    const star = button(app, 'Bookmark');
+    assert.equal(star.getAttribute('aria-pressed'), 'false');
+    star.click(); await settle(app);
+    assert.equal(button(app, 'Bookmark').getAttribute('aria-pressed'), 'true', 'the info page star bookmarks the file');
+    assert.deepEqual(saved.at(-1), ['/fixture/AGENTS.md']);
+    button(app, 'Bookmark').click(); await settle(app);
+    assert.equal(button(app, 'Bookmark').getAttribute('aria-pressed'), 'false', 'the same toggle removes it');
+  } finally { await app.close(); }
+});
