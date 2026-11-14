@@ -59,18 +59,9 @@
     <polyline points="16 18 22 12 16 6"/><polyline points="8 6 2 12 8 18"/><line x1="14" y1="4" x2="10" y2="20"/>
   {:else if name === 'chevron-right'}
     <polyline points="9 18 15 12 9 6"/>
-  {:else if name === 'panel-left'}
-    <!-- The primary-sidebar toggle (board #202): a window with its left pane,
-         and a chevron in the content area that alone turns 180° (.turn) —
-         pointing at the pane while it is open (collapse), away when closed.
-         The BASE drawing is the closed reading (points right, "expand");
-         `.flip.on` (expanded) turns it to point left at the pane. #215 fixed
-         the base, which pointed left and so read backwards in both states. -->
-    <rect x="3" y="4" width="18" height="16" rx="2"/><line x1="9" y1="4" x2="9" y2="20"/>
-    <polyline class="turn" points="14 9.5 16.5 12 14 14.5"/>
   {:else if name === 'panel-bottom' || name === 'panel-right'}
-    <!-- The scratch panel's two docks (board #326), same family as
-         `panel-left`: a window with the panel's own edge drawn as the divider
+    <!-- The scratch panel's two docks (board #326): a window with the panel's own
+         edge drawn as the divider
          — across the bottom, or down the right side. No chevron: unlike the
          sidebar toggle these are a CHOICE, and the Segmented pill shows which
          one is live. -->

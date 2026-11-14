@@ -151,14 +151,18 @@ test('icon-command ink clears 3:1 on normal and selected cards in both themes (#
   }
 });
 
-test('the panel toggle is a disclosure glyph whose inner chevron alone turns (boards #197 → #202)', async () => {
-  assert.match(source, /icon\.startsWith\('chevron-'\) \|\| icon === 'panel-left'/u);
+// Board #127 (owner, 2026-11-14 17:41: "桌面模式的时候 那个展开左侧边栏按钮比较丑 和手机模式一样三个横线就可以。
+// 然后展开以后 折叠的按钮不要背景色了"): the sidebar toggle is the phone's three-line `menu`
+// glyph, which does not turn; the drawn `panel-left` window and its turning `.turn` chevron
+// (#202/#215) are removed whole, with the atom's special case for them.
+test('the sidebar toggle glyph is the three-line menu; the panel-left drawing and its turning part are gone (board #127)', async () => {
+  assert.match(source, /const disclosure = \$derived\(!pending && expanded !== undefined && icon\.startsWith\('chevron-'\)\);/u, 'only a chevron turns');
+  assert.doesNotMatch(source, /panel-left/u);
   const icon = await readFile(new URL('./Icon.svelte', import.meta.url), 'utf8');
-  assert.match(icon, /name === 'panel-left'[\s\S]*?<rect x="3" y="4" width="18" height="16" rx="2"\/><line x1="9" y1="4" x2="9" y2="20"\/>\s*<polyline class="turn" points="14 9\.5 16\.5 12 14 14\.5"\/>/u,
-    'a drawn window with its left pane, the chevron a .turn part — base points RIGHT (closed = expand); .on turns it to the pane (#215)');
-  assert.doesNotMatch(icon, /arrow-to-bar/u, 'the typed →| is gone');
+  assert.doesNotMatch(icon, /panel-left|class="turn"/u, 'no drawing left for it');
+  assert.match(icon, /name === 'menu'[\s\S]*?<line x1="3" y1="6" x2="21" y2="6"\/><line x1="3" y1="12" x2="21" y2="12"\/><line x1="3" y1="18" x2="21" y2="18"\/>/u, 'the phone\'s three lines');
   const css = await readFile(new URL('../../app.css', import.meta.url), 'utf8');
-  assert.match(css, /\.flip:has\(\.turn\) \{ transform: none; \}\s*\n\.flip \.turn \{ transition: transform var\(--t-move\) ease; transform-box: fill-box; transform-origin: center; \}\s*\n\.flip\.on \.turn \{ transform: rotate\(180deg\); \}/u);
+  assert.doesNotMatch(css, /\.turn\b/u, 'the turning-part rules went with it');
 });
 
 // Board #107 F6: a wrapping label is the atom's variant, not a restyle around it. The button

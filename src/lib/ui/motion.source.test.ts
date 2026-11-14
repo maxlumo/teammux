@@ -46,7 +46,7 @@ test('the four atoms exist once, on the tokens, and still under reduced motion',
   assert.match(appCss, /\.appear-rise\s*\{\s*animation:\s*rise-in var\(--t-move\)/u);
   assert.match(appCss, /\.appear-pop\s*\{\s*animation:\s*pop-in var\(--t-fast\)/u);
   assert.match(appCss, /\.state-ctl\s*\{\s*transition:[^}]*border-color var\(--t-fast\)[^}]*background var\(--t-fast\)[^}]*color var\(--t-fast\)/u);
-  const still = /@media\s*\(prefers-reduced-motion:\s*reduce\)\s*\{\s*\.chev,\s*\.flip,\s*\.flip \.turn,\s*\.quarter-turn,\s*\.state-ctl[^{]*\{\s*transition:\s*none;\s*\}\s*\.appear,\s*\.appear-rise,\s*\.appear-pop[^}]*\{\s*animation:\s*none;/u;
+  const still = /@media\s*\(prefers-reduced-motion:\s*reduce\)\s*\{\s*\.chev,\s*\.flip,\s*\.quarter-turn,\s*\.state-ctl[^{]*\{\s*transition:\s*none;\s*\}\s*\.appear,\s*\.appear-rise,\s*\.appear-pop[^}]*\{\s*animation:\s*none;/u;
   assert.match(appCss, still, 'the atoms still under prefers-reduced-motion');
 });
 

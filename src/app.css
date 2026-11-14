@@ -976,11 +976,6 @@ button.side-win:hover { background: var(--surface2); color: var(--text); }
 .chev, .flip, .quarter-turn { display: inline-flex; flex: none; transition: transform var(--t-move) ease; }
 .chev.open { transform: rotate(90deg); }
 .flip.on { transform: rotate(180deg); }
-/* A glyph with a `.turn` PART (the panel toggle's inner chevron, #202) keeps
-   its frame still and turns only that part — the same 180° on the same tempo. */
-.flip:has(.turn) { transform: none; }
-.flip .turn { transition: transform var(--t-move) ease; transform-box: fill-box; transform-origin: center; }
-.flip.on .turn { transform: rotate(180deg); }
 .quarter-turn.on { transform: rotate(90deg); }
 /* · .tab-glyph + .on — a NAVIGATION tab's icon settles into its chosen pose
    (board #240, owner 2026-09-26: "每个选项卡图标…选中和非选中，都给我设计一个
@@ -1218,7 +1213,7 @@ button.side-win:hover { background: var(--surface2); color: var(--text); }
 }
 .skel-wrap { animation: fade-in var(--t-fast) ease-out backwards; animation-delay: 150ms; }
 @media (prefers-reduced-motion: reduce) {
-  .chev, .flip, .flip .turn, .quarter-turn, .state-ctl,
+  .chev, .flip, .quarter-turn, .state-ctl,
   .tab-glyph :is(.glyph-step, .glyph-cursor, .glyph-talk, .glyph-spin, .glyph-write, .glyph-card, .glyph-crew),
   .pop-layer.ready, .slide-pill.ready { transition: none; }
   .appear, .appear-rise, .appear-pop, .side-scrim, .to-tail, .to-tail.news::after,

@@ -59,10 +59,10 @@
   const compact = $derived(iconOnly || variant === 'icon');
   const solid = $derived(variant === 'primary' || (variant === 'danger' && destructiveConfirm));
   const engaged = $derived((variant === 'icon' || (variant === 'secondary' && iconOnly)) && (pressed === true || (expanded === true && !inside)));
-  // A disclosure glyph turns instead of swapping (motion.md 4) — a chevron,
-  // vertical for a roster, or the panel toggle of a side partition, whose
-  // inner chevron alone turns (boards #174, #202; app.css .flip .turn).
-  const disclosure = $derived(!pending && expanded !== undefined && (icon.startsWith('chevron-') || icon === 'panel-left'));
+  // A disclosure glyph turns instead of swapping (motion.md 4): a chevron, vertical
+  // for a roster (board #174). The shell's sidebar toggle is the three-line `menu`
+  // glyph since board #127 and does not turn.
+  const disclosure = $derived(!pending && expanded !== undefined && icon.startsWith('chevron-'));
 </script>
 
 <button type="button" class="command-button"

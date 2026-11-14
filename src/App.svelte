@@ -4131,7 +4131,7 @@
          it through `.side-toggle-row` / `.page-head` (app.css). -->
     {#if pageHasSidebar && !switching}
       <div class="shell-side-toggle">
-        <CommandButton variant="secondary" iconOnly icon="panel-left" expanded={shellSideShown} inside
+        <CommandButton variant="icon" iconOnly icon="menu" expanded={shellSideShown} inside
           label={shellSideShown ? t('hubSidebarCollapse') : t('hubSidebarExpand')}
           onclick={toggleShellSidebar} />
       </div>

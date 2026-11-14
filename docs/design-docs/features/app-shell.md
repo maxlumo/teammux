@@ -423,9 +423,27 @@ flip measures from under the pointer and the icon SETTLES into its new slot
 on `moveMs()` instead of jumping back and sliding. `transform` is deliberately
 absent from `.rail-btn`'s transition list for the same reason.
 
-### The desktop primary sidebar collapses from its own head row (2026-09-11 #174; 2026-09-14 #202; revised 2026-09-20 #217)
+### The desktop primary sidebar collapses from its own head row (2026-09-11 #174; 2026-09-14 #202; revised 2026-09-20 #217; glyph 2026-11-14 #127)
 
-**Current (board #217).** Owner, 2026-09-20, with two reference frames
+**The glyph and its surface (board #127).** Owner, 2026-11-14 17:41: "桌面模式的时候
+那个展开左侧边栏按钮比较丑 和手机模式一样三个横线就可以。然后展开以后 折叠的按钮不要背景色了
+现在有个背景色也很丑". The ONE toggle wears the phone's three-line `menu` glyph, the
+same `Icon` the phone's project drawer opener uses (one glyph for "the sidebar"), and it
+does not turn: `aria-expanded` and the label say the state. It is `variant="icon"`,
+the bare icon command: no paint at rest in EITHER state, the shared hover/press wash.
+The quiet `secondary` surface (#217: "so it reads over a terminal") is dropped in both
+states, measured, not assumed: at 1280 and 717 (compact desktop), dark and light, mouse
+and touch, on Chat, Terminal (a pane printing coloured lines top to bottom) and Board,
+open and closed, the square never lies over terminal text: under it is always the page
+head, the win-bar strip or the sidebar's head row (the heads make its room), and the
+bare glyph's ink against what is under it is 4.67:1 or more (light, touch, rest; 8.3:1
+dark). The drawn `panel-left` window, its `.turn` chevron, `.flip`'s turning-part rules
+and `CommandButton`'s disclosure special case for it are removed whole (no other
+consumer). Its seat, its click, its state, the heads' room and #123's below-760
+behaviour are unchanged. Under a coarse pointer it is 44×44 (#124). Pins:
+`App.source.test.ts`, `CommandButton.source.test.ts`, `motion.source.test.ts`.
+
+**Seat (board #217).** Owner, 2026-09-20, with two reference frames
 (`.tmm/uploads/mu9nqemo-804b2fd0.webp`, `mu9nqlt0-f7bda893.webp`): "折叠按钮放到
 侧边栏上吧，类似这个设计我觉得挺好的" — the toggle at the sidebar head's LEFT end
 beside its title; collapsed, the same square at the same screen point leading
@@ -438,9 +456,9 @@ coordinates open and collapsed — "on the sidebar" and "under the pointer" at
 once, which no earlier seat managed. Mechanism: ONE shell node (`App.svelte`
 `.side-toggle`, rendered beside the rail under the same desktop-connected
 guard), `position: fixed` at `left: 46px + --side-toggle-x` (8px), centred on
-the `--page-head-h` row; the same `CommandButton` `panel-left` glyph whose
-chevron turns (open `<`, closed `>`, #215), as `secondary iconOnly` so its
-quiet surface reads over a terminal; the same `toggleShellSidebar` delegate
+the `--page-head-h` row; then the `CommandButton` `panel-left` glyph whose
+chevron turned (open `<`, closed `>`, #215), as `secondary iconOnly` so its
+quiet surface read over a terminal (both replaced by #127, above); the same `toggleShellSidebar` delegate
 (#199/#201/#200). It does NOT ride `--side-open`. The rows it visually joins
 make room through one app.css rule set keyed on the shell state: open, each
 desktop sidebar's first head wears `.side-toggle-row` (Chat's projects head,
