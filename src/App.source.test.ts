@@ -1137,13 +1137,14 @@ test('one system-vitals strip serves desktop sidebar and an open phone drawer (b
   // user holding a mouse. The control is rendered only where the layout says
   // there is no touch user, so what a coarse pointer gets is a bigger HIT
   // AREA, bounded by the bar's own box.
-  // The one exception (board #102 round 6, leader note 77): on TOUCH, with a server name and a GPU, the
-  // phone drawer's strip takes two rows. It is the same variable's second value, scoped to the touch
-  // layout, so the desktop bar still never grows.
+  // The one named exception (board #103, leader note 13 by the owner's delegation; #102 round 6 before
+  // it): a SHOWN server name takes a row of its own, on every layout, so the bar is 48 px in Aggregate with
+  // a name, desktop included. It is the same variable's ONE second value, set only by the strip's own row
+  // count; Single (no name) keeps the 24 px bar.
   const heights = [...source.matchAll(/([^{}\n]*)\{[^{}]*--sys-sidebar-h: ([^;]+);/gu)].map((m) => [m[1]!.trim(), m[2]]);
   assert.deepEqual(heights.map(([, v]) => v), ['24px', 'calc(2 * 24px)'], 'one bar height, and one second value');
-  assert.equal(heights[1]![0], 'main.touch-layout.sys-two-rows', 'the second value lives on the touch layout only');
-  assert.match(source, /class:sys-two-rows=\{layout\.isTouchDevice && sysRows === 2\}/u, 'set by the strip\u2019s own row count');
+  assert.equal(heights[1]![0], 'main.sys-two-rows', 'the second value, on every layout');
+  assert.match(source, /class:sys-two-rows=\{sysRows === 2\}/u, 'set by the strip\u2019s own row count, nothing else');
   assert.match(source, /<SystemStatus[\s\S]{0,300}?tag=\{sysOwnerName\} bind:rows=\{sysRows\} \/>/u, 'which the strip reports');
   assert.equal((source.match(/--sys-ctl: /gu) ?? []).length, 1, 'and one of the control size');
   const coarse = [...source.matchAll(/@media \(any-pointer: coarse\) \{([\s\S]*?)\n  \}/gu)].map((m) => m[1] ?? '');

@@ -103,13 +103,19 @@ export function sysParts(s: SystemStatus | null | undefined, { touch = false }: 
 }
 
 const isPct = (v: number | null | undefined): v is number => v !== null && v !== undefined && Number.isFinite(v);
-/** How many 24 px rows the strip takes (board #102 round 6, leader note
- * 77). Two only on touch, with a server name and a shown GPU: the name
- * plus four readings do not fit the 284 px drawer row (Aggregate: -38 px at
- * 320, -13 at 390, measured), and touch has no hover card to move one to.
- * The desktop is always one row (#326); so is every other case. */
-export function sysRows(s: SystemStatus | null | undefined, { touch, tag }: { touch: boolean; tag: string | null | undefined }): 1 | 2 {
-  return touch && !!tag && !!s?.gpu && s.gpu.mem_total > 0 ? 2 : 1;
+/** How many 24 px rows the strip takes (board #103, leader note 13 by the
+ * owner's delegation; #102 round 6 before it): a SHOWN server name takes a
+ * row of its own, on every layout; the readings are the row under it,
+ * exactly Single's. Measured, the name could not share one row with the
+ * readings anywhere: on the 201 px desktop row even a one-letter name beside
+ * CPU MEM DISK is -14 px, a 12-character one -64; on the 284 px phone row a
+ * name plus four readings is -38 at 320. The name is never cut to fit the
+ * numbers. It takes the parts the strip RENDERS (`sysParts`), the one gate
+ * for both: no name (Single, a tagless Aggregate), or nothing to show (no
+ * reading, or every value unavailable: the strip draws nothing) is one row,
+ * the bar's own 24 px (validator, #103 note 16: a blank strip held 48). */
+export function sysRows(parts: readonly unknown[], { tag }: { tag: string | null | undefined }): 1 | 2 {
+  return !!tag && parts.length > 0 ? 2 : 1;
 }
 
 const clampPct = (v: number) => Math.min(100, Math.max(0, v));

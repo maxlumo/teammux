@@ -59,7 +59,8 @@
   // Touch has no hover card (ui/hover.ts), so its strip keeps every reading
   // the card would carry that fits (board 102, round 4).
   const parts = $derived(sysParts(status, { touch: layout.isTouchDevice }));
-  const twoRows = $derived(sysRows(status, { touch: layout.isTouchDevice, tag }) === 2);
+  // The row count and the render gate below are ONE definition: the parts drawn.
+  const twoRows = $derived(sysRows(parts, { tag }) === 2);
   $effect(() => { rows = twoRows ? 2 : 1; });
   const tempo = $derived(Math.max(SYS_POLL_MIN_MS, interval));
   // The full reading rides the ONE hover card (motion.md §1.16), not a native

@@ -122,15 +122,19 @@ test('GPU: an unreadable utilization drops only the card\u2019s percentage (#102
   assert.deepEqual(sysDetail(s).at(-1), { k: 'GPU', v: '16.13/22.49G (72%) · NVIDIA L4' });
 });
 
-// Round 6 (leader note 77): a server name plus four readings do not fit one 284 px row (Aggregate, touch,
-// a GPU: -38 px at 320, -13 at 390, validator note 73), and touch has no card; so in exactly that case the
-// name takes a row of its own. Everything else is one row.
-test('GPU: the strip is two rows only on touch, with a server name and a GPU (#102)', () => {
+// Board #103 (leader note 13, by the owner's delegation): a SHOWN server name takes a row of its own, on
+// every layout, GPU or not; measured, it fits beside the readings nowhere (desktop 201 px: a one-letter
+// name beside CPU MEM DISK -14 px; phone 284 px: a name and four readings -38 at 320). Single (no name)
+// and a reading not yet in are one row.
+test('the strip is two rows exactly when a server name is shown beside something to show (#103)', () => {
   const gpu = { ...base, gpu: { ...l4, count: 1 } };
-  assert.equal(sysRows(gpu, { touch: true, tag: 'remote-a' }), 2);
-  assert.equal(sysRows(gpu, { touch: false, tag: 'remote-a' }), 1, 'the desktop is one 24 px row (#326)');
-  assert.equal(sysRows(gpu, { touch: true, tag: null }), 1, 'no name: four fit');
-  assert.equal(sysRows(base, { touch: true, tag: 'remote-a' }), 1, 'no GPU: today\u2019s row');
-  assert.equal(sysRows({ ...base, gpu: { ...l4, count: 1, mem_total: 0 } }, { touch: true, tag: 'remote-a' }), 1, 'an unshown GPU is no GPU');
-  assert.equal(sysRows(null, { touch: true, tag: 'remote-a' }), 1, 'no reading');
+  const rows = (s: Parameters<typeof sysParts>[0], tag: string | null) => sysRows(sysParts(s), { tag });
+  assert.equal(rows(gpu, 'remote-a'), 2);
+  assert.equal(rows(base, 'a'), 2, 'no GPU, a one-letter name: still its own row');
+  assert.equal(rows(base, null), 1, 'Single: no name, one row');
+  assert.equal(rows(base, ''), 1, 'an empty name is no name');
+  assert.equal(rows(null, 'remote-a'), 1, 'no reading: no strip to split');
+  const blank = { cpu_pct: null, mem_used: 0, mem_total: 0, disk_used: 0, disk_total: 0, gpu: null, gpus: null };
+  assert.equal(rows(blank, 'a'), 1, 'every value unavailable: the strip draws nothing, the bar stays 24 px (validator, note 16)');
+  assert.equal(rows({ ...blank, cpu_pct: 0 }, 'a'), 2, 'CPU 0% is a reading');
 });

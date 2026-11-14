@@ -70,7 +70,8 @@ The strip is 24 px (#326, the owner) and its readout gets 201 px beside the
 scratch button at the default `--sidebar-w` 240 (measured in Chromium:
 CPU 44.3, MEM 58.8, DISK 68.1 px, gap 9, so three already take 189). No GPU
 form fits as a fourth (the narrowest, `72%`, needs 242), and a second row
-would be the 48 px strip the owner rejected. So with a GPU the strip reads
+would be the 48 px strip the owner rejected for Single (a shown server name is
+the one exception, § Several servers). So with a GPU the strip reads
 CPU, MEM, GPU (the VRAM used, in percent, `72%`; see the 320 px bound below)
 and DISK and the utilization move to the hover card, which spells every
 reading (leader's ruling, #102 note 5; the owner was asked). The GPU's dot
@@ -227,29 +228,39 @@ hover or a row, and the server switcher's card carries no readings at all
 (websocket-client.md ③c-5). The 08:17 sentence promising every member's
 reading on its Connection row is withdrawn (orchestrator 02:28).
 
-**Touch, a name and a GPU: two rows (board #102 round 6, leader note 77).**
-On touch the strip carries four readings when the server has a GPU (§ GPUs),
-and in Aggregate the name sits beside them. Name plus four did not fit the
-drawer's one row (`remote-a`: -37.8 px at 320, -13.0 at 390; validator
-note 73), and touch has no hover card to move a reading to. So in exactly
-that case, `sysRows(reading, { touch, tag }) === 2`, the name takes row 1
-alone and the four readings row 2 (the same part forms and margins as the
-untagged touch table). The readings sit in one `.sv-line` that never wraps:
-`display: contents` in one row, so nothing changes there, and a nowrap flex
-line in two. A first cut wrapped the whole strip, and the worst reading
-(CPU 100%, MEM 100/128G, GPU 100%) then put its GPU part on a third line at
-320 px (validator note 82); now it ellipsizes on row 2 exactly as the
-one-row strip does (-1.34 px, the known limit; leader note 84). The strip reports
-`rows` to App, which sets `sys-two-rows` on `main` beside `touch-layout`;
-that class gives `--sys-sidebar-h` its one second value, `calc(2 * 24px)`.
-The strip and the open drawer's bottom reservation both follow that one
-variable, with no measurement. The desktop never sets it: its bar stays one
-24 px row (#326, the owner), and every other touch case is one row.
-Measured (Chromium, natural-width sums per row, `remote-a`, dark = light):
-320 px row 1 50 of 259, row 2 238.0 (+21.2); 390 px row 2 +46.0; strip 48 px
-and the drawer reserving 48. Aggregate on the desktop clips beside the name
-with or without a GPU (-42.7 px without, -18.9 with): a baseline defect,
-board #103.
+**A shown server name takes a row of its own, on every layout (board #103,
+leader note 13 by the owner's delegation, 2026-11-14 "103你决定就行"; #102
+round 6 before it, touch with a GPU only).** The name is the identity of the
+number, so it is never cut to fit the numbers, and measured it could not
+share one row with them anywhere (Chromium 148, natural-width sums, gap 9;
+board #103 notes 4-6): on the desktop's 201 px readout even a one-letter
+name beside CPU MEM DISK needed 215.2 (-14.2), `remote-a` 248.2 (-47.2), a
+12-character name 265.2 (-64.2), and beside CPU MEM GPU `remote-a` -18.9; on
+touch, a name and four readings were -37.8 at 320 and -13.0 at 390. So
+`sysRows(reading, { tag }) === 2` whenever a name is shown (Aggregate, one
+member included or many): the name takes row 1 alone (`ServerTag`, its
+10em cap), and the readings row 2, exactly Single's row in its part forms
+and margins. Single and a tagless Aggregate are one row, as is a strip with nothing to
+show (no reading yet, or every value unavailable): `sysRows` takes the very
+parts the strip renders, so the row count and the render gate are one
+definition (validator, #103 note 16: a blank strip once held 48 px). The readings sit in one `.sv-line` that never
+wraps: `display: contents` in one row, a nowrap flex line in two, so a
+reading too wide for row 2 ellipsizes exactly as in one row and never falls
+to a third line (validator note 82 on #102). The strip reports `rows` to
+App, which sets `sys-two-rows` on `main`; that class gives `--sys-sidebar-h`
+its one second value, `calc(2 * 24px)`, on every layout. The strip, the
+desktop sidebars' bottom reservation and the open phone drawer's all follow
+that one variable, with no measurement.
+
+This is the ONE named exception to the desktop bar's 24 px (#326, the owner,
+2026-10-10: "需要维持得小一点"): a design-time rule (a shown name is its own
+row) wins over a per-case layout, and identity wins over a 24 px Aggregate
+bar. Single keeps the 24 px bar. **The known limit, stated with its
+numbers:** the readings row is Single's, so Single's worst desktop reading
+(CPU 100%, MEM 100/128G, DISK, no GPU) is 202.7 of 201 (-1.7 px) in
+Aggregate too, ellipsized as in Single; beside it #102's touch corner at
+320 (CPU 100%, MEM 100/128G, GPU 100%, -1.34 px) stays as it was. Every
+host-like reading fits (desktop CPU MEM DISK 189.2 of 201, +11.8).
 
 ## Tests
 

@@ -3977,7 +3977,7 @@
   });
 </script>
 
-<main class:with-rail={shell && !layout.isTouchDevice} class:touch-layout={shell && layout.isTouchDevice} class:side-collapsed={shellSideCollapsed} class:side-page={pageHasSidebar} class:immersive={view.filesImmersive && page === 'files'} class:sys-two-rows={layout.isTouchDevice && sysRows === 2}>
+<main class:with-rail={shell && !layout.isTouchDevice} class:touch-layout={shell && layout.isTouchDevice} class:side-collapsed={shellSideCollapsed} class:side-page={pageHasSidebar} class:immersive={view.filesImmersive && page === 'files'} class:sys-two-rows={sysRows === 2}>
   <!-- Shell chrome. Every nav item is in the Tab order (no tabindex="-1" —
        review, 2026-09-03: the whole nav was unreachable by keyboard) and wears
        the global button:focus-visible ring; the current page is aria-current.
@@ -4772,12 +4772,13 @@
      drawers is actually open. It then becomes the drawer's final reserved
      row, above the scrim and below dialogs; safe-area padding keeps the
      reading clear of the home indicator. */
-  /* The bar's one second height (board #102 round 6, leader note 77): on
-     touch, a server name and a GPU take two rows (the name alone, then the
-     four readings), because the 284 px drawer cannot hold both in one and
-     touch has no hover card. The strip and the open drawer's reservation
-     both follow through this one variable; the desktop never sets it. */
-  main.touch-layout.sys-two-rows { --sys-sidebar-h: calc(2 * 24px); }
+  /* The bar's one second height (board #103, leader note 13; #102 round 6
+     before it): a shown server name takes a row of its own, on every layout
+     (the name alone, then the readings, exactly Single's row). The strip,
+     the desktop sidebars' reservation and the open drawer's all follow
+     through this one variable. It is the one named exception to the desktop
+     bar's 24 px (#326): the name is never cut to fit the numbers. */
+  main.sys-two-rows { --sys-sidebar-h: calc(2 * 24px); }
   .touch-layout .sys-sidebar {
     display: none;
     left: 0;

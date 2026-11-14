@@ -128,22 +128,24 @@ for (const [label, reading, parts, ...rest] of [
   });
 }
 
-// Round 6 (leader note 77): touch + a server name + a GPU puts the name on row 1 alone and the four
-// readings on row 2; touch + a name without a GPU stays one row. The strip reports its row count to its
-// host (App reserves the drawer's bottom space from it).
-for (const [label, reading, rows] of [
-  ['a GPU', { ...base, gpu: { name: 'NVIDIA L4', count: 1, util_pct: 100, mem_used: 16 * G, mem_total: 22 * G }, gpus: null }, 2],
-  ['no GPU', { ...base, gpu: null, gpus: null }, 1],
+// Board #103 (leader note 13): a server name puts itself on row 1 and the readings on row 2, on every
+// layout, GPU or not; Single (no name) is one row. The strip reports its row count to its host (App
+// reserves the bar's height from it, desktop sidebars and the phone drawer alike).
+for (const [label, reading, mode, tag, rows] of [
+  ['touch, a GPU', { ...base, gpu: { name: 'NVIDIA L4', count: 1, util_pct: 100, mem_used: 16 * G, mem_total: 22 * G }, gpus: null }, 'mobile', 'remote-a', 2],
+  ['touch, no GPU', { ...base, gpu: null, gpus: null }, 'mobile', 'remote-a', 2],
+  ['desktop, no GPU', { ...base, gpu: null, gpus: null }, 'desktop', 'remote-a', 2],
+  ['desktop, Single', { ...base, gpu: null, gpus: null }, 'desktop', null, 1],
 ] as const) {
-  test(`on touch with a server name and ${label} the strip is ${rows} row(s) (#102 round 6)`, { timeout: 60000 }, async (context) => {
+  test(`${label}: the strip is ${rows} row(s) (#103)`, { timeout: 60000 }, async (context) => {
     const f = await gpuFixture();
     const app = await f.mount(context, { modules: [], setup(w) {
       w.Element.prototype.getAnimations = () => [];
-      w.localStorage.setItem('tmux_layout_mode', 'mobile');
+      w.localStorage.setItem('tmux_layout_mode', mode);
     } });
     try {
       const host = (app.window as unknown as { __gpu: { reading: unknown; tag: unknown; rows: number } }).__gpu;
-      host.tag = 'remote-a';
+      host.tag = tag;
       host.reading = reading;
       context.mock.timers.tick(20_000);
       await until(app, () => !!app.document.querySelector('.sysvitals'));
@@ -151,9 +153,29 @@ for (const [label, reading, rows] of [
       // The readings are ONE line (validator note 82: a wrapping flex row let the worst reading's GPU part
       // fall to a third line); the tag is the line above it.
       const kids = [...v.children].map((e) => e.classList.contains('server-tag') ? 'tag' : e.classList.contains('sv-line') ? [...e.querySelectorAll('.sv-k')].map((k) => k.textContent) : '?');
-      assert.deepEqual(kids, ['tag', rows === 2 ? ['CPU', 'MEM', 'DISK', 'GPU'] : ['CPU', 'MEM', 'DISK']]);
+      const readings = mode === 'mobile' && reading.gpu ? ['CPU', 'MEM', 'DISK', 'GPU'] : mode === 'mobile' ? ['CPU', 'MEM', 'DISK'] : reading.gpu ? ['CPU', 'MEM', 'GPU'] : ['CPU', 'MEM', 'DISK'];
+      assert.deepEqual(kids, [...(tag ? ['tag'] : []), readings]);
       assert.equal(v.classList.contains('two-rows'), rows === 2);
       assert.equal(host.rows, rows, 'the host is told the row count');
     } finally { await app.unmount(); }
   });
 }
+
+// Validator, #103 note 16: a reading with nothing to show (every value unavailable) draws no strip, so
+// with a server name the host is told ONE row (its bar stays 24 px), never a blank 48.
+test('a named reading with nothing to show draws no strip and reports one row (#103)', { timeout: 60000 }, async (context) => {
+  const f = await gpuFixture();
+  const app = await f.mount(context, { modules: [], setup(w) {
+    w.Element.prototype.getAnimations = () => [];
+    w.localStorage.setItem('tmux_layout_mode', 'desktop');
+  } });
+  try {
+    const host = (app.window as unknown as { __gpu: { reading: unknown; tag: unknown; rows: number } }).__gpu;
+    host.tag = 'a';
+    host.reading = { cpu_pct: null, mem_used: 0, mem_total: 0, disk_used: 0, disk_total: 0, gpu: null, gpus: null };
+    context.mock.timers.tick(20_000);
+    for (let i = 0; i < 20; i++) await app.flush();
+    assert.equal(app.document.querySelector('.sysvitals'), null, 'nothing drawn');
+    assert.equal(host.rows, 1, 'the host is told one row');
+  } finally { await app.unmount(); }
+});
