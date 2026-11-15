@@ -47,7 +47,8 @@ test('Watch always selects the terminal view and shares one route between menu a
   assert.match(source, /function watchAgent\(agent\) \{\s*drawerView = 'term';\s*openDrawer\(agent\);/u);
   assert.match(source, /if \(a\) watchAgent\(a\)/u, '#180: Watch is the existing menu verb, not a reserved card slot');
   assert.match(source, /if \(a\) watchAgent\(a\)/u);
-  assert.match(source, /if \(mobile \|\| \(compact && drawerView === 'term'\)\)/u,
+  // #132: no room beside the chat counts as no drawer too (noDrawer = compact || !besideFits).
+  assert.match(source, /if \(mobile \|\| \(noDrawer && drawerView === 'term'\)\)/u,
     'a narrow desktop cannot open an invisible terminal drawer');
 });
 test('open drawer tracks yield to the container without overwriting requested widths (#158, #154)', () => {
@@ -59,8 +60,10 @@ test('open drawer tracks yield to the container without overwriting requested wi
   // is the requested width times an animatable open factor (0 = closed): the
   // same minmax yield, one formula for rest and motion.
   assert.match(rule('.hub-root:not(.compact) .cols'),
-    /grid-template-columns:\s*minmax\(0,\s*calc\(var\(--sidebar-w\) \* var\(--side-open\)\)\)\s+minmax\(280px,\s*1fr\)\s+minmax\(0,\s*calc\(var\(--hub-drawer-w,\s*520px\) \* var\(--drawer-open\)\)\)/u);
+    /grid-template-columns:\s*minmax\(0,\s*calc\(var\(--sidebar-w\) \* var\(--side-open\)\)\)\s+minmax\(var\(--chat-min, 280px\),\s*1fr\)\s+minmax\(0,\s*calc\(var\(--hub-drawer-w,\s*520px\) \* var\(--drawer-open\)\)\)/u);
   assert.match(rule('.hub-root.drawer-open .cols'), /^\s*--drawer-open:\s*1;\s*$/u, 'open = factor 1, nothing else');
+  // #132: the chat floor is the measured head minimum (drawer-fit.ts), fed in as --chat-min.
+  assert.match(source, /style:--chat-min=\{`\$\{layout\.chatMin\}px`\}/u);
   assert.match(rule('.hub-root.compact .cols'), /grid-template-columns:\s*minmax\(0,\s*1fr\)/u,
     'compact keeps its existing single column');
   assert.equal([...source.matchAll(/style\.setProperty\('--hub-drawer-w'/g)].length, 1,
@@ -72,7 +75,7 @@ test('open drawer tracks yield to the container without overwriting requested wi
 test('Hub keeps the Drawer mount gate, durable state and navigation authority (#136)', () => {
   // #174: the Drawer stays mounted while its track shrinks (drawerShown =
   // open OR closing) — the gate is that, and still desktop-only.
-  assert.match(source, /\{#if drawerShown && !compact\}\s*<!--[^]*?-->\s*<div class="track drawer-track" id=\{drawerId\} bind:this=\{drawerTrackEl\}>\s*<Drawer/u);
+  assert.match(source, /\{#if drawerShown && !noDrawer\}\s*<!--[^]*?-->\s*<div class="track drawer-track" id=\{drawerId\} bind:this=\{drawerTrackEl\}>\s*<Drawer/u);
   assert.match(source, /bind:drawerFilesDir bind:drawerFilesPath onpick=\{pickWindow\} onclose=\{closeDrawer\}/u);
   assert.match(source, /onfilesback=\{\(back\) => \{ drawerFilesBack = back; \}\}/u);
   assert.match(source, /onexpand=\{\(\) => \(winsExpanded = !winsExpanded\)\}/u);
@@ -200,7 +203,7 @@ test('Hub keeps Composer transport and capture listeners at the coordinator boun
   assert.match(pipeline, /host\.focus\?\.\(\);/u);
   assert.doesNotMatch(source, /recipientChanged|closeRecipient/u);
   assert.match(source, /hubPrefs\.setDraft\(selected, composerText\)/u);
-  const drawer = source.indexOf("if (!termOpen || !visible) return;");
+  const drawer = source.indexOf("if (!drawerDrawn || !visible) return;");
   const transients = source.indexOf("if (!feedActions?.isOpen() && !composer?.hasTransient() && !replyTo) return;");
   assert.ok(transients > 0, 'the dismissal effect also listens while a reply chip is up (#290)');
   assert.ok(drawer < transients, 'surviving capture effects keep their order after menu removal');
@@ -231,8 +234,9 @@ test('Back keeps the original priority and current live guards in one dispatcher
     search: 'if (search.open) { search.close(); return true; }',
     filter: "if (filterAgent) { setFilter('', 'user'); return true; }",
     reply: 'if (replyTo) { replyTo = null; return true; }',
-    files: "if (termOpen && drawerView === 'files' && drawerFilesBack?.()) return true;",
-    drawer: 'if (termOpen) { closeDrawer(); return true; }',
+    // #132: Back peels only a DRAWN drawer; one the fit rule hides keeps its intent.
+    files: "if (drawerDrawn && drawerView === 'files' && drawerFilesBack?.()) return true;",
+    drawer: 'if (drawerDrawn) { closeDrawer(); return true; }',
     sidebar: 'if (compact && !sideOpen && !jumped) { sideOpen = true; return true; }',
   };
   for (const [layer, guard] of Object.entries(guards)) {
@@ -417,7 +421,7 @@ test('an Esc typed into the drawer terminal reaches the pane, not closeDrawer', 
   assert.match(source, /e\.target\?\.closest\?\.\('\[role="menu"\]'\)/u,
     '#164: focused app menus own Escape even outside the drawer input territory');
   // and a HIDDEN Hub (pages stay mounted) must not steal the Terminal page's Esc.
-  assert.match(source, /if \(!termOpen \|\| !visible\) return;/u, 'the listener is gated on visible');
+  assert.match(source, /if \(!drawerDrawn \|\| !visible\) return;/u, 'the listener is gated on visible (and, #132, on the drawer being drawn)');
 });
 
 test('the add-agent button is reachable in every project', () => {
@@ -481,7 +485,7 @@ test('the drawer has a board partition, and the tap prefers it on desktop (board
   assert.match(source, /\{drawerView\} \{drawerFilesReq\} \{drawerIssueReq\} \{drawerBoardNew\}/u,
     'the view receives the existing partition requests');
   assert.match(source, /drawerView = 'board'; openDrawer\(\);/u, 'the feed tap opens the partition on desktop');
-  assert.match(source, /if \(mobile \|\| compact\) \{ openBoardTab\?\.\(selected, id\); return; \}/u,
+  assert.match(source, /if \(mobile \|\| noDrawer\) \{ openBoardTab\?\.\(selected, id\); return; \}/u,
     'the phone still jumps to the board page');
   assert.match(source, /e\.target\?\.closest\?\.\('\.board-body'\)/u,
     'an Esc inside the partition belongs to the Board (the files-body territory rule)');
@@ -821,7 +825,8 @@ test('the drawer REVEALS, it never resizes: pinned content, one moving gate, no 
   assert.match(source, /const unpin = drawerTrackEl \? pinTrack\(drawerTrackEl, 'start'\) : null;\s*\n\s*drawerClosing = true;\s*\n\s*await withReadingAnchor\(\(\) => \{ termOpen = false; \}\);/u, 'close: pin first, then the rest state');
   assert.match(source, /await moveTrack\(colsEl, '--drawer-open', 1\);\s*\n\s*drawerClosing = false;\s*\n\s*unpin\?\.\(\);/u, 'close: unmount only after the move');
   assert.match(source, /const drawerShown = \$derived\(termOpen \|\| drawerClosing\);/u);
-  assert.match(source, /class:drawer-open=\{termOpen && !compact\}/u, 'the rest class follows the intent, not the mount');
+  assert.match(source, /const drawerDrawn = \$derived\(termOpen && !noDrawer\);/u, '#132: open AND drawn');
+  assert.match(source, /class:drawer-open=\{drawerDrawn\}/u, 'the rest class follows the intent, not the mount');
 });
 
 test('the sidebar collapses and expands by the same reveal, from ONE control that turns (board #174)', () => {

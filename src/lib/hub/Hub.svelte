@@ -69,6 +69,7 @@
   import CreateProjectDialog from '../projects/CreateProjectDialog.svelte';
   import ConfirmDialog from '../ui/ConfirmDialog.svelte';
   import { activeModal } from '../ui/modal.ts';
+  import { HubLayout } from './drawer-fit.svelte.ts';
 
   // This server's memory — per-project lead, read mark, draft, drawer, roster,
   // the open project, and its notification centre — from the scope the
@@ -131,14 +132,11 @@
 
   // Layout follows the viewport, not the device class (a squeezed desktop
   // window must not overflow). `mobile` still decides behavior defaults.
-  let narrow = $state(typeof window !== 'undefined' && window.matchMedia('(max-width: 760px)').matches);
-  $effect(() => {
-    const mq = window.matchMedia('(max-width: 760px)');
-    const onChange = () => { narrow = mq.matches; };
-    mq.addEventListener('change', onChange);
-    return () => mq.removeEventListener('change', onChange);
-  });
-  const compact = $derived(mobile || narrow);
+  let hubRootEl = $state(null);
+  const layout = new HubLayout(() => hubRootEl, () => sideCollapsed);
+  const compact = $derived(mobile || layout.narrow);
+  /** No drawer here: the phone, a compact Hub, or no room beside the chat (#132, drawer-fit.ts). */
+  const noDrawer = $derived(compact || !layout.drawerFits);
 
   let rows = $state([]);            // ProjectRow[]
   /** Project ids present when the sidebar first filled (motion.md principle
@@ -252,6 +250,8 @@
   // class the track factor follows, is the intent alone.
   let drawerClosing = $state(false);
   const drawerShown = $derived(termOpen || drawerClosing);
+  /** Open AND drawn: Back and Escape pass a drawer the rule hides, its intent kept (#132). */
+  const drawerDrawn = $derived(termOpen && !noDrawer);
   let colsEl = $state(null);
   let drawerTrackEl = $state(null);
   // The project sidebar collapses and expands the same way (owner, board
@@ -302,7 +302,7 @@
       else { try { const r = await fsCwd(target); if (r.path) file = resolvePathRef(r.path, file); } catch {} }
     }
     if (selected !== target) return;
-    if (mobile || compact) { openFilesTab?.(target, '', file); return; }
+    if (mobile || noDrawer) { openFilesTab?.(target, '', file); return; }
     drawerFilesReq = { file, n: (drawerFilesReq?.n ?? 0) + 1 };
     drawerView = 'files'; openDrawer();
   }
@@ -1559,7 +1559,7 @@
         termTarget = '';
       }
     }
-    if (mobile || (compact && drawerView === 'term')) {
+    if (mobile || (noDrawer && drawerView === 'term')) {
       // Compact layouts have no terminal drawer; use the whole Terminal tab.
       const m = /^(.+):(\d+)\.(\d+)$/.exec(termTarget);
       if (m) openTerminal(selected, termTarget);
@@ -2265,7 +2265,7 @@
   // while focus is anywhere else. Gated on `visible` too: pages stay mounted
   // while hidden, so a drawer left open used to eat the Terminal page's Esc.
   $effect(() => {
-    if (!termOpen || !visible) return;
+    if (!drawerDrawn || !visible) return;
     const onKey = (e) => {
       if (e.key !== 'Escape') return;
       if (activeModal(document)) return;
@@ -2436,8 +2436,8 @@
       backLayers.register('search', () => { if (search.open) { search.close(); return true; } return false; }),
       backLayers.register('filter', () => { if (filterAgent) { setFilter('', 'user'); return true; } return false; }),
       backLayers.register('reply', () => { if (replyTo) { replyTo = null; return true; } return false; }),
-      backLayers.register('files', () => { if (termOpen && drawerView === 'files' && drawerFilesBack?.()) return true; return false; }),
-      backLayers.register('drawer', () => { if (termOpen) { closeDrawer(); return true; } return false; }),
+      backLayers.register('files', () => { if (drawerDrawn && drawerView === 'files' && drawerFilesBack?.()) return true; return false; }),
+      backLayers.register('drawer', () => { if (drawerDrawn) { closeDrawer(); return true; } return false; }),
       // A chat JUMPED INTO (from the Dashboard, board #109) returns there before
       // the floor lifts the drawer, as Board's and Files' floors do.
       backLayers.register('sidebar', () => { if (compact && !sideOpen && !jumped) { sideOpen = true; return true; } return false; }),
@@ -2746,7 +2746,7 @@
   }
 </script>
 
-<div class="hub-root" class:compact class:drawer-open={termOpen && !compact} class:side-collapsed={sideCollapsed && !compact}>
+<div class="hub-root" class:compact class:drawer-open={drawerDrawn} class:side-collapsed={sideCollapsed && !compact} bind:this={hubRootEl} style:--chat-min={`${layout.chatMin}px`}>
   <div class="cols" bind:this={colsEl}>
     <!-- The .track is the grid item the reveal pins; the Sidebar inside never
          changes size while the track moves (board #174). -->
@@ -2874,10 +2874,10 @@
             onclick={(e) => centre.toggle(e.currentTarget)} />{#if centre.unviewed}<span class="unread-dot bell-dot" aria-hidden="true"></span>{/if}</span>
         {/if}
         <CommandButton variant="icon" icon="layout" label={t('board')}
-          expanded={mobile || compact ? undefined : termOpen && drawerView === 'board'}
-          controls={mobile || compact || !drawerShown ? undefined : drawerId}
+          expanded={mobile || noDrawer ? undefined : termOpen && drawerView === 'board'}
+          controls={mobile || noDrawer || !drawerShown ? undefined : drawerId}
           onclick={() => {
-            if (mobile || compact) { openBoardTab?.(selected); return; }
+            if (mobile || noDrawer) { openBoardTab?.(selected); return; }
             if (termOpen && drawerView === 'board') { closeDrawer(); } else { drawerView = 'board'; openDrawer(); }
           }} />
         <!-- The drawer's second partition. On the phone (no drawer) the same
@@ -2885,10 +2885,10 @@
              does with the Terminal tab (owner, 2026-08-28: "手机上好像没有
              打开文件侧边栏的按钮"). -->
         <CommandButton variant="icon" icon="files" label={t('files')}
-          expanded={mobile || compact ? undefined : termOpen && drawerView === 'files'}
-          controls={mobile || compact || !drawerShown ? undefined : drawerId}
+          expanded={mobile || noDrawer ? undefined : termOpen && drawerView === 'files'}
+          controls={mobile || noDrawer || !drawerShown ? undefined : drawerId}
           onclick={() => {
-            if (mobile || compact) { openFilesTab?.(selected, drawerFilesDir || projectPath); return; }
+            if (mobile || noDrawer) { openFilesTab?.(selected, drawerFilesDir || projectPath); return; }
             if (termOpen && drawerView === 'files') { closeDrawer(); } else { drawerView = 'files'; openDrawer(); }
           }} />
         <!-- THE terminal affordance: a button, not a permanent pane. Adding an
@@ -2896,9 +2896,9 @@
              title's menu (and Settings) — a header is not a place to keep
              spare switches. -->
         <CommandButton variant="icon" icon="terminal" label={t('hubTerminal')}
-          expanded={mobile || compact ? undefined : termOpen && drawerView === 'term'}
-          controls={mobile || compact || !drawerShown ? undefined : drawerId}
-          onclick={() => termOpen && drawerView === 'term' && !compact ? closeDrawer() : (drawerView = 'term', openDrawer())} />
+          expanded={mobile || noDrawer ? undefined : termOpen && drawerView === 'term'}
+          controls={mobile || noDrawer || !drawerShown ? undefined : drawerId}
+          onclick={() => termOpen && drawerView === 'term' && !noDrawer ? closeDrawer() : (drawerView = 'term', openDrawer())} />
         </div>
         <HubSearch {search} projectName={(room) => roomProjectName(rows, room)} agentName={filterName} onjump={jumpToHit} onopenfile={openFileHit} onclearagent={() => setFilter('', 'user')} mine={filterAgent === HUMAN} ontogglemine={() => toggleFilter(HUMAN)} />
         {#if headerCopyFeedback && headerCopyAnchor}
@@ -2963,7 +2963,7 @@
         onreply={replyToMessage}
         asks={asksOn ? askBook : null} {stopped} ondiscuss={replyToMessage}
         onboard={(id) => {
-          if (mobile || compact) { openBoardTab?.(selected, id); return; }
+          if (mobile || noDrawer) { openBoardTab?.(selected, id); return; }
           drawerIssueReq = { session: selected, id, n: (drawerIssueReq?.n ?? 0) + 1 };
           drawerView = 'board'; openDrawer();
         }}
@@ -3006,7 +3006,7 @@
       {/if}
     </main>
 
-    {#if drawerShown && !compact}
+    {#if drawerShown && !noDrawer}
     <!-- ── Terminal drawer: where terminal things live. The .track is the
          grid item the reveal pins; the Drawer inside never changes size
          while the track moves (board #174). ── -->
@@ -3186,7 +3186,7 @@
   /* --side-open is registered once in app.css (shell-wide since #200). */
   @property --drawer-open { syntax: '<number>'; inherits: false; initial-value: 0; }
   .cols { flex: 1; display: grid; min-height: 0; --side-open: 1; --drawer-open: 0; }
-  .hub-root:not(.compact) .cols { grid-template-columns: minmax(0, calc(var(--sidebar-w) * var(--side-open))) minmax(280px, 1fr) minmax(0, calc(var(--hub-drawer-w, 520px) * var(--drawer-open))); overflow: hidden; }
+  .hub-root:not(.compact) .cols { grid-template-columns: minmax(0, calc(var(--sidebar-w) * var(--side-open))) minmax(var(--chat-min, 280px), 1fr) minmax(0, calc(var(--hub-drawer-w, 520px) * var(--drawer-open))); overflow: hidden; }
   .hub-root.compact .cols { grid-template-columns: minmax(0, 1fr); }
   .hub-root.compact { --composer-inset: 9px; }
   /* :global — these classes are raised by reveal.ts, not by the markup. */

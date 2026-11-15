@@ -595,6 +595,10 @@ convention. The base now points right (closed = "expand"), so the open
 state turns it left, at the pane (measured: open `<`, closed `>`); pin in
 `CommandButton.source.test.ts`.
 
+### Space, not the screen's ratio, decides a page's structure (2026-11-15, #131 → #132)
+
+The owner asked (2026-11-15, the inner screen held landscape) whether a near-square screen should be a "square inner-screen mode". Measured (#131): at 776×717 every page fitted except Chat with its drawer open; the variable that decides whether two panes fit beside each other is the width each needs, not the ratio: 776×717 (1.08) and a 1440×1330 monitor have the same ratio and opposite needs, browser chrome and the keyboard change the ratio, and rotation does not change what a pane needs. So there is no aspect-ratio mode and no second breakpoint: the layout is chosen by the short side (#124), each page's structure by the 760 compact width (#123), and a secondary pane that needs more room says so itself: the Hub's drawer goes beside the chat only when both fit (hub-feed.md § The drawer goes beside the chat only when both fit). On the owner's inner screens that gives Chat full width with Files and Terminal one tap away as pages.
+
 ### One toggle, one sidebar per page, driven by the page's current structure (2026-11-14, #123)
 
 Owner, 2026-11-14, two screenshots from a foldable's inner screen with the
