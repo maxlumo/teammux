@@ -217,15 +217,17 @@ fn download_chunk(app: tauri::AppHandle, id: String, data: String) -> Result<(),
 #[tauri::command]
 fn download_finish(app: tauri::AppHandle, id: String, name: String, dest: Option<String>) -> Result<String, String> {
     let dir = part_dir(&app)?;
-    let target = if cfg!(target_os = "android") {
-        dir.join(sanitize_filename(&name)?)
+    // Android never replaces a same-name file (board #129): under scoped storage it may belong to
+    // another app; the desktop replaces the path the person confirmed in its save dialog.
+    let (target, existing) = if cfg!(target_os = "android") {
+        (dir.join(sanitize_filename(&name)?), downloads::Existing::KeepBoth)
     } else {
         use tauri_plugin_fs::FsExt;
         let dest = downloads::checked_dest(dest.as_deref().ok_or("no save location")?)?;
         if !app.fs_scope().is_allowed(&dest) { return Err("save location was not chosen in the dialog".into()); }
-        dest
+        (dest, downloads::Existing::Replace)
     };
-    downloads::finish_part(&dir, &id, &target).map(|p| p.to_string_lossy().to_string())
+    downloads::finish_part(&dir, &id, &target, existing).map(|p| p.to_string_lossy().to_string())
 }
 
 #[cfg(feature = "gui")]
