@@ -250,18 +250,19 @@ test('transparent pictures share one checker atom from existing tokens, on the i
     assert.doesNotMatch(src, /repeating-conic-gradient|conic-gradient|linear-gradient\([^)]*\) *0 0 *\//u, `${name}: no checker of its own`);
 });
 
-// Board #481: a viewBox-only SVG has a ratio and no width, so the shrink-wrapping button made it 0 x 0. The rule
-// that fixed it is for vectors ONLY, and keeps a vector exactly as clickable and focusable as a bitmap.
-test('a vector picture\u2019s button fills the pane, its margin is inert and its ring hugs the picture (#481)', async () => {
+// Board #481: a viewBox-only SVG has a ratio and no width, so the shrink-wrapping button made it 0 x 0; its containing
+// box was for vectors only. Board #130 (owner, 2026-11-15, measured: a 3:4 bitmap overflowed the body by 171 px at
+// 717×776) needs the same box for a bitmap's height, so it is EVERY picture's: one rule, no vector class. A smaller
+// bitmap still keeps its natural size because the picture is capped by max-width / max-height only.
+test('every picture\u2019s button fills the pane, its margin is inert and its ring hugs the picture (#481, #130)', async () => {
   const preview = await readFile(new URL('../files/FilePreview.svelte', import.meta.url), 'utf8');
-  assert.match(preview, /\{@const vector = \(currentFile\.stat\?\.mime_hint \?\? ''\)\.startsWith\('image\/svg'\)\}/u, 'known from the mime, not guessed from pixels');
-  assert.match(preview, /<button class="image-open" class:vector /u);
+  assert.match(preview, /<button class="image-open" aria-label=/u, 'no vector special case');
   const rule = (sel: string) => preview.match(new RegExp(`\\n  ${sel.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')} \\{([^}]*)\\}`, 'u'))?.[1] ?? '';
-  assert.match(rule('.image-open.vector'), /width: 100%; height: 100%; display: flex; align-items: center; justify-content: center; pointer-events: none;/u,
-    'the button gives the picture a containing box and ignores the pointer');
-  assert.match(rule('.image-open.vector img'), /pointer-events: auto;/u, 'only the picture takes it, as a bitmap does');
-  assert.match(rule('.image-open.vector:focus-visible'), /outline: none;/u);
-  assert.match(rule('.image-open.vector:focus-visible img'), /outline: 2px solid var\(--accent\); outline-offset: 2px;/u, 'the global ring, drawn on the picture');
-  assert.doesNotMatch(rule('.image-open'), /(?<![-\w])(?:width|height): 100%/u, 'a bitmap keeps its natural size: only max-width / max-height cap it');
-  assert.doesNotMatch(preview.replace(/\n  \.image-open\.vector[^\n]*/gu, ''), /\.vector/u, 'the vector class is used by these rules only');
+  assert.match(rule('.image-open'), /width: 100%; height: 100%; display: flex; align-items: center; justify-content: center;/u, 'the button gives every picture a containing box');
+  assert.match(rule('.image-open'), /pointer-events: none;/u, 'and ignores the pointer');
+  assert.match(rule('.image-open img'), /pointer-events: auto;/u, 'only the picture takes it');
+  assert.match(rule('.image-open:focus-visible'), /outline: none;/u);
+  assert.match(rule('.image-open:focus-visible img'), /outline: 2px solid var\(--accent\); outline-offset: 2px;/u, 'the global ring, drawn on the picture');
+  assert.match(rule('.image-preview img'), /max-width: 100%; max-height: 100%; object-fit: contain;/u, 'max only: a smaller picture keeps its natural size');
+  assert.doesNotMatch(preview, /\.vector|class:vector/u, 'the vector class is gone whole');
 });

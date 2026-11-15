@@ -121,13 +121,14 @@ test('every showing mints its own base: a reload and a return each ask again', a
 // not, and both pictures wear the one checker atom.
 const picture = (mime: string, name: string) => ({ path: `/p/${name}`, name, stat: { mime_hint: mime }, dataUrl: `data:${mime};base64,eA==` });
 
-test('a vector picture gets the sizing button, a bitmap keeps its natural size; both wear the checker (#481)', async context => {
-  for (const [mime, name, vector] of [['image/svg+xml', 'logo.svg', true], ['image/png', 'logo.png', false], ['image/webp', 'logo.webp', false], ['image/svg', 'odd.svg', true]] as const) {
+// #130: the sizing box is every picture's now (a bitmap's height needed it too), so no picture carries a vector class.
+test('every picture is the one sizing button into the viewer; both kinds wear the checker (#481, #130)', async context => {
+  for (const [mime, name] of [['image/svg+xml', 'logo.svg'], ['image/png', 'logo.png'], ['image/webp', 'logo.webp'], ['image/svg', 'odd.svg']] as const) {
     const app = await mount(context, picture(mime, name), {});
     try {
       const button = app.document.querySelector<HTMLButtonElement>('.image-preview .image-open')!;
       assert.ok(button, `${mime}: the picture is the one button into the viewer`);
-      assert.equal(button.classList.contains('vector'), vector, `${mime}: vector class only for an SVG`);
+      assert.equal(button.classList.contains('vector'), false, `${mime}: one box for every picture, no vector special case`);
       assert.equal(button.getAttribute('aria-label'), name);
       const img = button.querySelector('img')!;
       assert.ok(img.classList.contains('alpha-checker'), `${mime}: the picture wears the shared checker`);

@@ -316,6 +316,16 @@ defaultPrevented and opens the viewer.
 
 **A tap closes by its gesture, not by the scale its click finds (board #449, 2026-10-22).** The click arrives AFTER pointerup, so a double-tap that has just zoomed back out used to look, at click time, like a clean tap on an unzoomed backdrop and closed the viewer (measured in Chromium at main 7842c7ae; the image has `pointer-events: none`, so a tap on the picture lands on the stage and counts as the backdrop). The close is now decided from a per-gesture record, `tapCloses` in `Lightbox.svelte`: a first finger on an unzoomed picture sets it at pointerdown, and anything that changes the zoom during the gesture clears it (a second finger, a double-tap in or out, a wheel step with the button held; they all pass through `zoomAt` or the double-tap zoom-out), as does `pointercancel`, which is also not half of a double-tap. `onBackdrop` no longer reads `scale`. The next single-finger press takes its own qualification afresh, so old state can never leave the viewer unclosable. No timer or second gesture mechanism was added. NOT fixed here, filed as #450: because the first tap of an unzoomed double-tap closes the viewer at its click, double-tap-to-zoom-IN from scale 1 is unreachable (only pinch and wheel zoom in); making it reachable means delaying the close by the 300 ms double-tap window, which is the owner's call. Pinned by `Lightbox.mount.test.ts` (full pointerdown/up/click sequences on a test-owned clock: unzoomed tap closes; zoomed double-tap does not and the next tap does; zoomed tap and pan do not; a tap whose own gesture zooms in does not; a wheel step while held does not; two fingers and a cancel are not taps) and `Lightbox.source.test.ts` (the click handler does not read the scale).
 
+**Every picture fits its preview body (board #130, 2026-11-15).** Owner: "这个图片在折叠屏内屏预览下边被截断了".
+Measured on main 3ab9ebd2 (own gateway, Chromium): a 3:4 bitmap overflowed the preview body at the bottom by 171 px at
+717×776 (the foldable's inner screen) and by 327 px at a plain 1280×800 desktop; a landscape one and the phone fit. The
+picture's `max-height: 100%` resolves against its zoom button, which had a definite box only for an SVG (#481 below),
+so a bitmap was limited by width alone. The containing box (`width/height: 100%`, flex centring, inert margin, the
+picture alone takes the tap, the focus ring on the picture) is now EVERY picture's: one rule, the `vector` class gone.
+Measured after: portrait 495×660 in a 647×684 body at 717×776, 540×720 at 1280×800, no scrolling; landscape, the phone
+and 704×1000 unchanged; a 200×150 bitmap stays 200×150; a viewBox-only SVG still fills; a tap on the margin opens
+nothing, on the picture the viewer. Pins: `FilePreview.source.test.ts` (#130), `FilePreview.mount.test.ts`.
+
 **A vector picture has a size, and a see-through picture has a backdrop (board #481, 2026-10-29).** Owner: an SVG
 logo (`maxlumo-wordmark-ink.svg`) previewed wrong. Two causes, measured in Chromium 152 with the real `FilePreview`.
 (1) SIZE: the file has only a `viewBox`, so it has an aspect ratio and no width; the `.image-open` button that

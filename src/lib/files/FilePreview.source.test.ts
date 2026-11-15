@@ -32,3 +32,20 @@ test('the code cap and DOM scroll bindings keep their original host-owned state'
   }
   assert.doesNotMatch(source, /class="preview-header"/u, 'the shared header stays with Files');
 });
+
+// Board #130 (owner, 2026-11-15: "这个图片在折叠屏内屏预览下边被截断了"; measured: a 3:4 picture
+// overflowed the preview body by 171 px at 717×776 and 327 px at 1280×800). The picture's
+// max-height:100% resolves against its zoom BUTTON, which had a definite box only for an SVG
+// (#481), so a bitmap was limited by width alone. Every picture now has that containing box:
+// the whole image fits (letterboxed), a smaller one keeps its natural size, the margin is inert.
+test('every picture fits its preview body: the zoom button is a definite box for a bitmap too (#130)', () => {
+  const css = source.match(/<style>([\s\S]*?)<\/style>/u)?.[1] ?? '';
+  const open = css.match(/\.image-open \{([^}]+)\}/u)?.[1] ?? '';
+  assert.match(open, /width:\s*100%/u, 'the button takes the body\u2019s width');
+  assert.match(open, /height:\s*100%/u, 'and its height, so the picture\u2019s max-height resolves');
+  assert.match(open, /display:\s*flex/u);
+  assert.match(open, /pointer-events:\s*none/u, 'the letterbox margin is inert');
+  assert.match(css, /\.image-open img \{[^}]*pointer-events:\s*auto/u, 'the picture itself takes the tap');
+  assert.match(css, /\.image-preview img \{[^}]*max-width:\s*100%;[^}]*max-height:\s*100%;[^}]*object-fit:\s*contain/u, 'max only: a small picture is never enlarged');
+  assert.doesNotMatch(css, /\.image-open\.vector/u, 'one rule for every picture, not a vector special case');
+});
