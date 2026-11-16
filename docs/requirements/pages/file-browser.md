@@ -65,6 +65,14 @@ directory, or the server's home directory when no session is open yet.
   open comments into that project's Hub composer as one document-feedback
   block; nothing is sent until the person presses Send. Agents use
   `tmm review`. Comments are stored in `<project>/.tmm/reviews/`.
+- A **Motion Photo** (board #133: a JPEG with its video appended, as vivo and Google
+  cameras write it; recognised by its content, never its suffix) previews as its still,
+  with a **Live** / **实况** control at the pane's top-left. Pressed, the photo's motion
+  plays once, with sound, in the picture's place; it ends, or Stop / 停止 ends it, and the
+  still returns; pressing again replays. A tap on the picture still opens the zoom viewer.
+  The info page's Type line says `image/jpeg · Motion Photo (2.0 MB video)`. Download,
+  bookmark, rename and delete treat it as the one .jpg it is. Apple's Live Photo pairs (a
+  photo plus a separate .mov) and HEIC are not recognised.
 - On the phone, a text preview (markdown, code, csv, html, pdf, converted
   documents) offers **Reading mode** (maximize in the header): the preview
   header and the app's tab bar hide, the content takes the whole screen, and

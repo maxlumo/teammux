@@ -48,6 +48,27 @@ fn mac_input(stream: bool, path: &str, exp: u64) -> String {
     if stream { format!("dl:stream:{}:{}", path, exp) } else { format!("dl:{}:{}", path, exp) }
 }
 
+/// A Motion Photo's video window (board #133): a THIRD mode with the stream's lifetime, the
+/// window `[off, off + len)` signed with it. It never verifies as a download or a stream, and
+/// neither of those verifies as it. Minted only by `fs_download_url { motion: true }` after
+/// the server's own detection; the client never names the offsets.
+fn motion_mac(token: &str, path: &str, exp: u64, off: u64, len: u64) -> Hmac<Sha256> {
+    let mut mac = <Hmac<Sha256> as Mac>::new_from_slice(token.as_bytes()).unwrap();
+    mac.update(format!("dl:motion:{path}:{exp}:{off}:{len}").as_bytes());
+    mac
+}
+
+pub(super) fn sign_motion(token: &str, path: &str, exp: u64, off: u64, len: u64) -> String {
+    hex::encode(motion_mac(token, path, exp, off, len).finalize().into_bytes())
+}
+
+fn verify_motion(token: &str, path: &str, exp: u64, off: u64, len: u64, sig: &str) -> bool {
+    let now = unix_now();
+    if exp < now || exp > now + DL_STREAM_TTL_SECS { return false; }
+    let Ok(sig_bytes) = hex::decode(sig) else { return false };
+    motion_mac(token, path, exp, off, len).verify_slice(&sig_bytes).is_ok()
+}
+
 pub(super) fn sign_download(token: &str, stream: bool, path: &str, exp: u64) -> String {
     let mut mac = <Hmac<Sha256> as Mac>::new_from_slice(token.as_bytes()).unwrap();
     mac.update(mac_input(stream, path, exp).as_bytes());
@@ -250,26 +271,55 @@ where
     let exp: u64 = params.get("exp").and_then(|s| s.parse().ok()).unwrap_or(0);
     let sig = params.get("sig").unwrap_or(&"");
     let as_stream = params.get("stream").is_some_and(|v| *v == "1");
+    // `motion=OFF-LEN`: a Motion Photo's video window (board #133), its own signature mode.
+    let window = match params.get("motion") {
+        None => None,
+        Some(w) => match w.split_once('-').and_then(|(o, l)| Some((o.parse::<u64>().ok()?, l.parse::<u64>().ok()?))) {
+            Some(w) => Some(w),
+            None => { let _ = stream.write_all(b"HTTP/1.1 400 Bad Request\r\nContent-Length: 0\r\n\r\n").await; return; }
+        },
+    };
+    let verified = match window {
+        Some((off, len)) => verify_motion(&token, &path, exp, off, len, sig),
+        None => verify_download(&token, as_stream, &path, exp, sig),
+    };
 
-    if !verify_download(&token, as_stream, &path, exp, sig) {
+    if !verified {
         eprintln!("🚫 HTTP download rejected for {} (invalid sig)", addr);
         let _ = stream.write_all(b"HTTP/1.1 403 Forbidden\r\nContent-Length: 0\r\n\r\n").await;
         let _ = stream.flush().await;
         return;
     }
 
-    // Read file and stream response
-    let file_path = std::path::Path::new(&path);
-    let metadata = match std::fs::metadata(file_path) {
-        Ok(m) => m,
-        Err(_) => {
-            let _ = stream.write_all(b"HTTP/1.1 404 Not Found\r\nContent-Length: 0\r\n\r\n").await;
-            let _ = stream.flush().await;
-            return;
-        }
+    // ONE open (validator-2, #133 note 17): the metadata, a window's detection and the bytes
+    // served all come from this handle, so a file swapped at the path between them can never
+    // have another file's bytes served as the window. Synchronous I/O, so off the async
+    // workers (code-quality.md § 2). A window is served only while this handle IS that Motion
+    // Photo; otherwise 404 with no body, never other bytes.
+    let opened = {
+        let path = path.clone();
+        tokio::task::spawn_blocking(move || -> Option<(std::fs::File, std::fs::Metadata)> {
+            let mut file = std::fs::File::open(&path).ok()?;
+            let metadata = file.metadata().ok()?;
+            if let Some((offset, length)) = window {
+                if crate::fs::motion_in(&mut file, metadata.len()) != Some(crate::fs::Motion { offset, length }) { return None; }
+            }
+            Some((file, metadata))
+        }).await.ok().flatten()
     };
+    let Some((file, metadata)) = opened else {
+        let _ = stream.write_all(b"HTTP/1.1 404 Not Found\r\nContent-Length: 0\r\n\r\n").await;
+        let _ = stream.flush().await;
+        return;
+    };
+    let file = tokio::fs::File::from_std(file);
+    let file_path = std::path::Path::new(&path);
     let name = file_path.file_name().and_then(|n| n.to_str()).unwrap_or("file").to_string();
-    let Ok(file) = tokio::fs::File::open(&path).await else { return };
+    // A window is a video of its own: saved, it is `<stem>.mp4` (leader, #133 note 19).
+    let name = match window {
+        Some(_) => format!("{}.mp4", file_path.file_stem().and_then(|n| n.to_str()).unwrap_or("motion")),
+        None => name,
+    };
     // Images and videos declare their REAL type: a chat `<img>` and a Files
     // `<video>` stream through /dl, and SVG never renders from
     // `application/octet-stream` (browsers do not sniff SVG — the dashed
@@ -278,7 +328,9 @@ where
     // downloads instead of rendering — an SVG's scripts never execute from an
     // <img> context, and never get a document here. Everything else keeps
     // octet-stream: downloads, not documents.
-    send_file(&mut stream, &req, file, &metadata, &attachment(&name), media_content_type(&name), "").await;
+    let ctype = if window.is_some() { "video/mp4" } else { media_content_type(&name) };
+    let disposition = attachment(&name);
+    send_file(&mut stream, file, &Answer { req: &req, metadata: &metadata, window, disposition: &disposition, ctype, extra: "" }).await;
 }
 
 /// A download's `Content-Disposition` (#433 review P1-B). The name never
@@ -298,22 +350,40 @@ fn attachment(name: &str) -> String {
     format!("attachment; filename=\"{fallback}\"; filename*=UTF-8''{exact}")
 }
 
+/// What one answer of `send_file` is: the request it answers and the file's metadata, the byte
+/// window served as the resource, and the headers it declares.
+#[derive(Clone, Copy)]
+struct Answer<'a> {
+    req: &'a str,
+    metadata: &'a std::fs::Metadata,
+    /// `(offset, length)` serves that slice of the file AS the resource (board #133): its
+    /// size, its Range arithmetic and its own ETag; `None` is the whole file.
+    window: Option<(u64, u64)>,
+    /// The whole Content-Disposition value (`attachment(name)` or a fixed `attachment`).
+    disposition: &'a str,
+    ctype: &'a str,
+    /// Whole header lines.
+    extra: &'a str,
+}
+
 /// Answer a GET for an already OPENED file: validators, Range (resume and a
 /// media element's bounded ranges), the headers, then the bytes, all from
 /// that one handle. Shared by /dl and the scope door (#433), so neither can
-/// drift from the other's Range/ETag handling. `disposition` is the whole
-/// Content-Disposition value (`attachment(name)` or a fixed `attachment`);
-/// `extra` is whole header lines.
-async fn send_file<S>(stream: &mut S, req: &str, file: tokio::fs::File, metadata: &std::fs::Metadata, disposition: &str, ctype: &str, extra: &str)
+/// drift from the other's Range/ETag handling.
+async fn send_file<S>(stream: &mut S, file: tokio::fs::File, answer: &Answer<'_>)
 where
     S: tokio::io::AsyncWrite + Unpin,
 {
     use tokio::io::{AsyncReadExt, AsyncSeekExt, AsyncWriteExt};
-    let size = metadata.len();
+    let Answer { req, metadata, window, disposition, ctype, extra } = *answer;
+    let (base, size) = window.unwrap_or((0, metadata.len()));
     let modified = metadata.modified().ok()
         .and_then(|t| t.duration_since(std::time::UNIX_EPOCH).ok())
         .unwrap_or_default();
-    let etag = etag_for(size, modified.as_nanos());
+    let etag = match window {
+        None => etag_for(size, modified.as_nanos()),
+        Some((off, len)) => format!("\"{:x}-{:x}-w{off:x}-{len:x}\"", metadata.len(), modified.as_nanos()),
+    };
     let last_modified = http_date(modified.as_secs() as i64);
     let validators = format!("ETag: {etag}\r\nLast-Modified: {last_modified}\r\n");
 
@@ -350,12 +420,11 @@ where
     if stream.write_all(header.as_bytes()).await.is_err() { return; }
 
     let mut file = file;
-    let mut remaining = size;
-    if let Some((start, end)) = range {
-        if file.seek(std::io::SeekFrom::Start(start)).await.is_err() {
-            return;
-        }
-        remaining = end - start + 1;
+    let (start, remaining) = match range { Some((start, end)) => (start, end - start + 1), None => (0, size) };
+    // Always from the window's own position: a handle that was read (a window's detection) is
+    // not at 0.
+    if file.seek(std::io::SeekFrom::Start(base + start)).await.is_err() {
+        return;
     }
     let mut file = file.take(remaining);
     let mut chunk = vec![0u8; 65536];
@@ -570,7 +639,7 @@ where
     let Ok(metadata) = file.metadata() else { return status(stream, 403).await };
     // A FIXED disposition: a resource name never enters the header (#433
     // review P1-B), so no decoded CR, LF or quote can move the header block.
-    send_file(stream, req, tokio::fs::File::from_std(file), &metadata, "attachment", ctype, SCOPE_HEADERS).await;
+    send_file(stream, tokio::fs::File::from_std(file), &Answer { req, metadata: &metadata, window: None, disposition: "attachment", ctype, extra: SCOPE_HEADERS }).await;
 }
 
 /// The Content-Type for /dl: image and video extensions get their real type
@@ -595,6 +664,10 @@ fn media_content_type(name: &str) -> &'static str {
         other => crate::fs::streamed_media_type(other).unwrap_or("application/octet-stream"),
     }
 }
+
+#[cfg(test)]
+#[path = "download/motion_tests.rs"]
+mod motion_tests;
 
 #[cfg(test)]
 mod tests {

@@ -111,6 +111,7 @@ const PX_RADII = new Map<string, string>([
   ['files/FilePreview.svelte .md-render :global(img) 6px', 'an image in markdown'],
   ['files/FilePreview.svelte .md-render :global(.mermaid-block) 12px', 'a diagram block'],
   ['files/MediaPlayer.svelte video 4px', 'a video'],
+  ['files/MotionLive.svelte .motion-video 4px', 'a Motion Photo\'s motion over its still: the image\'s own corner (#133)'],
   ['hub/AttachStrip.svelte .pend-row :global(.pend-chip) 6px', 'an attachment chip'],
   ['hub/Board.svelte .seg-b calc(var(--ui-radius-control) - 3px)', 'derived from the control step, inside its segment'],
   ['hub/Board.svelte .seg :global(.slide-pill) calc(var(--ui-radius-control) - 3px)', 'derived from the control step'],

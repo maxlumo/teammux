@@ -12,7 +12,7 @@ use tokio::sync::Mutex;
 use crate::fs as rfs;
 use crate::tmux;
 
-use super::download::{download_expiry, scope_base, sign_download, streams};
+use super::download::{download_expiry, scope_base, sign_download, sign_motion, streams};
 
 // JSON-RPC style request/response
 
@@ -495,13 +495,22 @@ fn dispatch(req: &Request, token: &str) -> Result<serde_json::Value, RpcError> {
             // `stream: true` = a media element will keep coming back to this
             // URL for the whole playback (board #182); the expiry and the
             // mode are signed, and only what a <video> plays may stream.
+            let name = std::path::Path::new(path).file_name().and_then(|n| n.to_str()).unwrap_or("file");
+            // `motion: true` = a Motion Photo's embedded video (board #133). The SERVER finds the
+            // window; the client never names offsets. Streamed, so it gets the stream lifetime.
+            if p.get("motion").and_then(|v| v.as_bool()).unwrap_or(false) {
+                let m = rfs::motion_photo(path).ok_or_else(|| RpcError::InvalidParams("motion: not a Motion Photo".into()))?;
+                let exp = download_expiry(true);
+                let sig = sign_motion(token, path, exp, m.offset, m.length);
+                let qs = format!("/dl?path={}&exp={}&sig={}&motion={}-{}", urlencoding::encode(path), exp, sig, m.offset, m.length);
+                return Ok(serde_json::json!({ "url": qs, "name": name }));
+            }
             let stream = p.get("stream").and_then(|v| v.as_bool()).unwrap_or(false);
             if stream && !streams(path) {
                 return Err(RpcError::InvalidParams("stream: not a media file".into()));
             }
             let exp = download_expiry(stream);
             let sig = sign_download(token, stream, path, exp);
-            let name = std::path::Path::new(path).file_name().and_then(|n| n.to_str()).unwrap_or("file");
             let qs = format!("/dl?path={}&exp={}&sig={}{}", urlencoding::encode(path), exp, sig, if stream { "&stream=1" } else { "" });
             Ok(serde_json::json!({ "url": qs, "name": name }))
         }

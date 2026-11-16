@@ -21,7 +21,7 @@
 <script>
   import FilePreview from './FilePreview.svelte';
   import FileReview from './FileReview.svelte';
-  import { createPreviewRenderers, defaultWrapForMime, highlightCode, isPreviewable, mimeCategory, streamsInline } from './file-preview.ts';
+  import { createPreviewRenderers, defaultWrapForMime, highlightCode, isPreviewable, mimeCategory, streamsInline, typeLine } from './file-preview.ts';
   import { isAndroid, isTauri, isTauriDesktop, tauriReady } from '../core/platform.ts';
   import { invokeNative } from '../core/native.ts';
   import { saveServerFile, realmReady } from './save-file.ts';
@@ -2068,7 +2068,8 @@
         bind:showAllLines bind:previewBodyEl bind:previewEl bind:htmlPreviewEl bind:pdfContainer
         {previewLinkClick} {attachHtmlPreviewLinks} onview={(src) => { viewerDl.retire(); imageView = viewerOpen(src, currentFile?.path ?? null, currentFile?.name ?? ''); }} visible={imageActive}
         previewBase={fsPreviewBase} renew={previewRenew} onpreviewerror={(message) => { error = message; }}
-        reopenMedia={() => fsDownloadHttp(currentFile.path, { stream: true }).then((r) => r.url)} />
+        reopenMedia={() => fsDownloadHttp(currentFile.path, { stream: true }).then((r) => r.url)}
+        openMotion={(path) => fsDownloadHttp(path, { motion: true }).then((r) => r.url)} />
     </FileReview>
     {#if reading}
       <!-- The one way back that is not a gesture: a floating control above the
@@ -2225,7 +2226,7 @@
     <div class="info-body">
       {#if currentFile?.stat}
         <div class="info-row"><span class="info-label">{t('path')}</span><button class="info-path" onclick={() => copyPath(currentFile.stat.path)}>{currentFile.stat.path}</button></div>
-        <div class="info-row"><span class="info-label">{t('type')}</span><span class="info-val">{currentFile.stat.mime_hint}</span></div>
+        <div class="info-row"><span class="info-label">{t('type')}</span><span class="info-val">{typeLine(currentFile.stat, formatSize, t('filesMotionType'))}</span></div>
         <div class="info-row"><span class="info-label">{t('size')}</span><span class="info-val">{formatSize(currentFile.stat.size)}</span></div>
         <div class="info-row"><span class="info-label">{t('modified')}</span><span class="info-val">{formatDate(currentFile.stat.modified)}</span></div>
         <div class="info-row"><span class="info-label">{t('permissions')}</span><span class="info-val mono">{currentFile.stat.permissions}</span></div>

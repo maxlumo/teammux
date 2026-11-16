@@ -5,6 +5,12 @@ use std::os::unix::fs::PermissionsExt;
 use std::path::{Path, PathBuf};
 use std::time::UNIX_EPOCH;
 
+mod motion;
+pub use motion::{motion_photo, Motion};
+pub(crate) use motion::motion_in;
+#[cfg(test)]
+pub(crate) use motion::tests::fixture as motion_fixture;
+
 const MAX_READ_SIZE: u64 = 50 * 1024 * 1024; // 50MB
 const MAX_PREVIEW_SIZE: u64 = 512 * 1024; // 512KB for text preview
 
@@ -47,6 +53,10 @@ pub struct FileStat {
     pub is_symlink: bool,
     #[serde(default, skip_serializing_if = "String::is_empty")]
     pub link_target: String,
+    /// A Motion Photo's embedded video (board #133, `fs/motion.rs`): measured here, in the
+    /// stat of ONE file, never per entry of `list_dir`. Absent for every other file.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub motion: Option<Motion>,
 }
 
 pub fn resolve(p: &str) -> String {
@@ -367,6 +377,7 @@ pub fn stat_file(path: &str) -> Result<FileStat, String> {
         mime_hint: mime_hint(&p.to_string_lossy()),
         is_symlink,
         link_target,
+        motion: if !broken && meta.is_file() { motion_photo(&p.to_string_lossy()) } else { None },
     })
 }
 

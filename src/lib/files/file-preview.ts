@@ -9,7 +9,8 @@ type Mermaid = typeof import('mermaid')['default'];
 export interface PreviewFile {
   name: string;
   path: string;
-  stat?: { mime_hint?: string | null };
+  /** `motion`: a Motion Photo's embedded video window, from the server's stat (board #133). */
+  stat?: { mime_hint?: string | null; motion?: { offset: number; length: number } | null };
   content?: string | null;
   dataUrl?: string;
   /** A stream-signed /dl URL the media element fetches ranges from itself (board #182). */
@@ -48,6 +49,13 @@ export function isPreviewable(stat: { mime_hint?: string; is_text?: boolean; siz
   if (stat.is_text && stat.size <= 512 * 1024) return true;
   if (name && /\.pptx$/i.test(name)) return true;
   return false;
+}
+
+/** The info card's Type line (board #133): the MIME type, and for a Motion Photo the words
+ * `motionWords` (with `{size}`) naming it and its embedded video's size. */
+export function typeLine(stat: { mime_hint?: string | null; motion?: { length: number } | null }, formatSize: (bytes: number) => string, motionWords: string): string {
+  const mime = stat.mime_hint ?? '';
+  return stat.motion ? `${mime} · ${motionWords.replace('{size}', formatSize(stat.motion.length))}` : mime;
 }
 
 export function mimeCategory(mime: string | null | undefined) {

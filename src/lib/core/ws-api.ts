@@ -314,11 +314,13 @@ export function createWsApi(connection: Connection) {
   // so even a 50 MB frame in the air won't make us give up on the socket.
   const fsDownload = (path: string) => call('fs_download', { path }, 60000);
 
-  /** `stream: true` asks for a media-lived signature — a `<video>` keeps
+  /** `motion: true` asks for a Motion Photo's video window (board #133): the server finds it
+   * and signs it with the stream lifetime; the client never names offsets.
+   * `stream: true` asks for a media-lived signature — a `<video>` keeps
    * re-requesting the same URL for the whole playback (board #182); a plain
    * download URL is fetched at once and dies in a minute. */
-  const fsDownloadUrl = (path: string, opts: { stream?: boolean } = {}) =>
-    call<{ url: string; name: string }>('fs_download_url', opts.stream ? { path, stream: true } : { path });
+  const fsDownloadUrl = (path: string, opts: { stream?: boolean; motion?: boolean } = {}) =>
+    call<{ url: string; name: string }>('fs_download_url', opts.motion ? { path, motion: true } : opts.stream ? { path, stream: true } : { path });
   const fsConvert = (path: string, format = 'html') => call('fs_convert', { path, format });
   const gitCmd = (subcmd: string, args: string[] = [], cwd?: string) => call<{ code: number; stdout: string; stderr: string }>('git', { subcmd, args, cwd });
 
@@ -694,7 +696,7 @@ export function createWsApi(connection: Connection) {
    * branches HTTP vs WS. Streaming avoids the 50 MB cap and base64 overhead.
    * wss://host/prefix/ws → https://host/prefix. Only a trailing /ws proxy
    * segment is discarded; production parent prefixes remain intact. */
-  function fsDownloadHttp(path: string, opts: { stream?: boolean } = {}) {
+  function fsDownloadHttp(path: string, opts: { stream?: boolean; motion?: boolean } = {}) {
     const origin = connection.url(); // connect() set it before any RPC could run
     return fsDownloadUrl(path, opts).then(({ url, name }) => {
       const base = httpOriginForWs(origin!);

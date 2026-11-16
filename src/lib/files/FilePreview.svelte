@@ -3,6 +3,7 @@
   import { renderMarkdown } from '../core/markdown.ts';
   import { t } from '../core/i18n.svelte.ts';
   import MediaPlayer from './MediaPlayer.svelte';
+  import MotionLive from './MotionLive.svelte';
   import { basedPreviewDoc, highlightLine, mimeCategory, renderCsv, type PreviewFile, type PreviewScope } from './file-preview.ts';
 
   interface Props {
@@ -32,10 +33,12 @@
     /** A fresh stream URL for the media on screen (board #453): Files' own
      * open path, for the player's retry after a network error. */
     reopenMedia?: (() => Promise<string>) | null;
+    /** A Motion Photo's video window URL for a path (board #133), minted on the first Live press. */
+    openMotion?: ((path: string) => Promise<string>) | null;
   }
   let {
     currentFile, fontSize, wrapLines, hljs, onview = () => {}, visible = true,
-    previewBase = () => Promise.reject(new Error('no preview base')), onpreviewerror = () => {}, renew = 0, reopenMedia = null,
+    previewBase = () => Promise.reject(new Error('no preview base')), onpreviewerror = () => {}, renew = 0, reopenMedia = null, openMotion = null,
     showAllLines = $bindable(false),
     previewLinkClick, attachHtmlPreviewLinks,
     previewBodyEl = $bindable(null), previewEl = $bindable(null),
@@ -52,6 +55,10 @@
 
   /** The video or audio element, if the preview is one. */
   let mediaEl = $state<HTMLMediaElement | null>(null);
+  /** The still's natural size, for the picture it was read from: a Motion Photo's motion is
+   * laid out from it (#133). */
+  let stillSize = $state<{ src: string; width: number; height: number } | null>(null);
+  const motionShown = $derived(!!currentFile?.stat?.motion && !!openMotion && stillSize?.src === (currentFile?.dataUrl ?? ''));
   // Hiding the page pauses the media and nothing else: the element, its signed
   // URL and its position stay, and showing the page again never plays.
   $effect(() => { if (!visible) mediaEl?.pause(); });
@@ -117,11 +124,18 @@
          is (ChatImage .ci-link); and a trackpad pinch — ctrl+wheel in every
          browser — is taken by the image (non-passive, so the page keeps its
          zoom) and answered with the viewer, where pinch/wheel zoom the image. -->
-    <div class="image-preview">
+    <div class="image-preview" class:motion={motionShown}>
       <button class="image-open" aria-label={currentFile.name} onclick={() => onview(currentFile.dataUrl ?? '')}
         use:pinchOpens={() => onview(currentFile.dataUrl ?? '')}>
-        <img class="alpha-checker" src={currentFile.dataUrl} alt={currentFile.name} />
+        <img class="alpha-checker" src={currentFile.dataUrl} alt={currentFile.name} onload={(e) => { const img = e.currentTarget as HTMLImageElement; stillSize = { src: img.getAttribute('src') ?? '', width: img.naturalWidth, height: img.naturalHeight }; }} />
       </button>
+      {#if motionShown && stillSize && openMotion}
+        <!-- Board #133: a Motion Photo's Live control and its moment, keyed on the file, once its
+             still is decoded (its natural size lays the motion out). -->
+        {#key currentFile.path}
+          <MotionLive path={currentFile.path} natural={stillSize} open={openMotion} onerror={onpreviewerror} {visible} />
+        {/key}
+      {/if}
     </div>
   {:else if mimeCategory(currentFile.stat?.mime_hint) === 'video'}
     <!-- Board #182: the browser's own element streams ranges from the signed
@@ -194,8 +208,10 @@
     background: var(--surface);
   }
   .image-preview {
-    flex: 1; display: flex; align-items: center; justify-content: center; overflow: auto; padding: 12px;
+    position: relative; flex: 1; display: flex; align-items: center; justify-content: center; overflow: auto; padding: 12px;
   }
+  /* A Motion Photo's pane is the size container its motion is laid out in (#133, MotionLive). */
+  .image-preview.motion { container-type: size; }
   .image-preview img { max-width: 100%; max-height: 100%; object-fit: contain; border-radius: 4px; }
   .media-preview { align-items: stretch; }
   /* EVERY picture's containing box (board #481 for an SVG, #130 for a bitmap): the button fills the preview body, so

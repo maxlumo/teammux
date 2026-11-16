@@ -562,6 +562,95 @@ signed URL, same position), and showing the page again never plays. Leaving
 the preview removes the element, which pauses it. Not in scope: waveform, playlist, background
 playback, metadata or cover art. Device playback stays with the owner.
 
+### A Motion Photo's video is a window of the same file (board #133, 2026-11-16)
+
+Owner, 2026-11-16: "我最近做livephoto，你在预览遇到虽然是jpg后缀，但是检测到livephoto，要能够预览".
+Measured on the owner's files (sound-factory/wallpapers, vivo's kit): a Google Motion Photo,
+XMP `GCamera:MotionPhoto="1"` in the first APP1 (byte 54) with a `Container:Item`
+`Item:Semantic="MotionPhoto" Item:Length=L`, and an MP4 (`ftyp` at +4) as the file's last L
+bytes, right after the JPEG's EOI.
+
+- **One definition, by content** (`src-tauri/src/fs/motion.rs`, `motion_photo`): only a
+  file starting `FF D8 FF`; the marker walk up to the scan (SOS) or 256 KiB finds the XMP
+  APP1; both XMP forms (attribute and element) and the legacy `GCamera:MicroVideo="1"` +
+  `MicroVideoOffset=N` are read; CONFIRMED only by `ftyp` at `size − L + 4` with
+  `0 < L < size`. A flag without the box, or a length past the file, is a plain image.
+  Cost: 2 bytes for any file; for a JPEG the walk READS AS IT GOES (validator-2, #133 note
+  7: a first version bulk-read the 256 KiB cap, 262,155 bytes for a 205-byte head): each
+  segment's 4-byte header, an APP1's namespace, the XMP packet itself, every other segment
+  seeked past, each byte read once (fill bytes included), stopping at the XMP or the scan.
+  256 KiB is a HARD cap enforced by the walk's own reader (`Capped`: no read or seek at or
+  past it; validator-2 note 27: fill bytes and TEM/RST markers had carried the walk to
+  640 KB), pinned by `the_cap_is_hard_on_every_path_of_the_walk`. Then 8 bytes at the
+  offset. On round 1 (`7dae64f1`, before the 2-byte gate, which reads one byte less) a
+  counting reader on a copy of the owner's sample read 1,335 bytes of 2,510,084 (1,327 for
+  its still alone); that run was made on the host, not in the isolated runner, so it is not
+  evidence (#136 note 4). Measured in Docker by validator-2 on round 1: 208 bytes for its
+  synthetic photo's head, against 262,155 for the bulk read before. Pinned by
+  `the_walk_reads_only_the_segments_up_to_the_xmp_or_the_scan` (a 128 KiB segment before the
+  XMP is skipped, a plain JPEG stops at its SOS).
+- **Where it runs**: the stat of ONE file (`FileStat.motion {offset, length}`, omitted
+  otherwise; `mime_hint` stays `image/jpeg`) and the `/dl` window check. Never per entry
+  of `list_dir`: a listing of 50 photos does not open 50 files.
+- **The window**: `fs_download_url { motion: true }`. The SERVER detects and signs; the
+  client never names offsets, and a file that is not a Motion Photo is refused at the door.
+  A third MAC mode, `dl:motion:{path}:{exp}:{off}:{len}`, with the stream lifetime (4 h):
+  it never verifies as a download or a stream, nor they as it. `/dl?…&motion=OFF-LEN`
+  re-detects the window on every request; a window that no longer matches the signature
+  answers 404 with no byte sent. Within the same window the path's current bytes are
+  served, as the plain modes serve a path's current bytes, and the ETag (size, mtime and
+  window) changes with the file, so an If-Range resume across a rewrite gets the whole
+  window, never a splice (leader, #133 note 10). `/dl` opens the file ONCE,
+  in `spawn_blocking`: the metadata, the window's detection (`motion_in` on that handle) and
+  the bytes served come from the same handle (validator-2, #133 note 17: detecting by path
+  and serving from a second open let a file swapped in between have a plain file's bytes
+  served as `video/mp4`; pinned by a swap loop of 400 requests). `send_file` takes an
+  `Answer` with the window as the resource: `video/mp4`, its length, Range resolved and
+  clamped inside it, `Content-Range: …/len`, its own ETag, and the name `<stem>.mp4`
+  (`Content-Disposition: attachment` as on everything `/dl` serves, #133 note 19). One
+  `send_file`, the whole file being the window `0..size`.
+- **The preview** (leader's ruling, #133 note 2): the still exactly as before (the #130 fit,
+  the Lightbox on tap). `MotionLive.svelte` is the one control, a CommandButton with its
+  icon and the visible word Live / 实况, at the pane's top-left, outside the picture's zoom
+  target (44 px under a coarse pointer). Pressed, it mints the URL on the FIRST press only
+  (reused for the file), and plays a bare `<video playsinline>` (no `controls`, no `loop`,
+  sound on) in exactly the still's box by the SAME layout: the still is its natural size
+  capped on both axes by the pane's content box (max-width/max-height: 100%, ratio kept),
+  centred; the video gets the still's natural size (`--still-w/--still-h`, read at the
+  `<img>`'s `load`) under the same caps from the same container (the pane is a size
+  container, `100cqw/100cqh`), centred in the same symmetric box. No measured rect, so no
+  missed event (validator-2 notes 22 and 28: a video spanning the pane upscaled an 80×80 photo
+  to 720×720; a rect measured once went 50 px off when a resize moved the still without
+  resizing it). The control appears once the still is decoded. 'ended', Stop / 停止, leaving the file (keyed on the path, so a
+  late mint lands nowhere) or the page hidden bring the still back. A failed mint, a
+  stream error or a REJECTED `play()` (NotAllowedError, an unsupported source; validator-2
+  note 13) returns the still and reports through the preview's error path
+  (`onpreviewerror`), an AbortError included while the motion is still meant to play
+  (note 27). Each attempt is its own `<video>` and every answer (the play promise, `ended`,
+  `error`) is checked against the current one (code-quality.md § 1.4): our own Stop or
+  leaving retires it first, so its rejection lands nowhere, and a retired video's late
+  answer neither stops a replay nor reports. The same holds before a video exists: the Live
+  INTENT owns mint → playback (reviewer, #133 note 42). One mint per file (single flight),
+  so Live → Stop → Live makes one `fs_download_url` call; Stop, hiding the page, the end
+  and leaving the file retire the intent; only the intent current when the mint settles
+  plays it or reports its failure (once), and a failed mint is dropped so the next press
+  mints again. A STREAM error of the current video drops its URL the same way (reviewer, note
+  52): the owner rewrites these files while previewing them; a rewritten file whose
+  detected window no longer matches answers 404, and a signature past its 4 h lifetime
+  answers 403. MediaPlayer is not used: its seek bar, rate and PiP are a film's,
+  over a 1.5-5 s moment. Reading mode is never offered for a picture, so a Motion Photo
+  has none.
+- **Measured** (Chromium 148, rig, a copy of `cover-rings.jpg`, 2,510,084 B, video
+  2,108,447 B at 401,637, 1200×1600, 4.97 s): at 390×844 and 717×776 touch, and 1280×800
+  mouse, light and dark: the Live control is 44 px tall under touch (28 with a mouse), 4 px
+  from the pane's corner; the picture's centre is the image (its zoom tap opens the
+  Lightbox); playing, the video's picture is the still's box (342×456 at 390); the window
+  answers 206 `video/mp4` `bytes …/2108447`; after the end the still and Live are back; the
+  info Type line reads `image/jpeg · Motion Photo (2.0 MB video)`; the still alone (cut at
+  the offset) shows no control.
+- Pins: `fs/motion_tests.rs`, `server/download/motion_tests.rs`,
+  `FilePreview.motion.mount.test.ts`, `file-type-line.test.ts`.
+
 ### The preview plays through our own controls (board #453, 2026-10-22)
 
 Owner, 2026-10-22 21:18: "视频和音频的预览，你看能不能不要用最原始的这种播放器？看看有没有轻量、好用一点的加载播放器，能有比较好的拖动控制（尤其是在平板或手机上），缓存buffer，就是更现代一些的播放器".
