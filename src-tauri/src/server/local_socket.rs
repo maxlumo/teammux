@@ -13,6 +13,13 @@
 //! Ownership, start to exit (design delta 1, its table): every step works
 //! from an O_DIRECTORY handle of `<config>/sock/`, and any failure leaves the
 //! gateway TCP-only with the reason said — never a wider socket.
+//!
+//! The recorded `(dev, ino)` means "a gateway was KILLED with this node bound": a clean drop removes its
+//! node and clears the record (board #135), so a later listener of the same user that happens to get the
+//! same inode number back cannot inherit it (the macOS/XNU row of `reclaimable`). Accepted residual
+//! (leader, #135 note 2): Drop's identity check and its unlink are two steps; inside our own 0700 dir the
+//! only one who could swap the node between them is the same user, and not unlinking at a clean stop
+//! would leave a stale node on every stop.
 #![cfg(all(unix, not(any(target_os = "android", target_os = "ios"))))]
 
 use std::ffi::CString;
@@ -226,7 +233,10 @@ impl Drop for LocalSocket {
         if let Ok(st) = stat_at(&self.dir, NODE) {
             if (st.st_dev as u64, st.st_ino as u64) == self.node {
                 let c = CString::new(NODE).unwrap();
-                unsafe { libc::unlinkat(self.dir.as_raw_fd(), c.as_ptr(), 0) };
+                if unsafe { libc::unlinkat(self.dir.as_raw_fd(), c.as_ptr(), 0) } == 0 {
+                    // Our node is gone: the record no longer names a killed gateway's node (board #135).
+                    let _ = self._lock.set_len(0);
+                }
             }
         }
     }
@@ -257,8 +267,11 @@ mod tests {
     use std::os::unix::fs::PermissionsExt;
 
     fn config_dir(tag: &str) -> PathBuf {
-        // Short: a socket path is limited to ~104 bytes.
-        let d = PathBuf::from(format!("/tmp/t440-{tag}-{}", &uuid::Uuid::new_v4().to_string()[..8]));
+        // Short: a socket path is limited to ~104 bytes. LOCAL_SOCKET_TEST_ROOT moves the tests onto another
+        // filesystem (board #135: a short path to a directory on ext4, which reuses inode numbers at once,
+        // where /tmp's tmpfs never does).
+        let root = std::env::var("LOCAL_SOCKET_TEST_ROOT").unwrap_or_else(|_| "/tmp".into());
+        let d = PathBuf::from(format!("{root}/t440-{tag}-{}", &uuid::Uuid::new_v4().to_string()[..8]));
         std::fs::create_dir_all(&d).unwrap();
         d
     }
@@ -312,8 +325,15 @@ mod tests {
         // Dead: bound, then the listener closed without unlinking (a killed gateway).
         drop(std::os::unix::net::UnixListener::bind(path_in(&cfg)).unwrap());
         let dead = ident(&path_in(&cfg));
+        assert!(std::os::unix::net::UnixStream::connect(path_in(&cfg)).is_err(), "the dead socket refuses");
         let s = open(&cfg).unwrap();
-        assert_ne!(ident(&s.path), dead, "a dead socket of ours is replaced");
+        // Replaced, proven by what cannot coincide (board #135): the node there now ANSWERS, and it is
+        // the node our claim recorded. Not by (dev, ino) inequality: the filesystem may hand the new node
+        // the dead one's inode number (measured on main by builder-2, #133).
+        let new = ident(&s.path);
+        eprintln!("[local_socket test] dead {dead:?} -> new {new:?}{}", if new == dead { " (inode reused)" } else { "" });
+        assert!(std::os::unix::net::UnixStream::connect(&s.path).is_ok(), "a dead socket of ours is replaced by one that answers");
+        assert_eq!(recorded_node(&s._lock), Some(new), "and the claim records the new node");
         drop(s);
         // Live: something listens there, but holds no claim.
         let live = std::os::unix::net::UnixListener::bind(path_in(&cfg)).unwrap();
@@ -443,6 +463,31 @@ mod tests {
         let s = open(&cfg).unwrap();
         assert_eq!(recorded_node(&s._lock), Some(ident(&s.path)));
         drop(s);
+        let _ = std::fs::remove_dir_all(&cfg);
+    }
+
+    fn lock_of(cfg: &Path) -> File { File::open(cfg.join(DIR).join(LOCK)).unwrap() }
+
+    /// Board #135 (leader note 2): the record means "a gateway was killed with this node bound". A clean
+    /// drop removes its node and clears the record, so no later node can inherit it by a reused inode.
+    #[test]
+    fn a_clean_drop_clears_the_record_and_a_killed_gateway_keeps_it() {
+        let cfg = config_dir("clr");
+        let s = open(&cfg).unwrap();
+        drop(s);
+        assert_eq!(recorded_node(&lock_of(&cfg)), None, "a clean stop leaves no record");
+        // Killed: no Drop runs. Its descriptors close with the process; here, by hand.
+        let s = open(&cfg).unwrap();
+        let killed = ident(&s.path);
+        let fds = [s.listener.as_raw_fd(), s._lock.as_raw_fd(), s.dir.as_raw_fd()];
+        std::mem::forget(s);
+        for fd in fds { unsafe { libc::close(fd) }; }
+        assert_eq!(recorded_node(&lock_of(&cfg)), Some(killed), "a killed gateway's node stays recorded");
+        assert!(std::os::unix::net::UnixStream::connect(path_in(&cfg)).is_err(), "and refuses");
+        let next = open(&cfg).unwrap();
+        assert!(std::os::unix::net::UnixStream::connect(&next.path).is_ok(), "the next start reclaims it and answers");
+        assert_eq!(recorded_node(&next._lock), Some(ident(&next.path)));
+        drop(next);
         let _ = std::fs::remove_dir_all(&cfg);
     }
 
