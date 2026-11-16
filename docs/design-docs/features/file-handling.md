@@ -693,8 +693,14 @@ An hls/dash engine is out of scope (the files are files, not manifests).
 - **Buffer.** The track paints `el.buffered` and the played part; no buffer
   of our own. While `waiting` during playback, the played part dims.
 - **One value, one geometry** (board #462; owner 2026-10-24 "播放进度条圆点和下边高亮线不同步，圆点慢半拍"). The dot and the played line are both painted by `MediaRange` from one `--p` (value / max, unsnapped) over the track inset by the dot's radius; the browser's thumb stays only as the invisible, same-size hit/mapping element. It used to be the dot: snapped to `step` (whole seconds) and travelling one radius inside each end, it trailed or led the line by up to 13 px (mean 4.4 px) on a 30 s clip at 360 px. Measured as geometry per value, not as frames of real playback: each value from 0 to 30 s every 0.25 s rendered statically in headless Chromium 153 and the dot's centre and the line's edge read from pixels, they now coincide at every value but t = 0, where the line has no width and the reading falls back to 0 against the track start at 7 px (mean 0.06 px). With `step="any"` the native mapping of a pointer at x gives the value whose dot centre, by the same formula, is x; in production (`step` 1) a drag moves in whole seconds, the dot and the line together.
-- **Gestures.** A tap on the picture shows or hides the bar (never plays); a
-  double tap in the left/right third seeks −10/+10 s within 250 ms. Nothing
+- **Gestures.** The MIDDLE third of the picture is the one play/pause target,
+  at once (board #139; owner, 2026-11-16: "以前的视频播放器你优化过，做了一个图案，
+  但是我只能点击播放按钮，不能直接点击视频中间开始播放"; leader's ruling: paused,
+  before the first play, after a pause or after the end → play; playing →
+  pause; an errored load only shows the bar). The placeholder and its play
+  glyph lie over the picture and take no pointer, so a tap on the glyph is a
+  middle tap. A tap in the left or right third shows or hides the bar (never
+  plays), and a double tap there seeks −10/+10 s within 250 ms. Nothing
   in the bar reaches the picture or Files' edge swipe, and the bar takes no
   horizontal pan (`touch-action: pan-y`): on the rig a sideways drag from
   its Play button was Chrome's overscroll history back, which no handler
@@ -761,7 +767,15 @@ An hls/dash engine is out of scope (the files are files, not manifests).
   *Fix:* the Android app gives the element a poster of its own,
   `BLANK_POSTER` (a 1x1 transparent GIF data URI: no fetch, and the CSP's
   `img-src` allows `data:`), from the first mount, so the WebView never
-  paints its default. Desktop gets none: measured in headless Chromium 153,
+  paints its default. It is EVERY `<video>` the app renders, through one
+  function, `posterFor(isAndroid)` in `media-player.ts` (board #139; owner,
+  2026-11-16: "点击播放按钮的时候，会出现一个很丑的大大的播放器播放按键图案在图片中间。
+  另外所有的你都检查一下，避免出现类似图案": the Motion Photo's video had none):
+  `MediaPlayer`, `MotionLive` (the still underneath shows through the
+  transparent poster until play clears the flag and a frame paints) and
+  `ScanDialog`'s camera view (a stream has no frame for a moment either; the
+  same Blink path, inferred, not device-measured). `video-poster.source.test.ts`
+  fails for any `<video>` in `src` without it. Desktop gets none: measured in headless Chromium 153,
   a transparent poster leaves 0% of the box painted after `loadeddata` (99.5%
   without one, or after a seek or play). It would hide the first-frame
   preview desktop shows before play. Until the element shows a frame, the

@@ -74,6 +74,12 @@ export function errorKind(code: number | undefined): 'unplayable' | 'transient' 
  * would hide the first frame desktop browsers show before play. */
 export const BLANK_POSTER = 'data:image/gif;base64,R0lGODlhAQABAIAAAAAAAP///yH5BAEAAAAALAAAAAABAAEAAAIBRAA7';
 
+/** The poster EVERY <video> the app renders carries (board #139, owner: "很丑的大大的播放器播放按键图案"):
+ * in the Android app the transparent one above, so WebView never paints its stock poster (the
+ * big circled play glyph) before a frame; none elsewhere, where a browser shows no such
+ * graphic and a poster would hide the first-frame preview. Pinned by video-poster.source.test.ts. */
+export const posterFor = (android: boolean): string | undefined => (android ? BLANK_POSTER : undefined);
+
 /** The host facts the two modes are offered on (#453 P2: separately). */
 export type Host = { android: boolean; androidFullscreen: boolean };
 

@@ -168,7 +168,7 @@ test('a drag is cancelled by a new source and by hiding; a late release seeks no
   } finally { await p.app.close(); }
 });
 
-test('a tap only shows or hides the controls; a double tap seeks by side and never toggles playback', async (context) => {
+test('a side tap only shows or hides the controls; a double tap seeks by side and never toggles playback', async (context) => {
   const p = await player(context);
   try {
     await p.loaded();
@@ -186,14 +186,18 @@ test('a tap only shows or hides the controls; a double tap seeks by side and nev
     await p.app.advance(300);
     await p.tap(20); await p.app.advance(100); await p.tap(280); await p.app.advance(300);
     assert.deepEqual(p.m().seeks, [90, 100], 'a second tap on the OTHER side is not a double tap');
+    // Board #139: the middle third is the play/pause target, so a middle double tap is a
+    // pause then a play, never a seek (MediaPlayer.middle-tap.mount.test.ts pins the rule).
     await p.tap(150); await p.app.advance(100); await p.tap(150); await p.app.advance(300);
     assert.deepEqual(p.m().seeks, [90, 100], 'a double tap in the middle third seeks nothing');
+    assert.equal(p.m().pauses, 1, 'its first tap paused');
+    await p.settlePlay(1);
     await p.app.advance(3100);
     const before = p.bar().classList.contains('hidden');
-    await p.tap(150); await p.app.advance(300);
-    assert.notEqual(p.bar().classList.contains('hidden'), before, 'a single tap toggles the controls');
+    await p.tap(20); await p.app.advance(300);
+    assert.notEqual(p.bar().classList.contains('hidden'), before, 'a single side tap toggles the controls');
     assert.equal(p.m().paused, false, 'and nothing else');
-    assert.equal(p.m().pauses, 0);
+    assert.equal(p.m().pauses, 1);
   } finally { await p.app.close(); }
 });
 
@@ -208,9 +212,10 @@ test('a tap on the hidden bar shows it, also when the tap is what moves focus in
     // A real browser focuses the (focusable) player between pointerdown and
     // pointerup, and the focus pokes the bar shown: the tap still means SHOW.
     const el = p.app.document.querySelector<HTMLElement>('.media-player')!;
-    p.video().dispatchEvent(new p.w.MouseEvent('pointerdown', { bubbles: true, clientX: 150, clientY: 100 }));
+    // A side third (#139: the middle third plays and pauses).
+    p.video().dispatchEvent(new p.w.MouseEvent('pointerdown', { bubbles: true, clientX: 20, clientY: 100 }));
     el.focus();
-    p.video().dispatchEvent(new p.w.MouseEvent('pointerup', { bubbles: true, clientX: 150, clientY: 100 }));
+    p.video().dispatchEvent(new p.w.MouseEvent('pointerup', { bubbles: true, clientX: 20, clientY: 100 }));
     await p.app.flush(); await p.app.advance(300);
     assert.equal(p.bar().classList.contains('hidden'), false, 'one tap shows the bar');
   } finally { await p.app.close(); }
@@ -227,7 +232,7 @@ test('auto-hide: 3 s into playback; never while paused, dragging, a menu is open
     await p.app.advance(3100);
     assert.equal(p.bar().classList.contains('hidden'), true, 'playing: hides after 3 s');
     assert.ok((p.bar() as HTMLElement & { inert?: boolean }).inert === true || p.bar().hasAttribute('inert'), 'a hidden bar has no activatable control');
-    await p.tap(150); await p.app.advance(300);
+    await p.tap(20); await p.app.advance(300);   // a side tap shows the bar (#139: the middle pauses)
     assert.equal(p.bar().classList.contains('hidden'), false);
     // A drag holds it.
     p.fireRange('pointerdown'); p.range().value = '10'; p.fireRange('input'); await p.app.flush();
@@ -685,7 +690,7 @@ test('the narrow/wide switch mid-drag destroys the range: its drag is retired, s
     assert.equal(p.bar().classList.contains('hidden'), true, 'and it no longer holds the bar');
     assert.deepEqual(p.m().seeks, [], 'nothing was sought');
     // The new range works on its own.
-    await p.tap(150); await p.app.advance(300);
+    await p.tap(20); await p.app.advance(300);
     p.fireRange('pointerdown'); p.range().value = '120'; p.fireRange('input'); p.fireRange('pointerup'); await p.app.flush();
     assert.deepEqual(p.m().seeks, [120]);
   } finally { await p.app.close(); }

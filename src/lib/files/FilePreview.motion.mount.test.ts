@@ -19,11 +19,18 @@ const photo = (path: string, motion: object | null) => ({
 const natural = { width: 1200, height: 1600 };
 type Play = (el: HTMLMediaElement, win: Window & typeof globalThis) => Promise<void>;
 
+/** The next mount runs as the Android app (board #139). */
+let androidApp = false;
+
 async function mount(context: test.TestContext, file: object, extra: Record<string, unknown> = {}, play: Play = () => Promise.resolve()) {
   const plays: HTMLMediaElement[] = [];
   const app = await (await compiled).mount(context, {
     modules: [],
     setup(win) {
+      if (androidApp) {
+        Object.defineProperty(win.navigator, 'userAgent', { value: 'Mozilla/5.0 (Linux; Android 15) AppleWebKit/537.36', configurable: true });
+        (win as unknown as { __TAURI_INTERNALS__: object }).__TAURI_INTERNALS__ = {};
+      }
       win.HTMLMediaElement.prototype.play = function () { plays.push(this); return play(this, win as never); };
       win.HTMLMediaElement.prototype.pause = function () {};
       Object.defineProperty(win.HTMLImageElement.prototype, 'naturalWidth', { configurable: true, get: () => natural.width });
@@ -290,3 +297,20 @@ test('a stream error drops the cached URL: the next press mints afresh and plays
   assert.equal(app.document.querySelector('.image-preview video')!.getAttribute('src'), 'https://h/v2');
   assert.equal(plays.length, 2);
 });
+
+// Board #139 (owner, 2026-11-16 09:09: '点击播放按钮的时候，会出现一个很丑的大大的播放器播放按键图案在图片中间'):
+// the motion's <video> carries the transparent poster in the Android app, so WebView never
+// paints its stock one over the still before the first frame; none on the desktop.
+for (const android of [true, false]) {
+  test(`the motion's video poster: ${android ? 'transparent in the Android app' : 'none on the desktop'} (#139)`, async (context) => {
+    androidApp = android;
+    try {
+      const { app } = await mount(context, photo('/p/live.jpg', { offset: 1, length: 2 }), { openMotion: () => Promise.resolve('https://h/v') });
+      live(app.document)!.click(); await settle(app);
+      const poster = app.document.querySelector('.image-preview video')!.getAttribute('poster');
+      if (android) assert.match(poster ?? '', /^data:image\/gif;base64,/u);
+      else assert.equal(poster, null);
+      assert.ok(app.document.querySelector('.image-open img'), 'the still stays underneath');
+    } finally { androidApp = false; }
+  });
+}

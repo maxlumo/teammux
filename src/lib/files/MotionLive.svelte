@@ -9,6 +9,10 @@
   // The host keys this on the file, so a late answer for a file left behind lands nowhere.
   import CommandButton from '../ui/CommandButton.svelte';
   import { t } from '../core/i18n.svelte.ts';
+  import { isAndroid } from '../core/platform.ts';
+  // Board #139: the transparent poster (the owner saw WebView's stock play graphic here); the
+  // still underneath shows through it until play() clears the show-poster flag and a frame paints.
+  import { posterFor } from './media-player.ts';
 
   let { path, natural, open, onerror, visible = true }: {
     path: string;
@@ -86,7 +90,7 @@
 </div>
 {#if playing && src}
   <!-- svelte-ignore a11y_media_has_caption -->
-  <video class="motion-video" bind:this={video} {src} playsinline preload="auto"
+  <video class="motion-video" bind:this={video} {src} playsinline preload="auto" poster={posterFor(isAndroid)}
     style:--still-w={natural.width} style:--still-h={natural.height}
     onended={(e) => { if (current(e.currentTarget)) retire(); }} onerror={(e) => { if (current(e.currentTarget)) dropStream(); }}></video>
 {/if}

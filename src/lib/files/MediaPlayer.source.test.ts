@@ -21,7 +21,8 @@ test('the placeholder wears the existing .skel / .skel-wrap atoms and tokens onl
 });
 
 test('only the Android app gives the video a poster, from the first mount; preload stays metadata (#470)', () => {
-  assert.match(source, /<video bind:this=\{mediaEl\} playsinline preload="metadata" src=\{ownSrc \?\? src\} \{\.\.\.media\}\s*poster=\{isAndroid \? BLANK_POSTER : undefined\}/u);
+  // #139: through the one definition, posterFor(isAndroid) = isAndroid ? BLANK_POSTER : undefined.
+  assert.match(source, /<video bind:this=\{mediaEl\} playsinline preload="metadata" src=\{ownSrc \?\? src\} \{\.\.\.media\}\s*poster=\{posterFor\(isAndroid\)\}/u);
   assert.equal([...source.matchAll(/poster=/gu)].length, 1, 'one poster, on the element itself');
   assert.match(source, /if \(hasData && \(!isAndroid \|\| posterCleared\)\) framed = true;/u, 'the Android branch waits for the show-poster flag to clear');
 });

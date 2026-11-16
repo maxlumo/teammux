@@ -15,6 +15,7 @@
   import { t } from '../core/i18n.svelte.ts';
   import { decodePhoto, openCamera, type Camera, type Frame } from '../core/qr-scan.ts';
   import { isAndroid } from '../core/platform.ts';
+  import { posterFor } from '../files/media-player.ts';
 
   let {
     compact = false, onscanned, oncancel, onpicking = () => {},
@@ -128,7 +129,8 @@
   <h2>{t('scanQr')}</h2>
   <p class="dlg-note">{t('scanReason')}</p>
   <div class="scan-view" class:off={status === 'unavailable' || status === 'photo'}>
-    <video bind:this={video} playsinline muted></video>
+    <!-- Board #139: a camera stream has no frame for a moment either; WebView would paint its stock poster. -->
+    <video bind:this={video} playsinline muted poster={posterFor(isAndroid)}></video>
   </div>
   <p class="dlg-note scan-status" role="status">
     {#if status === 'starting'}{t('scanStarting')}{:else if status === 'live'}{t('scanLook')}{:else if status === 'photo'}{t('scanPhotoWaiting')}{:else}{problem}{/if}

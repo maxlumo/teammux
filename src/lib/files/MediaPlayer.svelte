@@ -4,9 +4,10 @@
   // signed /dl stream (#182/#416) — and this is only its controls layer, in
   // our design language. The rules are files/media-player.ts; the position bar
   // is the ui/MediaRange atom. Protocols (the #453 design, deltas 1-3):
-  //   - a tap on the picture only shows or hides the controls; playing is the
-  //     button's job, so a double tap's first tap never changes playback. A
-  //     double tap in the left or right third seeks -10/+10 s;
+  //   - the MIDDLE third of the picture is the one play/pause target, at once
+  //     (board #139, owner: "不能直接点击视频中间开始播放"); a tap in the left or
+  //     right third only shows or hides the controls, and a double tap there
+  //     seeks -10/+10 s, so a double tap's first tap never changes playback;
   //   - nothing in the bar reaches the picture or Files' edge swipe;
   //   - the bar auto-hides during playback after 3 s, never while paused,
   //     waiting or failed, nor while keyboard focus (:focus-visible), a drag,
@@ -22,7 +23,7 @@
   import { t } from '../core/i18n.svelte.ts';
   import { isAndroid } from '../core/platform.ts';
   import Icon from '../ui/Icon.svelte';
-  import { ANDROID_FULLSCREEN_EVENT, BLANK_POSTER, androidFullscreen, canFullscreen, canPip, clampTo, errorKind, fmtTime, Intents, seekWindow, spans, third, type Span } from './media-player.ts';
+  import { ANDROID_FULLSCREEN_EVENT, androidFullscreen, canFullscreen, canPip, clampTo, errorKind, fmtTime, Intents, posterFor, seekWindow, spans, third, type Span } from './media-player.ts';
 
   let { kind, src, name = '', visible = true, mediaEl = $bindable(null), reopen = null }:
     { kind: 'video' | 'audio'; src: string; name?: string;
@@ -230,17 +231,25 @@
   }
   $effect(() => { void paused; void waiting; void error; poke(); });
 
-  // One handler for the picture: a single tap (after 250 ms) toggles the
-  // controls; a second tap in the same side third seeks instead.
+  // One handler for the picture. The middle third plays or pauses at once
+  // (board #139, leader's ruling: paused → play, playing → pause; an errored
+  // load only shows the bar). A side third: a single tap (after 250 ms)
+  // toggles the controls; a second tap in the same third seeks instead.
   function onPictureUp(e: PointerEvent) {
     if (!down || !live() || Math.hypot(e.clientX - down.x, e.clientY - down.y) > 10) { down = null; return; }
     const wasShown = down.shown;
     down = null;
     const r = (e.currentTarget as HTMLElement).getBoundingClientRect();
     const side = third(e.clientX - r.left, r.width), now = Date.now();
+    if (side === 'middle') {
+      clearTimeout(tapTimer); tapTimer = 0; lastTap = { at: 0, side: '' };
+      if (!error) toggle();
+      poke();
+      return;
+    }
     const second = tapTimer && now - lastTap.at < 250 && side === lastTap.side;
     clearTimeout(tapTimer); tapTimer = 0;
-    if (second && side !== 'middle') { seekBy(side === 'left' ? -10 : 10); poke(); lastTap = { at: 0, side: '' }; return; }
+    if (second) { seekBy(side === 'left' ? -10 : 10); poke(); lastTap = { at: 0, side: '' }; return; }
     lastTap = { at: now, side };
     tapTimer = window.setTimeout(() => {
       tapTimer = 0;
@@ -319,7 +328,7 @@
   {#if kind === 'video'}
     <!-- svelte-ignore a11y_media_has_caption -->
     <video bind:this={mediaEl} playsinline preload="metadata" src={ownSrc ?? src} {...media}
-      poster={isAndroid ? BLANK_POSTER : undefined}
+      poster={posterFor(isAndroid)}
       onpointerdown={(e) => { down = live() ? { x: e.clientX, y: e.clientY, shown } : null; }} onpointerup={onPictureUp}></video>
     <!-- Until the picture is on screen, OUR placeholder (board #470): the
          .skel atom in the picture's aspect, centred where the frame will
