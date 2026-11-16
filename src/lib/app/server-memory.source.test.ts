@@ -55,6 +55,9 @@ const GLOBAL: Record<string, Record<string, string>> = {
   // PROCESS, begun once at load and awaited by every download, never of a server.
   'files/save-file.ts': { realm: 'once per page load, the process\'s claims in Rust' },
   'app/leave-guards.ts': { guards: 'instances unregister on unmount' },
+  // The app's own history.back() for a preview link (board #111): bounded to
+  // a few hundred ms and consumed by the one popstate router; the window's, not a server's.
+  'core/own-back.ts': { marked: 'a bounded mark of the window\'s own back(), consumed once' },
   'app/shortcuts.svelte.ts': { state: 'a preference' },
   // The person's and the window's Hub preferences (feed level, tool-row cap,
   // sidebar collapse). ONE owner however many servers are on screen, which is

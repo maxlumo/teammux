@@ -4,7 +4,7 @@
   import { t } from '../core/i18n.svelte.ts';
   import MediaPlayer from './MediaPlayer.svelte';
   import MotionLive from './MotionLive.svelte';
-  import { basedPreviewDoc, highlightLine, mimeCategory, renderCsv, type PreviewFile, type PreviewScope } from './file-preview.ts';
+  import { preparePreview, highlightLine, mimeCategory, renderCsv, type PreviewFile, type PreviewLinks, type PreviewScope } from './file-preview.ts';
 
   interface Props {
     currentFile: PreviewFile;
@@ -13,7 +13,8 @@
     hljs: HLJSApi | null;
     showAllLines: boolean;
     previewLinkClick: (event: MouseEvent) => void;
-    attachHtmlPreviewLinks: () => void;
+    /** At each frame load: the prepared document's link table (board #111). */
+    attachHtmlPreviewLinks: (links: PreviewLinks | null) => void;
     previewBodyEl: HTMLDivElement | null;
     previewEl: HTMLDivElement | null;
     htmlPreviewEl: HTMLIFrameElement | null;
@@ -71,6 +72,7 @@
   // its error and still shows the page, under a CSP that loads nothing —
   // never an unbased document fetching from the app's origin.
   let htmlSrcdoc = $state<string | null>(null);
+  let htmlLinks: PreviewLinks | null = null;
   $effect(() => {
     const file = currentFile;
     const content = file.content;
@@ -78,11 +80,11 @@
     if (mimeCategory(file.stat?.mime_hint) !== 'html' || content == null) return;
     let live = true;
     previewBase(file.path).then((scope) => {
-      if (live) htmlSrcdoc = basedPreviewDoc(content, scope);
+      if (live) { const p = preparePreview(content, scope); htmlLinks = p.links; htmlSrcdoc = p.html; }
     }).catch((e) => {
       if (!live) return;
       // The SAME preparation without a scope; if even that fails, no frame.
-      try { htmlSrcdoc = basedPreviewDoc(content, null); } catch {}
+      try { const p = preparePreview(content, null); htmlLinks = p.links; htmlSrcdoc = p.html; } catch {}
       onpreviewerror(`${t('previewResourcesNotLoaded')}: ${e?.message ?? String(e)}`);
     });
     return () => { live = false; htmlSrcdoc = null; };
@@ -110,7 +112,7 @@
         srcdoc={htmlSrcdoc}
         sandbox="allow-same-origin"
         title="HTML Preview"
-        onload={attachHtmlPreviewLinks}
+        onload={() => attachHtmlPreviewLinks(htmlLinks)}
       ></iframe>
     {/if}
   {:else if mimeCategory(currentFile.stat?.mime_hint) === 'pdf'}

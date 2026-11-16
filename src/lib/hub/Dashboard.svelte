@@ -19,6 +19,8 @@
   import { stoppedAgents } from './hub.ts';
   import type { AskClose, AskRow } from '../core/ws-api.ts';
   import { agentNames, type Names } from './names.ts';
+  import ProjectPage from './ProjectPage.svelte';
+  import type { PageHead } from './project-page.ts';
 
   type Note = { seq?: number; id?: number | string; ts?: number; from?: string; body?: string; to?: unknown; kind?: string; discuss?: boolean };
   type DashData = {
@@ -28,6 +30,9 @@
     stopped: number;
     finished: { id: number; title: string; assignee: string; done_at: number }[];
     labels?: unknown;
+    /** Board #111 (cap `dashboard_page`): the project page's head, or `page_error`. */
+    page?: PageHead | null;
+    page_error?: string;
   };
 
   type Api = {
@@ -37,6 +42,7 @@
     hubAskList: (session: string, all?: boolean) => Promise<{ asks: AskRow[] }>;
     hubAskAnswer: (session: string, seq: number, option?: string, text?: string) => Promise<AskClose>;
     hubAskDismiss: (session: string, seq: number) => Promise<AskClose>;
+    pageLoad?: (session: string) => Promise<any>;
   };
   type Pushed = { room?: string; kind?: unknown; id?: unknown };
 
@@ -44,6 +50,11 @@
     api,
     connected = true,
     asksOn = false,
+    pageOn = false,
+    compact = false,
+    onOpenFile = (_path: string) => {},
+    onPageEdited = (_edited: boolean) => {},
+    onPageGuard = (_editedNow: (() => boolean) | null) => {},
     slots = [],
     listen = null,
     now = Date.now(),
@@ -61,6 +72,15 @@
     connected?: boolean;
     /** The server answers the ask RPCs (`asks` cap, #107): the cards are drawn only then. */
     asksOn?: boolean;
+    /** The server announces `dashboard_page` (#111): the project page is drawn only then. */
+    pageOn?: boolean;
+    compact?: boolean;
+    /** Open a file the project page links to (Files; Back returns here). */
+    onOpenFile?: (path: string) => void;
+    /** The project page holds a field the person edited (the Board's discard guard). */
+    onPageEdited?: (edited: boolean) => void;
+    /** The project page's LIVE "a field is edited now" read, for the Board's doors. */
+    onPageGuard?: (editedNow: (() => boolean) | null) => void;
     /** The project's declared slots: who is stopped (an asker's state on its card). */
     slots?: { window_name: string; kind?: string }[];
     /** The server's pushed room lines (the Hub's own feed source): an ask, or the line
@@ -82,6 +102,9 @@
 
 
   let data = $state<DashData | null>(null);
+  // The page's head: a read that could not read the page store (page_error)
+  // keeps the last one; never "no page" (#108's rule).
+  let pageHead = $state<PageHead | null>(null);
   let notes = $state<Note[]>([]);
   let notesCapped = $state(false);
   let mark = $state<{ seq: number } | null | undefined>(undefined);
@@ -155,6 +178,7 @@
       if (mine !== gen) return;
       held = { notes: picked, top: Math.max(held.top, top(page0.messages as Note[])), more };
       data = d;
+      if (d.page_error == null) pageHead = d.page ?? null;
       followAsks(s, d);
       notes = picked;
       notesCapped = capped;
@@ -207,7 +231,7 @@
   // new name), then read.
   $effect(() => {
     void session; void room;
-    gen++; data = null; notes = []; mark = undefined; failed = false; held = { notes: [], top: 0, more: false }; asksStale = false;
+    gen++; data = null; pageHead = null; notes = []; mark = undefined; failed = false; held = { notes: [], top: 0, more: false }; asksStale = false;
     // The project left: a read queued for it (a push while it was shown) never starts.
     untrack(() => { if (asksFor && asksFor !== session) book.retire(asksFor); asksFor = session; });
   });
@@ -312,6 +336,12 @@
       {#if notesCapped}<div class="dash-meta">{t('dashNotesCapped')}</div>{/if}
       <button type="button" class="dash-more" onclick={onOpenChat}>{t('dashAllInChat')}</button>
     </section>
+
+    {#if pageOn && pageHead && api.pageLoad}
+      <!-- The LAST section (board #111): it can neither draw over Needs you nor push it away. -->
+      <ProjectPage api={api as { pageLoad: NonNullable<Api['pageLoad']> }} {session} head={data.page_error == null ? pageHead : undefined} {visible} {now} {compact}
+        shown={(n) => labels.shown(n)} {onOpenFile} onEdited={onPageEdited} onGuard={onPageGuard} />
+    {/if}
   {/if}
 </div>
 

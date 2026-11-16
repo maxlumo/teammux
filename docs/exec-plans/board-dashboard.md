@@ -330,6 +330,11 @@ agent acts, publishes again ◀── pane ◀── confirm: To @composer — "
 Every arrow is one of the three primitives the shell already has: a file in
 the workspace, text typed into a pane, `tmm` invoked by the agent.
 
+Built (board #111): the store, its lock and the doors are
+[dashboard.md § The project page](../design-docs/features/dashboard.md#the-project-page-board-111);
+`tmm dashboard unpublish` was added there (leader, R6), so "no page" is
+reachable again after a publish.
+
 ## 7. The agent's side (CLI parity)
 
 ```

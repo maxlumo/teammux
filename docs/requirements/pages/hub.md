@@ -495,6 +495,21 @@ you, unread after the room's read mark (looking here never marks them read),
 a tap opens the chat at that message. Design:
 [dashboard.md](../../design-docs/features/dashboard.md) § The view.
 
+## Project page (board #111)
+
+A project's agents may publish ONE static page (`tmm dashboard publish
+<dir>`; `tmm dashboard unpublish` takes it down). The Dashboard shows it as
+its last section, headed "Project page · by <publisher> · <age>", in the
+app's colours and type, as tall as its content (the Dashboard scrolls as one
+page). Nothing in it runs or reaches another site; its pictures, sounds and
+films come from the project, and a link opens its file in the app (Back
+returns to the Dashboard) or a web link outside the app. Leaving the
+Dashboard for the Board, an issue or another tab keeps the page as it is (a
+playing track plays on, a typed field keeps its text). A newer publication
+replaces the page only when nothing is being typed or played; otherwise the
+header offers Refresh, which asks before discarding typed text. No page
+published: no section. Design: dashboard.md § The project page.
+
 ## Dashboard read (board #108)
 
 Server half of the dashboard (the view is #109): `hub_dashboard` answers a

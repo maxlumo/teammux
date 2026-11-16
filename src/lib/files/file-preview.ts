@@ -1,7 +1,8 @@
 /// <reference types="vite/client" />
 import type { HLJSApi } from 'highlight.js';
-import { installExternalLinkHandler } from '../core/external-links.ts';
-import { installPathLinkHandler } from '../core/path-links.ts';
+import { isExternalWebUrl, openExternalUrl } from '../core/external-links.ts';
+import { pathRef } from '../core/path-links.ts';
+import { clearOwnBack, markOwnBack } from '../core/own-back.ts';
 
 type Pdfjs = typeof import('pdfjs-dist');
 type Mermaid = typeof import('mermaid')['default'];
@@ -138,8 +139,27 @@ export interface PreviewScope { url: string; prefix: string }
  * are the scope's `prefix` — this connection's http(s) origin and proxy
  * prefix plus `/dl/s/`, which the URL must begin with — so they are never cut
  * out of the URL by searching it. With no scope (`null`: a refused or failed
- * mint) there is no base and the CSP admits `data:` and inline styles only. */
-export function basedPreviewDoc(content: string, scope: PreviewScope | null, parser: DOMParser = new DOMParser()): string {
+ * mint) there is no base and the CSP admits `data:` and inline styles only.
+ *
+ * `baseStyle` (board #111, the project page): ONE stylesheet, marked
+ * `data-tmm-base`, placed after ours and before the author's head, so the
+ * page's own CSS wins; the Files preview passes none. */
+export function basedPreviewDoc(content: string, scope: PreviewScope | null, parser: DOMParser = new DOMParser(), baseStyle?: string): string {
+  return preparePreview(content, scope, parser, baseStyle).html;
+}
+
+/** The author's link targets, kept by the PARENT from the serialization: the
+ * frame's links are rewritten to `about:srcdoc#tmm-link-<nonce>-<n>` and the
+ * page never holds the table (board #111, leader note 16). */
+export interface PreviewLinks { nonce: string; hrefs: string[] }
+
+/** `basedPreviewDoc`, with the link table. ONE link mechanism in every engine
+ * (board #111 W1, measured): WebKit runs no event listener in a script-less
+ * frame, so a click on a link under the scope base navigated the frame to the
+ * door and the page was gone. A same-document fragment of the srcdoc keeps the
+ * document, its fields and its media in Chromium and WebKit alike, and the
+ * parent reads it from the frame's hash (`watchPreviewLinks`). */
+export function preparePreview(content: string, scope: PreviewScope | null, parser: DOMParser = new DOMParser(), baseStyle?: string): { html: string; links: PreviewLinks } {
   let prefix: string | null = null;
   const scopeUrl = scope?.url ?? null;
   if (scope != null) {
@@ -159,6 +179,15 @@ export function basedPreviewDoc(content: string, scope: PreviewScope | null, par
     if (el.getAttribute('name')?.trim().toLowerCase() === 'referrer') el.remove();
   }
   for (const el of doc.querySelectorAll('[referrerpolicy]')) el.removeAttribute('referrerpolicy');
+  // Links: every a[href] and area[href] becomes a fragment of the srcdoc; the
+  // author's href goes to the parent's table. A target, download or ping
+  // would make the click something other than that fragment, so they go.
+  const links: PreviewLinks = { nonce: linkNonce(), hrefs: [] };
+  for (const el of doc.querySelectorAll('a[href], area[href]')) {
+    links.hrefs.push(el.getAttribute('href') ?? '');
+    el.setAttribute('href', `about:srcdoc#tmm-link-${links.nonce}-${links.hrefs.length - 1}`);
+    for (const attr of ['target', 'download', 'ping']) el.removeAttribute(attr);
+  }
   const csp = doc.createElement('meta');
   csp.setAttribute('http-equiv', 'Content-Security-Policy');
   // No scope (a refused or failed mint): the page still reads, but loads
@@ -190,6 +219,12 @@ export function basedPreviewDoc(content: string, scope: PreviewScope | null, par
   review.textContent = '::highlight(review){background-color:color-mix(in srgb,Highlight 30%,transparent)}'
     + '::highlight(review-hot){background-color:color-mix(in srgb,Highlight 55%,transparent)}';
   (scopeUrl == null ? referrer : doc.head.children[2]!).after(review);
+  if (baseStyle != null) {
+    const sheet = doc.createElement('style');
+    sheet.setAttribute('data-tmm-base', '');
+    sheet.textContent = baseStyle;
+    review.after(sheet);
+  }
   // SERIALIZED, never reassembled (#433 review, orchestrator ruling): a fixed
   // doctype, then the serializer's own output of the prepared element. This
   // is a structural guarantee, not the fix for a shown injection: quoting the
@@ -207,7 +242,13 @@ export function basedPreviewDoc(content: string, scope: PreviewScope | null, par
     || first.getAttribute('content') !== csp.getAttribute('content')) {
     throw new Error('the prepared preview does not lead with its policy');
   }
-  return out;
+  return { html: out, links };
+}
+
+function linkNonce(): string {
+  const bytes = new Uint8Array(6);
+  globalThis.crypto.getRandomValues(bytes);
+  return [...bytes].map((b) => b.toString(16).padStart(2, '0')).join('');
 }
 
 /** A bare `#fragment` link scrolls the preview's own document. Under the
@@ -222,41 +263,58 @@ export function scrollToFragment(doc: Document, href: string): void {
   target?.scrollIntoView();
 }
 
-/** The preview frame's links: a fragment scrolls in the document, a path
- * opens in Files, an external URL leaves through its handler, and any other
- * activation is prevented — a frame under the scope base never navigates. */
-function installHtmlPreviewLinks(doc: Document | null, openPath: (path: string) => void): () => void {
-  if (!doc) return () => {};
-  const fragment = (event: Event) => {
-    const mouse = event as MouseEvent;
-    if (mouse.defaultPrevented) return;
-    const anchor = (mouse.target as Element | null)?.closest?.('a[href]');
-    const href = anchor?.getAttribute('href')?.trim() ?? '';
-    if (!href.startsWith('#')) return;
-    mouse.preventDefault();
-    // Only a plain primary click scrolls; a middle or modified click (a
-    // "new tab" gesture) is prevented and does nothing (review P2).
-    const plain = mouse.type === 'click' && mouse.button === 0
-      && !mouse.ctrlKey && !mouse.metaKey && !mouse.shiftKey && !mouse.altKey;
-    if (plain) scrollToFragment(doc, href);
+/** Where one author href goes: the ONE link logic of a preview frame (board
+ * #433, routed since #111 from the frame's hash): a fragment scrolls in the
+ * document, a path opens in the app, a web link leaves the app, and anything
+ * else (javascript:, data:, mailto:, …) is dead. */
+export function routePreviewHref(doc: Document | null, href: string, openPath: (path: string) => void, openWeb: (url: string) => unknown = openExternalUrl): 'fragment' | 'path' | 'web' | 'dead' {
+  const raw = href.trim();
+  if (raw.startsWith('#')) { if (doc) scrollToFragment(doc, raw); return 'fragment'; }
+  const path = pathRef(raw);
+  if (path) { openPath(path); return 'path'; }
+  // `//host/x` is a network reference: the scheme of the gateway it came from.
+  const web = raw.startsWith('//') ? `${(doc?.baseURI && /^https:/u.test(doc.baseURI)) ? 'https:' : 'http:'}${raw}` : raw;
+  if (isExternalWebUrl(web)) { void openWeb(web); return 'web'; }
+  return 'dead';
+}
+
+/** Watch a preview frame's links (board #111, leader notes 16 and 20): one
+ * timer reads the frame's hash while `active()`; a `#tmm-link-<nonce>-<n>`
+ * is a click (or a keyboard activation) on link n. The app's own
+ * history.back() then removes the entry the click added (marked, so the app's
+ * Back router cannot mistake it), and once the frame's hash has returned (or
+ * after `settleMs`) the href is routed, exactly once. If the back cannot be
+ * confirmed the hash is replaced, so the same link works again, and the
+ * leftover history entry is the documented cost. Latency is the period. */
+export function watchPreviewLinks(frame: HTMLIFrameElement, links: PreviewLinks, route: (href: string, doc: Document | null) => void,
+  { active = () => true, periodMs = 50, settleMs = 400, history: hist = globalThis.history }: { active?: () => boolean; periodMs?: number; settleMs?: number; history?: History } = {}): () => void {
+  const prefix = `#tmm-link-${links.nonce}-`;
+  let pending: { href: string; hash: string; until: number } | null = null;
+  const tick = () => {
+    const doc = frame.contentDocument;
+    const hash = doc?.location.hash ?? '';
+    if (pending) {
+      // The frame was dropped (its file, project or server changed, or it was
+      // unmounted): its intent goes with it, never to whatever replaced it (S1).
+      if (!frame.isConnected || !doc) { pending = null; clearOwnBack(); return; }
+      if (hash === pending.hash && Date.now() < pending.until) return;
+      const { href, hash: was } = pending;
+      pending = null;
+      clearOwnBack();
+      if (hash === was) frame.contentWindow?.location.replace('about:srcdoc#tmm-idle');
+      route(href, doc ?? null);
+      return;
+    }
+    if (!active() || !hash.startsWith(prefix)) return;
+    const n = Number(hash.slice(prefix.length));
+    const href = Number.isInteger(n) ? links.hrefs[n] : undefined;
+    if (href === undefined) return;
+    pending = { href, hash, until: Date.now() + settleMs };
+    markOwnBack(pending.until);
+    hist.back();
   };
-  const rest = (event: Event) => {
-    if ((event.target as Element | null)?.closest?.('a[href], area[href]')) event.preventDefault();
-  };
-  doc.addEventListener('click', fragment, true);
-  doc.addEventListener('auxclick', fragment, true);
-  const removePaths = installPathLinkHandler(doc, openPath);
-  const removeExternal = installExternalLinkHandler(doc);
-  doc.addEventListener('click', rest, true);
-  doc.addEventListener('auxclick', rest, true);
-  return () => {
-    doc.removeEventListener('click', fragment, true);
-    doc.removeEventListener('auxclick', fragment, true);
-    removePaths();
-    removeExternal();
-    doc.removeEventListener('click', rest, true);
-    doc.removeEventListener('auxclick', rest, true);
-  };
+  const timer = setInterval(tick, periodMs);
+  return () => { clearInterval(timer); if (pending) clearOwnBack(); };
 }
 
 /** Preserve Files' loader lifetime and live DOM/file reads during extraction.
@@ -375,10 +433,14 @@ export function createPreviewRenderers(context: PreviewRenderContext) {
   }
 
   let removeHtmlPreviewLinks = () => {};
-  function attachHtmlPreviewLinks() {
+  /** At each load of the HTML preview's frame: its links, by the one watcher. */
+  function attachHtmlPreviewLinks(links: PreviewLinks | null) {
     removeHtmlPreviewLinks();
-    const doc = context.htmlPreviewEl?.contentDocument ?? null;
-    removeHtmlPreviewLinks = installHtmlPreviewLinks(doc, context.openPath);
+    removeHtmlPreviewLinks = () => {};
+    const frame = context.htmlPreviewEl;
+    if (!frame || !links) return;
+    removeHtmlPreviewLinks = watchPreviewLinks(frame, links, (href, doc) => { routePreviewHref(doc, href, context.openPath); },
+      { active: () => frame.isConnected && frame.getClientRects().length > 0 });
   }
 
   async function resolveImages(container: HTMLElement | null) {

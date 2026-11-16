@@ -63,6 +63,12 @@ USAGE (agent):
                                       answers (read it after a restart)
   tmm ask close <id> "why" [--re <seq>]  withdraw your ask; --re cites a room message (e.g. the
                                       person's reply in chat). It never marks it answered
+  tmm dashboard publish <dir>         publish <dir>/index.html and the files beside it as this
+                                      project's page, the Dashboard's last section (static: no
+                                      scripts run). A project file is ../../../<path from the
+                                      project root>, e.g. <audio src="../../../EP/out/mix.mp3">.
+                                      The last publish wins; a page on screen keeps its own files
+  tmm dashboard unpublish             take the page down; the Dashboard shows no page
   tmm wake list [--all]               pending wakes (this project, or every project)
   tmm wake cancel <id>                cancel one you set (the human may cancel any)
   tmm log [--since <ts>] [--limit N] [-f]   read chat; --since is exclusive, -f follows
@@ -808,6 +814,32 @@ async fn main() {
                         println!("✓ ask #{} is open; the answer comes to you as a chat line (tmm ask list)", r["ask"]["seq"]);
                     }
                 }
+            }
+        }
+        // The project page (board #111): the TARGET gateway reads <dir>, as
+        // `tmm review` leaves the file to it (#434 P1-D): the path is made
+        // absolute here, lexically, and nothing here opens or measures it.
+        ("dashboard", rest) => {
+            use tmux_mobile::projects::page::cli;
+            let session = need_project(&ctx);
+            let who = ctx.agent.clone().unwrap_or_else(|| "human".into());
+            match rest.first().map(String::as_str) {
+                Some("publish") => {
+                    let Some(dir) = rest.get(1) else { fail(EXIT_USAGE, "dashboard publish needs a folder: tmm dashboard publish <dir>") };
+                    let dir = match std::path::absolute(dir) {
+                        Ok(p) => p.to_string_lossy().to_string(),
+                        Err(e) => fail(EXIT_USAGE, &format!("{dir}: {e}")),
+                    };
+                    let r = rpc_needing(&ctx, "dashboard_page", "page_publish", json!({ "session": session, "dir": dir, "who": who })).await;
+                    if ctx.json { println!("{r}"); } else { println!("{}", cli::published_line(&r, &session)); }
+                    if let Some(w) = cli::warning_line(&r) { if !ctx.json { eprintln!("{w}"); } }
+                }
+                Some("unpublish") => {
+                    let r = rpc_needing(&ctx, "dashboard_page", "page_unpublish", json!({ "session": session, "who": who })).await;
+                    if ctx.json { println!("{r}"); } else { println!("{}", cli::unpublished_line(&r, &session)); }
+                    if let Some(w) = cli::warning_line(&r) { if !ctx.json { eprintln!("{w}"); } }
+                }
+                _ => fail(EXIT_USAGE, "tmm dashboard publish <dir> | tmm dashboard unpublish"),
             }
         }
         // Scheduled wakes (board #275): list and cancel; `send --in/--at` adds.
@@ -2963,6 +2995,8 @@ const VERB_FLAGS: &[VerbFlags] = &[
     VerbFlags { key: "ask", ctx: true, flags: &["option", "recommend", "issue"] },
     VerbFlags { key: "ask list", ctx: true, flags: &["all"] },
     VerbFlags { key: "ask close", ctx: true, flags: &["re"] },
+    VerbFlags { key: "dashboard publish", ctx: true, flags: &[] },
+    VerbFlags { key: "dashboard unpublish", ctx: true, flags: &[] },
     VerbFlags { key: "wake", ctx: true, flags: &["all"] },
     VerbFlags { key: "wake list", ctx: true, flags: &["all"] },
     VerbFlags { key: "wake cancel", ctx: true, flags: &[] },
@@ -3284,6 +3318,9 @@ fn cap_refusal(need: &str) -> String {
         ),
         "asks" => format!(
             "this server is older than asks (its login answer lacks `{need}`): it would keep the question as a plain message that nothing can close — update the server. Nothing was sent."
+        ),
+        "dashboard_page" => format!(
+            "this server is older than project pages (its login answer lacks `{need}`) — update the server. Nothing was published or changed."
         ),
         "board_blocks" => format!(
             "this server is older than blocking edges (its login answer lacks `{need}`): it neither keeps blockers nor says which issues are blocked — update the server. Nothing was read or saved."
@@ -4899,7 +4936,7 @@ old — X []
         let skill = include_str!("../../../assets/skills/tmm-cli/SKILL.md");
         let help = usage();
         assert!(!help.contains("session unchanged"), "a rename moves the session (#278)");
-        for term in ["tmm wake list", "tmm wake cancel", "--wake", "--in ", "--at ", "/compact", "tmm agent mode", "--input-mode", "tmm agent restart --team", "tmm agent fork", "--re ", "--join ", "tmm agent team", "tmm skills load", "tmm review list", "tmm review add", "tmm review feedback", "tmm ask list", "tmm ask close", "--recommend", "--option"] {
+        for term in ["tmm wake list", "tmm wake cancel", "--wake", "--in ", "--at ", "/compact", "tmm agent mode", "--input-mode", "tmm agent restart --team", "tmm agent fork", "--re ", "--join ", "tmm agent team", "tmm skills load", "tmm review list", "tmm review add", "tmm review feedback", "tmm ask list", "tmm ask close", "--recommend", "--option", "tmm dashboard publish", "tmm dashboard unpublish", "../../../"] {
             assert!(help.contains(term), "help lost {term:?}");
             assert!(skill.contains(term), "the tmm-cli skill does not teach {term:?}");
         }

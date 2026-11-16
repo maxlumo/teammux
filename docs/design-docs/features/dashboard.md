@@ -262,6 +262,207 @@ server behind its scope.
   the last complete data, muted, with "Not live"; hidden, the view polls
   nothing and reads at once on return.
 
+## The project page (board #111)
+
+The design and its reasons are docs/exec-plans/board-dashboard.md § 6 and § 9;
+the rulings are on #111 (leader note 8). This section is how it is built.
+
+### The store and its two operations
+
+`projects/page.rs` owns `<ws>/.tmm/dashboard/`: `page.json` (`current`,
+`next`, and the LIVE revisions `{rev, by, at_ms, retired_ms}`), `.lock`, one
+folder per integer revision, and `.staging-<id>/` while a publication is
+being copied. The server is its only writer: `tmm dashboard publish <dir>`
+sends the folder absolute and unopened and the server reads it (#434 P1-D's
+rule), so an agent whose sandbox cannot write `.tmm/` still publishes.
+`server/page_rpc.rs` holds only the doors (`page_publish`, `page_unpublish`,
+`page_load`; websocket-rpc.md).
+
+- **Validate, copy outside the lock, commit inside it, then collect.** The
+  whole bundle is validated FIRST, from its entries' own stat, before
+  anything is created (regular files and folders only, nothing followed,
+  index.html at most 512 KiB, 500 files, 16 folders, 20 MiB). Then it is
+  copied into a staging folder, outside the lock (a slow copy blocks no
+  reader), re-checking every opened object and counting the bytes; the
+  COPY must hold its index.html (validator F2: a source changed after the
+  validation is caught here). Under the flock: rename the staging folder to
+  the next free number, retire the old current one and write `page.json`
+  (tmp, fsync, rename, folder fsync). **The rename of page.json is the
+  commit point** (leader, note 18). Any failure before it (validation, copy,
+  the tmp write, the tmp fsync, the rename) removes the staging copy or the
+  renamed revision and the tmp: no new revision, no `page.json.tmp`, and
+  page.json byte-identical (or still absent). The store's empty SKELETON
+  (the dashboard folder and its `.lock`) may remain after a failed first
+  publication and is not a change: it holds no revision and no pointer,
+  head and load answer no page over it, and a failing publisher never
+  removes it, because a concurrent publisher may hold or wait on that lock
+  (leader note 23). After the commit the publication has happened: nothing
+  the pointer names is deleted, and a folder-fsync error is a durability
+  `warning` on the answer (the CLI prints its ✓ line, then `warning: …` on
+  stderr), never a refusal. Collection runs only after a commit that synced,
+  and commits its own shortened page.json BEFORE it removes a folder, so
+  nothing page.json lists is ever deleted; a failure of that rewrite is the
+  same warning (`a_fault_in_collections_rewrite_is_a_warning_and_deletes_nothing_listed`). `a_fault_at_any_commit_step_leaves_the_old_store_or_a_complete_new_page`
+  injects EIO at each step, for publish and unpublish.
+- **No reader can block.** `page.json`, its tmp and `.lock` are opened
+  `O_NOFOLLOW | O_NONBLOCK` and must fstat as regular files; a FIFO, a
+  folder or a link is an error at once for every verb (F3), and an
+  unreadable store is `page_error` in the dashboard read.
+- **The first creation is idempotent** (F4): `mkdir` answering EEXIST is
+  accepted when what is there opens as a folder, so concurrent first
+  publications all succeed and the last wins.
+- **The wide-root gate is the door's own** (S1): `rpc::too_wide_root`, the
+  ONE check `fs_preview_base` uses (`/` and the canonical home folder are
+  never a root). A project whose folder is one of them gets no page: publish
+  refuses, and the head and the load are "no page".
+- **Load and publish are serialized (AC2).** `page_load` reads the pointer,
+  reads index.html from the revision's own handle and mints the cap
+  (`download::scope_base`) inside the SAME flock. A revision is therefore
+  retired no earlier than any cap minted for it, and collected no earlier
+  than that cap expires. `a_publication_racing_a_load_waits_for_its_mint`
+  starts a publication from inside the mint and fails when the mint is moved
+  outside the lock (measured: the mutation turns it red). The unseamed
+  stress test beside it checks the same invariant over 120 loads and 45
+  publications, but its windows are too small to catch the mutation alone.
+- **Collection uses the door's own lifetime.** At each publish and unpublish,
+  a revision retired at least `DL_STREAM_TTL_SECS` ago goes, folder and
+  entry, however many publications came between; `page.json` lists only
+  live revisions (R7). An unlisted numbered folder or staging folder (a
+  crash between the rename and the write) goes once its own mtime is that
+  old, so nothing a loaded document could still read is removed.
+- **A symlink is no page.** The store, the revision folder and index.html are
+  reached from the project root's handle with nothing followed
+  (`safe_fs::Dir`); a link at any step reads as no page in both the head and
+  the load, and a publish refuses to write through a linked store.
+- **Depth is part of the contract.** A revision is `.tmm/dashboard/<N>`, three
+  below the root, so a page reaches a project file as
+  `../../../<path from the project root>` (leader, Q1). The help, the skill
+  and the prompt sentence each show it; `a_revision_sits_three_folders_below_the_project_root`
+  fails if the layout changes.
+- **The publisher** is `human` or a managed agent of the project, resolved
+  and checked as `hub_ask`'s `from` (R8).
+- **The head rides the dashboard read.** `hub_dashboard` carries `page`
+  (`{rev, by, at}` or null) from an unlocked read of `page.json` (renames are
+  atomic); a store that cannot be read is `page_error`, never "no page"
+  (§ Could not ask). It only says a newer revision exists; the load reads
+  again under the lock.
+- **Not a transfer.** The #134 limiter caps the person's downloads and
+  uploads; a page's pictures and media are the browser's subresource loads
+  through the scope door, as in any Files HTML preview, and are not counted.
+
+### The section (client)
+
+`hub/ProjectPage.svelte` draws it and `hub/project-page.ts` holds its logic
+(pure, tested); `Dashboard.svelte`, `Board.svelte` and `App.svelte` take
+wiring only.
+
+- **The frame is the Files preview's** (#433): `preparePreview` with ONE
+  extra argument, the base sheet, placed after the policy, base and review
+  style and before the author's head; same srcdoc, `sandbox="allow-same-origin"`,
+  no scripts, same door. Links are the pipeline's one mechanism
+  (file-handling.md § An HTML preview's links), opening files through the
+  App's Files jump with `jumpedFrom = 'board'`: in the phone layout Back
+  returns to the Dashboard (two steps from a file preview: the preview, then
+  the folder, as for a path opened from chat); a desktop browser's Back is
+  the browser's.
+- **The app's look** (AC4): `pageSheet` writes the CURRENT computed values of
+  `PAGE_TOKENS` (colours, the three font roles, the type steps, two radii)
+  and an element sheet that uses only them. A live theme switch rewrites that
+  one `<style data-tmm-base>` inside the kept document (a MutationObserver on
+  `<html data-theme>`); the srcdoc never changes. The frame ELEMENT's
+  `color-scheme` follows the same switch: when it differs from its document's,
+  Chromium paints an opaque canvas behind the page (measured). The bundled
+  webfonts do not reach the frame (its policy admits fonts from the door and
+  `data:` only), so each role falls back along the app's own stack, CJK
+  included (leader, Q3); embedding the faces as `data:` fonts is the
+  follow-up if the owner wants them.
+- **One scroll** (AC5): the frame's height is its document's block, measured
+  at load and by a ResizeObserver on the document and the frame; a document
+  being replaced reads 0 and keeps the last height, so the Dashboard's scroll
+  is never clamped. The kept Dashboard wrapper (`.dash-keep`) is the page's
+  ONE scroller.
+- **Kept, never moved** (AC6, § 9): Board mounts the Dashboard whenever the
+  server offers it and hides it (the `hidden` attribute on its wrapper) under
+  the Board view, an issue or the create form; App hides the Board page on
+  another tab. The #109 sections follow their HIDDEN rules then (leader Q5).
+  Media keeps playing while hidden (Q4).
+- **One adoption rule** (`decide`, AC6 as amended by Q2): no document loads
+  the newest; a newer revision, or a document past its cap's expiry, is
+  loaded only when no field is edited and no media plays (scroll kept);
+  otherwise the header names the LOADED revision's publisher and offers
+  Refresh ("A newer page by X is waiting." / "out of date"). Refresh on an
+  edited page asks the app's discard confirm.
+- **Every decision reads the live document** (leader note 31, validator
+  F1/F2). `editedNow()` and `busyNow()` in ProjectPage are THE answers: the
+  Board's doors (a project pick, the silent follow, a server switch's leave
+  guard, the discard note) call `editedNow` through `onGuard`; Refresh calls
+  it; an adoption calls `busyNow` again when its awaited load ANSWERS, and if
+  the page became busy meanwhile the answer is dropped and the newer revision
+  stays offered (a confirmed Refresh is the one load that applies anyway).
+  The flag read on the page clock is for the header and to re-run a reactive
+  gate only. WebKit delivers no in-frame event to the app, so nothing here
+  listens inside the frame.
+- **"Edited" is against the page as it loaded** (F3): the parent snapshots
+  every control's value / checked / selected state at the frame's load and
+  compares against it, because an untouched first option, range or colour has
+  a value and no default attribute in Chromium and WebKit (measured: 6 of 12
+  native cases were false edits before; 0 of 24 now, both engines).
+- **Pending work belongs to its frame** (S1): a project or server change and
+  the unmount stop the frame's link watcher; a link seen and waiting for its
+  own back is dropped with its frame (and its own-back mark ends), and a link
+  is routed only by the generation and with the opener and folder captured
+  when its frame loaded. The Files preview's watcher drops a pending link the
+  same way when its frame leaves the document (a file or server change).
+- **The cap's expiry** is the segment right after the door's own prefix on
+  that connection (`capExpiry(url, prefix)`), never the first `/dl/s/<digits>/`
+  in the URL: a proxy prefix may hold one (F4).
+- **Owners** (AC7): a load belongs to (api, session); a project switch or a
+  new api drops a late answer; `page_error` keeps the last head; no head
+  means no section.
+
+### AC8: which backends can publish from their sandbox
+
+Per backend (leader ruling, #111 note 29), with `node scripts/live-docker.mjs
+page` as the measurement (each agent told to make `page-<backend>/index.html`
+in its working directory with its own shell tool and run `tmm dashboard
+publish`; the store must name the agent):
+
+| backend | result | how we know |
+|---|---|---|
+| codex | can publish | MEASURED: the live check; the revision named `pgcodex` |
+| claude | can publish | MEASURED: the live check; `pgclaude` |
+| pi | can publish | MEASURED: the live check; pane `/work/live`, `✓ published revision 3 of live's page` |
+| dsh | can publish | MEASURED by validator (#111 note 10): a managed dsh 0.2.0-rc.2 bash tool published and unpublished, against a scripted model |
+| omp | can publish | NOT TESTED: its provider host was unreachable from the rig (`getaddrinfo ENOTFOUND`), so it never ran a tool. INFERRED from the design |
+| kiro | can publish | NOT TESTED: not in the live image. INFERRED from the design |
+| kimi | can publish | NOT TESTED: not in the live image. INFERRED from the design |
+
+The inference: the SERVER is the only writer of the store and reads the
+bundle itself, so a publish needs from the agent exactly what `tmm send` and
+`tmm board` need, to run `tmm` and reach the gateway, which every managed
+backend does as the bridge's third primitive. Cited from the launch recipes
+too: every managed backend runs its tools unconfined (codex
+`--dangerously-bypass-approvals-and-sandbox`, claude
+`--dangerously-skip-permissions`, kiro `--trust-all-tools`, omp
+`--auto-approve`, kimi `--auto`, dsh `DSH_PERMISSION_MODE=danger-full-access`).
+A folder the SERVER cannot see (a CLI's private temp) is refused with the
+path named and nothing written: `tmm: /nope: No such file or directory (os
+error 2); nothing was published` (the rig's gateway).
+
+### The probe page (AC9 b): the native check
+
+`scripts/fixtures/project-page-probe/` is #110's hostile and render probes
+as ONE page a person can read: every attempt in it to run (inline and
+external script, SVG onload and script, event handlers, a nested frame) or
+to load from another site (a picture, a CSS background, a web font, an
+`@import`) would visibly mark it, and a clean probe reads "nothing ran,
+nothing left". Publish it with `tmm dashboard publish
+scripts/fixtures/project-page-probe` from a project on the owner's server
+and open the Dashboard on the phone and the Mac. Rig result (Chromium and
+WebKit): every row "did not run", every request to another origin blocked by
+the policy (Chromium reports `csp`), the in-bundle picture and sound through
+the door. The native result is the owner's look, recorded on #111.
+
 ## Not here
 
-The bell and the bubble (#107, hub-feed.md), the project page (#111).
+The bell and the bubble (#107, hub-feed.md); page actions (#112).

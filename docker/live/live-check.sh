@@ -19,6 +19,9 @@
 #                      most under busy loops on every core: each line is one prompt its hook
 #                      reports, confirmed and answered; then a line sent to a busy queue-mode codex
 #                      waits for the turn and arrives once. A failing round prints its frames.
+#   live-check page    board #111 AC8: codex, claude, pi and omp each run `tmm dashboard publish` from
+#                      their own working directory with their own shell tool; the store must name
+#                      the agent. Not run here: kiro and kimi (not installed), dsh (its stand-in).
 #   live-check write-guard   board #117: codex, claude, pi and omp are each sent a long line (800
 #                      characters) and a three-line line through the guarded write (if-shell -F on
 #                      the observed server, pane and process): each arrives once and whole, its row
@@ -68,7 +71,7 @@
 #                      Escape closes it.
 set -euo pipefail
 check="${1:-smoke}"
-case "$check" in smoke|codex-models|codex-provider|codex-start|write-guard|pi|pi-tools|asks|pi-paste|pi-start|dsh-tools|omp-tools|codex-limit|codex-picker) ;; *) echo "live-check: unknown check '$check' (known: smoke, codex-models, codex-provider, codex-start, write-guard, pi, pi-tools, asks, pi-paste, pi-start, dsh-tools, omp-tools, codex-limit, codex-picker)" >&2; exit 2 ;; esac
+case "$check" in smoke|codex-models|codex-provider|codex-start|write-guard|pi|pi-tools|asks|pi-paste|pi-start|dsh-tools|omp-tools|codex-limit|codex-picker|page) ;; *) echo "live-check: unknown check '$check' (known: smoke, codex-models, codex-provider, codex-start, write-guard, pi, pi-tools, asks, pi-paste, pi-start, dsh-tools, omp-tools, codex-limit, codex-picker, page)" >&2; exit 2 ;; esac
 
 cfg="$HOME/.config/teammux"
 mkdir -p "$cfg" /work/live
@@ -621,6 +624,48 @@ if [ "$check" = codex-provider ]; then
   case "$(pane_cmd)" in bash|zsh|sh|dash) echo "live-check: codex-provider: FAIL (agreeing layers: a shell, not codex)"; rc=1 ;; esac
   if ask gamma; then echo "live-check: codex-provider: agreeing layers: it answered gamma"; else echo "live-check: codex-provider: FAIL (agreeing layers: no answer)"; rc=1; fi
   tmm agent list --project live
+  exit $rc
+fi
+
+if [ "$check" = page ]; then
+  # Board #111 AC8: can each installed real CLI run `tmm dashboard publish` from its own working
+  # directory, inside whatever sandbox its managed launch runs it in? Each agent is asked to make a
+  # page folder there with its own shell tool and publish it; the store must then name THAT agent
+  # and hold its marker. kiro and kimi are not in this image (said, not omitted); dsh's tool calls
+  # need a model here (its stand-in is scripted for #87's commands only).
+  [ -f "$HOME/.codex/config.toml" ] || { echo "live-check: page: skipped: ~/.codex/config.toml not staged"; exit 2; }
+  pi_user
+  rc=0
+  ok() { echo "live-check: page: $1"; }; bad() { echo "live-check: page: FAIL ($1)"; rc=1; }
+  idle() { tmm agent list --project live | grep -q "$1 \[[a-z]*\] idle"; }
+  for b in codex claude pi omp; do
+    w=pg$b; extra=""; [ $b = pi ] && extra="--model ust/claude-haiku-5-5 --effort low"
+    tmm registry save --name "$w" --backend "$b" $extra --system "Live check agent. Do exactly what you are asked." >/dev/null
+    tmm spawn "$w" --project live >/dev/null
+    end=$((SECONDS + 120)); until idle "$w" || [ $SECONDS -ge $end ]; do sleep 1; done
+    tmm send --project live "@$w Run exactly these shell commands in your working directory, then reply with the single word done: pwd; mkdir -p page-$b && printf '<h1>PAGE-$b-111</h1>' > page-$b/index.html && tmm dashboard publish page-$b" >/dev/null
+    end=$((SECONDS + 240)); until python3 - "$w" "$b" <<'PY' 2>/dev/null || [ $SECONDS -ge $end ]; do sleep 2; done
+import json, sys, pathlib
+w, b = sys.argv[1], sys.argv[2]
+d = pathlib.Path('/work/live/.tmm/dashboard')
+m = json.loads((d / 'page.json').read_text())
+cur = next(r for r in m['revisions'] if r['rev'] == m['current'])
+sys.exit(0 if cur['by'] == w and f'PAGE-{b}-111' in (d / str(cur['rev']) / 'index.html').read_text() else 1)
+PY
+    if python3 - "$w" "$b" <<'PY'
+import json, sys, pathlib
+w, b = sys.argv[1], sys.argv[2]
+d = pathlib.Path('/work/live/.tmm/dashboard')
+m = json.loads((d / 'page.json').read_text())
+cur = next(r for r in m['revisions'] if r['rev'] == m['current'])
+sys.exit(0 if cur['by'] == w and f'PAGE-{b}-111' in (d / str(cur['rev']) / 'index.html').read_text() else 1)
+PY
+    then ok "$b: published from its working directory (revision by $w holds PAGE-$b-111)"
+    else bad "$b: no revision by $w"; fi
+    echo "live-check: page: --- $w pane:"; tmux capture-pane -p -S -60 -t "$(tmux list-panes -a -F '#{pane_id} #{window_name}' | awk -v w="$w" '$2==w{print $1; exit}')" | grep -v '^\s*$' | tail -14 | sed 's/^/    |/'
+    tmm agent remove "$w" --project live >/dev/null || true
+  done
+  [ $rc = 0 ] && echo "live-check: page: PASS"
   exit $rc
 fi
 

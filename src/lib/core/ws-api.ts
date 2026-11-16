@@ -748,6 +748,20 @@ export function createWsApi(connection: Connection) {
     });
   }
 
+  /** The project page (board #111, cap `dashboard_page`): the current
+   * revision, its document and its door, read and minted in ONE server
+   * operation. The base gets this connection's origin and the door's prefix,
+   * exactly as `fsPreviewBase`'s does. */
+  function pageLoad(session: string) {
+    const origin = connection.url();
+    return call<{ page: null | { rev: number; by: string; at: number; html: string; dir: string; base: string } }>('page_load', { session }).then(({ page }) => {
+      if (!page) return null;
+      if (!page.base.startsWith('/dl/s/')) throw new Error('page_load: not a scope path');
+      const http = httpOriginForWs(origin!);
+      return { ...page, scope: { url: http + page.base, prefix: http + '/dl/s/' } };
+    });
+  }
+
   return {
     reviewList, reviewAdd, reviewUpdate, reviewDelete, reviewFeedback,
     listSessions, listPanes, listSessionsWithPanes, capturePane, sendKeys, pasteText,
@@ -763,7 +777,7 @@ export function createWsApi(connection: Connection) {
     hubTeamRestart, hubTeamRemove, registryList, registrySave, registryDelete, globalPromptGet,
     globalPromptSet, teamsList, teamsSave, teamsDelete, backendsList, backendsCheck, modelsList, skillsList,
     skillsSave, skillsDelete, skillsRefresh, skillsRead, skillsImport, skillsFiles,
-    skillsFile, mcpList, mcpSave, mcpDelete, fsDownloadHttp, fsPreviewBase,
+    skillsFile, mcpList, mcpSave, mcpDelete, fsDownloadHttp, fsPreviewBase, pageLoad,
   };
 }
 
@@ -815,7 +829,7 @@ export const RPC_KIND = {
   getBookmarks: 'read', saveBookmarks: 'write', getPrefs: 'read', setPref: 'write',
   fsCwd: 'read', fsList: 'read', fsStat: 'read', fsRead: 'read',
   fsWrite: 'write', fsMkdir: 'write', fsDelete: 'write', fsRename: 'write',
-  fsDownload: 'read', fsDownloadUrl: 'read', fsDownloadHttp: 'read', fsPreviewBase: 'read',
+  fsDownload: 'read', fsDownloadUrl: 'read', fsDownloadHttp: 'read', fsPreviewBase: 'read', pageLoad: 'read',
   fsUploadBegin: 'write', fsUploadResume: 'write', fsUploadAbort: 'write', fsConvert: 'read', gitCmd: 'write',
   projectList: 'read', projectCreate: 'write', projectAdopt: 'write', projectUp: 'write',
   projectDown: 'write', projectRename: 'write', projectArchive: 'write', projectDelete: 'write',

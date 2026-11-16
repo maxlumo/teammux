@@ -693,7 +693,8 @@ test('every destructive/discarding path confirms through the SHARED dialog (boar
   // SAME neutral dialog, a confirmed discard truly clears the form, and a
   // clean form navigates silently.
   assert.match(source, /const createDirty = \$derived\(creating && \(!!\(nTitle\.trim\(\) \|\| nBody\.trim\(\) \|\| nAssignee\) \|\| holds\(createStage\)\)\);/u);
-  assert.match(source, /if \(dirty \|\| noteDirty \|\| createDirty\) pendingDiscard = action;/u, 'ONE guard covers both kinds of unsaved work');
+  assert.match(source, /if \(dirty \|\| noteDirty \|\| createDirty \|\| pageDirty\(\)\) pendingDiscard = action;/u, 'ONE guard covers every kind of unsaved work, the project page\u2019s edited fields read LIVE (#111, leader note 31)');
+  assert.match(source, /const pageDirty = \(\) => pageEdited \|\| !!pageEditedNow\?\.\(\);/u, 'the cached flag OR the live document, never the flag alone');
   assert.match(source, /aria-label=\{t\('cancel'\)\} onclick=\{\(\) => guard\(\(\) => \(creating = false\)\)\}/u,
     'the create form\u2019s explicit cancel goes through the guard');
   assert.match(source, /if \(creating && createDirty\) \{ pendingDiscard = \(\) => \{ creating = false; \}; e\.stopPropagation\(\); return; \}/u,
@@ -706,8 +707,8 @@ test('every destructive/discarding path confirms through the SHARED dialog (boar
     'a confirmed discard actually clears the create fields');
   assert.match(source, /<ConfirmDialog open=\{!!pendingDiscard\} danger=\{false\} compact=\{narrowVp\}/u,
     'discard confirms in neutral tone, phone-sheet aware');
-  assert.match(source, /note=\{creating \? t\('boardCreateDiscardNote'\) : t\('boardDiscardNote'\)\}/u,
-    'the words say WHAT is lost — an uncreated issue is not an unsaved edit');
+  assert.match(source, /note=\{creating \? t\('boardCreateDiscardNote'\) : !sel && !!pendingDiscard && pageDirty\(\) \? t\('dashPageDiscardNote'\) : t\('boardDiscardNote'\)\}/u,
+    'the words say WHAT is lost — an uncreated issue is not an unsaved edit, nor is a field typed in the project page (#111)');
   // No second confirmation species: no browser confirm(), no hand-rolled modal.
   assert.ok(!/window\.confirm|[^.\w]confirm\(/u.test(source), 'no browser confirm');
   assert.equal([...source.matchAll(/<ConfirmDialog /g)].length, 2, 'exactly the two shared dialogs');
@@ -716,8 +717,8 @@ test('every destructive/discarding path confirms through the SHARED dialog (boar
   // and wipe it with no dialog at all. The gate blocks on BOTH kinds of
   // unsaved work and resumes the moment they clear; the other cur writes are
   // guard-wrapped (pick, the feed jump) or fire only while no board shows.
-  assert.match(source, /\$effect\(\(\) => \{ if \(session && \(!picked \|\| !cur\) && !dirty && !noteDirty && !createDirty && !submitting\) cur = session; \}\);/u,
-    'the follow gate blocks dirty AND createDirty');
+  assert.match(source, /\$effect\(\(\) => \{ if \(session && \(!picked \|\| !cur\) && !dirty && !noteDirty && !createDirty && !pageEdited && !untrack\(pageDirty\) && !submitting\) cur = session; \}\);/u,
+    'the follow gate blocks dirty AND createDirty, and a project page with edited fields (#111)');
 });
 
 test('titles are optional, and the WIRING honors it — not just the pure helpers (board #31)', () => {

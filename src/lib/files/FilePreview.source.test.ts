@@ -13,7 +13,9 @@ test('the preview body uses the one safe markdown renderer and the shared host p
   assert.match(source, /onclick=\{previewLinkClick\} onauxclick=\{previewLinkClick\}/u);
   assert.match(source, /sandbox="allow-same-origin"/u);
   assert.doesNotMatch(source, /allow-scripts/u);
-  assert.match(source, /onload=\{attachHtmlPreviewLinks\}/u);
+  // Board #111: each load hands the watcher the PARENT's link table.
+  assert.match(source, /onload=\{\(\) => attachHtmlPreviewLinks\(htmlLinks\)\}/u);
+  assert.match(source, /const p = preparePreview\(content, scope\); htmlLinks = p\.links; htmlSrcdoc = p\.html;/u);
   // Board #433: the frame shows only the based document, never raw content.
   assert.match(source, /\{#if htmlSrcdoc != null\}\s*<iframe[\s\S]*?srcdoc=\{htmlSrcdoc\}/u);
   assert.doesNotMatch(source, /srcdoc=\{currentFile/u);

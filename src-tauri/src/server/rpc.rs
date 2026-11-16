@@ -524,6 +524,11 @@ fn dispatch(req: &Request, token: &str) -> Result<serde_json::Value, RpcError> {
             Ok(serde_json::json!({ "base": base }))
         }
 
+        // The project page (board #111): publish, take down, and the load that
+        // reads the pointer and mints the door in ONE critical section.
+        #[cfg(all(unix, not(any(target_os = "android", target_os = "ios"))))]
+        "page_publish" | "page_unpublish" | "page_load" => super::page_rpc::handle(req.method.as_str(), p, token),
+
         "fs_upload_begin" => {
             // The HTTP upload channel (board #23): the destination and the
             // size are fixed HERE, through the one upload validator.
@@ -613,6 +618,14 @@ pub(super) fn handle_request(req: &Request, token: &str) -> Response {
 }
 
 
+/// THE wide-root gate of the scope door (board #433; the project page's cap
+/// too, #111): `/` and the canonical home directory are never a root. `p` is
+/// canonical.
+pub(super) fn too_wide_root(p: &std::path::Path) -> bool {
+    let home = dirs::home_dir().and_then(|h| std::fs::canonicalize(h).ok());
+    p == std::path::Path::new("/") || home.as_deref() == Some(p)
+}
+
 /// Where an HTML preview's cap is rooted (board #433), and the HTML's
 /// directory below that root, both CANONICAL: the longest declared project
 /// path that contains the file, else the file's own directory. A root of `/`
@@ -635,8 +648,7 @@ fn preview_scope(path: &str, projects: &[String]) -> Result<(String, Vec<String>
         return Err(format!("{path}: not an HTML file"));
     }
     let parent = html.parent().ok_or_else(|| format!("{path}: no directory"))?.to_path_buf();
-    let home = dirs::home_dir().and_then(|h| std::fs::canonicalize(h).ok());
-    let too_wide = |p: &std::path::Path| p == std::path::Path::new("/") || home.as_deref() == Some(p);
+    let too_wide = too_wide_root;
     let declared = projects.iter()
         .filter_map(|p| std::fs::canonicalize(rfs::expand_path(p)).ok())
         .filter(|p| parent.starts_with(p) && !too_wide(p))

@@ -38,7 +38,7 @@
   import { feedbackPosition } from '../ui/feedback-position.ts';
   import { copyText } from '../core/clipboard.ts';
   import { scheduleCompletion } from '../ui/feedback-lifetime.ts';
-  import { ASKS, BOARD_AGREEMENT, BOARD_BLOCKS, BOARD_DISPATCH, DASHBOARD, lacksCap } from '../core/login-caps.ts';
+  import { ASKS, BOARD_AGREEMENT, BOARD_BLOCKS, BOARD_DISPATCH, DASHBOARD, DASHBOARD_PAGE, lacksCap } from '../core/login-caps.ts';
   import { draftOf, draftDirty, draftValid, draftPatch, isSubmitChord, rebaseDraft, issueRef, countsOf, applyCounts, visibleBoards, roomOf, boardTitle, chipCols, assigneeView, rememberBackends } from './board.ts';
   import { messageActsSet, messageActsCopyLanded, messageActsCopyFailed, messageActsExpired, MESSAGE_ACTS_IDLE, type MessageActsState } from './message-actions.ts';
   import { scrollFade } from '../core/scrollFade.ts';
@@ -131,7 +131,7 @@
    * the host's (`onPickServer`: focus that server, land on that board — D2);
    * the board body stays this server's (D3). Null in Single: this server's
    * list, untagged, as before. */
-  let { session = '', visible = true, onGoBack = null, issueRequest = null, embedded = false, createRequest = null, jumped = false, sideCollapsed = false, guardPage = '', union = null, scopeNote = null, onPickServer = null, onOpenAgent = null, onJumpMessage = null, onOpenChat = null, onReselect = null, onSideOpen = null }: { onReselect?: ((fn: (() => void) | undefined) => void) | null; onSideOpen?: ((open: boolean) => void) | null; onOpenAgent?: ((session: string, agent: string) => void) | null; onJumpMessage?: ((session: string, m: { seq?: number; id?: number | string; discuss?: boolean }) => void) | null; onOpenChat?: ((session: string) => void) | null; guardPage?: string; session?: string; visible?: boolean; onGoBack?: ((fn: () => boolean) => void) | null; issueRequest?: { session: string; id: number; n: number } | null; embedded?: boolean; createRequest?: { n: number } | null; jumped?: boolean; sideCollapsed?: boolean; union?: { source: BoardUnion; included: readonly { id: string; name: string }[] } | null; scopeNote?: ScopeNoteSpec | null; onPickServer?: ((ref: SessionRef) => void) | null } = $props();
+  let { session = '', visible = true, onGoBack = null, issueRequest = null, embedded = false, createRequest = null, jumped = false, sideCollapsed = false, guardPage = '', union = null, scopeNote = null, onPickServer = null, onOpenAgent = null, onJumpMessage = null, onOpenChat = null, onOpenFile = null, onReselect = null, onSideOpen = null }: { onOpenFile?: ((session: string, path: string) => void) | null; onReselect?: ((fn: (() => void) | undefined) => void) | null; onSideOpen?: ((open: boolean) => void) | null; onOpenAgent?: ((session: string, agent: string) => void) | null; onJumpMessage?: ((session: string, m: { seq?: number; id?: number | string; discuss?: boolean }) => void) | null; onOpenChat?: ((session: string) => void) | null; guardPage?: string; session?: string; visible?: boolean; onGoBack?: ((fn: () => boolean) => void) | null; issueRequest?: { session: string; id: number; n: number } | null; embedded?: boolean; createRequest?: { n: number } | null; jumped?: boolean; sideCollapsed?: boolean; union?: { source: BoardUnion; included: readonly { id: string; name: string }[] } | null; scopeNote?: ScopeNoteSpec | null; onPickServer?: ((ref: SessionRef) => void) | null } = $props();
   // The Dashboard view (board #109): the page head's Dashboard · Board switch,
   // remembered per device, Dashboard by default (owner's D2), only on a server
   // that announces `dashboard`, never in the Hub drawer's embedded board.
@@ -148,6 +148,18 @@
   let asksCap = $state(Array.isArray(capsAtMount) && capsAtMount.includes(ASKS));
   $effect(() => { if (Array.isArray(loginCaps)) asksCap = loginCaps.includes(ASKS); });
   const setBoardView = (v: BoardView) => { boardView = v; rememberBoardView(v); };
+  // The project page (board #111) needs the server's `dashboard_page`; and the
+  // Dashboard is KEPT MOUNTED while the Board view, an issue or the create
+  // form is on screen (hidden, never moved: its page's frame would reload,
+  // board-dashboard.md § 9; leader Q5), so it follows its hidden rules.
+  let pageCap = $state(Array.isArray(capsAtMount) && capsAtMount.includes(DASHBOARD_PAGE));
+  $effect(() => { if (Array.isArray(loginCaps)) pageCap = loginCaps.includes(DASHBOARD_PAGE); });
+  /** The project page holds a field the person edited: unsaved work for the
+   * Board's one discard guard, like a dirty edit. */
+  let pageEdited = $state(false);
+  /** The page's LIVE read: every door below decides on it, never on the cached flag (leader note 31). */
+  let pageEditedNow = $state<(() => boolean) | null>(null);
+  const pageDirty = () => pageEdited || !!pageEditedNow?.();
 
   // The project sidebar follows the shell-wide collapse (board #200) with the
   // Hub's reveal: pinned at its width, the track's factor moving (reveal.ts).
@@ -207,7 +219,7 @@
   // ConfirmDialog. The board keeps its current project until the user
   // explicitly cancels/creates/saves; the effect reads both flags, so the
   // moment they clear it follows again.
-  $effect(() => { if (session && (!picked || !cur) && !dirty && !noteDirty && !createDirty && !submitting) cur = session; });
+  $effect(() => { if (session && (!picked || !cur) && !dirty && !noteDirty && !createDirty && !pageEdited && !untrack(pageDirty) && !submitting) cur = session; });
   // A jump from the feed's board line (board #13 follow-up): the request names
   // its OWN session — a manual pick may have parked this page on another
   // project, and the issue id is session-gated. The dirty-draft guard still
@@ -469,6 +481,7 @@
   // view: the list, one issue (with its note thread), or the new-issue form.
   let sel = $state<BoardIssue | null>(null);
   let creating = $state(false);
+  const dashShown = $derived(dashOffered && boardView === 'dashboard' && !sel && !creating && !!cur);
   // Drill motion (design-language.md §1 navigation grammar, motion.md): on a
   // phone the detail takes the screen, so it enters from the right and the
   // columns re-enter from the left — 120ms linear, same as AgentsPage, and
@@ -615,10 +628,10 @@
   $effect(() => registerLeaveGuard({
     runtime: guardOwner,
     page: guardPage,
-    dirty: () => untrack(() => busy || dirty || noteDirty || createDirty),
+    dirty: () => untrack(() => busy || dirty || noteDirty || createDirty || pageDirty()),
     ask: async () => {
       while (alive && untrack(() => busy)) await new Promise((r) => setTimeout(r, 50));
-      if (!alive || !untrack(() => dirty || noteDirty || createDirty)) return true;
+      if (!alive || !untrack(() => dirty || noteDirty || createDirty || pageDirty())) return true;
       await tick(); // the revealed layer is visible before the dialog asks
       return new Promise<boolean>((resolve) => {
         endLeaveAsk = resolve;
@@ -629,7 +642,7 @@
   /** Run now, or park behind the discard confirm when unsaved work exists. */
   function guard(action: () => void) {
     if (submitting) return; // a request is running: its editor is locked, nothing leaves under it
-    if (dirty || noteDirty || createDirty) pendingDiscard = action;
+    if (dirty || noteDirty || createDirty || pageDirty()) pendingDiscard = action;
     else action();
   }
 
@@ -1272,15 +1285,21 @@
   </div>
   {/if}
   <div class="board" class:drill-fwd={drillAnim === 'fwd'} class:drill-back={drillAnim === 'back'}>
-  {#if dashOffered && boardView === 'dashboard' && !sel && !creating && cur}
+  {#if dashOffered && cur}
+    <div class="dash-keep" hidden={!dashShown}>
     <Dashboard api={guardOwner.api} connected={Array.isArray(loginCaps)} now={projectTick} session={cur}
-      asksOn={asksCap} slots={allProjects.find((p) => p.project.session === cur)?.slots ?? []}
-      listen={(fn) => { guardOwner.connection.addTeamMessageListener?.(fn); return () => guardOwner.connection.removeTeamMessageListener?.(fn); }} room={roomOf(allProjects.find((p) => p.project.session === cur)?.project ?? { session: cur })} {visible}
+      asksOn={asksCap} pageOn={pageCap} compact={narrowVp} slots={allProjects.find((p) => p.project.session === cur)?.slots ?? []}
+      listen={(fn) => { guardOwner.connection.addTeamMessageListener?.(fn); return () => guardOwner.connection.removeTeamMessageListener?.(fn); }} room={roomOf(allProjects.find((p) => p.project.session === cur)?.project ?? { session: cur })} visible={visible && dashShown}
       onOpenBoard={() => setBoardView('board')}
       onOpenAgent={(a) => onOpenAgent?.(cur, a)}
       onJump={(m) => onJumpMessage?.(cur, m)}
-      onOpenChat={() => onOpenChat?.(cur)} />
-  {:else if !ready && !issues.length}
+      onOpenChat={() => onOpenChat?.(cur)}
+      onOpenFile={(path) => onOpenFile?.(cur, path)}
+      onPageEdited={(e) => { pageEdited = e; }} onPageGuard={(fn) => { pageEditedNow = fn; }} />
+    </div>
+  {/if}
+  <!-- The Dashboard above is the view while it is shown; sel and creating are never shown with it. -->
+  {#if !dashShown && !ready && !issues.length}
     <div class="empty">…</div>
   {:else if sel}
     <!-- ── one issue: the note thread is the issue's own record ── -->
@@ -1534,7 +1553,7 @@
         <AttachStrip pending={createStage.pending} onremove={(i) => { if (!submitting) createStage.remove(i); }} onpreview={(u) => showShot(viewerOpen(u))} />
       </div>
     </div>
-  {:else}
+  {:else if !dashShown}
     <!-- ── the board: four fixed columns, cards in movement order ── -->
     <div class="cols">
       {#each STATUSES as s (s)}
@@ -1622,7 +1641,7 @@
   {/if}
   <ConfirmDialog open={!!pendingDiscard} danger={false} compact={narrowVp}
     confirmIcon="check"
-    title={t('confirmDiscardTitle')} note={creating ? t('boardCreateDiscardNote') : t('boardDiscardNote')}
+    title={t('confirmDiscardTitle')} note={creating ? t('boardCreateDiscardNote') : !sel && !!pendingDiscard && pageDirty() ? t('dashPageDiscardNote') : t('boardDiscardNote')}
     confirmLabel={t('confirmDiscard')} cancelLabel={t('configKeepEditing')}
     onconfirm={() => {
       const go = pendingDiscard;
@@ -1693,6 +1712,9 @@
      the head spans full width like Chat's, the padding belongs to the content. */
   .bmain { display: flex; flex-direction: column; height: 100%; min-width: 0; overflow: hidden; }
   .note-feedback { position: fixed; z-index: 8; }
+  /* The kept Dashboard (board #111) is the page's ONE scroll: the project
+     page under it is as tall as its content. Hidden by its attribute. */
+  .dash-keep { flex: 1; min-height: 0; overflow-y: auto; -webkit-overflow-scrolling: touch; }
   .board {
     flex: 1;
     min-height: 0;

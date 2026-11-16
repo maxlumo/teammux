@@ -71,9 +71,13 @@ test('the Board tab opens on the Dashboard: Now, Notes for you, and never the re
     assert.deepEqual(agents, ['ops'], 'a row opens the chat with that agent');
     await app.advance(20_000); await flush(app);
     assert.equal(reads, 0, 'open, poll and a Notes tap never call hub_read');
-    // The count line opens the Board view, and the choice is remembered.
+    // The count line opens the Board view, and the choice is remembered. The
+    // Dashboard is HIDDEN, the same element, never torn down (#111, leader Q5):
+    // its project page's frame must not reload.
+    const view = d.querySelector('.dash');
     d.querySelector<HTMLElement>('.dash-line')!.click(); await flush(app);
-    assert.equal(d.querySelector('.dash'), null);
+    assert.equal(d.querySelector('.dash'), view, 'the same Dashboard element');
+    assert.ok(view!.closest('[hidden]'), 'hidden under the Board view');
     assert.equal(app.window.localStorage.getItem('tmux_board_view'), 'board');
   } finally { await app.close(); }
 });
@@ -325,10 +329,10 @@ test('the Dashboard s teardown retires a queued entry read: settling the old rea
     await flush(app);
     await app.setProps({ visible: false }); await flush(app);
     await app.setProps({ visible: true }); await flush(app); // an entry read queued behind the held one
-    app.document.querySelector<HTMLElement>('.page-head .segmented button:last-child')!.click(); await flush(app); // the Board view: the Dashboard is gone
-    assert.equal(app.document.querySelector('.dash'), null);
+    app.document.querySelector<HTMLElement>('.page-head .segmented button:last-child')!.click(); await flush(app); // the Board view: the Dashboard is hidden (#111)
+    assert.ok(app.document.querySelector('.dash')!.closest('[hidden]'), 'kept, hidden');
     release(); await flush(app);
-    assert.equal(n, 1, 'no read starts after the view is gone');
+    assert.equal(n, 1, 'no read starts after the view is left');
   } finally { await app.close(); }
 });
 
@@ -565,7 +569,7 @@ test('a queued ask read never starts after the Dashboard is gone, or after its p
       await flush(app); // a full read queued behind the held first one
       if (leave === 'board view') {
         app.document.querySelector<HTMLElement>('.page-head .segmented button:last-child')!.click(); await flush(app);
-        assert.equal(app.document.querySelector('.dash'), null);
+        assert.ok(app.document.querySelector('.dash')!.closest('[hidden]'), 'kept, hidden (#111)');
       } else {
         await app.setProps({ session: 'other' }); await flush(app);
         assert.ok(releaseOther, 'the other project s snapshot is still pending');

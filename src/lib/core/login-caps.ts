@@ -52,6 +52,10 @@ export const OMP_TOOLS = 'omp_tools';
  * shows no ask chip and never asks. */
 export const DASHBOARD = 'dashboard';
 
+/** The project page's doors (board #111): `page_load` and the page head in
+ * `hub_dashboard`. Without it the Dashboard draws no project page. */
+export const DASHBOARD_PAGE = 'dashboard_page';
+
 /** An agent's question to the person, open until one explicit act closes it (boards #106, #107).
  * Without it the chat draws no ask affordance: an ask is then the plain message an older
  * client shows. */

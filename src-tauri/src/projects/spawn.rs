@@ -2291,6 +2291,7 @@ fn build_prompt_as(def: &RegAgent, name: &str, physical: &str, session: &str, gl
          - Use `tmm log --limit 50` for recent messages, `tmm log --grep <text> [--global]` to search history, and `tmm agent list` for participants. Read a queued backlog in full before replying once; when context is unclear, check the log or ask the relevant person.\n\
          - For a board issue, run `tmm board take <id>`, record progress with `tmm board note <id> \"...\"`, and hand off completed work with `tmm board move <id> review`.\n\
          - A question only the person can answer goes through `tmm ask \"question\" --option KEY=label … --recommend KEY`: one question, with its options and your recommendation. It stays open until the person closes it; never repeat an open ask. After a restart, read `tmm ask list --all`.\n\
+         - A project page is optional: `tmm dashboard publish <dir>` shows `<dir>/index.html` and its files, static, as the last section of the person's Dashboard; a project file is `../../../<path from the project root>`.\n\
          - Delegate independent parallel work with `tmm spawn <agent> --brief \"...\"` or `tmm spawn --team <team> --brief \"...\"`. State the objective, inputs, outputs, and completion criteria; results return automatically.\n\
          - With no message, wait. If tmm is temporarily unavailable, continue local work. Use `tmm --help` for the remaining commands."
     );
@@ -2743,6 +2744,8 @@ mod tests {
         assert!(prompt.contains("tmm send"), "the tmm paragraph IS the integration");
         // Board #106: the one door for a question to the person, never repeated.
         assert!(prompt.contains("goes through `tmm ask \"question\" --option KEY=label … --recommend KEY`") && prompt.contains("never repeat an open ask") && prompt.contains("`tmm ask list --all`"), "{prompt}");
+        // Board #111: the page is optional, and its one example of a project file.
+        assert!(prompt.contains("A project page is optional: `tmm dashboard publish <dir>`") && prompt.contains("`../../../<path from the project root>`"), "{prompt}");
         assert!(!prompt.contains("fix the bug"), "brief is delivered as the first user message");
         // Board #436: a kiro agent reads every delivered `@` as `＠`, and its
         // own config says so, as the last bullet of the collaboration flow.

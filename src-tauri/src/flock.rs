@@ -5,9 +5,10 @@
 //! loop and the startup-prompt waiters) keeps the description, close-on-exec or not, until
 //! its execve closes it. Closing our fd therefore did not release the lock in that window,
 //! and an acquire right after a release saw it held. `LOCK_UN` on drop releases it on the
-//! description itself, whatever a child still references. Every try-acquired lock whose
-//! release can be followed by an acquire that must succeed goes through this guard
-//! (the restore owner lock, the local socket's claim).
+//! description itself, whatever a child still references. Every lock whose release can be
+//! followed by an acquire that must succeed goes through this guard: try-acquired (the
+//! restore owner lock, the local socket's claim) or blocking (the project page store's
+//! lock, board #111).
 use std::fs::File;
 use std::os::unix::io::AsRawFd;
 
@@ -25,6 +26,20 @@ impl Flock {
         }
         let e = std::io::Error::last_os_error();
         if e.raw_os_error() == Some(libc::EWOULDBLOCK) { Ok(None) } else { Err(e) }
+    }
+
+    /// `LOCK_EX` on `file`, WAITING for another description to release it (EINTR retried).
+    pub(crate) fn exclusive(file: File) -> std::io::Result<Flock> {
+        loop {
+            // SAFETY: a valid open fd; flock has no other preconditions.
+            if unsafe { libc::flock(file.as_raw_fd(), libc::LOCK_EX) } == 0 {
+                return Ok(Flock { file });
+            }
+            let e = std::io::Error::last_os_error();
+            if e.raw_os_error() != Some(libc::EINTR) {
+                return Err(e);
+            }
+        }
     }
 
     /// The locked file (its contents are the holder's: the socket claim records its node).

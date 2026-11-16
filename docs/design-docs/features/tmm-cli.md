@@ -44,6 +44,9 @@ tmm ask "q" [--option KEY=label]… [--recommend KEY] [--issue N]   one question
                                      prints its id; open until closed; never repeated
 tmm ask list [--all] · tmm ask close <id> "why" [--re <seq>]   open asks (--all: closed, with answers);
                                      withdraw yours, citing a room message; never marks it answered
+tmm dashboard publish <dir> · tmm dashboard unpublish   the project page (#111): <dir>/index.html
+                                     and its files, static, the Dashboard's last section; the
+                                     server reads <dir>; a project file is ../../../<path>
 tmm task start <name> --wake [@who] -- <cmd>   wake @who (default: you) when it ends by itself
 tmm send "<text>" --status           ambient progress; room-only, interrupts nobody
 tmm scratch [--kill]                 the desktop's scratch terminal session (#324): ensure it
@@ -761,6 +764,7 @@ The rules behind each surface live next to their design, not here:
 | recipients, `/commands`, the palette, interrupt | [hub-composer.md](hub-composer.md) |
 | the task board (`hub_board_*`, `tmm board`) | [board.md](board.md) |
 | asks (`hub_ask*`, `tmm ask`) | [asks.md](asks.md) |
+| project page (`page_*`, `tmm dashboard publish\|unpublish`) | [dashboard.md § The project page](dashboard.md#the-project-page-board-111) |
 | spawn, isolated homes, registry, per-backend knowledge, AGENTS.md | [agents-overview.md](agents-overview.md) |
 | project lifecycle, restart/resume | [projects.md](projects.md) |
 

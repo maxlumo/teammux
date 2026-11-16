@@ -31,6 +31,8 @@ pub mod message_paths;
 pub mod model_refused;
 pub mod models;
 pub mod names;
+#[cfg(unix)]
+pub mod page;
 pub mod projects;
 pub(crate) mod recipe;
 pub mod reconcile;

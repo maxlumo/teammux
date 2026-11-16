@@ -1,0 +1,74 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<title>Project page probe</title>
+<!-- Board #111 (AC9 b): the probe page for the owner's own devices. Publish it
+     with `tmm dashboard publish scripts/fixtures/project-page-probe` and open
+     the Dashboard. Every attempt below to RUN something or to LOAD from
+     another origin would visibly mark this page: a clean probe reads
+     "nothing ran, nothing left". Built from #110's hostile and render probes. -->
+<base href="https://example.com/">
+<meta http-equiv="refresh" content="3;url=https://example.com/refreshed">
+<meta name="referrer" content="unsafe-url">
+<style>@import url("https://cdn.jsdelivr.net/npm/water.css@2/out/water.css");</style>
+<style>
+  .ok { font-weight: 600; }
+  .bad { font-weight: 700; text-decoration: underline; }
+  .remote-bg { min-height: 2.5em; border: 1px dashed currentColor; background-image: url("https://www.google.com/images/branding/googlelogo/1x/googlelogo_color_272x92dp.png"); background-repeat: no-repeat; }
+  @font-face { font-family: "probe-remote"; src: url("https://fonts.gstatic.com/s/pacifico/v22/FwZY7-Qmy14u9lezJ-6H6Mk.woff2") format("woff2"); }
+  .remote-font { font-family: "probe-remote", monospace; }
+</style>
+</head>
+<body onload="document.getElementById('v-body').textContent='RAN'">
+<h1>Project page probe</h1>
+<p id="verdict">Expected: every row of the first table says <span class="ok">did not run</span>, and
+every box of the second table is empty. Anything else is a finding: photograph it.</p>
+
+<h2>1. Nothing runs</h2>
+<table>
+  <thead><tr><th>attempt</th><th>result</th></tr></thead>
+  <tbody>
+    <tr><td>inline &lt;script&gt;</td><td id="v-inline" class="ok">did not run</td></tr>
+    <tr><td>&lt;script src&gt; beside the page</td><td id="v-ext" class="ok">did not run</td></tr>
+    <tr><td>&lt;svg onload&gt;</td><td id="v-svgonload" class="ok">did not run</td></tr>
+    <tr><td>&lt;script&gt; inside &lt;svg&gt;</td><td id="v-svgscript" class="ok">did not run</td></tr>
+    <tr><td>&lt;img onload&gt; / onerror</td><td id="v-img" class="ok">did not run</td></tr>
+    <tr><td>&lt;body onload&gt;</td><td id="v-body" class="ok">did not run</td></tr>
+    <tr><td>a nested &lt;iframe&gt; with a script</td><td id="v-inner" class="ok">did not run</td></tr>
+    <tr><td>meta refresh (3 s)</td><td class="ok">this page is still here</td></tr>
+  </tbody>
+</table>
+<script>for (const id of ['v-inline']) { const c = document.getElementById(id); c.textContent = 'RAN'; c.className = 'bad'; }</script>
+<script src="probe.js"></script>
+<svg onload="var c=document.getElementById('v-svgonload');c.textContent='RAN';c.setAttribute('class','bad')" width="1" height="1"></svg>
+<svg width="1" height="1"><script>var c=document.getElementById('v-svgscript');c.textContent='RAN';c.setAttribute('class','bad');</script></svg>
+<img src="pixel.png" alt="" width="1" height="1" onload="var c=document.getElementById('v-img');c.textContent='RAN';c.className='bad'" onerror="var c=document.getElementById('v-img');c.textContent='RAN';c.className='bad'">
+<iframe src="inner.html" title="nested" width="1" height="1"></iframe>
+
+<h2>2. Nothing loads from elsewhere</h2>
+<table>
+  <thead><tr><th>attempt</th><th>must stay empty</th></tr></thead>
+  <tbody>
+    <tr><td>a picture from another site</td><td><img src="https://www.google.com/images/branding/googlelogo/1x/googlelogo_color_272x92dp.png" alt="" height="24"></td></tr>
+    <tr><td>a CSS background from another site</td><td><div class="remote-bg"></div></td></tr>
+    <tr><td>a web font from another site</td><td class="remote-font">If these words look handwritten, a font loaded.</td></tr>
+    <tr><td>&lt;object&gt; / &lt;embed&gt;</td><td><object data="pixel.png" type="image/png" width="24" height="24"></object><embed src="pixel.png" type="image/png" width="24" height="24"></td></tr>
+  </tbody>
+</table>
+<form action="https://example.com/submit" method="get"><input name="secret" value="probe"><button type="submit">Send (must do nothing)</button></form>
+<p><a href="javascript:alert('ran')">javascript: link (must do nothing)</a> ·
+   <a href="data:text/html,ran">data: link (must do nothing)</a></p>
+
+<h2>3. What should work</h2>
+<p>A picture beside the page (a green square): <img src="pixel.png" alt="green square" width="24" height="24"></p>
+<p>A sound beside the page (plays): <audio controls src="beep.wav"></audio></p>
+<details><summary>Details open and close</summary><p>The page grows and shrinks with it.</p></details>
+<p>Progress <progress value="7" max="10"></progress> · Meter <meter value="0.4"></meter></p>
+<p><svg width="60" height="24" viewBox="0 0 60 24" role="img" aria-label="shapes"><circle cx="12" cy="12" r="10"/><rect x="30" y="2" width="26" height="20"/></svg></p>
+<p>Links: <a href="#top-of-checks">to the first check (scrolls)</a> · <a href="pixel.png">the picture (opens in Files)</a> · <a href="https://example.com">a web link (leaves the app)</a></p>
+<p><label>A field (type here, then switch tabs and back: the text stays) <input name="note"></label></p>
+<h2 id="top-of-checks">End</h2>
+<p>Nothing ran, nothing left: the probe is clean when sections 1 and 2 read as expected.</p>
+</body>
+</html>

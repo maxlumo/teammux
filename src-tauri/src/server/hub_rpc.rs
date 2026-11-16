@@ -819,7 +819,15 @@ fn dispatch_hub(req: &Request, notifications: Option<&crate::agent_notifications
             // Session, workspace AND room from the fold's one project row
             // (round 5); the dispatcher's `room` is not used here.
             let f = fold(session, crate::projects::project_for_session(session), crate::tmux::list_panes);
-            dashboard::dashboard(session, &f.room, &f.roster, f.workspace.as_deref())
+            let mut read = dashboard::dashboard(session, &f.room, &f.roster, f.workspace.as_deref())?;
+            // The project page's head (board #111): `page` {rev, by, at} or
+            // null, or `page_error` when its store could not be read.
+            #[cfg(unix)]
+            match super::page_rpc::head(f.workspace.as_deref()) {
+                Ok(head) => read["page"] = head,
+                Err(e) => read["page_error"] = serde_json::Value::String(e),
+            }
+            Ok(read)
         }
 
         // An existing agent's RUNTIME team (board #384): the Hub's drag of a

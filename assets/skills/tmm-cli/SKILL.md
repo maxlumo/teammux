@@ -114,6 +114,28 @@ tmm ask close <id> "why" [--re <seq>]  # withdraw it; --re cites a room message
   it, withdraw the ask citing that message: `tmm ask close <id> "answered in
   chat" --re <seq>`. That never marks it answered.
 
+## The project page — optional, static, the Dashboard's last section
+
+A project may have ONE page for the person: status they read at a glance on
+the Dashboard, under Needs you, Now and Notes. Write a plain `index.html`
+(headings, tables, lists, `<details>`, `<audio>`, inline SVG; your own CSS is
+optional, the app's look is applied for you) with its files beside it,
+anywhere you can write, then publish it:
+
+```bash
+tmm dashboard publish ./status      # status/index.html and the files beside it
+tmm dashboard unpublish             # take it down
+```
+
+- Static: no script in it ever runs, and it cannot send anything. Links to
+  files open them in the app; web links leave it.
+- A file beside index.html is `style.css`; a project file is
+  `../../../<path from the project root>`, e.g.
+  `<audio controls src="../../../EP/out/mix.mp3"></audio>`.
+- Regular files only (no symlinks), index.html up to 512 KiB, 500 files and
+  20 MiB together. The last publish wins and is shown with your name; a page
+  someone has on screen keeps reading its own files.
+
 ## The task board — shared kanban, humans and agents alike
 
 The project has ONE board (todo / doing / review / done). The human writes

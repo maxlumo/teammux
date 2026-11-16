@@ -1,4 +1,5 @@
 <script>
+  import { takeOwnBack } from './lib/core/own-back.ts';
   import { onDestroy, tick, untrack } from 'svelte';
   import { SvelteSet } from 'svelte/reactivity';
   import { activeModal } from './lib/ui/modal.ts';
@@ -3588,6 +3589,8 @@
     if (!ownsBack) return; // a desktop browser: the browser's Back is the browser's
     router = ++routerSeq;
     const handler = (e) => {
+      // The app's OWN history.back() (a preview link's entry, board #111): exactly one event, swallowed.
+      if (takeOwnBack()) return;
       // The shell's OWN dialogs are the first layers (#317): a dialog is modal,
       // so a Back that peeled a page layer behind it would act on something
       // the reader cannot even see. Every other dialog in the app is peeled
@@ -4429,6 +4432,7 @@
           union={boardUnionFor} onPickServer={pickServerBoard} {scopeNote}
           onOpenAgent={(s, agent) => { v.hubSelectReq = { serverId: runtime.id, session: s, agent, n: (v.hubSelectReq?.n ?? 0) + 1 }; switchTab('hub'); v.jumpedFrom = 'board'; }}
           onOpenChat={(s) => { v.hubSelectReq = { serverId: runtime.id, session: s, n: (v.hubSelectReq?.n ?? 0) + 1 }; switchTab('hub'); v.jumpedFrom = 'board'; }}
+          onOpenFile={(s, file) => { if (s) showSessionIn(runtime, v, s); v.filesNavReq = { serverId: runtime.id, path: '', file, n: (v.filesNavReq?.n ?? 0) + 1 }; switchTab('files'); v.jumpedFrom = 'board'; }}
           onJumpMessage={(s, m) => { v.hubSelectReq = { serverId: runtime.id, session: s, n: (v.hubSelectReq?.n ?? 0) + 1 }; centre.requestJump({ server: runtime.id, room: m.room ?? `proj:${s}`, session: s, id: String(m.id ?? ''), seq: Number(m.seq) || 0, ...(m.discuss ? { discuss: true } : {}) }); switchTab('hub'); v.jumpedFrom = 'board'; }} />
       {/if}
     </div>

@@ -11,6 +11,8 @@ use wire::HalfCipher;
 mod download;
 mod upload;
 mod hub_rpc;
+#[cfg(all(unix, not(any(target_os = "android", target_os = "ios"))))]
+mod page_rpc;
 mod rpc;
 mod connection;
 mod dispatch;
@@ -47,11 +49,12 @@ pub type NotificationHub = Arc<AgentNotificationHub>;
 /// sends no agreement without it. `command_when_idle` (board #45): `hub_command` keeps `when_idle: true`,
 /// holding the command for the agent's idle edge and answering `waiting`. An older server ignores the
 /// key and types the command at once, into a turn that may be running, so `tmm send --when-idle` sends
-/// nothing without it. An older server announces no `caps` at all, and a client that
+/// nothing without it. `dashboard_page` (board #111): the `page_*` doors exist and `hub_dashboard` carries the
+/// page head; `tmm dashboard publish|unpublish` sends nothing and the Dashboard draws no page without it. An older server announces no `caps` at all, and a client that
 /// needs one refuses the write instead of saving a label nobody acts on. The
 /// phone's server has no Hub, so it announces none.
 #[cfg(not(any(target_os = "android", target_os = "ios")))]
-pub(crate) const LOGIN_CAPS: &[&str] = &["board_dispatch", "board_notify", "spawn_join", "agent_team", "hub_files", "mcp_masked", "backends_check", "board_blocks", "board_agreement", "command_when_idle", "omp_tools", "asks", "dashboard"];
+pub(crate) const LOGIN_CAPS: &[&str] = &["board_dispatch", "board_notify", "spawn_join", "agent_team", "hub_files", "mcp_masked", "backends_check", "board_blocks", "board_agreement", "command_when_idle", "omp_tools", "asks", "dashboard", "dashboard_page"];
 #[cfg(any(target_os = "android", target_os = "ios"))]
 pub(crate) const LOGIN_CAPS: &[&str] = &[];
 

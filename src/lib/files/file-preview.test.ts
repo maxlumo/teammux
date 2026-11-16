@@ -3,11 +3,12 @@ import assert from 'node:assert/strict';
 import { readFile } from 'node:fs/promises';
 import type { HLJSApi } from 'highlight.js';
 import {
-  basedPreviewDoc, createPreviewRenderers, defaultWrapForMime, highlightCode, highlightLine,
+  basedPreviewDoc, createPreviewRenderers, preparePreview, routePreviewHref, watchPreviewLinks, defaultWrapForMime, highlightCode, highlightLine,
   hljsLang, isPreviewable, mimeCategory, mimeFromName, renderCsv, scrollToFragment, streamsInline,
   type PreviewRenderContext,
 } from './file-preview.ts';
 import { JSDOM, requestInterceptor } from 'jsdom';
+import { clearOwnBack, markOwnBack, takeOwnBack } from '../core/own-back.ts';
 
 test('preview classification and limits match the existing Files decisions', () => {
   for (const [mime, category] of [
@@ -123,33 +124,40 @@ test('image resolution retains document-relative paths, MIME inference and missi
   assert.equal(mimeFromName('unknown'), 'image/png');
 });
 
-test('iframe path handlers are replaced on load and removed on Files disposal', () => {
-  const doc = new EventTarget();
-  // Node 22's EventTarget needs the object form when removing capture
-  // listeners; normalize this test boundary to the browser Document behavior.
-  const remove = doc.removeEventListener.bind(doc);
-  doc.removeEventListener = (type, listener, options) =>
-    remove(type, listener, typeof options === 'boolean' ? { capture: options } : options);
-  const opened: string[] = [];
-  const renderers = createPreviewRenderers(context({
-    htmlPreviewEl: { contentDocument: doc } as unknown as HTMLIFrameElement,
-    openPath: path => opened.push(path),
-  }));
-  const click = () => {
-    const event = new Event('click', { cancelable: true });
-    Object.defineProperty(event, 'target', { value: { closest: () => ({
-      getAttribute: () => '../next.md',
-      href: 'http://localhost:5173/next.md',
-    }) } });
-    doc.dispatchEvent(event);
-    return event.defaultPrevented;
+// Board #111 (W1, leader notes 16 and 20): the frame's links are read from its hash.
+type FakeFrame = { contentDocument: { location: { hash: string } } | null; contentWindow: { location: { replace: (u: string) => void } }; isConnected: boolean; getClientRects: () => unknown[] };
+function fakeFrame() {
+  const replaced: string[] = [];
+  const frame: FakeFrame = {
+    contentDocument: { location: { hash: '' } },
+    contentWindow: { location: { replace: (u: string) => { replaced.push(u); frame.contentDocument!.location.hash = u.slice(u.indexOf('#')); } } },
+    isConnected: true, getClientRects: () => [{}],
   };
-  renderers.attachHtmlPreviewLinks();
-  renderers.attachHtmlPreviewLinks();
-  assert.equal(click(), true);
-  assert.deepEqual(opened, ['../next.md'], 'exactly one installed path router');
-  renderers.dispose();
-  assert.equal(click(), false);
+  return { frame, replaced };
+}
+const sleepMs = (ms: number) => new Promise((r) => setTimeout(r, ms));
+
+test('the HTML preview\u2019s link watcher is replaced at each load and stopped on Files disposal', async () => {
+  const { frame } = fakeFrame();
+  const opened: string[] = [];
+  let backs = 0;
+  const realHistory = globalThis.history;
+  Object.defineProperty(globalThis, 'history', { configurable: true, value: { back: () => { backs++; frame.contentDocument!.location.hash = ''; } } });
+  try {
+    const renderers = createPreviewRenderers(context({ htmlPreviewEl: frame as unknown as HTMLIFrameElement, openPath: (p) => opened.push(p) }));
+    const links = { nonce: 'n1', hrefs: ['../next.md'] };
+    renderers.attachHtmlPreviewLinks(links);
+    renderers.attachHtmlPreviewLinks(links);
+    frame.contentDocument!.location.hash = '#tmm-link-n1-0';
+    await sleepMs(200);
+    assert.deepEqual(opened, ['../next.md'], 'exactly one watcher routes the click, once');
+    assert.equal(backs, 1, 'and one back removes its entry');
+    renderers.dispose();
+    frame.contentDocument!.location.hash = '#tmm-link-n1-0';
+    await sleepMs(200);
+    assert.deepEqual(opened, ['../next.md'], 'disposed: nothing routes');
+    renderers.dispose();
+  } finally { Object.defineProperty(globalThis, 'history', { configurable: true, value: realHistory }); }
 });
 
 test('heavy imports remain lazy and each failed loader remains retryable', async () => {
@@ -311,43 +319,108 @@ test('a fragment link scrolls its own document by id, then by name, decoded once
   assert.equal(top, 1);
 });
 
-test('in the preview frame a fragment scrolls, a path opens Files, and nothing navigates', () => {
-  const window = new JSDOM('<a id="f" href="#sec">f</a><h2 id="sec">S</h2><a id="p" href="next.html">p</a>'
-    + '<a id="m" href="mailto:x@y">m</a><map><area id="a" href="z.html"></map><span id="n">n</span>').window;
+test('every link becomes a fragment of the srcdoc; the author\u2019s hrefs stay with the parent (#111)', () => {
+  const { html, links } = preparePreview('<a id="f" href="#sec">f</a><a id="p" href="next.html" target="_blank" download ping="https://t.example/">p</a>'
+    + '<map><area id="a" href="z.html"></map><a id="n">no href</a><a id="w" href="https://example.com/x">w</a>', SCOPE, new new JSDOM('').window.DOMParser());
+  const doc = parse(html);
+  assert.match(links.nonce, /^[0-9a-f]{12}$/u);
+  assert.deepEqual(links.hrefs, ['#sec', 'next.html', 'z.html', 'https://example.com/x']);
+  assert.deepEqual(['f', 'p', 'a', 'w'].map((id) => doc.getElementById(id)!.getAttribute('href')),
+    [0, 1, 2, 3].map((n) => `about:srcdoc#tmm-link-${links.nonce}-${n}`));
+  const p = doc.getElementById('p')!;
+  assert.deepEqual([p.getAttribute('target'), p.getAttribute('download'), p.getAttribute('ping')], [null, null, null], 'nothing turns the click into anything but the fragment');
+  assert.equal(doc.getElementById('n')!.getAttribute('href'), null, 'an anchor without href stays one');
+  assert.ok(!html.includes('next.html') && !html.includes('example.com/x'), 'the page does not hold the table');
+  assert.notEqual(preparePreview('<a href="x">x</a>', null, new new JSDOM('').window.DOMParser()).links.nonce, links.nonce, 'a nonce per document');
+});
+
+test('one route for an author href: a fragment scrolls, a path opens, a web link leaves, the rest is dead', () => {
+  const window = new JSDOM('<h2 id="sec">S</h2>', { url: 'http://gw.example/dl/s/x/' }).window;
   const doc = window.document;
   const scrolled: string[] = [];
   (doc.getElementById('sec') as HTMLElement).scrollIntoView = () => { scrolled.push('sec'); };
-  const opened: string[] = [];
-  const renderers = createPreviewRenderers(context({
-    htmlPreviewEl: { contentDocument: doc } as unknown as HTMLIFrameElement,
-    openPath: path => opened.push(path),
-  }));
-  renderers.attachHtmlPreviewLinks();
-  const click = (id: string) => {
-    const event = new window.MouseEvent('click', { bubbles: true, cancelable: true });
-    doc.getElementById(id)!.dispatchEvent(event);
-    return event.defaultPrevented;
-  };
-  const gesture = (id: string, init: MouseEventInit, type = 'click') => {
-    const event = new window.MouseEvent(type, { bubbles: true, cancelable: true, ...init });
-    doc.getElementById(id)!.dispatchEvent(event);
-    return event.defaultPrevented;
-  };
-  assert.equal(gesture('f', { button: 1 }, 'auxclick'), true, 'a middle click on a fragment is prevented');
-  assert.equal(gesture('f', { ctrlKey: true }), true);
-  assert.equal(gesture('f', { metaKey: true }), true);
-  assert.equal(gesture('f', { shiftKey: true }), true);
-  assert.deepEqual(scrolled, [], '... and none of them scrolls');
-  assert.equal(click('f'), true);
+  const opened: string[] = [], web: string[] = [];
+  const go = (href: string) => routePreviewHref(doc, href, (p) => opened.push(p), (u) => web.push(u));
+  assert.deepEqual(['#sec', 'next.html', '../up/a.md', 'https://example.com/', '//cdn.example/x', 'mailto:x@y', 'javascript:alert(1)', 'data:text/html,x', ' '].map(go),
+    ['fragment', 'path', 'path', 'web', 'web', 'dead', 'dead', 'dead', 'dead']);
   assert.deepEqual(scrolled, ['sec']);
-  assert.deepEqual(opened, [], 'a fragment never reaches Files');
-  assert.equal(click('p'), true);
-  assert.deepEqual(opened, ['next.html']);
-  assert.equal(click('m'), true, 'an unknown scheme is prevented');
-  assert.equal(click('a'), true, 'an area is prevented');
-  assert.equal(click('n'), false, 'a click on no link is left alone');
-  renderers.dispose();
-  assert.equal(click('f'), false);
+  assert.deepEqual(opened, ['next.html', '../up/a.md']);
+  assert.deepEqual(web, ['https://example.com/', 'http://cdn.example/x']);
+});
+
+test('the watcher: a click is routed once after its own back; a back not confirmed still routes once (#111, leader note 20)', async () => {
+  const links = { nonce: 'ab', hrefs: ['report.html', '#later'] };
+  // (a) the back returns the frame: marked while in flight, cleared after, routed once.
+  {
+    const { frame } = fakeFrame();
+    const routed: string[] = [];
+    let markedDuringBack = false;
+    const history = { back: () => { markedDuringBack = takeOwnBack(Date.now()); frame.contentDocument!.location.hash = ''; } } as unknown as History;
+    const stop = watchPreviewLinks(frame as unknown as HTMLIFrameElement, links, (h) => routed.push(h), { periodMs: 10, history });
+    try {
+      frame.contentDocument!.location.hash = '#tmm-link-ab-0';
+      await sleepMs(80);
+      assert.deepEqual(routed, ['report.html']);
+      assert.ok(markedDuringBack, 'the back was marked as the app\u2019s own while it ran');
+      assert.equal(takeOwnBack(), false, 'and the mark is gone after');
+      frame.contentDocument!.location.hash = '#tmm-link-ab-0';
+      await sleepMs(80);
+      assert.deepEqual(routed, ['report.html', 'report.html'], 'the same link works twice');
+    } finally { stop(); }
+  }
+  // (b) the back is never confirmed: routed once after the bound, the hash replaced so it works again.
+  {
+    const { frame, replaced } = fakeFrame();
+    const routed: string[] = [];
+    const history = { back: () => {} } as unknown as History;
+    const stop = watchPreviewLinks(frame as unknown as HTMLIFrameElement, links, (h) => routed.push(h), { periodMs: 10, settleMs: 60, history });
+    try {
+      frame.contentDocument!.location.hash = '#tmm-link-ab-1';
+      await sleepMs(150);
+      assert.deepEqual(routed, ['#later']);
+      assert.deepEqual(replaced, ['about:srcdoc#tmm-idle']);
+      assert.equal(takeOwnBack(), false, 'the mark ended at the bound');
+    } finally { stop(); }
+  }
+  // (c) another document\u2019s nonce, an index out of the table, or an inactive frame: nothing.
+  {
+    const { frame } = fakeFrame();
+    const routed: string[] = [];
+    let backs = 0, on = false;
+    const history = { back: () => { backs++; } } as unknown as History;
+    const stop = watchPreviewLinks(frame as unknown as HTMLIFrameElement, links, (h) => routed.push(h), { periodMs: 10, history, active: () => on });
+    try {
+      for (const hash of ['#tmm-link-zz-0', '#tmm-link-ab-9', '#tmm-link-ab-x', '#later']) { on = true; frame.contentDocument!.location.hash = hash; await sleepMs(40); }
+      on = false; frame.contentDocument!.location.hash = '#tmm-link-ab-0'; await sleepMs(40);
+      assert.deepEqual([routed, backs], [[], 0]);
+    } finally { stop(); }
+  }
+});
+
+test('a link pending when its frame is dropped is never routed, and its own-back mark ends (S1)', async () => {
+  const { frame } = fakeFrame();
+  const routed: string[] = [];
+  const history = { back: () => {} } as unknown as History;
+  const stop = watchPreviewLinks(frame as unknown as HTMLIFrameElement, { nonce: 'cd', hrefs: ['clip.md'] }, (h) => routed.push(h), { periodMs: 10, settleMs: 60, history });
+  try {
+    frame.contentDocument!.location.hash = '#tmm-link-cd-0';
+    await sleepMs(25); // seen, waiting for its back
+    frame.isConnected = false; frame.contentDocument = null; // the file, the project or the server changed
+    await sleepMs(150);
+    assert.deepEqual(routed, [], 'dropped with its frame');
+    assert.equal(takeOwnBack(), false, 'and its mark is gone');
+  } finally { stop(); }
+});
+
+test('the app\u2019s own back is swallowed exactly once, and only within its bound', () => {
+  assert.equal(takeOwnBack(), false, 'nothing marked: a person\u2019s Back');
+  markOwnBack(Date.now() + 1000);
+  assert.equal(takeOwnBack(), true, 'ours');
+  assert.equal(takeOwnBack(), false, 'exactly one');
+  markOwnBack(Date.now() - 1);
+  assert.equal(takeOwnBack(), false, 'past its bound it is a person\u2019s again');
+  markOwnBack(Date.now() + 1000); clearOwnBack();
+  assert.equal(takeOwnBack(), false, 'cleared when the frame returned');
 });
 
 test('review highlights: ONE style after the policy, in the same serialization, on both paths (#434)', () => {
@@ -362,4 +435,21 @@ test('review highlights: ONE style after the policy, in the same serialization, 
     assert.doesNotMatch(ours, /#[0-9a-f]{3,8}\b|rgba?\(|var\(--/iu, 'no literal colour, no app token');
     assert.equal(doc.querySelectorAll('script').length, 0, 'no script added');
   }
+});
+
+// Board #111: the project page passes ONE base stylesheet, placed after ours
+// and before the author's, inside the same serialization and policy check.
+test('a base stylesheet leads the author styles, marked, on both paths (#111)', () => {
+  for (const scope of [SCOPE, null]) {
+    const out = basedPreviewDoc('<head><style>p{color:red}</style></head><p>x</p>', scope, new new JSDOM('').window.DOMParser(), ':root{--x:1}');
+    const doc = parse(out);
+    const lead = [...doc.head.children].map((el) => el.tagName.toLowerCase() + (el.hasAttribute('data-tmm-base') ? '[base-sheet]' : ''));
+    assert.deepEqual(lead, scope
+      ? ['meta', 'meta', 'base', 'style', 'style[base-sheet]', 'style']
+      : ['meta', 'meta', 'style', 'style[base-sheet]', 'style'], 'the policy, ours, the base sheet, then the author\u2019s');
+    assert.equal(doc.head.querySelector('style[data-tmm-base]')!.textContent, ':root{--x:1}');
+    assert.equal(doc.head.firstElementChild!.getAttribute('http-equiv'), 'Content-Security-Policy');
+  }
+  const without = parse(basedPreviewDoc('<p>x</p>', SCOPE, new new JSDOM('').window.DOMParser()));
+  assert.equal(without.querySelector('style[data-tmm-base]'), null, 'the Files preview passes none and gets none');
 });

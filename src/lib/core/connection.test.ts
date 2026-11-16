@@ -368,6 +368,25 @@ test('a preview scope carries its URL and the door prefix of the connection that
   await assert.rejects(bad, /not a scope path/u);
 }));
 
+test('a page load carries its door on the connection that asked, and no page is null (#111)', (t) => withWebCrypto(async () => {
+  const w = await pair(t);
+  const got = w.apiA.pageLoad('proj');
+  const req = await w.serverA.next(w.socketA);
+  assert.equal(req.method, 'page_load');
+  assert.deepEqual(req.params, { session: 'proj' });
+  const page = { rev: 3, by: 'leader', at: 5, html: '<p>x</p>', dir: '/w/.tmm/dashboard/3', base: '/dl/s/9/1.2/sig/L3c/.tmm/dashboard/3/' };
+  w.socketA.binary(await w.serverA.seal(JSON.stringify({ id: req.id, result: { page } })));
+  assert.deepEqual(await got, { ...page, scope: { url: 'http://a.test/dl/s/9/1.2/sig/L3c/.tmm/dashboard/3/', prefix: 'http://a.test/dl/s/' } });
+  const none = w.apiA.pageLoad('proj');
+  const r2 = await w.serverA.next(w.socketA);
+  w.socketA.binary(await w.serverA.seal(JSON.stringify({ id: r2.id, result: { page: null } })));
+  assert.equal(await none, null);
+  const bad = w.apiA.pageLoad('proj');
+  const r3 = await w.serverA.next(w.socketA);
+  w.socketA.binary(await w.serverA.seal(JSON.stringify({ id: r3.id, result: { page: { ...page, base: '/dl?path=x' } } })));
+  await assert.rejects(bad, /not a scope path/u);
+}));
+
 // ─── Lifetime: disconnect keeps the room, dispose empties it ─────────────
 // The plain-token path, because what is under test is bookkeeping, not crypto.
 

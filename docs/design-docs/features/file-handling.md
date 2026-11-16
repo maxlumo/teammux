@@ -968,6 +968,15 @@ The zero-request claim for the no-resource state and the loads under the
 scope are measured in a real browser against a real gateway (board #433
 notes), since jsdom enforces no CSP.
 
+**A second caller, the project page (board #111).** The Dashboard's project
+page is this same frame and this same door: `page_load` mints the cap with
+`scope_base` for the root = the project and dir = `.tmm/dashboard/<N>`, inside
+the page store's lock (dashboard.md § The project page). No route, MAC mode,
+type or header was added for it. Its subresource reads are NOT transfers:
+the #134 limiter (`files/transfers.ts`) caps the person's downloads and
+uploads, while a page's `<img>`, `<audio>` and stylesheets are the browser's
+own loads, exactly as in a Files HTML preview.
+
 ### Upload feedback is the third slot of the same stack (board #214, 2026-09-20; #23)
 
 Owner: "文件上传要有个进度或者提示，让我知道传上去了没有". A successful upload was a
@@ -1059,12 +1068,61 @@ still follows normally. Previously the concurrent follow could send the
 newly opened preview back to the session directory.
 
 True HTTP(S) URLs retain the external opener in both browser and Tauri;
-mailto and document fragments retain their native behavior (in the HTML
-preview frame, since #433, a fragment scrolls through its own handler and any
-other link is prevented — see above). The app-wide
+mailto and document fragments retain their native behavior outside the HTML
+preview frame (inside it, see the next section). The app-wide
 path net remains only for otherwise unrouted surfaces, not as the fix for
 an incorrect external classification. Unit tests reproduce the capture/router
 ordering and source contracts pin the primary, auxiliary and iframe wiring.
+
+### An HTML preview's links are read from the frame's hash, in every engine (board #111)
+
+**The incident (measured, #111 note 15).** The preview frame runs no
+script, and until #111 the app attached capture listeners to the frame's
+document to route its links. In rig WebKit (Playwright 1.60, webkit-2287) a
+listener the PARENT registers on a script-less frame's document never runs,
+for real pointer clicks and dispatched clicks alike (listener calls: 0). A
+fragment link (resolved against the scope `<base>`) and a relative link then
+navigated the frame to the `/dl/s/` door, the door refused the document, and
+the page was gone; Chromium ran the same listeners and prevented the
+navigation. The shipped Files HTML preview was the same frame.
+
+**The mechanism (leader notes 16 and 20; one for both engines and both
+hosts, `files/file-preview.ts`).**
+- `preparePreview` rewrites every `a[href]` and `area[href]` to
+  `about:srcdoc#tmm-link-<nonce>-<n>` (and drops `target`, `download`,
+  `ping`); the author's hrefs go to a table the PARENT keeps from the
+  serialization. The page never holds it, and the parent never trusts an
+  attribute it reads back.
+- A click or a keyboard activation is then a same-document fragment
+  navigation: nothing unloads. `watchPreviewLinks` reads the frame's hash on
+  one 50 ms timer while the frame is shown, removes the history entry the
+  click added with `history.back()`, marked as the app's own
+  (`core/own-back.ts`), and once the frame's hash has returned (bound 400 ms)
+  routes the href exactly once through `routePreviewHref`: a fragment
+  scrolls in the page, a path opens in Files, an http(s) or `//` link leaves
+  through the external opener, and anything else (`javascript:`, `data:`,
+  `mailto:`) is dead. If the back is not confirmed in the bound, the link is
+  still routed once, the hash is replaced so the same link works again, and
+  the leftover entry is the cost. A link pending when its frame leaves the
+  document (a file, project or server change, an unmount) is dropped and its
+  mark ends: it is never routed to what replaced the frame (#111 S1).
+- The app's ONE popstate router asks `takeOwnBack()` first and swallows
+  exactly one event while the mark stands, so the app's own back can never
+  peel an app layer on Android or in the phone layout.
+- No listener inside the frame is used for anything: the project page reads
+  its edited fields and playing media from the document on its clock.
+
+**Measured in rig Chromium 1223 and WebKit 2287** (#111 notes 19 and the
+handoff): a click and an Enter on a rewritten link keep the same document
+(a parent marker, a typed field and playing audio intact), the hash is seen
+in about 10 ms, a hash reset does not reload, a second click on the same
+link is seen, the parent's `scrollIntoView` reaches an in-page target; each
+click adds one joint-history entry, `history.back()` from the parent removes
+it with no popstate on the app's window in either engine. A simulated WebView
+that DOES deliver that popstate peels the open Files preview without the
+guard and nothing with it. The Files preview's relative file, fragment, web
+link and `.html` links, and the project page's, pass in both engines.
+**Native WebViews (Android, macOS WKWebView): not tested; the owner's devices.**
 
 ### Content Security Policy and opener scope
 
