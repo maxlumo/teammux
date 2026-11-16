@@ -13,6 +13,9 @@
 // gained, give up with an `UploadFailed` carrying the id, so a Retry resumes
 // the same upload instead of starting again.
 
+import { TransferWaitCancelled, type TransferSlots } from './transfer-slots.ts';
+import { transferSlots } from './transfers.ts';
+
 export interface UploadBegun { id: string; url: string; chunk: number; received: number; done?: boolean }
 
 /** The session side: `fs_upload_begin`/`_resume`/`_abort`, with `url`
@@ -40,6 +43,10 @@ export interface UploadOptions {
   sleep?: (ms: number) => Promise<void>;
   maxStalls?: number;
   retryDelayMs?: number;
+  /** Told when this upload has to wait for a transfer slot (board #134): nothing is sent yet. */
+  onWaiting?: () => void;
+  /** The transfer limiter (default: the app's one). A seam for tests. */
+  slots?: TransferSlots;
 }
 
 export const UPLOAD_MAX_STALLS = 4;
@@ -66,7 +73,26 @@ function offsetOf(res: Response): number | null {
   return Number.isSafeInteger(n) && n >= 0 ? n : null;
 }
 
+/** One upload, holding one transfer slot (board #134) from before its session is begun or resumed (the
+ * session and its signed URL expire, so a waiting upload holds neither) until it ends, whichever way. */
 export async function uploadFile(o: UploadOptions): Promise<void> {
+  const slots = o.slots ?? transferSlots;
+  let release = slots.tryAcquire();
+  if (!release) {
+    o.onWaiting?.();
+    try { release = await slots.acquire(o.signal); }
+    catch (e) {
+      if (!(e instanceof TransferWaitCancelled)) throw e;
+      // Cancel has one meaning (reviewer #134 R1): a waiting Retry of an existing session aborts that
+      // session, so the server removes its part, as a running Cancel does. A fresh upload has none.
+      if (o.resumeId) await o.api.abort(o.resumeId).catch(() => {});
+      throw new UploadCancelled();
+    }
+  }
+  try { await sendFile(o); } finally { release(); }
+}
+
+async function sendFile(o: UploadOptions): Promise<void> {
   const doFetch = o.fetch ?? fetch;
   const sleep = o.sleep ?? defaultSleep;
   const maxStalls = o.maxStalls ?? UPLOAD_MAX_STALLS;

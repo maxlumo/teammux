@@ -1378,7 +1378,7 @@
         <textarea class="d-body-edit" bind:this={bodyEl} bind:value={draft.body} use:autoGrow={draft.body} placeholder={t('boardBodyPh')} rows="3"
           onkeydown={onChord(saveDraft)} onpaste={pasteInto(bodyStage)} readonly={submitting}></textarea>
         <div class="attach-line">
-          <CommandButton variant="icon" icon="plus" label={t('hubAttach')} disabled={submitting || bodyStage.attaching}
+          <CommandButton variant="icon" icon="plus" label={bodyStage.waiting ? t('hubAttachWaiting') : t('hubAttach')} disabled={submitting || bodyStage.attaching}
             pending={bodyStage.attaching} onclick={() => pickFor(bodyStage)} />
           <AttachStrip pending={bodyStage.pending} onremove={(i) => { if (!submitting) bodyStage.remove(i); }} onpreview={(u) => showShot(viewerOpen(u))} />
         </div>
@@ -1471,7 +1471,7 @@
         </div>
       {/if}
       <div class="note-add">
-        <CommandButton variant="icon" icon="plus" label={t('hubAttach')} disabled={submitting || noteStage.attaching}
+        <CommandButton variant="icon" icon="plus" label={noteStage.waiting ? t('hubAttachWaiting') : t('hubAttach')} disabled={submitting || noteStage.attaching}
           pending={noteStage.attaching} onclick={() => pickFor(noteStage)} />
         <!-- A textarea, not an input (board #28: "消息过长要自动帮我换行，
              现在是一直在一行里，前边都看不到了"): long text soft-wraps in
@@ -1529,7 +1529,7 @@
         onkeydown={onChord(createIssue)}
         onpaste={pasteInto(createStage)} readonly={submitting}></textarea>
       <div class="attach-line">
-        <CommandButton variant="icon" icon="plus" label={t('hubAttach')} disabled={submitting || createStage.attaching}
+        <CommandButton variant="icon" icon="plus" label={createStage.waiting ? t('hubAttachWaiting') : t('hubAttach')} disabled={submitting || createStage.attaching}
           pending={createStage.attaching} onclick={() => pickFor(createStage)} />
         <AttachStrip pending={createStage.pending} onremove={(i) => { if (!submitting) createStage.remove(i); }} onpreview={(u) => showShot(viewerOpen(u))} />
       </div>

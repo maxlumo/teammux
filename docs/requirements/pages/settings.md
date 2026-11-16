@@ -84,6 +84,11 @@ where Agents is a page of its own, reads as one plain list):
   and the server are different builds, to update the installed app or reload a
   browser (the UI may come from a cache or a different deployment). The same
   commit built twice is not a mismatch. Not connected: no server row.
+- Max concurrent transfers (board #134): how many downloads and uploads run
+  at once on this device, every server together (`ui/Stepper`, 1 to 8,
+  default 3, persisted to `tmux_transfer_limit`, applied at once: a higher
+  number starts waiting transfers, a lower one stops none that run). The
+  rule: [file-browser.md](file-browser.md).
 - Connection mode (board #335 ③): **Connect to: One server / All
   included** (`ui/Segmented`, persisted to `tmux_connection_mode`). In
   Aggregate every INCLUDED saved server is a member: it dials on its own

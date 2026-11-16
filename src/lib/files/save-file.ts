@@ -18,6 +18,8 @@
 import { isAndroid, isTauri, tauriReady } from '../core/platform.ts';
 import { invokeNative } from '../core/native.ts';
 import { download, memorySink, nativeSink, partId, PIECE_BYTES, throwIfCancelled } from './download.ts';
+import { TransferWaitCancelled, type TransferSlots } from './transfer-slots.ts';
+import { transferSlots } from './transfers.ts';
 import type { DownloadStore } from './downloads.svelte.ts';
 import type { FilesMemory } from './files-memory.ts';
 
@@ -31,6 +33,8 @@ export interface SaveDeps {
   /** The once-per-process preparation every attempt awaits (default `realmReady`). A seam for
    * tests that hold it; nothing else replaces it. */
   ready?: () => Promise<void>;
+  /** The transfer limiter (default: the app's one, transfers.ts). A seam for tests. */
+  slots?: TransferSlots;
 }
 
 /** Where an attempt's outcome is said. Exactly one of these ends an attempt
@@ -100,6 +104,7 @@ export async function saveServerFile(deps: SaveDeps, path: string, owner: unknow
   say.began?.(rowId);
   const progress = (_fraction: number | null, received = 0, total = 0) => { store.progress(rowId, received, total); };
   if (id) memory.claim(id, { owner });
+  let release: (() => void) | null = null;
   const completed = (savedPath: string) => {
     store.done(rowId, savedPath);
     say.saved(savedPath);
@@ -113,6 +118,17 @@ export async function saveServerFile(deps: SaveDeps, path: string, owner: unknow
   const held = native ? null : memorySink();
   const sink = (native ?? held)!;
   try {
+    // A slot first (board #134, leader note 2), before anything that expires is minted: the signed /dl
+    // URL below lives 60 s, so an attempt that waits for a slot holds none. Cancel or a switch while
+    // waiting ends the attempt like a cancel mid-transfer (throwIfCancelled reads the same signal).
+    const slots = deps.slots ?? transferSlots;
+    release = slots.tryAcquire();
+    if (!release) {
+      store.waiting(rowId);
+      try { release = await slots.acquire(control.signal); }
+      catch (e) { if (e instanceof TransferWaitCancelled) throwIfCancelled(control.signal); throw e; }
+      store.started(rowId);
+    }
     await (deps.ready ?? realmReady)();
     // The preparation may have taken a while: a Cancel or a runtime's suspend that came in
     // meanwhile ends the attempt HERE, before any signature is asked for (board #447 review P1-B).
@@ -148,6 +164,8 @@ export async function saveServerFile(deps: SaveDeps, path: string, owner: unknow
     // card offers no Cancel (a dialog or a finish is not cancelled here).
     throwIfCancelled(control.signal);
     // There is no measured write fraction. Only transfer bytes report a percentage.
+    // The bytes are here: the slot goes now, not after the save dialog a person may take a while over.
+    release?.();
     store.saving(rowId);
     if (native) {
       let dest: string | null = null;
@@ -211,5 +229,5 @@ export async function saveServerFile(deps: SaveDeps, path: string, owner: unknow
     else { await native?.abort(); store.failed(rowId, message); }
     say.error(message, path);
   }
-  } finally { if (id) memory.release(id); memory.untrack(rowId); settle(); }
+  } finally { release?.(); if (id) memory.release(id); memory.untrack(rowId); settle(); }
 }

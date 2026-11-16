@@ -86,17 +86,39 @@ export function createStager(host: StagerHost) {
   const { fsMkdir, fsStat, fsUploadBegin, fsUploadResume, fsUploadAbort } = host.api;
   // One file, sliced chunk by chunk, never read whole or base64'd.
   const api = { begin: fsUploadBegin, resume: fsUploadResume, abort: fsUploadAbort };
-  const put = (dest: string, blob: Blob) => uploadFile({ dest, size: blob.size, source: async (start, end) => blob.slice(start, end), api });
+  // Uploads waiting for a transfer slot (board #134, leader note 2): the composer says Waiting, not
+  // uploading, while one is. Booked PER GENERATION like the stage jobs (validator #134): a stale job's
+  // upload still waits, but it is not the composer on screen, so it says nothing there.
+  let waitingGens = $state<number[]>([]);
+  const put = async (dest: string, blob: Blob, gen: number) => {
+    let waits = false;
+    const done = () => {
+      if (!waits) return;
+      waits = false;
+      const at = waitingGens.indexOf(gen);
+      if (at >= 0) waitingGens = waitingGens.filter((_, i) => i !== at);
+    };
+    try {
+      await uploadFile({ dest, size: blob.size, source: async (start, end) => blob.slice(start, end), api,
+        onWaiting: () => { waits = true; waitingGens = [...waitingGens, gen]; },
+        onProgress: done });
+    } finally { done(); }
+  };
   // The uploads dir ignores itself, written only when MISSING (board #25
   // round 1, validator-2 S1): the channel holds one upload per destination
   // ("upload in progress", upload.rs `begin`), so writing it on every stage
   // failed every file of a second, overlapping job. A lost race on this one
   // file is fine: another writer is writing the same two bytes, and if that
   // one fails, the next stage finds it missing and writes it.
-  const ignoreSelf = async (path: string) => {
+  // `gen` is the stage job's (validator #134): the stat may answer after a clear(), and the wait it then
+  // books must be that job's, never the live set's.
+  const ignoreSelf = async (path: string, gen: number) => {
     if (await fsStat(path).then(() => true, () => false)) return;
+    // The stat answered after a clear(): this job is stale, and its completion is a no-op (leader #134
+    // note 15). The next stage writes the file if it is still missing.
+    if (gen !== attachGen) return;
     try {
-      await put(path, new Blob(['*\n']));
+      await put(path, new Blob(['*\n']), gen);
     } catch (err) {
       if (/upload in progress/.test(errText(err))) return;
       if (await fsStat(path).then(() => true, () => false)) return;
@@ -127,6 +149,8 @@ export function createStager(host: StagerHost) {
     get pending() { return pending; },
     set pending(v: Attachment[]) { pending = v; },
     get attaching() { return jobGens.includes(attachGen); },
+    /** An attachment of this composer waits for a transfer slot (board #134): nothing of it is sent yet. */
+    get waiting() { return waitingGens.includes(attachGen); },
     /** A failed chip is not content, and while one is staged nothing saves. */
     get failed() { return pending.some((a) => a.error); },
     /** Text or at least one good attachment. */
@@ -174,7 +198,7 @@ export function createStager(host: StagerHost) {
         if (stale()) return;
         // Self-gitignored like the other .tmm runtime dirs — an attachment
         // must never show up in the project's `git status`.
-        await ignoreSelf(`${ws}/.tmm/uploads/.gitignore`);
+        await ignoreSelf(`${ws}/.tmm/uploads/.gitignore`, gen);
         if (stale()) return;
         for (const f of files) {
           let item: Attachment;
@@ -186,7 +210,7 @@ export function createStager(host: StagerHost) {
               const { blob, ext } = await encodeImage(f);
               if (stale()) return;
               const path = uploadImagePath(ws, imageId(), ext);
-              await put(path, blob);
+              await put(path, blob, gen);
               if (stale()) return;
               item = { key: path, path, kind: 'image', name: f.name, n: attachSeq++, thumb: URL.createObjectURL(f) };
             } else {
@@ -197,7 +221,7 @@ export function createStager(host: StagerHost) {
                 continue;
               }
               const path = uploadFilePath(ws, imageId(), f.name);
-              await put(path, f);
+              await put(path, f, gen);
               if (stale()) return;
               item = { key: path, path, kind: 'file', name: f.name, n: attachSeq++, thumb: '' };
             }

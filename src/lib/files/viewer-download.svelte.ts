@@ -21,7 +21,7 @@
 
 import { saveServerFile } from './save-file.ts';
 import type { SaveDeps } from './save-file.ts';
-import { feedbackOf } from './downloads.svelte.ts';
+import { feedbackOf, inProgress } from './downloads.svelte.ts';
 import { createFeedbackLifetime } from '../ui/feedback-lifetime.ts';
 import type { FeedbackValue } from '../ui/feedback-lifetime.ts';
 import type { DownloadStore } from './downloads.svelte.ts';
@@ -68,14 +68,14 @@ export function createViewerDownload(scope: ViewerScope, isCurrent: (record: Vie
   let shownRow = $state<string | null>(null);
   let shownEnded = $state(true);
 
-  const strings = () => ({ downloading: t('downloading'), changed: t('downloadFileChanged'), saving: t('saving') });
+  const strings = () => ({ downloading: t('downloading'), changed: t('downloadFileChanged'), saving: t('saving'), waiting: t('transferWaiting') });
 
   return {
     /** What the viewer shows: this attempt's running row, read from the
      * record by its id (never copied), else the outcome the token still owns. */
     get status(): FeedbackValue | null {
       const row = shownRow && !shownEnded ? store.rowOf(shownRow) : undefined;
-      if (row && (row.state === 'downloading' || row.state === 'saving')) return feedbackOf(row, strings());
+      if (row && inProgress(row)) return feedbackOf(row, strings());
       return outcome;
     },
     /** A save for THIS open is running (or being prepared): the button is not offered. */

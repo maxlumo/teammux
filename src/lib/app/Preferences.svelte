@@ -20,6 +20,8 @@
   import { fonts, uiFont, displayFont, availableFamilies } from './fonts.svelte.ts';
   import { UI_ZOOM_MIN, UI_ZOOM_MAX, UI_ZOOM_STEP } from './ui-zoom.ts';
   import { terminalPrefs, LINE_HEIGHT_MIN, LINE_HEIGHT_MAX } from './terminal-prefs.svelte.ts';
+  import { transferPrefs } from '../files/transfers.svelte.ts';
+  import { TRANSFER_LIMIT_MIN, TRANSFER_LIMIT_MAX } from '../files/transfers.ts';
   import { appPrefs } from '../hub/hub-prefs.svelte.ts';
   import { ensurePermission, previewCue, systemNotify, notifyLevel, setNotifyLevel, NOTIFY_LEVELS, type NotifyLevel } from '../hub/notifications.ts';
   import { notifySwitch } from '../hub/notify-switch.svelte.ts';
@@ -1054,6 +1056,16 @@
               </div>
             </div>
           {/if}
+          <!-- How many downloads and uploads run at once on THIS device (board #134); the rest wait in order.
+               One number for every server, applied at once. -->
+          <div class="preference-row">
+            <div class="pref-label"><strong class="config-field-label">{t('transferLimit')}</strong></div>
+            <div class="pref-control">
+              <Stepper value={transferPrefs.limit} min={TRANSFER_LIMIT_MIN} max={TRANSFER_LIMIT_MAX} label={t('transferLimit')}
+                decreaseLabel={`${t('configDecrease')} ${t('transferLimit')}`}
+                increaseLabel={`${t('configIncrease')} ${t('transferLimit')}`} onchange={(n: number) => transferPrefs.setLimit(n)} />
+            </div>
+          </div>
           {#if pendingInputs}
             <!-- Unattributed state from an earlier version (③d-3): named by
                  the machine it came from, with the one action a person can

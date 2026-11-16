@@ -199,6 +199,14 @@ Default restore_on_start: true (since board #422 round 4's live acceptance, `scr
 
 Default disconnect_grace_secs: 600 (10 min). Delay before a disconnected client's tmux window is auto-resized back; set to 0 for legacy immediate restore. See `docs/design-docs/features/disconnect-grace.md`.
 
+## Per-device client settings
+
+Kept in the client's `localStorage`, not in `config.toml`; each device has its own.
+
+| key | values | default | what |
+|---|---|---|---|
+| `tmux_transfer_limit` | 1 to 8 | 3 | Max concurrent transfers (board #134): downloads and uploads in flight at once on this device, every server together; Settings › Connection |
+
 ## Where the configuration lives (board #472)
 
 The directory is `<base>/teammux`, where `<base>` is `$XDG_CONFIG_HOME` when it is absolute, else `~/.config`, taken exactly as the environment gives it (the gateway service records it). It is chosen ONCE per process, before anything is read, created or written, by looking at the two names under `<base>`:

@@ -15,7 +15,7 @@
     selected = '', compact = false, recipient = '', composerText = $bindable(''),
     roomReady = false,
     agents = [], names = NO_LABELS, interruptible = false,
-    pending = [], attaching = false, failed = false, sendable = false,
+    pending = [], attaching = false, attachWaiting = false, failed = false, sendable = false,
     /** Why nothing can be sent now, said where the destination is (#482: the
      * one agent the filter shows has stopped). Hub also withholds `sendable`. */
     blocked = '',
@@ -370,7 +370,9 @@
        Files-head pitch): 32px each instead of 44, so the field keeps 24px more
        for text (board #228, owner: "发送区的按钮" tighter). -->
   <div class="composer-actions" class:compact-tools={compact} bind:this={actionsEl}>
-    <CommandButton variant="icon" icon="plus" label={t('hubAttach')} disabled={!selected || attaching}
+    <!-- An attachment waiting for a transfer slot says so (board #134): the same pending button, its name
+         'Waiting for a transfer slot'. -->
+    <CommandButton variant="icon" icon="plus" label={attachWaiting ? t('hubAttachWaiting') : t('hubAttach')} disabled={!selected || attaching}
       pending={attaching} onclick={() => fileEl?.click()} />
     <CommandButton variant="primary" iconOnly round icon="send-up" label={t('hubSend')}
       disabled={!selected || attaching || failed || !sendable} onclick={send} />

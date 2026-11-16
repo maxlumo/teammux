@@ -675,7 +675,7 @@ test('a stage job dies with its room, and nothing sends while one is in flight (
   const sendFn = /async function send\(\) \{([\s\S]*?)\n  \}/u.exec(source)?.[1] ?? '';
   assert.ok(sendFn, 'send found');
   assert.match(sendFn, /if \(attaching\) return;/u, 'send() refuses while a stage job is in flight');
-  assert.match(source, /\{pending\} \{attaching\} \{failed\} \{sendable\}/u,
+  assert.match(source, /\{pending\} \{attaching\} \{attachWaiting\} \{failed\} \{sendable\}/u,
     'the view receives the same gate verdicts; its button contract lives in Composer.source');
   // The gate answers PER GENERATION, and every job books/releases only its
   // OWN entry: a stale job neither holds the new room's send closed nor —

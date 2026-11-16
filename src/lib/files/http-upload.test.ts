@@ -1,6 +1,7 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import { uploadFile, UploadCancelled, UploadFailed, type UploadApi } from './http-upload.ts';
+import { createTransferSlots } from './transfer-slots.ts';
 
 // A fake gateway with the server's rules (src-tauri/src/server/upload.rs):
 // only the next offset is accepted, a 409 names where to resume, the last
@@ -194,4 +195,64 @@ test('every byte held is not done: only the server s 201 or done is (reviewer P1
   assert.ok(err instanceof UploadFailed, `not reported done: ${String(err)}`);
   assert.equal(err.id, 'u1', 'and a Retry can still ask the same upload');
   assert.equal(puts, 1, 'the bytes are not sent again');
+});
+
+// Board #134 (leader note 2): an upload holds a transfer slot from BEFORE its session is begun (the session
+// and its signed URL expire) until it ends, whichever way.
+test('an upload waits for a slot before it begins a session, and frees the slot when it ends', async () => {
+  const src = file(10);
+  const g = gateway(10);
+  const slots = createTransferSlots(1);
+  const held = await slots.acquire();
+  let waited = 0;
+  const run = uploadFile({ dest: '/d/a.bin', size: 10, source: sourceOf(src), api: g.api, fetch: g.fetch, sleep: noSleep, slots, onWaiting: () => { waited += 1; } });
+  await new Promise((r) => setImmediate(r));
+  assert.equal(waited, 1, 'told it waits');
+  assert.equal(g.begins, 0, 'no session while it waits');
+  held();
+  await run;
+  assert.equal(g.begins, 1);
+  assert.equal(g.committed, true);
+  assert.equal(slots.running, 0, 'the slot is free again');
+});
+
+test('an upload cancelled while it waits throws UploadCancelled and never begins', async () => {
+  const g = gateway(10);
+  const slots = createTransferSlots(1);
+  await slots.acquire();
+  const control = new AbortController();
+  const run = uploadFile({ dest: '/d/a.bin', size: 10, source: sourceOf(file(10)), api: g.api, fetch: g.fetch, sleep: noSleep, slots, signal: control.signal });
+  control.abort();
+  await assert.rejects(run, UploadCancelled);
+  assert.equal(g.begins, 0);
+  assert.equal(slots.waiting, 0);
+});
+
+test('a failed upload frees its slot', async () => {
+  const g = gateway(10);
+  g.fault = () => ({ drop: true, keep: 0 });
+  const slots = createTransferSlots(1);
+  await assert.rejects(uploadFile({ dest: '/d/a.bin', size: 10, source: sourceOf(file(10)), api: g.api, fetch: g.fetch, sleep: noSleep, slots, maxStalls: 2 }), UploadFailed);
+  assert.equal(slots.running, 0);
+});
+
+// Reviewer #134 R1 (validator's probe, note 25; leader note 28): Cancel has one meaning for uploads. A
+// WAITING Retry of an existing server session is cancelled by aborting that session, as a running Cancel
+// does; it is never resumed. A fresh waiting upload has no session and aborts nothing (test above).
+test('Cancel on a waiting Retry aborts its existing session and never resumes it', async () => {
+  const slots = createTransferSlots(1);
+  const held = await slots.acquire();
+  const control = new AbortController();
+  const calls: string[] = [];
+  const api: UploadApi = {
+    begin: async () => { calls.push('begin'); throw new Error('unexpected'); },
+    resume: async (id) => { calls.push(`resume ${id}`); return { url: 'http://g/up/x', received: 3 }; },
+    abort: async (id) => { calls.push(`abort ${id}`); return {}; },
+  };
+  const run = uploadFile({ dest: '/d/a.txt', size: 10, source: async () => new Blob(['abc']), api, resumeId: 'kept-session', slots, signal: control.signal });
+  assert.equal(slots.waiting, 1);
+  control.abort();
+  await assert.rejects(run, UploadCancelled);
+  held();
+  assert.deepEqual(calls, ['abort kept-session']);
 });

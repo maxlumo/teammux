@@ -19,7 +19,7 @@ const failed = (...a: Parameters<typeof record.failed>) => record.failed(...a);
 const forget = (...a: Parameters<typeof record.forget>) => record.forget(...a);
 const rowOf = (...a: Parameters<typeof record.rowOf>) => record.rowOf(...a);
 
-const S = { downloading: 'Downloading', changed: 'File changed', saving: 'Saving' };
+const S = { downloading: 'Downloading', changed: 'File changed', saving: 'Saving', waiting: 'Waiting' };
 
 test('an attempt moves downloading → saving → done, and the slot value is read from the row (#308)', () => {
   resetForTests();

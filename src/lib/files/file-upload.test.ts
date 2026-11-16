@@ -6,7 +6,7 @@ import { uploadProgress, uploadSummary } from './file-upload.ts';
 // Board #23: the file goes over HTTP in chunks, so the line shows the bytes
 // the server holds, of the total, with a percentage.
 const s = {
-  uploading: 'Uploading {name} ({index}/{total})', uploadBytes: '{sent} of {size}',
+  uploading: 'Uploading {name} ({index}/{total})', uploadWaiting: 'Waiting {name} ({index}/{total})', uploadBytes: '{sent} of {size}',
   uploaded: 'Uploaded {name}', uploadedMany: 'Uploaded {count} files',
   uploadFailed: 'Upload failed: {names}', uploadPartial: '{ok} uploaded, {failed} failed: {names}',
 };

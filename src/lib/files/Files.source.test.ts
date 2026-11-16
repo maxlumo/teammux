@@ -37,7 +37,7 @@ test('one upload mechanism: the base64 fs_upload RPC is gone from the client and
   assert.doesNotMatch(await read('../../../src-tauri/src/server/rpc.rs'), /"fs_upload" =>/u, 'no server arm');
   assert.doesNotMatch(await read('../../../src-tauri/src/fs.rs'), /fn upload_file\b/u, 'no base64 writer');
   const stager = await read('../hub/attachments.svelte.ts');
-  assert.match(stager, /uploadFile\(\{ dest, size: blob\.size, source: async \(start, end\) => blob\.slice\(start, end\), api \}\)/u,
+  assert.match(stager, /uploadFile\(\{ dest, size: blob\.size, source: async \(start, end\) => blob\.slice\(start, end\), api,/u,
     'Hub attachments go through #23\'s one core, sliced, never read whole');
   // Uploaded = the last chunk committed: the upload resolves before the count.
   assert.match(source, /await uploadFile\(\{[\s\S]{0,400}?\}\);\s*outcome\.ok\.push\(item\.name\);/u);
@@ -337,8 +337,8 @@ test('the download stack is a bounded scroll region; Cancel only while honored; 
   // never squeezed into scrolling inside itself (this boundary only).
   assert.match(source, /\.files-feedback > :global\(\.operation-feedback\) \{ flex: none; \}/u);
   // P2-C: no Cancel in 'saving'; the boundaries outside download() check it.
-  assert.match(source, /actions=\{row\.state === 'downloading' \? cancelAction : undefined\}/u);
-  assert.match(saveFile, /throwIfCancelled\(control\.signal\);\s*\/\/ There is no measured write fraction\. Only transfer bytes report a percentage\.\s*store\.saving\(rowId\);/u, 'the one check sits right before saving');
+  assert.match(source, /actions=\{row\.state === 'downloading' \|\| row\.state === 'waiting' \? cancelAction : undefined\}/u, 'a waiting download is cancelled from its card too (#134)');
+  assert.match(saveFile, /throwIfCancelled\(control\.signal\);\s*\/\/ There is no measured write fraction\. Only transfer bytes report a percentage\.\s*\/\/[^\n]*\s*release\?\.\(\);\s*store\.saving\(rowId\);/u, 'the one check sits right before saving; the transfer slot goes with the bytes (#134)');
   // P1-B: hidden -> held, latest wins; its life starts when Files is seen.
   assert.match(source, /if \(!visible\) \{\s*heldOutcome = value\.kind === 'result' \? \{ \.\.\.value, kind: 'success' \} : value;\s*return;/u);
   assert.match(source, /if \(!visible \|\| !heldOutcome\) return;\s*const value = heldOutcome;\s*heldOutcome = null;\s*earlierLifetime\.update\(earlierLifetime\.begin\(\), value\);/u);
@@ -355,7 +355,7 @@ test('the feedback stack shows every running download from the store; it keeps n
   assert.doesNotMatch(source, /downloadLifetime\.update\(token, feedbackOf\(/u, 'no slot holds a copy of the progress');
   assert.doesNotMatch(source, /shown = \{ kind: 'progress'/u, 'the old private progress copy is gone');
   // ONE card, drawn by the Downloads view and by the stack alike.
-  assert.match(source, /\{#snippet activeDownload\(row\)\}[\s\S]*?<OperationFeedback value=\{rowFeedback\(row\)\} actions=\{row\.state === 'downloading' \? cancelAction : undefined\} \/>\s*\{\/snippet\}/u);
+  assert.match(source, /\{#snippet activeDownload\(row\)\}[\s\S]*?<OperationFeedback value=\{rowFeedback\(row\)\} actions=\{row\.state === 'downloading' \|\| row\.state === 'waiting' \? cancelAction : undefined\} \/>\s*\{\/snippet\}/u);
   assert.equal(source.match(/\{@render activeDownload\(row\)\}/gu)?.length, 2, 'the view and the stack render the same card');
   assert.match(source, /\{#each stackedRows as row \(row\.id\)\}\{@render activeDownload\(row\)\}\{\/each\}/u);
   assert.match(saveFile, /store\.done\(rowId, savedPath\);/u);

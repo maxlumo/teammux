@@ -71,6 +71,10 @@ const GLOBAL: Record<string, Record<string, string>> = {
   // the centre's Mute and both bells read the same fact.
   'hub/notify-switch.svelte.ts': { on: 'a preference', permission: 'this device\'s platform permission' },
   'app/terminal-prefs.svelte.ts': { state: 'a preference' },
+  // The ONE transfer limiter (board #134, leader note 2): per app instance, across servers, because the
+  // cap protects this device's link and memory, which every server's transfers share.
+  'files/transfers.ts': { transferSlots: 'this device\'s transfer slots, shared by every server' },
+  'files/transfers.svelte.ts': { state: 'a preference' },
   'app/layout.svelte.ts': { mode: 'a preference', vw: 'this window\'s viewport', vh: 'this window\'s viewport', coarse: 'this device\'s input' },
   'app/server-mode.svelte.ts': { current: 'THIS computer\'s own server, not the connected one', started: 'one subscription per page' },
   'core/i18n.svelte.ts': { i18n: 'a preference' },

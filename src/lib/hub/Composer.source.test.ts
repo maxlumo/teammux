@@ -20,7 +20,9 @@ test('All, attachment and Send are a measured last-line signature (#186)', () =>
   assert.match(rule('.c-input'), /width: 100%/u);
   assert.match(rule('.c-input'), /min-width: 0/u);
   assert.doesNotMatch(source, /class="all-choice"|onall|allMenuOpen/u, '#204: Everyone lives in the roster, beside Spawn');
-  assert.ok(source.indexOf("label={t('hubEveryone')}") < source.indexOf("label={t('hubAttach')}"));
+  assert.ok(source.indexOf("label={t('hubEveryone')}") < source.indexOf("t('hubAttach')}"));
+  // A waiting attachment names itself on the same button (#134, leader note 2): not uploading, waiting.
+  assert.match(source, /label=\{attachWaiting \? t\('hubAttachWaiting'\) : t\('hubAttach'\)\}/u);
   assert.doesNotMatch(source, /justify-content: space-between/u, 'no separate footer distributes the controls');
   assert.match(source, /signatureLayout\(/u);
 });

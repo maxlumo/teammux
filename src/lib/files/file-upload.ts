@@ -14,6 +14,8 @@ export interface UploadStep {
   /** Bytes of THIS file the server holds. */
   sent: number;
   size: number;
+  /** Waiting for a transfer slot (board #134): nothing of this file is sent yet. */
+  waiting?: boolean;
 }
 
 export interface UploadOutcome {
@@ -23,6 +25,7 @@ export interface UploadOutcome {
 
 export interface UploadStrings {
   uploading: string;      // 'Uploading {name} ({index}/{total})'
+  uploadWaiting: string;  // 'Waiting {name} ({index}/{total})'
   uploadBytes: string;    // '{sent} of {size}'
   uploaded: string;       // 'Uploaded {name}'
   uploadedMany: string;   // 'Uploaded {count} files'
@@ -39,6 +42,8 @@ const fill = (template: string, values: Record<string, string | number>) =>
  * rounding (70% vs 71%, the #23 live run). `size` formats a byte count the
  * way the page does. */
 export function uploadProgress(step: UploadStep, dir: string, s: UploadStrings, size: (n: number) => string): FeedbackValue {
+  // Waiting for a slot (board #134): the same line, still, at 0 %.
+  if (step.waiting) return { kind: 'progress', message: fill(s.uploadWaiting, { name: step.name, index: step.index, total: step.total }), detail: dir, progress: 0 };
   const message = fill(s.uploading, { name: step.name, index: step.index, total: step.total });
   const pct = step.size > 0 ? Math.min(100, (step.sent / step.size) * 100) : 100;
   const bytes = fill(s.uploadBytes, { sent: size(Math.min(step.sent, step.size)), size: size(step.size) });

@@ -1337,6 +1337,7 @@
   });
   const pending = $derived(stager.pending);
   const attaching = $derived(stager.attaching);
+  const attachWaiting = $derived(stager.waiting);
   // A failed chip is not content: it does not make the composer sendable, and
   // while one is staged nothing sends (send() and the button agree, the same
   // two-gate rule as `attaching`) — the user removes it or re-attaches.
@@ -2990,7 +2991,7 @@
       {/if}
       <Composer bind:this={composer} bind:composerText {selected} {compact} {recipient} {names}
         {roomReady} blocked={sendBlocked}
-        {agents} {pending} {attaching} {failed} {sendable} {interruptible} {replyTo}
+        {agents} {pending} {attaching} {attachWaiting} {failed} {sendable} {interruptible} {replyTo}
         issues={roomIssues} onissues={(s) => loadIssues(s)}
         onclearreply={() => { replyTo = null; composer?.focus(); }}
         onsend={send} onstage={stageFiles} onremove={removeAttachment}

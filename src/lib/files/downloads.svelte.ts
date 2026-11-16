@@ -21,7 +21,8 @@
 
 import type { FeedbackValue } from '../ui/feedback-lifetime.ts';
 
-export type DownloadState = 'downloading' | 'saving' | 'done' | 'failed' | 'paused';
+/** `waiting`: this attempt waits for a transfer slot (board #134); it has not started. */
+export type DownloadState = 'waiting' | 'downloading' | 'saving' | 'done' | 'failed' | 'paused';
 
 export interface DownloadRow {
   /** The part id (native) or a session id (browser). */
@@ -45,9 +46,13 @@ export interface DownloadRow {
   requested: boolean;
 }
 
+/** IN PROGRESS, the ONE definition (reviewer #134 R2, leader note 28): running or waiting for a slot. The
+ * feedback stack, the Downloads view's In progress group and `active` all read it. */
+export const inProgress = (row: Pick<DownloadRow, 'state'>) => row.state === 'waiting' || row.state === 'downloading' || row.state === 'saving';
+
 export interface DownloadStore {
   readonly rows: readonly DownloadRow[];
-  /** Rows a transfer is running for. */
+  /** Rows in progress (`inProgress`): a row leaving the group (a waiting one cancelled too) lowers it. */
   readonly active: number;
   rowOf(id: string): DownloadRow | undefined;
   /** A new attempt. A row for the same id (a resume, a retry) is reused, so
@@ -55,6 +60,10 @@ export interface DownloadStore {
   begin(id: string, name: string, path: string, now?: number): DownloadRow;
   progress(id: string, received: number, total: number, now?: number): void;
   restarted(id: string): void;
+  /** Waiting for a transfer slot (board #134). */
+  waiting(id: string): void;
+  /** The slot came: the transfer starts. */
+  started(id: string): void;
   saving(id: string): void;
   done(id: string, savedPath: string | null, now?: number, requested?: boolean): void;
   /** The transfer stopped and its part stays on disk to be resumed. */
@@ -80,7 +89,7 @@ export function createDownloads(): DownloadStore {
 
   return {
     get rows(): readonly DownloadRow[] { return rows; },
-    get active(): number { return rows.filter((r) => r.state === 'downloading' || r.state === 'saving').length; },
+    get active(): number { return rows.filter(inProgress).length; },
     rowOf,
     begin(id, name, path, now = Date.now()) {
       const old = rows.findIndex((r) => r.id === id);
@@ -105,6 +114,14 @@ export function createDownloads(): DownloadStore {
       row.restarted = true;
       row.received = 0;
       row.base = null;
+    },
+    waiting(id) {
+      const row = rowOf(id);
+      if (row) row.state = 'waiting';
+    },
+    started(id) {
+      const row = rowOf(id);
+      if (row?.state === 'waiting') row.state = 'downloading';
     },
     saving(id) {
       const row = rowOf(id);
@@ -141,11 +158,14 @@ export function speed(row: DownloadRow, now = Date.now()): number | null {
   return (row.received - row.base.received) / seconds;
 }
 
-export interface FeedbackStrings { downloading: string; changed: string; saving: string }
+export interface FeedbackStrings { downloading: string; changed: string; saving: string; waiting: string }
 
 /** The feedback slot's progress value for a row: the slot shows the store,
  * it keeps no copy of its own. Pure, like `speed`. */
 export function feedbackOf(row: DownloadRow, s: FeedbackStrings): FeedbackValue {
+  // Waiting for a slot (board #134): nothing moves, so nothing turns. The still 0 % bar of the same card
+  // (no download glyph, whose ring turns for the whole transfer), with Cancel beside it.
+  if (row.state === 'waiting') return { kind: 'progress', message: s.waiting, detail: row.path, progress: 0 };
   return {
     kind: 'progress', glyph: 'download',
     message: row.state === 'saving' ? s.saving : row.restarted ? s.changed : s.downloading,

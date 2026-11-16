@@ -25,7 +25,7 @@
   import { isAndroid, isTauri, isTauriDesktop, tauriReady } from '../core/platform.ts';
   import { invokeNative } from '../core/native.ts';
   import { saveServerFile, realmReady } from './save-file.ts';
-  import { speed as bytesPerSecond, feedbackOf } from './downloads.svelte.ts';
+  import { speed as bytesPerSecond, feedbackOf, inProgress } from './downloads.svelte.ts';
   import { useServerScope } from '../app/server-context.ts';
   import Icon from '../ui/Icon.svelte';
   import CommandButton from '../ui/CommandButton.svelte';
@@ -266,7 +266,7 @@
     } catch (e) { error = e.message; }
   }
   const sessionRows = $derived(store.rows);
-  const activeRows = $derived(sessionRows.filter((r) => r.state === 'downloading' || r.state === 'saving'));
+  const activeRows = $derived(sessionRows.filter(inProgress));
   const failedRows = $derived(sessionRows.filter((r) => r.state === 'failed'));
   // The feedback stack's cards (board #420): every running download, newest
   // first, straight from the store; none in the Downloads view, which lists
@@ -309,7 +309,7 @@
     return bps ? `${formatSize(Math.round(bps))}/s` : '';
   };
   const rowFeedback = (row) => {
-    const value = feedbackOf(row, { downloading: t('downloading'), changed: t('downloadFileChanged'), saving: t('saving') });
+    const value = feedbackOf(row, { downloading: t('downloading'), changed: t('downloadFileChanged'), saving: t('saving'), waiting: t('transferWaiting') });
     const speedText = rowSpeed(row);
     return { ...value, detail: speedText ? `${row.name} · ${speedText}` : row.name };
   };
@@ -1574,7 +1574,7 @@
   // existing copy/download slot and its context rule: leave the directory
   // and the line stops updating.
   const uploadStrings = () => ({
-    uploading: t('uploading'), uploadBytes: t('uploadBytes'),
+    uploading: t('uploading'), uploadWaiting: t('uploadWaiting'), uploadBytes: t('uploadBytes'),
     uploaded: t('uploaded'), uploadedMany: t('uploadedMany'), uploadFailed: t('uploadFailed'), uploadPartial: t('uploadPartial'),
   });
   const uploadApi = { begin: fsUploadBegin, resume: fsUploadResume, abort: fsUploadAbort };
@@ -1603,7 +1603,8 @@
         await uploadFile({
           dest: uploadDest(dir, item.name), size, source: item.source, api: uploadApi, signal: ctl.signal,
           resumeId: item.resumeId,
-          onProgress: (sent) => { step.sent = sent; show(); },
+          onWaiting: () => { step.waiting = true; show(); },
+          onProgress: (sent) => { step.waiting = false; step.sent = sent; show(); },
         });
         outcome.ok.push(item.name);
       } catch (e) {
@@ -2133,7 +2134,7 @@
     <!-- Cancel only while it is honored (review P2-C): while downloading.
          Saving (a dialog, a finish) offers no action rather than a cancel
          that would not happen. -->
-    <OperationFeedback value={rowFeedback(row)} actions={row.state === 'downloading' ? cancelAction : undefined} />
+    <OperationFeedback value={rowFeedback(row)} actions={row.state === 'downloading' || row.state === 'waiting' ? cancelAction : undefined} />
 {/snippet}
 
 {#snippet localPanel()}
