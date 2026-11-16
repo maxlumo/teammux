@@ -17,7 +17,7 @@ function stubMedia(win: any, opts: { fullscreen?: boolean; pip?: boolean } = {})
   const P = win.HTMLMediaElement.prototype;
   const states = new WeakMap<object, Media>();
   const s = (el: object): Media => {
-    if (!states.has(el)) states.set(el, { paused: true, t: 0, d: NaN, buf: [], seek: [], err: null, muted: false, plays: [], pauses: 0, seeks: [], rs: 0, vw: 0, vh: 0 });
+    if (!states.has(el)) states.set(el, { paused: true, t: 0, d: NaN, buf: [], seek: [], err: null, muted: false, plays: [], pauses: 0, seeks: [], rs: 0, vw: 1280, vh: 720 });  // a picture, as a real video has (#141)
     return states.get(el)!;
   };
   const ranges = (a: number[][]) => ({ length: a.length, start: (i: number) => a[i]![0], end: (i: number) => a[i]![1] });
@@ -807,4 +807,44 @@ test('Android app: a load that played does not lend its cleared poster flag to t
       assert.equal(state(p), 'frame', `${reset}: its own play hands over`);
     } finally { await p.app.close(); }
   }
+});
+
+// Board #141 (leader's ruling, note 4; measured on the rig: an HEVC .mp4 in a Chromium without
+// HEVC decode played its sound under an EMPTY pane, no error event, no message): a file played
+// as VIDEO whose metadata brings no picture shows the player's existing error line; the sound,
+// the bar and the middle tap keep working. A file played as audio never shows it.
+test('a video with no picture says so on the error line; its controls stay live and nothing is paused (#141)', async (context) => {
+  const p = await player(context);
+  try {
+    Object.assign(p.m(), { vw: 0, vh: 0 });
+    await p.loaded();
+    const line = p.app.document.querySelector('.mp-error');
+    assert.ok(line, 'the existing error line');
+    assert.match(line!.textContent!, /cannot show this video.s picture/u);
+    assert.equal(p.button('Play')!.disabled, false, 'the bar stays live');
+    p.button('Play')!.click(); await p.settlePlay(0);
+    assert.equal(p.m().paused, false, 'the sound plays');
+    assert.equal(p.m().pauses, 0, 'nothing paused it');
+    assert.ok(p.app.document.querySelector('.mp-error'), 'and the line stays while it plays');
+    // A later source with a picture: the line goes.
+    p.ev('loadstart'); Object.assign(p.m(), { vw: 1280, vh: 720 }); p.ev('loadedmetadata'); await p.app.flush();
+    assert.equal(p.app.document.querySelector('.mp-error'), null);
+  } finally { await p.app.close(); }
+});
+
+test('a file played as audio never shows the no-picture line, and a normal video neither (#141)', async (context) => {
+  const a = await player(context, { kind: 'audio', src: 'https://h/dl?path=%2Fs.mp3&stream=1', name: 's.mp3' });
+  try {
+    Object.assign(a.m(), { vw: 0, vh: 0 });
+    await a.loaded();
+    assert.equal(a.app.document.querySelector('.mp-error'), null, 'audio');
+  } finally { await a.app.close(); }
+});
+
+test('a normal video shows no no-picture line (#141)', async (context) => {
+  const p = await player(context);
+  try {
+    await p.loaded();
+    assert.equal(p.app.document.querySelector('.mp-error'), null);
+  } finally { await p.app.close(); }
 });

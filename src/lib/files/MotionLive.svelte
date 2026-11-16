@@ -12,7 +12,7 @@
   import { isAndroid } from '../core/platform.ts';
   // Board #139: the transparent poster (the owner saw WebView's stock play graphic here); the
   // still underneath shows through it until play() clears the show-poster flag and a frame paints.
-  import { posterFor } from './media-player.ts';
+  import { hasPicture, posterFor } from './media-player.ts';
 
   let { path, natural, open, onerror, visible = true }: {
     path: string;
@@ -59,6 +59,19 @@
     onerror(t('filesMotionFailed'));
   }
 
+  /** The current video has no decodable picture (board #141): sound alone is not the motion.
+   * Its sound stops, the still returns and the person is told; the URL is kept (the stream
+   * is fine), so a replay reports again without minting. */
+  function noPicture(el: HTMLVideoElement) {
+    el.pause();
+    retire();
+    onerror(t('filesMotionNoPicture'));
+  }
+  const checkPicture = (e: Event) => {
+    const el = e.currentTarget as HTMLVideoElement;
+    if (current(el) && !hasPicture(el)) noPicture(el);
+  };
+
   /** The current video's STREAM failed (reviewer, #133 note 52): its URL is dropped as a failed
    * mint is, so the next press mints afresh: a file rewritten while previewed whose detected
    * window no longer matches (404) or a signature past its lifetime (403) is never replayed. */
@@ -92,6 +105,7 @@
   <!-- svelte-ignore a11y_media_has_caption -->
   <video class="motion-video" bind:this={video} {src} playsinline preload="auto" poster={posterFor(isAndroid)}
     style:--still-w={natural.width} style:--still-h={natural.height}
+    onloadedmetadata={checkPicture} onplaying={checkPicture}
     onended={(e) => { if (current(e.currentTarget)) retire(); }} onerror={(e) => { if (current(e.currentTarget)) dropStream(); }}></video>
 {/if}
 

@@ -17,6 +17,9 @@ const photo = (path: string, motion: object | null) => ({
 
 /** The still's natural size (jsdom decodes no image; the preview reads it at `load`). */
 const natural = { width: 1200, height: 1600 };
+/** The motion's decoded picture size (board #141: 0×0 when the browser cannot decode its video). */
+const picture = { width: 1200, height: 1600 };
+let pauses = 0;
 type Play = (el: HTMLMediaElement, win: Window & typeof globalThis) => Promise<void>;
 
 /** The next mount runs as the Android app (board #139). */
@@ -32,7 +35,10 @@ async function mount(context: test.TestContext, file: object, extra: Record<stri
         (win as unknown as { __TAURI_INTERNALS__: object }).__TAURI_INTERNALS__ = {};
       }
       win.HTMLMediaElement.prototype.play = function () { plays.push(this); return play(this, win as never); };
-      win.HTMLMediaElement.prototype.pause = function () {};
+      pauses = 0;
+      win.HTMLMediaElement.prototype.pause = function () { pauses++; };
+      Object.defineProperty(win.HTMLVideoElement.prototype, 'videoWidth', { configurable: true, get: () => picture.width });
+      Object.defineProperty(win.HTMLVideoElement.prototype, 'videoHeight', { configurable: true, get: () => picture.height });
       Object.defineProperty(win.HTMLImageElement.prototype, 'naturalWidth', { configurable: true, get: () => natural.width });
       Object.defineProperty(win.HTMLImageElement.prototype, 'naturalHeight', { configurable: true, get: () => natural.height });
     },
@@ -314,3 +320,45 @@ for (const android of [true, false]) {
     } finally { androidApp = false; }
   });
 }
+
+// Board #141 (validator-2's probe on #133, measured in Docker Chromium 148): a Motion Photo whose
+// video the browser cannot decode (HEVC without HEVC decode) played its SOUND over an unchanged
+// still: play() resolved, videoWidth = videoHeight = 0, no error event, Stop and no feedback.
+// One definition of "has a picture"; without one the still returns and the person is told.
+test('a motion with no decodable picture returns the still, stops its sound and says so; a replay reuses the URL and says it again', async (context) => {
+  const asked: string[] = [];
+  const errors: string[] = [];
+  picture.width = 0; picture.height = 0;
+  try {
+    const { app } = await mount(context, photo('/p/hevc.jpg', { offset: 1, length: 2 }), {
+      openMotion: (path: string) => { asked.push(path); return Promise.resolve('https://h/hevc'); },
+      onpreviewerror: (m: string) => errors.push(m),
+    });
+    live(app.document)!.click(); await settle(app);
+    const video = app.document.querySelector<HTMLVideoElement>('.image-preview video')!;
+    video.dispatchEvent(new app.window.Event('loadedmetadata')); await settle(app);
+    assert.equal(app.document.querySelector('.image-preview video'), null, 'the still again');
+    assert.ok(pauses >= 1, 'its sound stopped: the element was paused');
+    assert.equal(errors.length, 1);
+    assert.match(errors[0]!, /cannot play the video/u);
+    assert.match(live(app.document)!.textContent ?? '', /Live/u);
+    live(app.document)!.click(); await settle(app);
+    assert.deepEqual(asked, ['/p/hevc.jpg'], 'the stream is fine: no new mint');
+    app.document.querySelector('.image-preview video')!.dispatchEvent(new app.window.Event('playing')); await settle(app);
+    assert.equal(errors.length, 2, 'said again');
+    assert.equal(app.document.querySelector('.image-preview video'), null);
+  } finally { picture.width = 1200; picture.height = 1600; }
+});
+
+test('a motion WITH a picture plays on through loadedmetadata and playing (#141)', async (context) => {
+  const errors: string[] = [];
+  const { app } = await mount(context, photo('/p/h264.jpg', { offset: 1, length: 2 }), {
+    openMotion: () => Promise.resolve('https://h/h264'), onpreviewerror: (m: string) => errors.push(m),
+  });
+  live(app.document)!.click(); await settle(app);
+  const video = app.document.querySelector<HTMLVideoElement>('.image-preview video')!;
+  video.dispatchEvent(new app.window.Event('loadedmetadata'));
+  video.dispatchEvent(new app.window.Event('playing')); await settle(app);
+  assert.ok(app.document.querySelector('.image-preview video'), 'still playing');
+  assert.deepEqual(errors, []);
+});

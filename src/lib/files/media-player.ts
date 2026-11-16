@@ -74,6 +74,11 @@ export function errorKind(code: number | undefined): 'unplayable' | 'transient' 
  * would hide the first frame desktop browsers show before play. */
 export const BLANK_POSTER = 'data:image/gif;base64,R0lGODlhAQABAIAAAAAAAP///yH5BAEAAAAALAAAAAABAAEAAAIBRAA7';
 
+/** Does a video element have a decodable PICTURE? (board #141: a browser that cannot decode
+ * the video track, HEVC without HEVC decode, still plays its audio, resolves play() and fires
+ * no error, with videoWidth = videoHeight = 0.) Read once the metadata is known. */
+export const hasPicture = (v: { videoWidth: number; videoHeight: number }): boolean => v.videoWidth > 0 && v.videoHeight > 0;
+
 /** The poster EVERY <video> the app renders carries (board #139, owner: "很丑的大大的播放器播放按键图案"):
  * in the Android app the transparent one above, so WebView never paints its stock poster (the
  * big circled play glyph) before a frame; none elsewhere, where a browser shows no such

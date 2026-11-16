@@ -23,7 +23,7 @@
   import { t } from '../core/i18n.svelte.ts';
   import { isAndroid } from '../core/platform.ts';
   import Icon from '../ui/Icon.svelte';
-  import { ANDROID_FULLSCREEN_EVENT, androidFullscreen, canFullscreen, canPip, clampTo, errorKind, fmtTime, Intents, posterFor, seekWindow, spans, third, type Span } from './media-player.ts';
+  import { ANDROID_FULLSCREEN_EVENT, androidFullscreen, canFullscreen, canPip, clampTo, errorKind, fmtTime, hasPicture, Intents, posterFor, seekWindow, spans, third, type Span } from './media-player.ts';
 
   let { kind, src, name = '', visible = true, mediaEl = $bindable(null), reopen = null }:
     { kind: 'video' | 'audio'; src: string; name?: string;
@@ -60,7 +60,10 @@
     hasData = mediaEl.readyState >= 2;
     if (hasData && (!isAndroid || posterCleared)) framed = true;
   }
-  function newLoad() { hasData = false; posterCleared = false; framed = false; aspect = 16 / 9; }
+  /** A VIDEO whose metadata brought no decodable picture (board #141, `hasPicture`): the
+   * error line says so; nothing else changes (the sound is content the person asked for). */
+  let noPicture = $state(false);
+  function newLoad() { hasData = false; posterCleared = false; framed = false; aspect = 16 / 9; noPicture = false; }
   /** The range transaction being dragged and the seek ticket it opened. */
   let drag: { tx: number; ticket: ReturnType<Intents['begin']> } | null = null;
   /** `life` bumps at every life end (menus built before it are stale);
@@ -296,6 +299,7 @@
       readTimes();
       const v = mediaEl as HTMLVideoElement | null;
       if (v?.videoWidth && v.videoHeight) aspect = v.videoWidth / v.videoHeight;
+      noPicture = kind === 'video' && !!v && !hasPicture(v);
     },
     onloadeddata: settleFrame,
     // A new load: the old source's state, its error included, is gone
@@ -370,7 +374,7 @@
         onclick={(e) => { if (!live()) return; menuAt = menuAt ? null : { anchor: anchorOf(e.currentTarget as Element), align: 'left', trigger: e.currentTarget }; }} />
     </div>
     {#if narrow}<div class="mp-row">{@render range()}</div>{/if}
-    {#if error}<p class="mp-error" role="status">{error.text}</p>{/if}
+    {#if error}<p class="mp-error" role="status">{error.text}</p>{:else if noPicture}<p class="mp-error" role="status">{t('mediaNoPicture')}</p>{/if}
   </div>
   <ContextMenu at={menuAt} items={moreItems} oncancel={() => { menuAt = null; poke(); }} />
 </div>

@@ -637,7 +637,26 @@ bytes, right after the JPEG's EOI.
   mints again. A STREAM error of the current video drops its URL the same way (reviewer, note
   52): the owner rewrites these files while previewing them; a rewritten file whose
   detected window no longer matches answers 404, and a signature past its 4 h lifetime
-  answers 403. MediaPlayer is not used: its seek bar, rate and PiP are a film's,
+  answers 403. A video with NO decodable picture is not the motion (board #141;
+  validator-2 measured on #133, Docker Chromium 148: a Motion Photo embedding HEVC/AAC in a
+  Chromium without HEVC decode played its sound over the unchanged still, play() resolved,
+  `videoWidth = videoHeight = 0`, no error event, Stop and no feedback). One definition,
+  `hasPicture()` in `media-player.ts` (both dimensions non-zero), read at the current video's
+  `loadedmetadata` and `playing`: without a picture the element is paused (no sound left
+  running), the intent retires (the still and Live return) and the preview's feedback says
+  "This browser cannot play the video in this photo" / "此浏览器无法播放这张照片里的视频". The
+  URL is kept, because the stream itself is fine: a second press replays it without minting and
+  says so again. Measured after (own rig): that photo returns the still with the message and no
+  media element left playing; the owner's H.264 sample plays as before. The media player has the
+  same case (measured on the rig: an HEVC `.mp4` played its sound under an EMPTY pane, the bar
+  ran to its end, no error event, no message). For a file played as VIDEO, once its metadata
+  is known and `hasPicture()` is false, the player's existing error line says "This browser
+  cannot show this video's picture" / "此浏览器无法显示这个视频的画面" (leader's ruling, #141
+  note 4). Nothing else changes: the sound and the bar keep working, because for a file the
+  sound is content the person asked for, and the middle tap keeps play/pause. A file played as
+  audio never shows it, and the line goes with a later source that has a picture. The real
+  `unplayable` error state is unchanged. Measured after: the HEVC file shows the line before and
+  during play; the owner's H.264 video shows none. MediaPlayer is not used: its seek bar, rate and PiP are a film's,
   over a 1.5-5 s moment. Reading mode is never offered for a picture, so a Motion Photo
   has none.
 - **Measured** (Chromium 148, rig, a copy of `cover-rings.jpg`, 2,510,084 B, video
