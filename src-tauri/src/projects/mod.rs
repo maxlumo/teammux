@@ -197,12 +197,12 @@ fn canonical(path: &str) -> Result<String, String> {
 
 use crate::tmux;
 
-#[cfg(test)]
 // pub(crate): `use_test_store` must be reachable from tests in OTHER module
 // trees (server/hub_rpc). STORE is a OnceLock — whichever test opens it first
 // decides the path for the whole process, so a test that reaches the store
 // without pointing it at a throwaway db can send every later test's writes into
 // the user's real state.db.
+#[cfg(test)]
 pub(crate) mod tests {
     use super::*;
 

@@ -24,7 +24,6 @@ const ALLOWED: &[(&str, usize, &str)] = &[
     ("probe.rs", 1, "run_status_as's pipe reader: read_to_string on the child's pipe, then a channel send; nothing else"),
     ("gateway/mod.rs", 1, "stamp_fd's job: stamp_stream copies a pipe to a fd with a chrono timestamp; nothing else"),
     ("backends/dsh.rs", 1, "TEST code (dsh's test module, a stand-in's reader thread at the module's end), counted because a JS fixture inside a raw string has a lone '}' line at column 0, which ends the scan's exclusion early: the accepted limit, failing closed"),
-    ("projects/mod.rs", 2, "TEST code (projects' test module, two threads racing open_once), counted because a comment sits between its #[cfg(test)] and its 'pub(crate) mod tests {', which is not the standard shape: failing closed"),
     ("lib.rs", 1, "the embedded gateway's runtime thread: it IS the gateway; the server's start sets the process global from inside it (server/mod.rs set_socket) and the set_socket RPC changes it later, so a binding would pin it to the pre-start value and override both"),
 ];
 

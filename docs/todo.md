@@ -198,6 +198,13 @@
   (server `deliver_mentions` + the client's `hub_agents` refresh), left as
   they are: a time-based cache would give a freshly launched CLI a window of
   reading as a plain shell. `child_cmd` stays a detection clue everywhere.
+- [ ] The detached-thread pin (`tmux::spawn_pin_tests`, board #140) is a line
+  scan that fails closed. Its parser-backed form is clippy's
+  `disallowed-methods` on `std::thread::spawn` / `Builder::spawn` with a
+  per-site `#[allow]` and reason; clippy is in no gate today (reviewer, #140
+  note 51, P2-b). Until then one test-code entry stays on its allow-list:
+  dsh's test module, whose raw-string JS fixture has a lone `}` in column 0;
+  moving those tests to a `*_tests.rs` file removes the entry (P2-a).
 - [ ] Structural clippy findings (deferred 2026-07-22; fixing them changes
   signatures, which the mechanical-move discipline forbade in that pass).
   Done: `handle_connection`(9) / `handle_connection_ws`(11) take a
