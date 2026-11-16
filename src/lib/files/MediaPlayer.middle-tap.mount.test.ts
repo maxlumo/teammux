@@ -59,35 +59,43 @@ async function player(context: test.TestContext) {
 
 test('paused before the first play: a middle tap plays at once', async (context) => {
   const p = await player(context);
-  await p.tap(150);
-  assert.equal(p.m().plays.length, 1, 'play() at once, no 250 ms wait');
+  try {
+    await p.tap(150);
+    assert.equal(p.m().plays.length, 1, 'play() at once, no 250 ms wait');
+  } finally { await p.app.close(); }
 });
 
 test('after a pause and after the end, a middle tap plays again', async (context) => {
   const p = await player(context);
-  await p.tap(150); await p.settle();
-  await p.tap(150);
-  assert.equal(p.m().pauses, 1, 'playing: the middle tap pauses');
-  await p.tap(150);
-  assert.equal(p.m().plays.length, 2, 'paused: plays again');
-  await p.settle();
-  p.m().paused = true; p.ev('pause'); p.ev('ended'); await p.app.flush();
-  await p.tap(150);
-  assert.equal(p.m().plays.length, 3, 'ended: plays again');
+  try {
+    await p.tap(150); await p.settle();
+    await p.tap(150);
+    assert.equal(p.m().pauses, 1, 'playing: the middle tap pauses');
+    await p.tap(150);
+    assert.equal(p.m().plays.length, 2, 'paused: plays again');
+    await p.settle();
+    p.m().paused = true; p.ev('pause'); p.ev('ended'); await p.app.flush();
+    await p.tap(150);
+    assert.equal(p.m().plays.length, 3, 'ended: plays again');
+  } finally { await p.app.close(); }
 });
 
 test('the side thirds never play: a single tap there toggles the bar, a double tap seeks', async (context) => {
   const p = await player(context);
-  await p.tap(20); await p.app.advance(300);
-  await p.tap(280); await p.app.advance(300);
-  assert.equal(p.m().plays.length, 0, 'no play from a side tap');
-  assert.equal(p.bar().classList.contains('hidden'), false, 'paused: the bar stays');
+  try {
+    await p.tap(20); await p.app.advance(300);
+    await p.tap(280); await p.app.advance(300);
+    assert.equal(p.m().plays.length, 0, 'no play from a side tap');
+    assert.equal(p.bar().classList.contains('hidden'), false, 'paused: the bar stays');
+  } finally { await p.app.close(); }
 });
 
 test('an errored load: a middle tap only shows the bar', async (context) => {
   const p = await player(context);
-  p.m().err = 4; p.ev('error'); await p.app.flush();
-  await p.tap(150); await p.app.advance(300);
-  assert.equal(p.m().plays.length, 0);
-  assert.equal(p.bar().classList.contains('hidden'), false);
+  try {
+    p.m().err = 4; p.ev('error'); await p.app.flush();
+    await p.tap(150); await p.app.advance(300);
+    assert.equal(p.m().plays.length, 0);
+    assert.equal(p.bar().classList.contains('hidden'), false);
+  } finally { await p.app.close(); }
 });
