@@ -44,6 +44,7 @@ import { tmpdir } from 'node:os';
 import { dirname, join, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { cargoTargetDir, lockedCommand, withTargetDir } from './target-lock.mjs';
+import { requireIsolated } from './isolation-guard.mjs';
 
 export const repoRoot = resolve(dirname(fileURLToPath(import.meta.url)), '..');
 
@@ -192,4 +193,5 @@ export function serverSocketsUnder(dir) {
 }
 
 const isMain = process.argv[1] && resolve(process.argv[1]) === fileURLToPath(import.meta.url);
-if (isMain) process.exitCode = runTestRust();
+// Before anything else (board #137): outside the isolated runner it starts nothing.
+if (isMain) { requireIsolated(['pnpm', 'run', 'test:rust', ...process.argv.slice(2)]); process.exitCode = runTestRust(); }

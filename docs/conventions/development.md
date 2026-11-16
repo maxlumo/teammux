@@ -712,7 +712,31 @@ and rewrote `~/.codex/config.toml` twice. So **no test runs on this host**:
 unit suites run inside `scripts/isolated.mjs` (`node scripts/isolated.mjs --
 pnpm test`, `node scripts/isolated.mjs -- bash -c 'pnpm run test:rust'`),
 only `pnpm run check` and `pnpm run check:android` (no run) are allowed bare,
-and every live check with a real agent CLI runs in the live rig:
+and every live check with a real agent CLI runs in the live rig.
+
+**The test entries enforce it** (board #137, after three slips on record: a
+`node --test` run on the host, nested quoting that ran check and probes on
+the host, and 33 host runs of `node scripts/test-rust.mjs`, whose own
+tmux/XDG isolation is not the runner). `pnpm test` (`scripts/test-node.mjs`)
+and `pnpm run test:rust` (`scripts/test-rust.mjs`) ask
+`scripts/isolation-guard.mjs` before anything else, with the command as it was
+called, arguments included, each shell-quoted where it must be: inside the runner means `ISOLATED_RUNNER=1` AND a container
+(`/.dockerenv`), so a variable typed on the host is not enough. Outside it
+they exit 96, start nothing, and print the command to use
+(`node scripts/isolated.mjs -- <the same command>`). The one override, for a
+PERSON at this terminal who means to run a suite here, is
+`TEAMMUX_HOST_TESTS=i-am-the-human-at-this-terminal` in the environment of
+that one command (no default, never read from a file). **Agents never set
+it.** A bare `node --test <file>` is Node's own and cannot be guarded: it is
+covered by the rule above, not by the guard. `pnpm run check`,
+`pnpm run check:android` and the Docker entries (`test:e2e:docker`,
+`test:live:docker`, which build their own containers) are not guarded.
+`pnpm run test:e2e:docker` (`scripts/e2e-docker.mjs`) does run on the HOST
+itself: Node assertions over WebSocket and fetch against the gateways it starts
+in Docker, through their published 127.0.0.1 ports, plus `docker compose` and
+`docker exec`; no suite, no cargo and no agent CLI. The guard does not cover
+it, and under the rule above agents do not run it (the validators' practice).
+The live checks:
 
 ```bash
 pnpm run test:live:docker            # check `smoke`: one codex turn and one claude turn

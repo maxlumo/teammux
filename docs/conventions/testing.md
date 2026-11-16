@@ -221,6 +221,13 @@ A check with a real agent CLI runs only through `pnpm run test:live:docker`
 `scripts/scratch-env.mjs` refuses to run anywhere else. Tickets whose live
 evidence waits on the rig say "live check pending #55".
 
+`pnpm test` and `pnpm run test:rust` refuse outside the isolated runner
+(board #137, `scripts/isolation-guard.mjs`): they exit 96 having started
+nothing and print `node scripts/isolated.mjs -- <the same command>`. The
+person-only override and what is not guarded are in development.md § the
+same rule. Tests: `scripts/isolation-guard.test.ts`, which spawns each entry
+with the runner's marker removed (inside the runner, never on the host).
+
 ## A live check never edits an agent home's config in place (board #54)
 
 A managed codex home's `config.toml` (and `.env`, `auth.json`, `*.config.toml`)

@@ -11,7 +11,7 @@
     "dev:server:watch": "node scripts/preflight.mjs server && bash scripts/dev-server-watch.sh",
     "gateway:update": "node scripts/gateway-update.mjs",
     "build": "vite build",
-    "test": "node --test 'src/**/*.test.js' 'src/**/*.test.ts' 'scripts/**/*.test.js' 'scripts/**/*.test.ts'",
+    "test": "node scripts/test-node.mjs",
     "check": "svelte-check --tsconfig ./tsconfig.json",
     "check:android": "node scripts/preflight.mjs android-check",
     "preview": "vite preview",
