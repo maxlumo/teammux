@@ -679,6 +679,10 @@ barrier (next section).
   the lock held for that window. A `give_up` right after the last pass, or a
   door right after a release, was refused (`Observed`, `Busy`) while a tmux
   child from the capture loop or a startup-prompt waiter was being spawned.
+  That guard is the ONE way to take a flock in src-tauri, try-acquired or
+  blocking (the restore owner, the local socket's claim, the project page
+  store, the review store since board #145); `flock::tests::no_raw_flock_call_outside_the_guard`
+  fails on a raw `flock(` call anywhere else, tests included.
 - **The batch.** `meta restore_batch:<socket>` holds the plan frozen whole:
   the full batch uuid, the boot, the socket, the source checkpoint, the
   server the first creation printed, and every project and window with its

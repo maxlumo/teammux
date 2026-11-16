@@ -25,7 +25,9 @@ survive restarts, they are not in Git, and they go with the folder.
 **One read-modify-write protocol** (`projects::review::with_store`, the one
 door). A write opens a stable sidecar, `<key>.json.lock`, which is created
 once and never replaced, so the lock binds to one inode, and takes `LOCK_EX`
-on it. It reads the store, mutates it, writes an `O_EXCL` temp file, fsyncs
+on it through the one flock guard (`crate::flock::Flock::exclusive`, board
+#145), which unlocks explicitly, so a child forked while it is held and not
+yet exec'd cannot keep the next writer waiting. It reads the store, mutates it, writes an `O_EXCL` temp file, fsyncs
 it, `renameat`s it over the store, fsyncs the directory, and unlocks. An
 absent store is empty.
 

@@ -295,7 +295,7 @@ thread_local! {
 /// before a concurrent write or the one after it.
 ///
 /// `Write` creates the stable `<key>.json.lock` sidecar once, takes
-/// `LOCK_EX` on it for the whole read-modify-write, and writes the changed
+/// `LOCK_EX` on it (`crate::flock::Flock::exclusive`) for the whole read-modify-write, and writes the changed
 /// store atomically when `f` returns `Ok(true)`.
 pub fn with_store<T>(root: &Root, rel: &str, access: Access, f: impl FnOnce(&mut ReviewFile) -> Result<(T, bool), String>) -> Result<T, String> {
     let key = store_key(rel);
@@ -312,10 +312,9 @@ pub fn with_store<T>(root: &Root, rel: &str, access: Access, f: impl FnOnce(&mut
     if !is_reg(&fstat(&lock)?) {
         return Err("the review lock is not a regular file".into());
     }
-    if unsafe { libc::flock(lock.as_raw_fd(), libc::LOCK_EX) } != 0 {
-        return Err(format!("lock the review store: {}", errno()));
-    }
-    // Held until `lock` drops at the end of this function (close releases).
+    // The one flock guard (board #145, #136's rule): released EXPLICITLY when it drops, so a
+    // child forked meanwhile and not yet exec'd cannot keep the next writer waiting.
+    let lock = crate::flock::Flock::exclusive(std::fs::File::from(lock)).map_err(|e| format!("lock the review store: {e}"))?;
     let mut file = read_store(&dir, &key, rel)?;
     let (value, changed) = f(&mut file)?;
     if changed {
@@ -927,6 +926,26 @@ mod tests {
         let mut got = ids(&root, rel);
         got.sort();
         assert_eq!(got.len(), 8, "{got:?}");
+    }
+
+    /// Board #145 (#136's rule): the store lock is released EXPLICITLY. A child forked while a
+    /// writer holds it, and parked before its exec, keeps the lock's open file description;
+    /// the next writer must still get the lock the moment the first returns.
+    #[test]
+    fn the_next_writer_gets_the_lock_while_a_child_forked_under_the_first_has_not_exec_d() {
+        let d = scratch();
+        let root = Root::open(d.to_str().unwrap()).unwrap();
+        let rel = "src/main.rs";
+        let parked = std::rc::Rc::new(std::cell::RefCell::new(None));
+        let keep = parked.clone();
+        INSIDE_LOCK.with(|h| *h.borrow_mut() = Some(Box::new(move || *keep.borrow_mut() = Some(crate::flock::parked_child::ParkedChild::spawn()))));
+        add(&root, rel, "a1").unwrap();
+        assert!(parked.borrow().as_ref().is_some_and(|c| !c.gone()), "a child was forked under the lock and is still parked before its exec");
+        let lock = std::fs::OpenOptions::new().write(true).open(d.join(".tmm/reviews").join(format!("{}.json.lock", store_key(rel)))).unwrap();
+        assert!(crate::flock::Flock::try_exclusive(lock).unwrap().is_some(), "free the moment the first writer returned");
+        drop(parked.borrow_mut().take());
+        add(&root, rel, "a2").unwrap();
+        assert_eq!(ids(&root, rel), ["a1", "a2"]);
     }
 
     #[test]

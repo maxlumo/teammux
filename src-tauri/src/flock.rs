@@ -8,7 +8,8 @@
 //! description itself, whatever a child still references. Every lock whose release can be
 //! followed by an acquire that must succeed goes through this guard: try-acquired (the
 //! restore owner lock, the local socket's claim) or blocking (the project page store's
-//! lock, board #111).
+//! lock, board #111; the review store's, board #145). No raw `flock` call exists elsewhere
+//! (`tests::no_raw_flock_call_outside_the_guard`).
 use std::fs::File;
 use std::os::unix::io::AsRawFd;
 
@@ -197,6 +198,30 @@ mod tests {
         assert!(Flock::try_exclusive(open(&path)).unwrap().is_some(), "free at once after the drop");
         drop(child);
         let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// Board #145: `flock` is called raw ONLY here, so every lock is released explicitly by
+    /// this guard. The scan covers every `.rs` file under `src-tauri` (src, bin, tests, test
+    /// files included), and fails closed: any `flock(` call text outside this file is red.
+    #[test]
+    fn no_raw_flock_call_outside_the_guard() {
+        fn walk(dir: &std::path::Path, out: &mut Vec<std::path::PathBuf>) {
+            for e in std::fs::read_dir(dir).unwrap() {
+                let p = e.unwrap().path();
+                if p.is_dir() { walk(&p, out) } else if p.extension().is_some_and(|x| x == "rs") { out.push(p) }
+            }
+        }
+        let root = std::path::Path::new(env!("CARGO_MANIFEST_DIR"));
+        let mut files = Vec::new();
+        walk(&root.join("src"), &mut files);
+        walk(&root.join("tests"), &mut files);
+        assert!(files.len() > 100, "the scan found the tree: {}", files.len());
+        let guard = root.join("src/flock.rs");
+        let raw: Vec<String> = files.iter().filter(|f| **f != guard).flat_map(|f| {
+            let src = std::fs::read_to_string(f).unwrap();
+            src.lines().enumerate().filter(|(_, l)| l.contains("libc::flock(") || l.contains(" flock(")).map(|(i, _)| format!("{}:{}", f.strip_prefix(root).unwrap().display(), i + 1)).collect::<Vec<_>>()
+        }).collect();
+        assert!(raw.is_empty(), "a raw flock outside crate::flock: {raw:?}");
     }
 
     /// Validator-2 note 21 (measured): a signal delivered to the parked child interrupted its

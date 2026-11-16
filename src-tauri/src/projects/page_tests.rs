@@ -354,7 +354,6 @@ fn the_cli_lines_say_what_happened() {
 /// non-blocking acquire on a THIRD description must then succeed.
 #[test]
 fn the_store_lock_is_released_while_another_reference_to_it_lives() {
-    use std::os::fd::AsRawFd;
     let w = ws("unlock");
     let src = bundle(&w.join("p"), &[]);
     publish(&w, &src, "a", H, &clock(1)).unwrap();
@@ -364,17 +363,16 @@ fn the_store_lock_is_released_while_another_reference_to_it_lives() {
     // The SAME open file description, duplicated: what fork gives the child.
     let child = held.file().try_clone().unwrap();
     drop(held);
-    let other = std::fs::OpenOptions::new().read(true).write(true).open(store(&w).join(".lock")).unwrap();
-    let rc = unsafe { libc::flock(other.as_raw_fd(), libc::LOCK_EX | libc::LOCK_NB) };
-    assert_eq!(rc, 0, "the lock is free although a duplicate of its descriptor is still open");
-    unsafe { libc::flock(other.as_raw_fd(), libc::LOCK_UN) };
+    let other = || std::fs::OpenOptions::new().read(true).write(true).open(store(&w).join(".lock")).unwrap();
+    let taken = crate::flock::Flock::try_exclusive(other()).unwrap();
+    assert!(taken.is_some(), "the lock is free although a duplicate of its descriptor is still open");
+    drop(taken);
     drop(child);
     // The real case (#136): a child forked while the lock is held, parked before its exec.
     let held = lock(&store_dir).unwrap();
     let parked = crate::flock::parked_child::ParkedChild::spawn();
     drop(held);
-    let rc = unsafe { libc::flock(other.as_raw_fd(), libc::LOCK_EX | libc::LOCK_NB) };
-    assert_eq!(rc, 0, "the lock is free although a forked child still holds its description");
+    assert!(crate::flock::Flock::try_exclusive(other()).unwrap().is_some(), "the lock is free although a forked child still holds its description");
     drop(parked);
 }
 
