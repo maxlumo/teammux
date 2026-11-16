@@ -32,6 +32,9 @@
   import ServerTag from '../ui/ServerTag.svelte';
   import Segmented from '../ui/Segmented.svelte';
   import ConfirmDialog from '../ui/ConfirmDialog.svelte';
+  import PathChooser from './PathChooser.svelte';
+  import { PathFind } from './path-find.svelte.ts';
+  import { entryInfo, entryKind, fileIcon, formatDate, formatSize } from './file-format.ts';
   import OperationFeedback from '../ui/OperationFeedback.svelte';
   import { createFeedbackLifetime } from '../ui/feedback-lifetime.ts';
   import ContextMenu from '../ui/ContextMenu.svelte';
@@ -65,7 +68,7 @@
   const { files } = scope.state;
   const memory = files.memory;
   const store = files.downloads;
-  const { fsCwd, fsList, fsStat, fsRead, fsWrite, fsMkdir, fsDelete, fsRename, fsDownload, fsDownloadHttp, fsPreviewBase, fsUploadBegin, fsUploadResume, fsUploadAbort, getBookmarks, saveBookmarks, gitCmd, getPrefs, setPref, fsConvert } = scope.runtime.api;
+  const { fsCwd, fsList, fsStat, fsFindTail, fsRead, fsWrite, fsMkdir, fsDelete, fsRename, fsDownload, fsDownloadHttp, fsPreviewBase, fsUploadBegin, fsUploadResume, fsUploadAbort, getBookmarks, saveBookmarks, gitCmd, getPrefs, setPref, fsConvert } = scope.runtime.api;
   const { getMachineId } = scope.runtime.connection;
   // What one download attempt needs from this server (`save-file.ts`).
   const saveDeps = { memory, store, fsDownload, fsDownloadHttp, getMachineId };
@@ -995,8 +998,8 @@
       // the file's parent — so back and the crumbs mean something — and the
       // preview opens on the file itself through the one openEntry path
       // (stat, previewability, recents, nav history).
-      const file = navRequest.file;
-      leaveEditor(() => openFileRef(file));
+      const file = navRequest.file, find = navRequest.find ?? null;
+      leaveEditor(() => openFileRef(file, find));
     } else if (navRequest.path) {
       const to = navRequest.path;
       leaveEditor(() => {
@@ -1022,7 +1025,7 @@
   let pendingSlide = ''; // 'fwd' | 'back' — set by the navigation, consumed when its answer lands
   let loadSeq = 0;
   async function loadDir(path, purpose = 'navigate') {
-    if (purpose === 'navigate') { fileNav.nextFile(); fileNav.resetFiles(); }
+    if (purpose === 'navigate') { fileNav.nextFile(); fileNav.resetFiles(); pathFind.retire(); }
     const my = ++loadSeq; // several callers can navigate concurrently around a
     loading = true;       // session switch — the NEWEST intent wins (DirPicker's rule)
     error = '';
@@ -1163,9 +1166,17 @@
     return true;
   }
 
-  function openFileRef(file) {
-    return openEntry({ type: 'file', name: file.slice(file.lastIndexOf('/') + 1), path: file }, true);
+  /** `find`: an agent's reference ({session, ref}) searched where it ends if this path is not
+   * found (board #144, path-find.svelte.ts). */
+  function openFileRef(file, find = null) {
+    return openEntry({ type: 'file', name: file.slice(file.lastIndexOf('/') + 1), path: file, find }, true);
   }
+  const pathFind = new PathFind((s, r) => fsFindTail(s, r), () => scope.runtime.connection.getCaps?.());
+  // Files' owner (a session, the server, its scope either way): a find is minted FOR the owner it
+  // was raised under and retires when Files' owner becomes anything else, or Files goes (#144).
+  const ownerNow = () => `${session}|${scope.runtime.id}|${scope.eligible?.() ?? true}`;
+  $effect(() => { const now = ownerNow(); untrack(() => pathFind.own(now)); });
+  $effect(() => () => pathFind.retire());
 
   function openPreviewRef(ref) {
     const docDir = currentFile?.path ? currentFile.path.slice(0, currentFile.path.lastIndexOf('/')) : cwd;
@@ -1176,6 +1187,9 @@
   }
 
   async function openEntry(entry, linked = false) {
+    // Another entry, a file or a directory: an older reference's find ends (#144 note 24); this
+    // operation's own token is taken here, before its first await (note 29).
+    const findToken = pathFind.begin(untrack(ownerNow));
     if (entry.type === 'dir') {
       navPush();
       navTo(entry.path, 'fwd');
@@ -1256,7 +1270,19 @@
       // A dead path reference is an EXPECTED miss (a chat link may outlive
       // its file) — say so in words, not in errno (board #99: "即使路径不对，
       // 应该友好的提示").
-      error = /No such file|os error 2/iu.test(e.message ?? '') ? `${t('fileMissing')}: ${entry.path}` : e.message;
+      const missing = /No such file|os error 2/iu.test(e.message ?? '');
+      if (missing && entry.find) {
+        // Board #144: searched where it ends; the pane keeps its loading state meanwhile.
+        // The person sees which file it was (#144 AC4): the notice names its project-relative path.
+        const s0 = session;
+        const opened = (abs, rel) => { void openFileRef(abs).then(() => { if (session === s0 && currentFile?.path === abs) copyLifetime.update(copyLifetime.begin(), { kind: 'success', message: `${t('fileFindOpened')}: ${rel}` }); }); };
+        void pathFind.afterMiss(entry.find, findToken, opened, (stopped) => {
+          error = `${t(stopped === 'unreadable' ? 'fileMissingUnreadable' : stopped ? 'fileMissingStopped' : 'fileMissing')}: ${entry.path}`;
+          previewLoading = false;
+        });
+        return;
+      }
+      error = missing ? `${t('fileMissing')}: ${entry.path}` : e.message;
       previewLoading = false;
       return;
     }
@@ -1796,37 +1822,6 @@
       : { kind: 'error', message: t('copyFailed') });
   }
 
-  function formatSize(bytes) {
-    if (bytes < 1024) return bytes + ' B';
-    if (bytes < 1024 * 1024) return (bytes / 1024).toFixed(1) + ' KB';
-    if (bytes < 1024 * 1024 * 1024) return (bytes / (1024 * 1024)).toFixed(1) + ' MB';
-    return (bytes / (1024 * 1024 * 1024)).toFixed(1) + ' GB';
-  }
-
-  function formatDate(ts) {
-    if (!ts) return '';
-    return new Date(ts * 1000).toLocaleString();
-  }
-
-  // The row's facts for the hover card (motion.md principle 16), through the
-  // SAME formatters the info view uses — never a second one.
-  function entryKind(entry) {
-    if (entry.type === 'broken') return t('kindBroken');
-    const target = entry.type === 'dir' ? t('kindDir') : t('kindFile');
-    return entry.is_symlink ? `${t('kindSymlink')} → ${entry.link_target || target}` : target;
-  }
-  function entryInfo(entry) {
-    const lines = [{ label: t('type'), value: entryKind(entry) }];
-    if (entry.type !== 'dir') lines.push({ label: t('size'), value: formatSize(entry.size) });
-    if (entry.modified) lines.push({ label: t('modified'), value: formatDate(entry.modified) });
-    return { title: entry.name, lines };
-  }
-
-  function fileIcon(entry) {
-    if (entry.type === 'dir') return 'folder';
-    return 'file';
-  }
-
   // This state survives preview/editor round-trips, as before the extraction.
   let showAllLines = $state(false);
 
@@ -2321,6 +2316,7 @@
 {/if}
 <ContextMenu at={fileMenu?.at} items={menuActions} who={fileMenu?.entry?.name || fileMenu?.cwd || t('filesTools')}
   id={`${panelId}-menu`} oncancel={closeFileMenu} />
+<PathChooser finder={pathFind} compact={narrowViewport} />
 <ConfirmDialog open={!!pendingAct} busy={acting} compact={narrowViewport}
   title={pendingAct ? t(ACT_COPY[pendingAct.kind].title).replace('{name}', actName(pendingAct)) : ''}
   note={pendingAct ? t(ACT_COPY[pendingAct.kind].note) : ''}

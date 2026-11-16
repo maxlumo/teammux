@@ -289,7 +289,7 @@
   let drawerFilesReq = $state(null); // a feed path-reference tap: preview the file in the drawer (board #99)
   let drawerFilesBack = null;
 
-  async function routePathRef(raw) {
+  async function routePathRef(raw, find = null) {
     const target = selected;
     let file = raw;
     // A relative reference is relative to the PROJECT — the same base the
@@ -297,13 +297,14 @@
     // declared path is that base (board #181); only a session without a
     // declaration falls back to asking where its active pane is.
     if (!file.startsWith('/') && !file.startsWith('~')) {
+      find ??= file.startsWith('../') ? null : { session: target, ref: raw }; // #144: searched if Files misses it
       const base = projectPath;
       if (base) file = resolvePathRef(base, file);
       else { try { const r = await fsCwd(target); if (r.path) file = resolvePathRef(r.path, file); } catch {} }
     }
     if (selected !== target) return;
-    if (mobile || noDrawer) { openFilesTab?.(target, '', file); return; }
-    drawerFilesReq = { file, n: (drawerFilesReq?.n ?? 0) + 1 };
+    if (mobile || noDrawer) { openFilesTab?.(target, '', file, find); return; }
+    drawerFilesReq = { file, find, n: (drawerFilesReq?.n ?? 0) + 1 };
     drawerView = 'files'; openDrawer();
   }
   let drawerBoardNew = $state(null); // the drawer head's + (board #23): new issue, requested into the embedded Board
@@ -1048,6 +1049,7 @@
     if (!same()) { search.fail(g, t('hubSearchFileProjectChanged')); return; }       // before any lookup is spent on it
     const session = src.session;
     let path = file.path;
+    const find = !path.startsWith('/') && !path.startsWith('~') && !path.startsWith('../') ? { session, ref: path } : null; // #144
     if (!path.startsWith('/') && !path.startsWith('~')) {
       let base = src.path;
       if (!base) { try { base = (await fsCwd(session)).path; } catch {} }
@@ -1060,8 +1062,8 @@
     if (!search.isCurrent(g)) return;
     if (!same()) { search.fail(g, t('hubSearchFileProjectChanged')); return; }
     search.close();
-    if (session === selected) void routePathRef(path);
-    else openFilesTab?.(session, '', path);
+    if (session === selected) void routePathRef(path, find);
+    else openFilesTab?.(session, '', path, find);
   }
   // The jump is over (landed, failed, superseded or cancelled) when the surface lets go of it.
   $effect(() => { if (!centre.jump) ownedJump = 0; });

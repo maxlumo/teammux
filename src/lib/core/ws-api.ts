@@ -303,6 +303,9 @@ export function createWsApi(connection: Connection) {
   const fsCwd = (session: string) => call('fs_cwd', { session });
   const fsList = (path: string, show_hidden = false) => call('fs_list', { path, show_hidden });
   const fsStat = (path: string) => call('fs_stat', { path });
+  /** Board #144: an agent's reference not found at the project root, searched where it ends
+   * (the server derives the root from the session; capability `path_find`). */
+  const fsFindTail = (session: string, ref: string) => call<{ root: string; matches: string[]; more: boolean; stopped?: 'time' | 'dirs' | 'unreadable' }>('fs_find_tail', { session, ref });
   const fsRead = (path: string) => call('fs_read', { path });
   const fsWrite = (path: string, content: string) => call('fs_write', { path, content });
   const fsMkdir = (path: string) => call('fs_mkdir', { path });
@@ -767,7 +770,7 @@ export function createWsApi(connection: Connection) {
     listSessions, listPanes, listSessionsWithPanes, capturePane, sendKeys, pasteText,
     scratchSession, scratchKill, scratchRelease, newSession, killSession, newWindow, killWindow, paneCommand,
     resizePane, setSocket, getBookmarks, saveBookmarks, getPrefs, setPref, fsCwd, fsList,
-    fsStat, fsRead, fsWrite, fsMkdir, fsDelete, fsRename, fsDownload, fsDownloadUrl,
+    fsStat, fsFindTail, fsRead, fsWrite, fsMkdir, fsDelete, fsRename, fsDownload, fsDownloadUrl,
     fsUploadBegin, fsUploadResume, fsUploadAbort, fsConvert, gitCmd, projectList, projectCreate, projectAdopt, projectUp,
     projectDown, projectRename, projectArchive, projectDelete, projectAutostart, hubPost,
     hubCommand, hubLog, hubLogAround, hubSearch, hubFiles, hubMsgArchive, hubMsgRestore, hubMsgPurge, hubRooms,
@@ -827,7 +830,7 @@ export const RPC_KIND = {
   newSession: 'write', killSession: 'write', newWindow: 'write', killWindow: 'write',
   paneCommand: 'read', resizePane: 'write', setSocket: 'write',
   getBookmarks: 'read', saveBookmarks: 'write', getPrefs: 'read', setPref: 'write',
-  fsCwd: 'read', fsList: 'read', fsStat: 'read', fsRead: 'read',
+  fsCwd: 'read', fsList: 'read', fsStat: 'read', fsFindTail: 'read', fsRead: 'read',
   fsWrite: 'write', fsMkdir: 'write', fsDelete: 'write', fsRename: 'write',
   fsDownload: 'read', fsDownloadUrl: 'read', fsDownloadHttp: 'read', fsPreviewBase: 'read', pageLoad: 'read',
   fsUploadBegin: 'write', fsUploadResume: 'write', fsUploadAbort: 'write', fsConvert: 'read', gitCmd: 'write',

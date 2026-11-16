@@ -2536,7 +2536,8 @@ test('Feed keeps native selection, Copy/Raw dismissal, path intents and room-loc
       assert.equal(event.defaultPrevented, true);
       assert.equal(actions(), null, 'path routing wins over Copy/Raw toggling');
     }
-    assert.deepEqual(routes, Array.from({ length: 3 }, () => ['other', '', '/fixture/source.txt']));
+    // #144: the 4th argument is the find request, none for an absolute path.
+    assert.deepEqual(JSON.parse(JSON.stringify(routes)), Array.from({ length: 3 }, () => ['other', '', '/fixture/source.txt', null]));
     app.document.querySelector<HTMLElement>('.sys-jump')!.click();
     await app.flush();
     assert.deepEqual(boards, [['other', 7]], 'the feed board row carries the clicked issue id');
@@ -5334,9 +5335,10 @@ test('a file opens against the project that named it: its folder resolves a rela
       const got = routes.splice(0).map((r) => JSON.parse(JSON.stringify(r)));
       return got[0];
     };
-    assert.deepEqual(await open(0), ['fixture', '', '/fixture/src/own.md'], 'the selected project: its own folder');
+    // #144: a relative path carries its original reference and session, for Files' find.
+    assert.deepEqual(await open(0), ['fixture', '', '/fixture/src/own.md', { session: 'fixture', ref: 'src/own.md' }], 'the selected project: its own folder');
     assert.equal(app.document.querySelector('.search-bar'), null, 'opening closes the box');
-    for (const [n, want] of [[1, ['other', '', '/other/src/theirs.md']], [2, ['other', '', '/srv/abs.pdf']], [3, ['fixture', '', '~/notes.md']], [4, ['other', '', '/other/lead.md']]] as const) {
+    for (const [n, want] of [[1, ['other', '', '/other/src/theirs.md', { session: 'other', ref: 'src/theirs.md' }]], [2, ['other', '', '/srv/abs.pdf', null]], [3, ['fixture', '', '~/notes.md', null]], [4, ['other', '', '/other/lead.md', { session: 'other', ref: './lead.md' }]]] as const) {
       await openFilesMode(app);
       assert.deepEqual(await open(n), want, `row ${n}`);
     }
@@ -5360,7 +5362,7 @@ test('a project with no declared folder asks where it is, and says so when it ca
     const rowsEl = () => app.document.querySelectorAll<HTMLButtonElement>('.sr-file .sr-row');
     rowsEl()[0]!.click();
     await until(app, () => routes.length > 0);
-    assert.deepEqual(JSON.parse(JSON.stringify(routes[0])), ['other', '', '/where/other/a.md'], 'the row’s own project was asked, not the selected one');
+    assert.deepEqual(JSON.parse(JSON.stringify(routes[0])), ['other', '', '/where/other/a.md', { session: 'other', ref: 'a.md' }], 'the row’s own project was asked, not the selected one');
     assert.deepEqual(cwds, ['other']);
     routes.length = 0;
     await openFilesMode(app);
@@ -5531,7 +5533,7 @@ test('two projects with the same relative path each open their own file, from th
       app.document.querySelectorAll<HTMLButtonElement>('.sr-file .sr-row')[n]!.click();
       await until(app, () => routes.length > n);
     }
-    assert.deepEqual(JSON.parse(JSON.stringify(routes)), [['fixture', '', '/fixture/README.md'], ['other', '', '/other/README.md']]);
+    assert.deepEqual(JSON.parse(JSON.stringify(routes)), [['fixture', '', '/fixture/README.md', { session: 'fixture', ref: 'README.md' }], ['other', '', '/other/README.md', { session: 'other', ref: 'README.md' }]]);
   } finally { await app.close(); }
 });
 

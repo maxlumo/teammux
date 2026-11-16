@@ -6,6 +6,7 @@ use std::path::{Path, PathBuf};
 use std::time::UNIX_EPOCH;
 
 mod motion;
+pub mod find;
 pub use motion::{motion_photo, Motion};
 pub(crate) use motion::motion_in;
 #[cfg(test)]
@@ -57,6 +58,13 @@ pub struct FileStat {
     /// stat of ONE file, never per entry of `list_dir`. Absent for every other file.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub motion: Option<Motion>,
+}
+
+/// THE wide-root gate (board #433; the project page's cap, #111; the path search, #144): `/`
+/// and the canonical home directory are never a scope to share or to search. `p` is canonical.
+pub fn too_wide(p: &Path) -> bool {
+    let home = dirs::home_dir().and_then(|h| std::fs::canonicalize(h).ok());
+    p == Path::new("/") || home.as_deref() == Some(p)
 }
 
 pub fn resolve(p: &str) -> String {

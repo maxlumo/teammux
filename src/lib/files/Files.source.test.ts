@@ -225,9 +225,9 @@ test('navRequest can ask for a FILE: land in its directory with the preview open
   // file itself — one request, both halves.
   assert.match(source, /if \(navRequest\.file\)/u, 'the file form exists');
   assert.match(source, /await loadDir\(parent, 'refresh'\)/u, 'the parent listing cannot race and close the preview');
-  assert.match(source, /leaveEditor\(\(\) => openFileRef\(file\)\)/u,
+  assert.match(source, /leaveEditor\(\(\) => openFileRef\(file, find\)\)/u,
     'external file requests retain their origin too');
-  assert.match(source, /openEntry\(\{ type: 'file', name: file\.slice\(file\.lastIndexOf\('\/'\) \+ 1\), path: file \}, true\)/u,
+  assert.match(source, /openEntry\(\{ type: 'file', name: file\.slice\(file\.lastIndexOf\('\/'\) \+ 1\), path: file, find \}, true\)/u,
     'and the preview opens through the one openEntry path (stat, recents, nav history)');
   // Round two (owner: "文件侧边栏上有一个报错 stat error… 然后弹出了一个新的
   // 页面"): the markdown PREVIEW renders anchors too, and a path href there
@@ -247,7 +247,7 @@ test('navRequest can ask for a FILE: land in its directory with the preview open
   assert.ok(!listPanel.includes('{#if error}'), 'the error banner belongs to Files, not only its hidden list: missing preview refs must be visible');
   // A dead reference fails in WORDS, not errno (round four: "即使路径不对，
   // 应该友好的提示，不要弹出新的窗口" — the window half is path-link-net.ts).
-  assert.match(source, /error = \/No such file\|os error 2\/iu\.test\(e\.message \?\? ''\) \? `\$\{t\('fileMissing'\)\}: \$\{entry\.path\}` : e\.message;/u,
+  assert.match(source, /const missing = \/No such file\|os error 2\/iu\.test\(e\.message \?\? ''\);[^]*?error = missing \? `\$\{t\('fileMissing'\)\}: \$\{entry\.path\}` : e\.message;/u,
     'ENOENT on a file open reads as a sentence with the path');
 });
 

@@ -433,6 +433,29 @@ fn dispatch(req: &Request, token: &str) -> Result<serde_json::Value, RpcError> {
             Ok(serde_json::json!({ "path": path }))
         }
 
+        "fs_find_tail" => {
+            // Board #144: an agent's path relative to a SUBFOLDER of the project, found where
+            // it ends (fs::find). The server derives the root: the session's declared project
+            // path, else the folder fs_cwd answers (today's resolution); a wide root is refused
+            // inside find_tail. Runs on the blocking pool like every handle_request
+            // (concurrent-ws-rpc.md), so no other RPC waits for the walk.
+            let session = param(p, "session")?;
+            let r = rfs::find::reference(param(p, "ref")?).map_err(RpcError::InvalidParams)?;
+            #[cfg(not(any(target_os = "android", target_os = "ios")))]
+            let declared = crate::projects::project_for_session(session).map_err(RpcError::Internal)?.map(|p| p.path);
+            #[cfg(any(target_os = "android", target_os = "ios"))]
+            let declared: Option<String> = None;
+            let root = match declared {
+                Some(path) => path,
+                None => rfs::get_cwd(session).map_err(RpcError::Internal)?,
+            };
+            let root = std::fs::canonicalize(rfs::expand_path(&root)).map_err(|e| RpcError::Internal(format!("{root}: {e}")))?;
+            let found = rfs::find::find_tail(&root, r, rfs::find::LIMITS).map_err(RpcError::InvalidParams)?;
+            let mut v = serde_json::to_value(&found).map_err(|e| RpcError::Internal(e.to_string()))?;
+            v["root"] = serde_json::json!(root.to_string_lossy());
+            Ok(v)
+        }
+
         "fs_list" => {
             let path = param(p, "path")?;
             let show_hidden = p
@@ -618,14 +641,6 @@ pub(super) fn handle_request(req: &Request, token: &str) -> Response {
 }
 
 
-/// THE wide-root gate of the scope door (board #433; the project page's cap
-/// too, #111): `/` and the canonical home directory are never a root. `p` is
-/// canonical.
-pub(super) fn too_wide_root(p: &std::path::Path) -> bool {
-    let home = dirs::home_dir().and_then(|h| std::fs::canonicalize(h).ok());
-    p == std::path::Path::new("/") || home.as_deref() == Some(p)
-}
-
 /// Where an HTML preview's cap is rooted (board #433), and the HTML's
 /// directory below that root, both CANONICAL: the longest declared project
 /// path that contains the file, else the file's own directory. A root of `/`
@@ -648,7 +663,7 @@ fn preview_scope(path: &str, projects: &[String]) -> Result<(String, Vec<String>
         return Err(format!("{path}: not an HTML file"));
     }
     let parent = html.parent().ok_or_else(|| format!("{path}: no directory"))?.to_path_buf();
-    let too_wide = too_wide_root;
+    let too_wide = rfs::too_wide;
     let declared = projects.iter()
         .filter_map(|p| std::fs::canonicalize(rfs::expand_path(p)).ok())
         .filter(|p| parent.starts_with(p) && !too_wide(p))

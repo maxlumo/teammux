@@ -84,6 +84,13 @@ directory, or the server's home directory when no session is open yet.
   preview → open it in Files, with the target's parent listing and a Back
   route to the source preview/list. Relative paths resolve against the
   project (chat) or source document's directory (previews), never the web origin.
+- A relative path from chat that the project root does not have (an agent wrote it relative
+  to its own subfolder, a worktree or a package; board #144) is looked for where it ENDS: under
+  any folder of the project, matching whole trailing segments (`b/c.txt` is `x/b/c.txt`, never
+  `x/ab/c.txt`). One match opens; several show a chooser (the 10 nearest, project-relative,
+  "more not shown" beyond); none is the usual not-found, which says when the search stopped
+  early so a second tap may find it. A path that exists opens as before. Absolute, `~` and
+  `../` paths are never searched; neither are a preview's own links.
 - Explicit HTTP(S) and protocol-relative web links open in the system browser
   (a separate tab in browser mode); never navigate the app WebView.
 - Desktop left-click, Cmd/Ctrl-click and middle-click share this destination

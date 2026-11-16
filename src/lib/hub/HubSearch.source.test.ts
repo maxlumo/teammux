@@ -141,5 +141,5 @@ test('the Hub opens a file against the project that NAMED it, never the selected
   assert.equal((body.match(/\bsame\(\)/gu) ?? []).length, 2, 'the project is the same one before any lookup, and again right before the route (after the only await)');
   assert.equal((body.match(/search\.isCurrent\(g\)/gu) ?? []).length, 1, 'right before the route, after the only await');
   assert.match(src, /files: page\.files\.map\(\(f\) => \(\{ \.\.\.f, source: sourceOf\(f\.room\) \}\)\)/u, 'every page is stamped as it lands');
-  assert.match(body, /if \(session === selected\) void routePathRef\(path\);\s*\n\s*else openFilesTab\?\.\(session, '', path\);/u);
+  assert.match(body, /if \(session === selected\) void routePathRef\(path, find\);\s*\n\s*else openFilesTab\?\.\(session, '', path, find\);/u);
 });

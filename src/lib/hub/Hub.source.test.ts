@@ -790,7 +790,7 @@ test('a path reference in a bubble opens the file preview, not the void (board #
   // Desktop: the RIGHT DRAWER's embedded Files gets an imperative file request
   // (the drawerIssueReq pattern); compact jumps to the Files PAGE like every
   // other drawer feature does.
-  assert.match(source, /drawerFilesReq = \{ file, n: \(drawerFilesReq\?\.n \?\? 0\) \+ 1 \}/u,
+  assert.match(source, /drawerFilesReq = \{ file, find, n: \(drawerFilesReq\?\.n \?\? 0\) \+ 1 \}/u,
     'the drawer request carries the file and a bumped n');
   assert.match(source, /drawerView = 'files'; openDrawer\(\);/u, 'and the files drawer opens');
   assert.match(source, /openFilesTab\?\.\(target, [^)]*file[^)]*\)/u, 'compact hands off using the project captured at the click');

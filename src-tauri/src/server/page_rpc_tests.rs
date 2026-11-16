@@ -147,7 +147,7 @@ fn the_login_announces_the_page_doors() {
 fn a_project_at_home_gets_no_page() {
     crate::projects::tests::use_test_store();
     let home = dirs::home_dir().unwrap().canonicalize().unwrap();
-    assert!(super::super::rpc::too_wide_root(&home) && super::super::rpc::too_wide_root(std::path::Path::new("/")));
+    assert!(crate::fs::too_wide(&home) && crate::fs::too_wide(std::path::Path::new("/")));
     let session = format!("tmm-page-home-{}", uuid::Uuid::new_v4());
     let ok = std::process::Command::new("tmux")
         .args(["new-session", "-d", "-s", &session, "-n", "keep", "-c", &home.to_string_lossy(), "bash --norc --noprofile"])

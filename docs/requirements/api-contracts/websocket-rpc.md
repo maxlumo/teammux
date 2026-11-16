@@ -9,7 +9,7 @@ JSON-RPC over WebSocket (`ws://` or `wss://`).
 ```
 ← {"server_nonce": "<hex>", "e2e": 2}                // nonce + newest handshake version
 → {"method": "auth", "params": {"client_nonce": "<hex>", "proof": "<hex>", "e2e": 2}}
-← <binary AES-GCM frame: {"result": {"authenticated": true, "machine_id", "hostname", "e2e": 2, "build": {…}, "caps": ["board_dispatch", "board_notify", "spawn_join", "agent_team", "hub_files", "mcp_masked", "backends_check", "board_blocks", "board_agreement", "omp_tools", "asks", "dashboard"]}}>
+← <binary AES-GCM frame: {"result": {"authenticated": true, "machine_id", "hostname", "e2e": 2, "build": {…}, "caps": ["board_dispatch", "board_notify", "spawn_join", "agent_team", "hub_files", "mcp_masked", "backends_check", "board_blocks", "board_agreement", "omp_tools", "asks", "dashboard", "dashboard_page", "path_find"]}}>
 ```
 - The client accepts exactly one first frame: the nonce, `server_nonce` = 32 hex digits (16 bytes). The server sends nothing before it;
   a client ends the attempt on any other first frame or any other length, and delivers nothing (pushes, answers) until the login completes
@@ -40,7 +40,7 @@ JSON-RPC over WebSocket (`ws://` or `wss://`).
 ```
 ← {"server_nonce": "<hex>"}
 → {"method": "auth", "params": {"token": "..."}}
-← {"result": {"authenticated": true, "machine_id": "uuid", "hostname": "my-mac", "build": {…}, "caps": ["board_dispatch", "board_notify", "spawn_join", "agent_team", "hub_files", "mcp_masked", "backends_check", "board_blocks", "board_agreement", "omp_tools", "asks", "dashboard"]}}
+← {"result": {"authenticated": true, "machine_id": "uuid", "hostname": "my-mac", "build": {…}, "caps": ["board_dispatch", "board_notify", "spawn_join", "agent_team", "hub_files", "mcp_masked", "backends_check", "board_blocks", "board_agreement", "omp_tools", "asks", "dashboard", "dashboard_page", "path_find"]}}
 ```
 `build` (board #368) is the build the server runs, `{"version": "1.0.0", "commit": "46392f16", "built": "2026-10-14 07:40"}`:
 the package version, the source commit (`git --short=8`: AT LEAST 8 hex characters, so two sides compare by prefix; `dev` when git was unavailable) and the UTC minute the build ran
@@ -94,6 +94,7 @@ with nothing saved); a login that has not answered yet is a wait, never a yes ra
 |--------|--------|----------|
 | `fs_cwd` | `session` | `{path}` |
 | `fs_list` | `path`, `show_hidden?` | `{entries, path}` |
+| `fs_find_tail` | `session`, `ref` | Board #144, capability `path_find`. `{root, matches, more, stopped?}`: `ref` (relative; no `..`, `~`, NUL or absolute form, a leading `./` dropped) looked for as `<root>/<one or more folders>/<ref>`, nearest first. The server derives `root` (the session's declared project path, else `fs_cwd`'s folder) and refuses a wide root (`/`, HOME). Directories only are walked, symlinked ones not followed, version-control and dependency stores skipped; every match lies inside the root. Up to 21 matches (`more` past that); the walk stops at 2 s or 100,000 directories and says `stopped: "time"|"dirs"`; a folder that cannot be listed (or an entry that cannot be read) is passed over and says `stopped: "unreadable"` (a limit names the reason when both happened). Any `stopped` means the answer is not complete. Invalid params for a bad `ref` or a wide root |
 | `fs_stat` | `path` | FileStat object; a Motion Photo adds `motion: {offset, length}` (its video window, board #133), omitted for every other file and never in `fs_list` entries |
 | `fs_read` | `path` | `{content, revision}` (≤512KB). `revision` (board #434) is the sha256 hex of exactly the bytes `content` was decoded from: what a review comment anchors to |
 | `fs_write` | `path`, `content` | OK |

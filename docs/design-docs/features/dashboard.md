@@ -311,8 +311,8 @@ rule), so an agent whose sandbox cannot write `.tmm/` still publishes.
 - **The first creation is idempotent** (F4): `mkdir` answering EEXIST is
   accepted when what is there opens as a folder, so concurrent first
   publications all succeed and the last wins.
-- **The wide-root gate is the door's own** (S1): `rpc::too_wide_root`, the
-  ONE check `fs_preview_base` uses (`/` and the canonical home folder are
+- **The wide-root gate is the door's own** (S1): `fs::too_wide`, the
+  ONE check `fs_preview_base` and `fs_find_tail` (#144) use (`/` and the canonical home folder are
   never a root). A project whose folder is one of them gets no page: publish
   refuses, and the head and the load are "no page".
 - **Load and publish are serialized (AC2).** `page_load` reads the pointer,

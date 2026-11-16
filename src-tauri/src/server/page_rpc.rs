@@ -14,7 +14,6 @@
 //! door; no authentication is claimed.
 
 use super::download::{scope_base, DL_STREAM_TTL_SECS};
-use super::rpc::too_wide_root;
 use super::rpc::RpcError;
 use crate::projects::page;
 use serde_json::{json, Value};
@@ -55,7 +54,7 @@ fn publisher(session: &str, ws: &str, p: &Value) -> Result<String, RpcError> {
 /// folder is `/` or the home directory gets no page, as no preview gets a
 /// scope rooted there.
 fn too_wide(ws: &str) -> bool {
-    std::fs::canonicalize(ws).is_ok_and(|p| too_wide_root(&p))
+    std::fs::canonicalize(ws).is_ok_and(|p| crate::fs::too_wide(&p))
 }
 
 pub(super) fn handle(method: &str, p: &Value, token: &str) -> Result<Value, RpcError> {
