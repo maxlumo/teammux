@@ -198,6 +198,18 @@
   (server `deliver_mentions` + the client's `hub_agents` refresh), left as
   they are: a time-based cache would give a freshly launched CLI a window of
   reading as a plain shell. `child_cmd` stays a detection clue everywhere.
+- [ ] Project page tidy-ups (reviewer, #111 note 38, no behaviour change):
+  `ProjectPage.svelte`'s `.page-meta` / `.page-refresh` copy the Dashboard's
+  `.dash-meta` / `.dash-more` declarations (one shared class or a
+  Dashboard-level atom, P2-d); `watchPreviewLinks` ticks every 50 ms for the
+  frame's whole life and the Files preview's `active()` reads layout on each
+  tick (run it only while the frame is visible, P2-e).
+- [ ] The own-back swallow (`core/own-back.ts`, #111): what a native WebView
+  does when the app's own `history.back()` removes a link's history entry is
+  not measured (rig Chromium and WebKit deliver no popstate). If the owner's
+  device shows a dead or skipped Back after a link click, start from the
+  reviewer's proposal: re-push on the swallow branch, proven with a
+  real-history test in the `App.shell.mount` #403 pattern (#111 notes 38-43).
 - [ ] The detached-thread pin (`tmux::spawn_pin_tests`, board #140) is a line
   scan that fails closed. Its parser-backed form is clippy's
   `disallowed-methods` on `std::thread::spawn` / `Builder::spawn` with a
