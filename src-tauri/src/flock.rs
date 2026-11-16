@@ -141,7 +141,11 @@ pub(crate) mod parked_child {
     impl Drop for ParkedChild {
         fn drop(&mut self) {
             // Open the gate (a byte: the child holds a copy of this write end itself, so a
-            // close alone would never reach it as EOF), then reap.
+            // close alone would never reach it as EOF), then reap. The write's result needs
+            // no handling (board #136 ruling 28, validator-2 note 33): this is the pipe's only
+            // writer and its buffer is empty, so the write never waits and cannot be
+            // interrupted; it fails only with the child already gone (EPIPE) or with no
+            // memory for the pipe's page, and the join below then ends or the test dies loudly.
             // SAFETY: a valid fd and a one-byte buffer.
             unsafe { libc::write(self.release.as_raw_fd(), b"g".as_ptr().cast(), 1) };
             if let Some(s) = self.spawner.take() {
