@@ -946,7 +946,9 @@ fn spawn_schedule(inputs: RunInputs, start: Start) {
     if let Some(hook) = SPAWN_HOOK.lock().unwrap().take() {
         return hook(inputs, start);
     }
-    std::thread::spawn(move || continue_schedule(inputs, start));
+    // Bound (board #140): the executor names the batch's socket on its own tmux calls, and
+    // anything else it reaches (a delivery, a capture) stays on the starter's server.
+    crate::tmux::spawn_bound(move || continue_schedule(inputs, start));
 }
 
 /// Test seam: receives the next admitted continuation instead of a thread.
@@ -984,7 +986,7 @@ pub fn decide_if_needed() {
     };
     match prepare(&inputs) {
         Ok(Prepared::Ready { lease, batch }) => {
-            std::thread::spawn(move || continue_schedule(inputs, Start::Pass(lease, batch)));
+            crate::tmux::spawn_bound(move || continue_schedule(inputs, Start::Pass(lease, batch)));
         }
         // The owner decides; its decision lets the ticks commit.
         Ok(Prepared::Busy) => said("another owner holds the restore lock".into()),

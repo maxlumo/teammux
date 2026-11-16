@@ -455,7 +455,8 @@ pub async fn start_with_socket_ready(
         // The restore's tmux work, after the room poster is in place; its
         // windows are held from their creation (restore_hold).
         if let Some((inputs, start)) = restore_start {
-            std::thread::spawn(move || crate::projects::restore_run::continue_schedule(inputs, start));
+            // Bound to this gateway's server (board #140), on its own thread.
+            crate::tmux::spawn_bound(move || crate::projects::restore_run::continue_schedule(inputs, start));
         }
         // Lines held for a busy queue-mode agent (board #257) whose turn a
         // restart finds over are typed now, not at the first feed read.
@@ -741,7 +742,7 @@ mod start_order {
         }
         let run = at("crate::projects::restore_run::continue_schedule(inputs, start)");
         assert!(at("notifications.set_room_poster(poster);") < run, "the room poster is in place first");
-        assert!(start.contains("std::thread::spawn(move || crate::projects::restore_run::continue_schedule(inputs, start));"), "on its own thread");
+        assert!(start.contains("crate::tmux::spawn_bound(move || crate::projects::restore_run::continue_schedule(inputs, start));"), "on its own thread, bound to this gateway's server (#140)");
         assert!(!start.contains(".join()"), "never joined: the listener does not wait for the windows");
         assert!(!start[run..].starts_with("crate::projects::restore_run::continue_schedule(inputs, start)).await"), "never awaited");
         assert_eq!(start.matches("prepare_on_start").count(), 1);

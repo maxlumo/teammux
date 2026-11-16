@@ -1123,7 +1123,9 @@ impl Flight {
                     *slot = Some(s.clone());
                     let worker = s.clone();
                     let work_until = work_deadline(deadline, budget);
-                    std::thread::spawn(move || {
+                    // Bound to the starter's server (board #140): the work reaches tmux
+                    // (refresh → baseline reads show-environment / default-shell).
+                    crate::tmux::spawn_bound(move || {
                         let v = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| work(work_until))).unwrap_or_else(|_| json!({ "error": "check_failed" }));
                         *worker.done.lock().unwrap_or_else(|p| p.into_inner()) = Some((v, Instant::now()));
                         worker.ready.notify_all();
@@ -1240,8 +1242,9 @@ static KICKED: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::ne
 pub fn availability() -> (bool, impl Fn(&str) -> Option<Value>) {
     let checked = LAST.checked();
     if !checked && !KICKED.swap(true, std::sync::atomic::Ordering::SeqCst) {
+        // Bound to the starter's server (board #140): automatic → refresh_once reaches tmux.
         #[cfg(not(test))]
-        std::thread::spawn(|| {
+        crate::tmux::spawn_bound(|| {
             let _ = automatic();
         });
     }

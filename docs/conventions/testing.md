@@ -855,6 +855,11 @@ flaky wall-clock assertions in the test.
   1 s stall timer's nudge after `sleep(3500 ms)` and read an empty log at load
   29. It now waits for the nudge (30 s bound) and then gives a second one a
   grace; a wait for something that must NOT happen can only miss, never flake.
+  An ORDER the test means is made, never raced: board #140, the same test
+  failed 1 in 20 isolated runs because the timer's first look could land
+  between its prompt and its second empty end, answer Gone and exit (forced
+  through the seam, 5 of 5 red). The timer's first look now waits for both
+  ends (`stalls::FIRST_LOOK`, a test-only gate on the timer's thread).
   How a writer's bytes fall into a reader's `read()` calls is scheduling,
   not behaviour: the tmux key probes (`main.rs` t08/t09) assert on their
   reads concatenated into one byte stream (`probe_reads`), waited for; even

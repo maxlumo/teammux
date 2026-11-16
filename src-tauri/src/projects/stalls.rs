@@ -69,7 +69,8 @@ pub fn on_empty_end(session: &str, window: &str) {
 fn watch(session: &str, window: &str, after: Duration, act: impl Fn(&str, &str, Due) + Send + 'static) {
     let Some(token) = super::telemetry::arm_nudge(session, window) else { return };
     let (session, window) = (session.to_string(), window.to_string());
-    std::thread::spawn(move || {
+    // Bound to this server (board #140): the nudge types where its turn ended.
+    crate::tmux::spawn_bound(move || {
         // The lease is released however the thread ends, a panic included.
         struct Release<'a>(&'a str, &'a str, u64);
         impl Drop for Release<'_> {
@@ -78,9 +79,22 @@ fn watch(session: &str, window: &str, after: Duration, act: impl Fn(&str, &str, 
             }
         }
         let _release = Release(&session, &window, token);
+        // Test seam (board #140): the first look, held and observed, so a test orders it
+        // against its own steps instead of racing it.
+        #[cfg(test)]
+        let mut first_look = FIRST_LOOK.lock().unwrap().take();
+        #[cfg(test)]
+        if let Some((before, _)) = first_look.as_mut() {
+            before();
+        }
         let mut answered = 0;
         loop {
-            match super::telemetry::nudge_wait(&session, &window, token, after.as_secs(), answered) {
+            let next = super::telemetry::nudge_wait(&session, &window, token, after.as_secs(), answered);
+            #[cfg(test)]
+            if let Some((_, looked)) = first_look.take() {
+                looked(&next);
+            }
+            match next {
                 NudgeWait::Wait(secs) => std::thread::sleep(Duration::from_secs(secs)),
                 NudgeWait::Due(due) => {
                     act(&session, &window, due);
@@ -91,6 +105,12 @@ fn watch(session: &str, window: &str, after: Duration, act: impl Fn(&str, &str, 
         }
     });
 }
+
+/// The next timer's first look (board #140 test seam): `before` runs on the timer's thread
+/// just before its first `nudge_wait`, `looked` with that look's answer.
+#[cfg(test)]
+#[allow(clippy::type_complexity)]
+pub(crate) static FIRST_LOOK: std::sync::Mutex<Option<(Box<dyn FnMut() + Send>, Box<dyn FnOnce(&NudgeWait) + Send>)>> = std::sync::Mutex::new(None);
 
 fn fire(session: &str, window: &str, due: Due) {
     fire_with(
@@ -289,6 +309,12 @@ mod tests {
         crate::projects::tests::use_test_store();
         let (s, w) = (unique(), "dev");
         let first = empty_end(&s, w);
+        // "Before the timer acts" is an ORDER, not a race (board #140: the timer's first look
+        // between this test's prompt and its second end answered Gone, red 1 in 20 runs and
+        // every time when forced): the timer's first look waits for both ends.
+        let (both_tx, both_rx) = std::sync::mpsc::channel::<()>();
+        let both_rx = Mutex::new(both_rx);
+        *FIRST_LOOK.lock().unwrap() = Some((Box::new(move || { let _ = both_rx.lock().unwrap().recv_timeout(Duration::from_secs(30)); }), Box::new(|_: &NudgeWait| {})));
         let acted = Arc::new(Mutex::new(Vec::new()));
         let (log, s2, w2) = (acted.clone(), s.clone(), w.to_string());
         watch(&s, w, Duration::from_secs(1), move |_, _, due| {
@@ -302,6 +328,7 @@ mod tests {
         record_prompt(&s, w, "[tmm chat 10:00] human: continue");
         let second = empty_end(&s, w);
         assert!(second > first);
+        both_tx.send(()).unwrap();
         // Wait for the fact the assertion reads, the timer's nudge, under a
         // generous bound (board #429: a fixed 3.5 s sleep after a 1 s timer
         // read an empty log at load 29). Then a grace for a second nudge: a
@@ -314,6 +341,43 @@ mod tests {
         std::thread::sleep(Duration::from_millis(1500));
         assert_eq!(*acted.lock().unwrap(), vec![second], "one timer, one nudge, for the end that is still the newest");
         assert!(arm_nudge(&s, w).is_none(), "and the allowance is spent");
+    }
+
+    /// Board #140, the production answer to a timer that looked too early: its first look
+    /// lands while the window works again (between the prompt and the next end), it answers
+    /// Gone and frees the lease; the next empty end starts a NEW watch (what on_empty_end
+    /// does for every empty end, agent_notifications.rs) and that one nudges, once, for it.
+    #[test]
+    fn a_timer_gone_while_the_agent_worked_leaves_the_next_empty_end_to_a_new_watch() {
+        crate::projects::tests::use_test_store();
+        let (s, w) = (unique(), "dev");
+        empty_end(&s, w);
+        let (prompted_tx, prompted_rx) = std::sync::mpsc::channel::<()>();
+        let (looked_tx, looked_rx) = std::sync::mpsc::channel::<String>();
+        let prompted_rx = Mutex::new(prompted_rx);
+        *FIRST_LOOK.lock().unwrap() = Some((
+            Box::new(move || { let _ = prompted_rx.lock().unwrap().recv_timeout(Duration::from_secs(30)); }),
+            Box::new(move |next: &NudgeWait| { let _ = looked_tx.send(format!("{next:?}")); }),
+        ));
+        let acted = Arc::new(Mutex::new(Vec::new()));
+        let act = |log: Arc<Mutex<Vec<u64>>>, s2: String, w2: String| move |_: &str, _: &str, due: Due| {
+            log.lock().unwrap().push(due.end_seq);
+            spend_nudge(&s2, &w2, due.run);
+        };
+        watch(&s, w, Duration::from_secs(1), act(acted.clone(), s.clone(), w.to_string()));
+        record_prompt(&s, w, "[tmm chat 10:00] human: continue");
+        prompted_tx.send(()).unwrap();
+        assert_eq!(looked_rx.recv_timeout(Duration::from_secs(30)).ok().as_deref(), Some("Gone"), "the early look finds the agent working");
+        let second = empty_end(&s, w);
+        // The lease is free again: the next empty end's watch takes it (on_empty_end's call).
+        watch(&s, w, Duration::from_secs(1), act(acted.clone(), s.clone(), w.to_string()));
+        let deadline = std::time::Instant::now() + Duration::from_secs(30);
+        while acted.lock().unwrap().is_empty() {
+            assert!(std::time::Instant::now() < deadline, "the new watch never nudged within 30 s");
+            std::thread::sleep(Duration::from_millis(50));
+        }
+        std::thread::sleep(Duration::from_millis(1500));
+        assert_eq!(*acted.lock().unwrap(), vec![second], "one nudge, for the end after the work");
     }
 
     /// A timer that finds the agent moved on says nothing and releases itself.

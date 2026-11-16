@@ -194,7 +194,8 @@ pub fn sniff_window_soon(session: &str, window: &str) {
     }
     let session = session.to_string();
     let window = window.to_string();
-    std::thread::spawn(move || {
+    // Bound to this server (board #140): the sniff reads the pane that asked for it.
+    crate::tmux::spawn_bound(move || {
         std::thread::sleep(std::time::Duration::from_millis(1200));
         sniff_window_now(&session, &window);
     });

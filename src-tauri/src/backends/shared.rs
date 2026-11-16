@@ -582,7 +582,9 @@ pub(crate) fn confirm_startup_prompt_or(
     on_ready: Option<Box<dyn FnOnce() + Send + 'static>>,
     on_timeout: Option<Box<dyn FnOnce() + Send + 'static>>,
 ) {
-    std::thread::spawn(move || {
+    // Bound to the server it starts on (board #140): its captures, its keys and the
+    // callers' on_ready/on_timeout never follow the global elsewhere.
+    tmux::spawn_bound(move || {
         let deadline = std::time::Instant::now() + confirmation.timeout;
         let mut accepted = false;
         let mut on_ready = on_ready;
@@ -902,6 +904,10 @@ fn redact(text: &str) -> String {
     }
     out
 }
+
+#[cfg(all(test, not(any(target_os = "android", target_os = "ios"))))]
+#[path = "shared/watcher_socket_tests.rs"]
+mod watcher_socket_tests;
 
 #[cfg(test)]
 mod tests {

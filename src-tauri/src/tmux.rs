@@ -67,8 +67,36 @@ pub fn set_socket(socket: Option<String>) {
     *socket_lock().write().unwrap() = socket;
 }
 
+/// The tmux server every global-socket call resolves to: THIS thread's binding when it has
+/// one (`spawn_bound`), else the process global.
 pub fn get_socket() -> Option<String> {
+    if let Some(bound) = BOUND_SOCKET.with(|b| b.borrow().clone()) {
+        return bound;
+    }
     socket_lock().read().unwrap().clone()
+}
+
+thread_local! {
+    /// `Some(socket)` on a thread `spawn_bound` started: that thread's server for its life.
+    static BOUND_SOCKET: std::cell::RefCell<Option<Option<String>>> = const { std::cell::RefCell::new(None) };
+}
+
+/// Run `f` on a DETACHED thread bound to the server its starter resolves now (board #140:
+/// a startup-prompt watcher outlived its starter and, reading the global on every poll,
+/// captured and typed into a same-named pane of whatever server the global named later;
+/// code-quality.md § 1.4, capture the target before waiting). Every tmux call the thread
+/// makes through the global, its callers' closures included, goes to that server. In a
+/// gateway, with its one socket, nothing changes.
+pub(crate) fn spawn_bound<F, T>(f: F) -> std::thread::JoinHandle<T>
+where
+    F: FnOnce() -> T + Send + 'static,
+    T: Send + 'static,
+{
+    let socket = get_socket();
+    std::thread::spawn(move || {
+        BOUND_SOCKET.with(|b| *b.borrow_mut() = Some(socket));
+        f()
+    })
 }
 
 /// The first executable file named `program` in the directories of `path`
@@ -299,6 +327,10 @@ pub(crate) fn run_tmux_on(socket: Option<&str>, args: &[&str]) -> Result<String,
 /// tmux said on a "success" (board #508: tmux 3.6a exits 0 when it cannot
 /// create an explicit `-S` socket).
 pub(crate) fn run_tmux_raw(socket: Option<&str>, args: &[&str]) -> std::io::Result<std::process::Output> {
+    #[cfg(test)]
+    if let Some(calls) = CALLS.lock().unwrap().as_mut() {
+        calls.push((socket.map(str::to_string), args.iter().map(|a| a.to_string()).collect()));
+    }
     let mut cmd = Command::new(find_tmux());
     if let Some(socket) = socket {
         cmd.args(["-S", socket]);
@@ -320,6 +352,12 @@ pub(crate) fn socket_create_error(stderr: &str, socket: &str) -> Option<String> 
     let text = line.strip_prefix("error creating ")?.strip_prefix(socket)?.strip_prefix(" (")?.strip_suffix(')')?;
     (!text.is_empty() && text.chars().count() <= 120 && !text.contains(['(', ')'])).then(|| text.to_string())
 }
+
+/// Test seam (board #140): while `Some`, every tmux command this process runs is recorded as
+/// (the socket it was sent to, its arguments), so a test can count what reached which server.
+#[cfg(test)]
+#[allow(clippy::type_complexity)]
+pub(crate) static CALLS: std::sync::Mutex<Option<Vec<(Option<String>, Vec<String>)>>> = std::sync::Mutex::new(None);
 
 /// Test seam: the uid the socket directory must belong to (we cannot chown).
 #[cfg(test)]
@@ -3004,3 +3042,7 @@ mod tests {
         assert_eq!(pane_agent(&target(agent)), Some("kiro"));
     }
 }
+
+#[cfg(test)]
+#[path = "tmux/spawn_pin_tests.rs"]
+mod spawn_pin_tests;

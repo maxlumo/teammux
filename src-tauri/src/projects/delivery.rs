@@ -327,7 +327,8 @@ fn watch(session: &str, window: &str, backend: Option<crate::backends::Backend>,
         let read = |p: &std::path::Path| { let _g = marks_lock().lock().unwrap(); read_mark(p) };
         let Some(owned) = read(&path).filter(|m| !m.id.is_empty()) else { return };
         let (s, w, timeout) = (session.to_string(), window.to_string(), confirmation.timeout);
-        std::thread::spawn(move || {
+        // Bound to this server (board #140), like the startup watcher it stands in for.
+        crate::tmux::spawn_bound(move || {
             let deadline = std::time::Instant::now() + timeout;
             loop {
                 if read(&path).as_ref() != Some(&owned) {
@@ -871,7 +872,8 @@ impl Taken {
         // On its own thread: the sender's pane takes its own window lock, and the caller
         // holds this one.
         let (session, window, why, stamp) = (session.to_string(), window.to_string(), self.why, self.stamp);
-        std::thread::spawn(move || {
+        // Bound to this server (board #140): the notices type where the kill happened.
+        crate::tmux::spawn_bound(move || {
             for (sender, whens) in by_sender {
                 let _ = super::deliver_chat_line(&session, &sender, &may_be_lost_notice(&window, &why, &whens, &stamp));
             }
