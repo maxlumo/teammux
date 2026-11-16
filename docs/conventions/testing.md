@@ -862,6 +862,18 @@ flaky wall-clock assertions in the test.
   never one read (a read boundary is not a key boundary, review P1). Reason:
   board #430 — t08 asserted a read `'ab'` and failed at load ~30 when `ab`
   and `\x03` arrived as one.
+- A negative control proves its edit applied before its run counts: the
+  control shows the diff it ran with (or asserts the edited line is there),
+  then runs. Reason: board #136, a `sed` that matched nothing left the
+  "unlock disabled" control running the unchanged tip; a green control from
+  it would have proved nothing (builder-2 caught it and redid the run).
+- A finding from fault injection says how the fault is reached WITHOUT the
+  injection (the caller, the input, the timing); when that cannot be shown
+  it is reported as an observation, not a finding, and holds nothing.
+  Reason: board #136, an injected `EINTR` on a one-byte write to an empty
+  single-writer pipe was held as P1 for an hour; the kernel source showed
+  the path is reachable only when the write must wait, which that pipe never
+  does (validator-2 withdrew it on that evidence).
 - A test that feeds a child's stdin writes only what that child reads. Where
   the child rightly exits before reading (the hook helper with no pane, or an
   inbox `mktemp` cannot write into), the test lets it exit, tolerates the
