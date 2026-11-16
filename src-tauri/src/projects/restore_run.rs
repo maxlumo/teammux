@@ -51,7 +51,8 @@ pub struct RunInputs {
 /// The one restore owner per state.db: `flock(LOCK_EX|LOCK_NB)` on
 /// `<state dir>/restore.lock`, released by the OS when the process dies.
 pub struct OwnerLock {
-    _file: std::fs::File,
+    // Released explicitly on drop (board #136): see `crate::flock`.
+    _lock: crate::flock::Flock,
 }
 
 impl OwnerLock {
@@ -61,17 +62,10 @@ impl OwnerLock {
             std::fs::create_dir_all(dir).map_err(|e| format!("{}: {e}", dir.display()))?;
         }
         let f = std::fs::OpenOptions::new().create(true).truncate(false).write(true).open(&path).map_err(|e| format!("{}: {e}", path.display()))?;
-        use std::os::unix::io::AsRawFd;
-        // SAFETY: a valid open fd; flock has no other preconditions.
-        let rc = unsafe { libc::flock(f.as_raw_fd(), libc::LOCK_EX | libc::LOCK_NB) };
-        if rc == 0 {
-            return Ok(Some(OwnerLock { _file: f }));
-        }
-        let e = std::io::Error::last_os_error();
-        if e.raw_os_error() == Some(libc::EWOULDBLOCK) {
-            Ok(None)
-        } else {
-            Err(format!("restore lock: {e}"))
+        match crate::flock::Flock::try_exclusive(f) {
+            Ok(Some(lock)) => Ok(Some(OwnerLock { _lock: lock })),
+            Ok(None) => Ok(None),
+            Err(e) => Err(format!("restore lock: {e}")),
         }
     }
 }
@@ -2241,6 +2235,10 @@ pub fn unrestored_windows(b: &Batch, project_id: &str) -> Result<std::collection
     }
     Ok(out)
 }
+
+#[cfg(test)]
+#[path = "restore_run/owner_lock_tests.rs"]
+mod owner_lock_tests;
 
 #[cfg(test)]
 mod tests {

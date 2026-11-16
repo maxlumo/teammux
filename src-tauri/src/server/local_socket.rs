@@ -39,7 +39,7 @@ pub(super) struct LocalSocket {
     pub(super) listener: std::os::unix::net::UnixListener,
     dir: File,
     node: (u64, u64),
-    _lock: File,
+    _lock: crate::flock::Flock,
 }
 
 /// `<config>/sock/gateway.sock`: where this config's gateway binds its local
@@ -83,8 +83,10 @@ fn open_dir(config_dir: &Path) -> Result<File, String> {
 /// The claim: an flock on `sock/gateway.lock`, opened without following a
 /// symlink and checked to be our own regular file, held for the gateway's
 /// life. Another live gateway holding it means this one does not touch the
-/// socket at all.
-fn claim(dir: &File) -> Result<File, String> {
+/// socket at all. Released explicitly on drop (board #136, `crate::flock`): a
+/// child this process forked keeps the lock's description until its exec, and
+/// a gateway started right after another's end must find the claim free.
+fn claim(dir: &File) -> Result<crate::flock::Flock, String> {
     let c = CString::new(LOCK).unwrap();
     let fd = unsafe { libc::openat(dir.as_raw_fd(), c.as_ptr(), libc::O_RDWR | libc::O_CREAT | libc::O_NOFOLLOW | libc::O_CLOEXEC, 0o600 as libc::c_uint) };
     if fd < 0 { return Err(format!("{LOCK}: {}", errno())); }
@@ -93,10 +95,11 @@ fn claim(dir: &File) -> Result<File, String> {
     if !m.is_file() || m.uid() != unsafe { libc::geteuid() } {
         return Err(format!("{LOCK} is not a regular file of ours"));
     }
-    if unsafe { libc::flock(lock.as_raw_fd(), libc::LOCK_EX | libc::LOCK_NB) } != 0 {
-        return Err(format!("another gateway holds {LOCK} ({})", errno()));
+    match crate::flock::Flock::try_exclusive(lock) {
+        Ok(Some(claim)) => Ok(claim),
+        Ok(None) => Err(format!("another gateway holds {LOCK} ({})", std::io::Error::from_raw_os_error(libc::EWOULDBLOCK))),
+        Err(e) => Err(format!("another gateway holds {LOCK} ({e})")),
     }
-    Ok(lock)
 }
 
 /// What a liveness probe of an existing socket found (review P1-A).
@@ -189,7 +192,7 @@ pub(super) fn open(config_dir: &Path) -> Result<LocalSocket, String> {
         Err(e) => return Err(format!("{}: {e}", path.display())),
         Ok(st) if is_type(&st, libc::S_IFSOCK) && st.st_uid == me => {
             // A socket of ours, while WE hold the claim: see `reclaimable`.
-            let recorded = recorded_node(&lock) == Some((st.st_dev as u64, st.st_ino as u64));
+            let recorded = recorded_node(lock.file()) == Some((st.st_dev as u64, st.st_ino as u64));
             match probe(&path) {
                 p if reclaimable(cfg!(target_os = "linux"), recorded, &p) => {
                     let c = CString::new(NODE).unwrap();
@@ -222,7 +225,7 @@ pub(super) fn open(config_dir: &Path) -> Result<LocalSocket, String> {
     }
     socket.listener.set_nonblocking(true).map_err(|e| e.to_string())?;
     // For the next claim holder: this node is a gateway's.
-    record_node(&socket._lock, socket.node).map_err(|e| format!("{LOCK}: {e}"))?;
+    record_node(socket._lock.file(), socket.node).map_err(|e| format!("{LOCK}: {e}"))?;
     Ok(socket)
 }
 
@@ -235,7 +238,7 @@ impl Drop for LocalSocket {
                 let c = CString::new(NODE).unwrap();
                 if unsafe { libc::unlinkat(self.dir.as_raw_fd(), c.as_ptr(), 0) } == 0 {
                     // Our node is gone: the record no longer names a killed gateway's node (board #135).
-                    let _ = self._lock.set_len(0);
+                    let _ = self._lock.file().set_len(0);
                 }
             }
         }
@@ -333,7 +336,7 @@ mod tests {
         let new = ident(&s.path);
         eprintln!("[local_socket test] dead {dead:?} -> new {new:?}{}", if new == dead { " (inode reused)" } else { "" });
         assert!(std::os::unix::net::UnixStream::connect(&s.path).is_ok(), "a dead socket of ours is replaced by one that answers");
-        assert_eq!(recorded_node(&s._lock), Some(new), "and the claim records the new node");
+        assert_eq!(recorded_node(s._lock.file()), Some(new), "and the claim records the new node");
         drop(s);
         // Live: something listens there, but holds no claim.
         let live = std::os::unix::net::UnixListener::bind(path_in(&cfg)).unwrap();
@@ -461,7 +464,7 @@ mod tests {
     fn a_ready_socket_records_its_node_in_the_claim() {
         let cfg = config_dir("rec");
         let s = open(&cfg).unwrap();
-        assert_eq!(recorded_node(&s._lock), Some(ident(&s.path)));
+        assert_eq!(recorded_node(s._lock.file()), Some(ident(&s.path)));
         drop(s);
         let _ = std::fs::remove_dir_all(&cfg);
     }
@@ -479,14 +482,14 @@ mod tests {
         // Killed: no Drop runs. Its descriptors close with the process; here, by hand.
         let s = open(&cfg).unwrap();
         let killed = ident(&s.path);
-        let fds = [s.listener.as_raw_fd(), s._lock.as_raw_fd(), s.dir.as_raw_fd()];
+        let fds = [s.listener.as_raw_fd(), s._lock.file().as_raw_fd(), s.dir.as_raw_fd()];
         std::mem::forget(s);
         for fd in fds { unsafe { libc::close(fd) }; }
         assert_eq!(recorded_node(&lock_of(&cfg)), Some(killed), "a killed gateway's node stays recorded");
         assert!(std::os::unix::net::UnixStream::connect(path_in(&cfg)).is_err(), "and refuses");
         let next = open(&cfg).unwrap();
         assert!(std::os::unix::net::UnixStream::connect(&next.path).is_ok(), "the next start reclaims it and answers");
-        assert_eq!(recorded_node(&next._lock), Some(ident(&next.path)));
+        assert_eq!(recorded_node(next._lock.file()), Some(ident(&next.path)));
         drop(next);
         let _ = std::fs::remove_dir_all(&cfg);
     }

@@ -6,6 +6,8 @@ pub mod fs;
 pub mod pptx;
 #[cfg(unix)]
 pub(crate) mod safe_fs;
+#[cfg(unix)]
+pub(crate) mod flock;
 pub mod server;
 pub mod backends;
 pub mod shell;

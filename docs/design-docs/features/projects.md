@@ -672,7 +672,13 @@ barrier (next section).
   and differ (review P1-D).
 - **One owner.** `flock(LOCK_EX|LOCK_NB)` on `<state dir>/restore.lock`; the
   OS releases it when the owner dies. A run that cannot take it answers
-  `Busy` and does nothing.
+  `Busy` and does nothing. The holder releases it EXPLICITLY (`LOCK_UN`, the shared
+  `crate::flock::Flock` guard; board #136, measured in the isolated runner): a
+  flock belongs to the open file description, and a child that any thread
+  forks keeps that description until its exec, so closing the fd alone left
+  the lock held for that window. A `give_up` right after the last pass, or a
+  door right after a release, was refused (`Observed`, `Busy`) while a tmux
+  child from the capture loop or a startup-prompt waiter was being spawned.
 - **The batch.** `meta restore_batch:<socket>` holds the plan frozen whole:
   the full batch uuid, the boot, the socket, the source checkpoint, the
   server the first creation printed, and every project and window with its
