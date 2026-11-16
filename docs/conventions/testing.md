@@ -879,6 +879,19 @@ flaky wall-clock assertions in the test.
   single-writer pipe was held as P1 for an hour; the kernel source showed
   the path is reachable only when the write must wait, which that pipe never
   does (validator-2 withdrew it on that evidence).
+- An asynchronous operation whose answer must belong to the gesture that
+  asked (code-quality.md § 1, captured identity) ships with a DOOR TABLE:
+  one table test of every door that makes the answer stale (another request,
+  a navigation, a file, project, server or scope change in BOTH directions,
+  unmount, and the owner changing in the same update as a new request) ×
+  every await boundary of the operation (its FIRST await and each later
+  one), with the answer deferred past each; a stale answer requests nothing
+  and writes nothing, and a door someone adds later has a row to be listed
+  in. Reason: board #144, where one rule took five rounds: a predicate read
+  at answer time, then a token taken after the first await, then the
+  mount-arrival and the same-update owner change, each found by the
+  verifier's next table (`Files.path-find.mount.test.ts` holds both tables
+  now; validator-2's pre-stat and owner-arrival probes were the model).
 - A test that feeds a child's stdin writes only what that child reads. Where
   the child rightly exits before reading (the hook helper with no pane, or an
   inbox `mktemp` cannot write into), the test lets it exit, tolerates the

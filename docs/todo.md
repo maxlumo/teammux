@@ -198,6 +198,11 @@
   (server `deliver_mentions` + the client's `hub_agents` refresh), left as
   they are: a time-based cache would give a freshly launched CLI a window of
   reading as a plain shell. `child_cmd` stays a detection clue everywhere.
+- [ ] Path-find tidy-ups (reviewer, #144 note 54, no behaviour change):
+  the "Found and opened" notice rides Files' `copyLifetime`, built for copy
+  (rename the lifetime); `Hub.routePathRef` and the Hub search's file result
+  each decide "is this reference searchable" (one pure `findRequest` with a
+  table test).
 - [ ] Project page tidy-ups (reviewer, #111 note 38, no behaviour change):
   `ProjectPage.svelte`'s `.page-meta` / `.page-refresh` copy the Dashboard's
   `.dash-meta` / `.dash-more` declarations (one shared class or a
