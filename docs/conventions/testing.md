@@ -892,6 +892,23 @@ flaky wall-clock assertions in the test.
   mount-arrival and the same-update owner change, each found by the
   verifier's next table (`Files.path-find.mount.test.ts` holds both tables
   now; validator-2's pre-stat and owner-arrival probes were the model).
+  The table WALKS THIS LIST (board #150, where a table that named the
+  concept but not the kinds grew by one finding per round): (a) the
+  person's newer intent under the same owner: another request of the same
+  kind, a create or New form, Back, Escape, Cancel, a view switch, a
+  navigation; (b) an owner change in EACH direction (server, scope
+  eligibility, project), away and away-and-back; (c) unmount; each × the
+  operation's first await and every later one, for a late answer AND a late
+  error; and the request that arrives together with its new owner, in both
+  effect orders, which must NOT be retired. Not a door: another operation's
+  own completion (the app returning to a list after a save or a delete): the
+  pending request is still the last thing the person asked for and lands
+  (#150 ruling 35). A door that goes through a SHARED helper is covered by
+  that helper's rows plus a source pin binding the action to the helper;
+  only a door with its own code path needs its own row (#150 ruling 33).
+  The one identity mechanism is `core/owned-token.ts` (begin for an owner,
+  own on an owner change, retire); a predicate read at answer time is not
+  one.
 - A test that feeds a child's stdin writes only what that child reads. Where
   the child rightly exits before reading (the hook helper with no pane, or an
   inbox `mktemp` cannot write into), the test lets it exit, tolerates the

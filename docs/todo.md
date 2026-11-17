@@ -198,6 +198,11 @@
   (server `deliver_mentions` + the client's `hub_agents` refresh), left as
   they are: a time-based cache would give a freshly launched CLI a window of
   reading as a plain shell. `child_cmd` stays a detection clue everywhere.
+- [ ] Board.svelte carries two stale-completion idioms (reviewer, #150 note
+  40, P2-b): `OpCtx`/`freeze()`/`owns()` for operations on the SHOWN issue
+  (identity = the issue) and `OwnedToken` for pane-opening intents (identity
+  = the owner). Both are correct; expressing `owns()` over the token is a
+  candidate consolidation.
 - [ ] Drawer tidy-up (reviewer, #147 note 27, P2-b, no behaviour change):
   `Drawer.svelte` passes eight props through to its board partition
   (onpagefile, onopenagent, onjump, onopenchat, onboardguard, boardMounted,
