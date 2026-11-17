@@ -20,6 +20,8 @@ export type Stop = 'early' | 'unreadable' | null;
 type Opener = (abs: string, rel: string) => void;
 type Choices = { root: string; shown: string[]; more: boolean; stopped: Stop; token: number; open: Opener; missing: (stopped: Stop) => void };
 
+import { OwnedToken } from '../core/owned-token.ts';
+
 const under = (root: string, rel: string) => `${root.replace(/\/+$/u, '')}/${rel}`;
 
 export class PathFind {
@@ -29,10 +31,10 @@ export class PathFind {
   #caps: () => string[] | undefined | null;
   /** ONE permanent retirement (leader's ruling, #144 note 24): every find holds the token it
    * started with; `retire()` moves it on for good, so a late answer or a pick from an older
-   * reference applies nothing, whatever the state looks like when it lands. */
-  #token = 0;
-  /** The owner (Files' session, server and scope) the current token was minted FOR (#144 note 45). */
-  #owner: string | null = null;
+   * reference applies nothing, whatever the state looks like when it lands. The token and the
+   * owner it was minted FOR (Files' session, server and scope, #144 note 45) are the shared
+   * core/owned-token.ts since #150. */
+  #ops = new OwnedToken();
 
   constructor(ask: (session: string, ref: string) => Promise<FindAnswer>, caps: () => string[] | undefined | null) {
     this.#ask = ask;
@@ -44,16 +46,16 @@ export class PathFind {
    * operation BEGAN, before its first await (#144 note 29): a miss that lands after its owner
    * was retired asks nothing. */
   async afterMiss(find: FindRequest, token: number, open: Opener, missing: (stopped: Stop) => void): Promise<void> {
-    if (token !== this.#token) return;
+    if (!this.#ops.live(token)) return;
     if (!this.#caps()?.includes(PATH_FIND)) { missing(null); return; }
     let answer: FindAnswer;
     try {
       answer = await this.#ask(find.session, find.ref);
     } catch {
-      if (token === this.#token) missing(null);
+      if (this.#ops.live(token)) missing(null);
       return;
     }
-    if (token !== this.#token) return;
+    if (!this.#ops.live(token)) return;
     const stopped: Stop = answer.stopped === 'unreadable' ? 'unreadable' : answer.stopped ? 'early' : null;
     if (answer.matches.length === 0) { missing(stopped); return; }
     // Exactly one opens only from a COMPLETE search (leader's ruling, note 16): a walk that
@@ -66,7 +68,7 @@ export class PathFind {
     const c = this.choices;
     this.choices = null;
     const rel = c?.shown[i];
-    if (c && rel !== undefined && c.token === this.#token) c.open(under(c.root, rel), rel);
+    if (c && rel !== undefined && this.#ops.live(c.token)) c.open(under(c.root, rel), rel);
   }
 
   /** What Files shows or who owns it changed (another entry, a directory navigation, a file,
@@ -74,25 +76,25 @@ export class PathFind {
    * the chooser of an older reference are retired for good. */
   retire(): number {
     this.choices = null;
-    return ++this.#token;
+    return this.#ops.retire();
   }
 
   /** A reference is raised under `owner`: every older find retires, and the new token is minted
    * for that owner. */
   begin(owner: string): number {
-    this.#owner = owner;
-    return this.retire();
+    this.choices = null;
+    return this.#ops.begin(owner);
   }
 
   /** Files' owner is now `now`: a token minted for any other owner retires; one minted for
    * `now` stays, whichever of `begin` and `own` runs first (#144 note 45). */
   own(now: string): void {
-    if (this.#owner !== now) { this.#owner = now; this.retire(); }
+    if (this.#ops.own(now)) this.choices = null;
   }
 
   dismiss(): void {
     const c = this.choices;
     this.choices = null;
-    if (c && c.token === this.#token) c.missing(null);
+    if (c && this.#ops.live(c.token)) c.missing(null);
   }
 }

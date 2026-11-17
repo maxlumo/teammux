@@ -3,6 +3,7 @@ import assert from 'node:assert/strict';
 import { readFile } from 'node:fs/promises';
 
 const source = await readFile(new URL('./Board.svelte', import.meta.url), 'utf8');
+const lines = await readFile(new URL('./board-lines.ts', import.meta.url), 'utf8');
 const appCss = await readFile(new URL('../../app.css', import.meta.url), 'utf8');
 
 test('the issue detail is a DRAFT: explicit save, clean cancel, guarded exits (board #11)', () => {
@@ -24,10 +25,11 @@ test('the issue detail is a DRAFT: explicit save, clean cancel, guarded exits (b
   // Every exit that would drop a dirty draft goes through the confirm
   // dialect: the back button, Escape, the phone's back gesture, a sidebar
   // project switch. Nothing silently discards.
-  assert.match(source, /onclick=\{\(\) => guard\(\(\) => \(sel = null\)\)\}/u, 'the back button is guarded');
-  assert.match(source, /if \(sel && \(dirty \|\| noteDirty\)\) \{ pendingDiscard = \(\) => \{ sel = null; \}; e\.stopPropagation\(\); return; \}/u,
+  assert.match(source, /function toList\(\) \{ opens\.retire\(\); sel = null; creating = false; \}\n\s*function toCreate\(\) \{ opens\.retire\(\); sel = null; creating = true; \}/u, 'the two destinations are the old writes plus the retirement (#150 round 3)');
+  assert.match(source, /aria-label=\{t\('back'\)\} onclick=\{\(\) => guard\(toList\)\}/u, 'the back button is guarded (toList since #150 round 3)');
+  assert.match(source, /if \(sel && \(dirty \|\| noteDirty\)\) \{ pendingDiscard = toList; e\.stopPropagation\(\); return; \}/u,
     'Escape asks first while dirty');
-  assert.match(source, /if \(sel && \(dirty \|\| noteDirty\)\) \{ pendingDiscard = \(\) => \{ sel = null; \}; return true; \}/u,
+  assert.match(source, /if \(sel && \(dirty \|\| noteDirty\)\) \{ pendingDiscard = toList; return true; \}/u,
     'the back gesture asks first while dirty');
   assert.match(source, /function pick\(s: string\) \{\s*\n\s*guard\(/u, 'a sidebar switch asks first');
   assert.match(source, /<ConfirmDialog open=\{!!pendingDiscard\} danger=\{false\}/u,
@@ -76,14 +78,16 @@ test('assignment is ONE save the SERVER hands over — the page posts no brief o
   assert.ok(!save.includes('assignBlocked') && !create.includes('assignBlocked'), 'no second gate on the submit path');
   assert.match(save, /catch \(e\) \{ if \(owns\(ctx\)\) err = saveError\(e\); \}/u, 'a refusal keeps the draft and says why');
   assert.match(create, /if \(owns\(ctx\)\) err = saveError\(e\);/u, 'and keeps the create form');
-  assert.match(source, /if \(code === 'server_too_old'\) return t\('boardAssignOldServer'\);[\s\S]*if \(code === 'login_pending'\) return t\('boardAssignConnecting'\);/u);
+  // #150 moved saveError and dispatchLine, unchanged, to board-lines.ts (the file-size rule).
+  assert.match(lines, /if \(code === 'server_too_old'\) return t\('boardAssignOldServer'\);[\s\S]*if \(code === 'login_pending'\) return t\('boardAssignConnecting'\);/u);
+  assert.match(source, /import \{ dispatchLine, saveError \} from '\.\/board-lines\.ts';/u);
   assert.equal([...source.matchAll(/<Select value=\{(?:draft\.assignee|nAssignee)\} dense disabled=\{submitting \|\| assignBlocked\(\)\}/gu)].length, 2, 'both pickers are disabled on a server known to be old');
   // A hand-off that was not delivered (failed OR offline) is its own line after
   // the save landed, never a failed save: the create form is gone and the edit
   // is rebased first, and the line carries a real action — Reassign sends the
   // same assignee again with no change to the draft.
   assert.match(create, /await load\(\);\s*\/\/[^\n]*\n\s*\/\/[^\n]*\n\s*const untold = dispatchLine\(created, assignee\);\s*if \(untold && alive && cur === ctx\.session\) resend = \{ session: ctx\.session, id: created\.id, name: assignee, line: `#\$\{created\.id\}: \$\{untold\}` \};/u, 'the create offers Reassign after closing the form AND after the reload, which clears the error line');
-  assert.match(source, /answer\?\.dispatch === 'failed'[\s\S]*answer\?\.dispatch === 'offline'/u, 'failed and offline both speak');
+  assert.match(lines, /answer\?\.dispatch === 'failed'[\s\S]*answer\?\.dispatch === 'offline'/u, 'failed and offline both speak (board-lines.ts since #150)');
   assert.match(source, /async function reassign\(\) \{[\s\S]*if \(!alive \|\| again\.session !== cur\) \{ resend = null; return; \}[\s\S]*await boardSave\(again\.session, \{ id: again\.id, assignee: again\.name, dispatch: true \}\);/u, 'Reassign is the flagged save to the project it was born in, and a click from another project is dropped');
   assert.match(source, /let resend = \$state<\{ session: string; id: number; name: string; line: string \} \| null>\(null\);/u, 'it carries its own project');
   assert.match(source, /err = ''; resend = null; \/\/ the old board's error line and its Reassign belong to it/u, 'a project switch drops it with its error line, in the effect that resets the rest');
@@ -393,7 +397,7 @@ test('embedded, the Board brings no head of its own — the drawer head is the h
     'the page-head renders only on the standalone page');
   // Creation still has one entry point per surface: the drawer head's + sends
   // a request, and the guard between it and a dirty draft still stands.
-  assert.match(source, /const req = createRequest;[\s\S]{0,200}?guard\(\(\) => \{ sel = null; creating = true; \}\);/u,
+  assert.match(source, /const req = createRequest;[\s\S]{0,200}?guard\(toCreate\);/u,
     'a create request routes through the same dirty-draft guard as every other jump');
 });
 
@@ -695,11 +699,11 @@ test('every destructive/discarding path confirms through the SHARED dialog (boar
   assert.match(source, /const createDirty = \$derived\(creating && \(!!\(nTitle\.trim\(\) \|\| nBody\.trim\(\) \|\| nAssignee\) \|\| holds\(createStage\)\)\);/u);
   assert.match(source, /if \(dirty \|\| noteDirty \|\| createDirty \|\| pageDirty\(\)\) pendingDiscard = action;/u, 'ONE guard covers every kind of unsaved work, the project page\u2019s edited fields read LIVE (#111, leader note 31)');
   assert.match(source, /const pageDirty = \(\) => pageEdited \|\| !!pageEditedNow\?\.\(\);/u, 'the cached flag OR the live document, never the flag alone');
-  assert.match(source, /aria-label=\{t\('cancel'\)\} onclick=\{\(\) => guard\(\(\) => \(creating = false\)\)\}/u,
+  assert.match(source, /aria-label=\{t\('cancel'\)\} onclick=\{\(\) => guard\(toList\)\}/u,
     'the create form\u2019s explicit cancel goes through the guard');
-  assert.match(source, /if \(creating && createDirty\) \{ pendingDiscard = \(\) => \{ creating = false; \}; e\.stopPropagation\(\); return; \}/u,
+  assert.match(source, /if \(creating && createDirty\) \{ pendingDiscard = toList; e\.stopPropagation\(\); return; \}/u,
     'Escape asks before dropping create data');
-  assert.match(source, /if \(creating && createDirty\) \{ pendingDiscard = \(\) => \{ creating = false; \}; return true; \}/u,
+  assert.match(source, /if \(creating && createDirty\) \{ pendingDiscard = toList; return true; \}/u,
     'the back gesture asks too');
   assert.match(source, /if \(pendingDelete\) \{ if \(!busy\) pendingDelete = null; return true; \}/u,
     '#167: pending Back is consumed; only an idle confirmation can dismiss');
@@ -1065,7 +1069,7 @@ test('a landing is HELD until the board can take it, newest wins, and ONE eligib
   assert.match(source, /if \(gen !== landingGen \|\| !eligible\(\)\) return;/u, 'and re-checked right before the continuation runs');
   assert.match(source, /\$effect\(\(\) => \{ const ok = eligible\(\); if \(!ok && landingParked\) untrack\(voidLanding\); \}\);/u, 'a question the landing parked goes with it');
   assert.match(source, /if \(landingParked && pendingDiscard === landingParked\) pendingDiscard = null;/u, 'withdrawn from the existing guard — no new modal');
-  assert.match(source, /if \(req\.id\) void openIssue\(req\.id\);\s*else sel = null;/u, 'id 0 = the board LIST: an open detail is left (dirty → the existing Keep/Discard)');
+  assert.match(source, /if \(req\.id\) void openIssue\(req\.id\);\s*else toList\(\);/u, 'id 0 = the board LIST: an open detail is left (dirty → the existing Keep/Discard)');
   // The transaction boundary: the question the LANDING parked is re-checked
   // BEFORE the discard clears the draft / note / attachments — not only before
   // the final navigation — and only the landing's own question is restricted.

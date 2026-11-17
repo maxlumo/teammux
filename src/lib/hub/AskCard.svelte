@@ -15,7 +15,7 @@
 
   let {
     ask, names = NO_LABELS, asker = 'live' as AskerState, refused = '', error = '', stale = false, busy = false, draft, ondraft,
-    onanswer = async (_option?: string, _text?: string) => false, ondismiss = () => {}, ondiscuss = () => {},
+    onanswer = async (_option?: string, _text?: string) => false, ondismiss = () => {}, ondiscuss = () => {}, onopen = null,
     compact = false, now = 0,
   }: {
     /** The Dashboard's form (board #109, leader note 88): the asker and the ask's age on the
@@ -27,6 +27,9 @@
     draft?: AskDraft; ondraft?: (draft: AskDraft) => void;
     /** Resolves true once the server answered; the Answer box is cleared only then. */
     onanswer?: (option?: string, text?: string) => Promise<boolean> | void; ondismiss?: () => void; ondiscuss?: () => void;
+    /** Board #150: on the Dashboard the asker line is a door to the ask's bubble in the chat
+     * (the question keeps its own expand toggle). Absent: plain text, as in the feed. */
+    onopen?: (() => void) | null;
   } = $props();
 
   // svelte-ignore state_referenced_locally
@@ -103,7 +106,11 @@
 <!-- svelte-ignore a11y_click_events_have_key_events, a11y_no_static_element_interactions -->
 <div class="ask-card" class:closed={!open} onclick={(e) => e.stopPropagation()} data-ask-seq={ask.seq}>
   {#if compact}
-    <div class="ask-meta"><span class="ask-who">{who}</span><span class="side-age">{agoShort(ask.ts, now)}</span></div>
+    {#if onopen}
+      <button type="button" class="ask-meta ask-open" onclick={onopen} aria-label={`${who} · ${t('dashOpenInChat')}`}><span class="ask-who">{who}</span><span class="side-age">{agoShort(ask.ts, now)}</span></button>
+    {:else}
+      <div class="ask-meta"><span class="ask-who">{who}</span><span class="side-age">{agoShort(ask.ts, now)}</span></div>
+    {/if}
     <!-- svelte-ignore a11y_no_noninteractive_tabindex -->
     <div class="ask-q clamp" class:open={qOpen} class:cut={qToggle} bind:this={qEl}
       role={qToggle ? 'button' : undefined} tabindex={qToggle ? 0 : undefined} aria-expanded={qToggle ? qOpen : undefined}
@@ -162,6 +169,11 @@
   .ask-q.clamp > :global(:first-child) { margin-top: 0; }
   .ask-q.clamp > :global(:last-child) { margin-bottom: 0; }
   .ask-meta { display: flex; align-items: baseline; gap: var(--ui-gap); min-width: 0; }
+  /* The Dashboard's door to the bubble (#150): the meta line as a borderless row in the wash
+     family, the control height so it is a touch target. */
+  .ask-open { align-items: center; min-height: var(--control-height); padding: 0 4px; margin: 0 -4px; border: none; background: none;
+    color: inherit; font: inherit; text-align: left; cursor: pointer; border-radius: var(--control-radius); }
+  .ask-open:hover { background: var(--surface2); }
   .ask-who { font-weight: 600; font-family: var(--font-display); min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
   .ask-meta > .side-age { margin-left: 0; }
   .ask-opts { display: flex; flex-direction: column; gap: var(--ui-gap); }

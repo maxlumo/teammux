@@ -97,6 +97,19 @@ export function rememberBoardView(v: BoardView, store: Pick<Storage, 'setItem'> 
   try { store?.setItem(key, v); } catch { /* a private window keeps it for the session only */ }
 }
 
+/** Board #150: whether a host's status block (Needs you, Now, Notes) is folded to its one
+ * line, remembered per device and per host, the view memory's pattern; unfolded by default. */
+export const BOARD_FOLD_KEY = 'tmux_dash_folded';
+export const DRAWER_FOLD_KEY = 'tmux_drawer_dash_folded';
+
+export function statusFoldedOf(store: Pick<Storage, 'getItem'> | null = globalThis.localStorage ?? null, key = BOARD_FOLD_KEY): boolean {
+  try { return store?.getItem(key) === '1'; } catch { return false; }
+}
+
+export function rememberStatusFolded(folded: boolean, store: Pick<Storage, 'setItem'> | null = globalThis.localStorage ?? null, key = BOARD_FOLD_KEY): void {
+  try { store?.setItem(key, folded ? '1' : '0'); } catch { /* a private window keeps it for the session only */ }
+}
+
 /** Unread = after the room's ONE server mark (board #334), the same on every
  * device. `null`: the room has no mark yet, so everything is unread;
  * `undefined`: the mark could not be read, so nothing is marked (unknown is

@@ -11,7 +11,7 @@
   import { poll, single } from '../core/poll.ts';
   import { t } from '../core/i18n.svelte.ts';
   import { agoShort, stateDotColor, stateIsLive } from './hub.ts';
-  import { agentSummary, countParts, foldNotes, isUnread, pickNotes, NOTES_MAX_PAGES, NOTES_PAGE, type DashAgent } from './dashboard.ts';
+  import { agentSummary, countParts, foldNotes, isUnread, pickNotes, rememberStatusFolded, statusFoldedOf, BOARD_FOLD_KEY, NOTES_MAX_PAGES, NOTES_PAGE, type DashAgent } from './dashboard.ts';
   import { excerpt } from './notifications.ts';
   import Icon from '../ui/Icon.svelte';
   import AskCard from './AskCard.svelte';
@@ -62,6 +62,8 @@
     room,
     visible = true,
     onOpenBoard = () => {},
+    onOpenIssue = (_id: number) => {},
+    foldKey = BOARD_FOLD_KEY,
     onOpenAgent = (_name: string) => {},
     onJump = (_m: Note) => {},
     onOpenChat = () => {},
@@ -95,6 +97,10 @@
     room: string;
     visible?: boolean;
     onOpenBoard?: () => void;
+    /** Board #150: an issue the block names (the oldest doing, a finished one) opens in this host's Board. */
+    onOpenIssue?: (id: number) => void;
+    /** Where this host remembers its fold (the Board tab's, or the drawer's board's). */
+    foldKey?: string;
     onOpenAgent?: (name: string) => void;
     onJump?: (m: Note) => void;
     onOpenChat?: () => void;
@@ -102,6 +108,9 @@
 
 
   let data = $state<DashData | null>(null);
+  // Board #150 (the owner, 2026-11-17 03:14): the status block folds to one line so the project
+  // page gets the room; per host, unfolded by default. Folding never touches the page.
+  let statusOpen = $state(!statusFoldedOf(globalThis.localStorage ?? null, untrack(() => foldKey)));
   // The page's head: a read that could not read the page store (page_error)
   // keeps the last one; never "no page" (#108's rule).
   let pageHead = $state<PageHead | null>(null);
@@ -204,6 +213,9 @@
   let asksFor = '';
   function followAsks(s: string, d: DashData) {
     if (!asksOn) return;
+    // Folded, the line needs only the count the snapshot carries: the ask rows wait for the
+    // unfold (#150), the shape of #109 S8's hidden rule.
+    if (!statusOpen) { asksStale = true; return; }
     if (asksStale) { asksStale = false; void book.load(s); return; }
     if (!book.ensure(s, d.asks.map((a) => a.seq))) void book.reconcile(s);
   }
@@ -212,7 +224,7 @@
     const r = room, s = session;
     return listen((m) => {
       if (m?.room !== r || !(isAsk(m) || closingSeq(m) !== null)) return;
-      if (!visible) { asksStale = true; return; }
+      if (!visible || !statusOpen) { asksStale = true; void (visible && loader()); return; }
       void book.load(s);
       void loader(); // the open list (and its count) is the server's: read it again
     });
@@ -261,6 +273,20 @@
   // lands, and a queued entry read never starts (#109 S4).
   $effect(() => () => { gen++; loader.dispose(); book.dispose(); });
 
+  // Unfolded again: the ask rows a folded block skipped are read now (#150).
+  $effect(() => {
+    if (!statusOpen || !visible) return;
+    untrack(() => { if (asksOn && asksStale && data) { asksStale = false; void book.load(session); } });
+  });
+  const foldToggled = (e: Event) => {
+    statusOpen = (e.currentTarget as HTMLDetailsElement).open;
+    // Folded: an ask rows read queued while unfolded retires unrun (validator-2 R1), through the
+    // one mechanism the hidden view uses (#109 S8); the next unfold reads the rows again.
+    if (!statusOpen && untrack(() => book.retire(session))) asksStale = true;
+    rememberStatusFolded(!statusOpen, globalThis.localStorage ?? null, foldKey);
+  };
+  const unreadNotes = $derived(notes.filter((m) => isUnread(m, mark)).length);
+
   const summary = $derived(data ? agentSummary(data.agents, data.stopped) : null);
   const labels: Names = $derived(agentNames(data?.labels ?? []));
   const counts = $derived(data?.board.counts ?? null);
@@ -271,6 +297,17 @@
 <div class="dash" class:muted={failed} aria-busy={!data}>
   {#if failed}<div class="dash-note" role="status">{t('dashNotLive')}</div>{/if}
   {#if data && summary && counts}
+    <!-- Board #150: the ONE status block, folding to its line (the 'Finished · 24 h' atom). The
+         summary is the same line in both states; the middle part elides, the ask part never. -->
+    <details class="dash-block" open={statusOpen} ontoggle={foldToggled}>
+      <summary class="dash-fold-line">
+        <span class="flip" class:on={statusOpen}><Icon name="chevron-down" size={11} /></span>
+        <span class="fold-label">{t('dashStatus')}</span>
+        {#if data.asks.length}<span class="fold-asks">· <span class="b-count side-unread">{data.asks.length}</span> {t(data.asks.length === 1 ? 'dashFoldAsk' : 'dashFoldAsks')}</span>{/if}
+        {#if countParts(summary.counts).length}<span class="fold-mid">· {countParts(summary.counts).map((p) => t(COUNT_KEYS[p.key]).replace('{n}', String(p.n))).join(' · ')}</span>{/if}
+        {#if unreadNotes}<span class="fold-unread">· {t('dashFoldUnread').replace('{n}', String(unreadNotes))}</span>{/if}
+      </summary>
+      <div class="dash-block-body">
     <section class="dash-sec" aria-label={t('dashNeedsYou')}>
       <h2 class="menu-heading">{t('dashNeedsYou')} · {data.asks.length}</h2>
       <div class="dash-asks" data-asks={data.asks.length}>
@@ -280,10 +317,11 @@
             <AskCard compact {now} ask={row} names={labels} asker={askerState(row.asker, roster, stopped)} refused={book.refused[a.seq] ?? ''} error={book.errors[a.seq] ?? ''} stale={book.failed}
               draft={book.drafts[a.seq]} ondraft={(dr) => book.setDraft(a.seq, dr)} busy={!!book.busy[a.seq]}
               onanswer={(option, words) => answer(a.seq, option, words)} ondismiss={() => dismiss(a.seq)}
-              ondiscuss={() => onJump({ seq: a.seq, discuss: true })} />
+              ondiscuss={() => onJump({ seq: a.seq, discuss: true })} onopen={() => onJump({ seq: a.seq })} />
           {:else}
-            <!-- Not loaded (yet, or its read failed): who asks what, never a second card. -->
-            <div class="dash-meta">{labels.shown(a.asker)}: {a.question}</div>
+            <!-- Not loaded (yet, folded, or its read failed): who asks what, never a second card;
+                 a door to the ask's bubble (#150). -->
+            <button type="button" class="dash-door dash-meta" onclick={() => onJump({ seq: a.seq })}>{labels.shown(a.asker)}: {a.question}</button>
           {/if}
         {/each}
       </div>
@@ -298,7 +336,7 @@
       </button>
       {#if data.board.oldest_doing}
         {@const o = data.board.oldest_doing}
-        <div class="dash-meta">{t('dashOldestDoing').replace('{id}', String(o.id)).replace('{title}', o.title)} · {t('dashLastChange')} {agoShort(o.last_change * 1000, now)}</div>
+        <button type="button" class="dash-door dash-meta" onclick={() => onOpenIssue(o.id)}>{t('dashOldestDoing').replace('{id}', String(o.id)).replace('{title}', o.title)} · {t('dashLastChange')} {agoShort(o.last_change * 1000, now)}</button>
       {/if}
       {#if countParts(summary.counts).length}
         <div class="dash-meta" data-counts>{countParts(summary.counts).map((p) => t(COUNT_KEYS[p.key]).replace('{n}', String(p.n))).join(' · ')}</div>
@@ -317,7 +355,7 @@
         <details class="dash-finished" bind:open={finishedOpen}>
           <summary><span class="flip" class:on={finishedOpen}><Icon name="chevron-down" size={11} /></span>{t('dashFinished')} · {data.finished.length}</summary>
           {#each data.finished as f (f.id)}
-            <div class="dash-meta dash-done"><span class="dash-done-text">#{f.id} {f.title}{f.assignee ? ` · ${labels.shown(f.assignee)}` : ''}</span><span class="side-age">{agoShort(f.done_at * 1000, now)}</span></div>
+            <button type="button" class="dash-door dash-meta dash-done" onclick={() => onOpenIssue(f.id)}><span class="dash-done-text">#{f.id} {f.title}{f.assignee ? ` · ${labels.shown(f.assignee)}` : ''}</span><span class="side-age">{agoShort(f.done_at * 1000, now)}</span></button>
           {/each}
         </details>
       {/if}
@@ -336,6 +374,8 @@
       {#if notesCapped}<div class="dash-meta">{t('dashNotesCapped')}</div>{/if}
       <button type="button" class="dash-more" onclick={onOpenChat}>{t('dashAllInChat')}</button>
     </section>
+      </div>
+    </details>
 
     {#if pageOn && pageHead && api.pageLoad}
       <!-- The LAST section (board #111): it can neither draw over Needs you nor push it away. -->
@@ -391,4 +431,21 @@
   .dash-finished > summary { gap: 6px; }
   .dash-finished > summary::-webkit-details-marker { display: none; }
   .dash-finished > summary:hover { background: var(--surface2); }
+  /* Board #150: the status block and its one line (the disclosure atom above, one row). */
+  .dash-block { min-width: 0; }
+  .dash-block-body { display: flex; flex-direction: column; gap: 12px; min-width: 0; padding-top: 4px; }
+  .dash-block > summary {
+    display: flex; align-items: center; gap: 6px; min-width: 0; min-height: var(--control-height); padding: 0 4px;
+    cursor: pointer; font: 400 var(--fs-meta)/1.4 var(--font-ui); color: var(--text2); border-radius: var(--control-radius);
+    white-space: nowrap; overflow: hidden;
+  }
+  .dash-block > summary::-webkit-details-marker { display: none; }
+  .dash-block > summary:hover { background: var(--surface2); }
+  .dash-block > summary > :not(.fold-mid) { flex: none; }
+  .fold-label { font-weight: 600; color: var(--text); }
+  .fold-mid { flex: 0 1 auto; min-width: 0; overflow: hidden; text-overflow: ellipsis; }
+  /* Doors that were text (#150): the row dialect of the view's other doors. */
+  .dash-door { display: flex; align-items: baseline; gap: 6px; min-height: var(--control-height); padding: 0 4px; border: none; background: none;
+    text-align: left; cursor: pointer; border-radius: var(--control-radius); width: 100%; }
+  .dash-door:hover { background: var(--surface2); }
 </style>

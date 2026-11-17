@@ -351,6 +351,48 @@ rule), so an agent whose sandbox cannot write `.tmm/` still publishes.
   uploads; a page's pictures and media are the browser's subresource loads
   through the scope door, as in any Files HTML preview, and are not counted.
 
+### The status block folds to one line (board #150)
+
+The owner, 2026-11-17 03:13 and 03:14: "这部分内容可以不做在这个 board 里了，这个放在我们
+chat 界面上更合适…" then "或者这个放在 board 里也行，就是我不用的时候能折叠或者缩小，不完全占据本身
+项目自己做的 dashboard". Decision (leader, #150 note 1): the smaller form; the
+sections stay here.
+
+- **One block, one line.** Needs you, Now and Notes for you are ONE
+  `<details class="dash-block">`; its summary, the disclosure atom of
+  'Finished · 24 h', is the same line folded or not: `Status · <n> asks ·
+  <the agents' count line> · <m> unread`, each part only when non-zero.
+  The line never wraps; the agents' part elides, the ask count never does
+  (measured at 320 and 390 in the #150 rig). The project page is outside
+  the block, so folding never touches its frame.
+- **Memory per host**: `tmux_dash_folded` (the Board tab) and
+  `tmux_drawer_dash_folded` (the drawer), one pair in dashboard.ts, unfolded
+  by default.
+- **A new ask while folded** changes the line's count, which wears the
+  sidebar ask chip's unread ink (`b-count side-unread`); it does not unfold:
+  the ask also rings the bell and is a bubble in the chat.
+- **Reads**: the snapshot (`hub_dashboard`, the notes page(s), the unread
+  mark) stays ONE read, because the line needs its counts and its unread
+  notes; the per-ask rows (`hub_ask_list`) are read only while unfolded, and
+  a push while folded marks them stale for the next unfold (#109 S8's shape).
+- **Doors**: the asker line of an ask card (and the not-loaded ask line)
+  opens its bubble in the chat (the centre's one jump); the oldest doing
+  issue and a finished issue open that issue in this host's Board, whose
+  Back returns to the Dashboard; the counts line opens the Board view; an
+  agent row, a note and All in chat as before. The agents' count summary is
+  a summary of the rows under it, plain text (leader, Q2).
+- **An issue door's answer belongs to its owner** (validator-2 S1/R2, leader
+  note 19): `openIssue`, the Board's ONE issue-opening function, mints its
+  read for an owner (the board's eligibility and project) with
+  `core/owned-token.ts`, #144's token core shared with `PathFind`; a newer
+  open, the owner becoming another (an edge: away and back stays dead) and
+  the unmount retire it, a change TO its owner never does, so a landing that
+  arrives with its new project opens. Every other change of the Board's main
+  pane by the same owner (New issue by either path, Back or Escape to the list
+  or Dashboard, Cancel, a view switch) retires it too, through `toList` /
+  `toCreate` and `setBoardView` (leader note 30): a late answer or error never
+  replaces a newer pane. Door table in Dashboard.fold.mount.
+
 ### In the Hub drawer (board #147)
 
 The owner, 2026-11-17 02:10: "还有 dashboard 在右侧 board 的侧边栏应该也能支持显示，现在好像还看不到".

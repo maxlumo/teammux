@@ -387,6 +387,12 @@ an open ask is never repeated; a project page is optional and published with
 | input | keyboard only (options are buttons in focus order); an IME's Enter never sends the answer box (the note box's rule); wide touch targets; six long options wrap |
 | widths and themes | 320 / 390 / 1280, dark and light, real Chromium, by natural widths with the longest realistic names, server tags and numbers, for the sidebar row, the cards and the confirm with a very long text (the #102/#103 lesson) |
 
+**Amended 2026-11-17 (#150).** The owner, 03:13: "这部分内容可以不做在这个 board
+里了，这个放在我们 chat 界面上更合适，我可以方便的比如右上角有一个悬浮按钮…"; 03:14: "或者这个放在
+board 里也行，就是我不用的时候能折叠或者缩小，不完全占据本身项目自己做的 dashboard". The status
+sections stay on the Dashboard as one block that folds to one line, in both
+hosts (dashboard.md § The status block folds); no Chat button.
+
 ## 9. Phasing (each ticket verifiable alone, in this order)
 
 | | ticket | outcome |

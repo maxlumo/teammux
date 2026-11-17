@@ -15,9 +15,10 @@ test('the Dashboard positions the shared .side-win atoms and never restyles them
 
 test('every tappable element of the view is a control-height target (44px on touch, #109 S3)', () => {
   const tappable = [...src.matchAll(/<(button|summary)\b([^>]*)>/gu)].map((m) => /class="([^" ]*)/u.exec(m[2]!)?.[1] ?? m[1]!);
-  assert.deepEqual([...new Set(tappable)].sort(), ['dash-agent', 'dash-line', 'dash-more', 'dash-note-row', 'summary']);
+  // #150 adds the doors that were text (an ask line, the oldest doing, a finished issue) and the fold line.
+  assert.deepEqual([...new Set(tappable)].sort(), ['dash-agent', 'dash-door', 'dash-fold-line', 'dash-line', 'dash-more', 'dash-note-row', 'summary']);
   const rule = (sel: string) => [...style.matchAll(/([^{}]+)\{([^}]*)\}/gu)].filter((m) => m[1]!.split(',').some((s) => s.trim() === sel)).map((m) => m[2]).join(';');
-  for (const sel of ['.dash-line', '.dash-agent', '.dash-note-row', '.dash-more', '.dash-finished > summary']) {
+  for (const sel of ['.dash-line', '.dash-agent', '.dash-note-row', '.dash-more', '.dash-finished > summary', '.dash-door', '.dash-block > summary']) {
     assert.match(rule(sel), /min-height: var\(--control-height\)/u, `${sel} has the control height`);
   }
 });

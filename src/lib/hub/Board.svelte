@@ -47,7 +47,9 @@
   import { hoverInfo } from '../ui/hover.ts';
   import Segmented from '../ui/Segmented.svelte';
   import Dashboard from './Dashboard.svelte';
-  import { boardViewOf, rememberBoardView, BOARD_VIEW_KEY, DRAWER_VIEW_KEY, type BoardView } from './dashboard.ts';
+  import { dispatchLine, saveError } from './board-lines.ts';
+  import { OwnedToken } from '../core/owned-token.ts';
+  import { boardViewOf, rememberBoardView, BOARD_VIEW_KEY, DRAWER_VIEW_KEY, BOARD_FOLD_KEY, DRAWER_FOLD_KEY, type BoardView } from './dashboard.ts';
   import { slideIndicator } from '../ui/indicator.ts';
   import { selectionClickGuard } from '../ui/native-context-menu.ts';
   import ScopeNote, { type ScopeNoteSpec } from '../app/ScopeNote.svelte';
@@ -89,24 +91,6 @@
   const agreementLocked = () => lacksCap(loginCaps, BOARD_AGREEMENT);
   /** `#1, #2`: an issue's blockers as the card and the room say them. */
   const blockList = (i: BoardIssue) => (i.blocked_by ?? []).map((n) => `#${n}`).join(', ');
-  /** Why a write did not go, in this page's words: the two gate refusals
-   * (board #377) have their own copy; anything else is the server's message. */
-  const saveError = (e: unknown) => {
-    const code = (e as { code?: string } | null)?.code;
-    if (code === 'server_too_old') return t('boardAssignOldServer');
-    if (code === 'login_pending') return t('boardAssignConnecting');
-    return String((e as Error)?.message ?? e);
-  };
-  /** The line a save's answer owes the person when the assignee was NOT
-   * reached (board #377 review P1-A): `failed` (the telling went wrong) and
-   * `offline` (nothing was delivered: stopped, not this project's agent, or
-   * tmux could not be asked). The issue is saved either way — that is why
-   * this is a line of its own and not a failure of the save. */
-  const dispatchLine = (answer: { dispatch?: string; dispatch_error?: string; offline?: { why?: string }[] } | null | undefined, name: string) => {
-    if (answer?.dispatch === 'failed') return t('boardDispatchFailed').replace('{name}', name).replace('{error}', answer.dispatch_error ?? '');
-    if (answer?.dispatch === 'offline') return t('boardDispatchOffline').replace('{name}', name).replace('{why}', answer.dispatch_error ?? answer.offline?.[0]?.why ?? '');
-    return '';
-  };
   /** A hand-off that was saved but not delivered, and the action that fixes
    * it: Reassign sends the same assignee again (board #377). It is an ACTION OF
    * ONE ISSUE IN ONE PROJECT, so it carries the project it was born in
@@ -149,7 +133,7 @@
   // (with their drafts), muted with the rest of the view.
   let asksCap = $state(Array.isArray(capsAtMount) && capsAtMount.includes(ASKS));
   $effect(() => { if (Array.isArray(loginCaps)) asksCap = loginCaps.includes(ASKS); });
-  const setBoardView = (v: BoardView) => { boardView = v; rememberBoardView(v, globalThis.localStorage ?? null, viewKey); };
+  const setBoardView = (v: BoardView) => { opens.retire(); boardView = v; rememberBoardView(v, globalThis.localStorage ?? null, viewKey); };
   // The project page (board #111) needs the server's `dashboard_page`; and the
   // Dashboard is KEPT MOUNTED while the Board view, an issue or the create
   // form is on screen (hidden, never moved: its page's frame would reload,
@@ -197,7 +181,7 @@
   type OpCtx = { session: string; id: number | null; gen: number };
   const freeze = (): OpCtx => ({ session: cur, id: sel?.id ?? null, gen: opGen });
   const owns = (c: OpCtx) => alive && c.gen === opGen;
-  onDestroy(() => { alive = false; opGen++; viewClaim.retire(); viewerDl.dispose(); viewGeneration++; readSequence++; loadProjects.dispose(); load.dispose(); setNoteActions(-1); createStage.clear(); bodyStage.clear(); noteStage.clear(); endLeaveAsk?.(true); });
+  onDestroy(() => { alive = false; opGen++; opens.retire(); viewClaim.retire(); viewerDl.dispose(); viewGeneration++; readSequence++; loadProjects.dispose(); load.dispose(); setNoteActions(-1); createStage.clear(); bodyStage.clear(); noteStage.clear(); endLeaveAsk?.(true); });
   let picked = $state(false);      // a manual pick overrides the session follow
   // The Board sheet's own condition (≤760px — the old media gate, expressed
   // where the class is applied; see app.css .side-sheet).
@@ -257,6 +241,10 @@
   let landingParked: (() => void) | null = null;
   let landingParkedOk: (() => boolean) | null = null;   // is the parked question still the landing's to ask?
   const eligible = () => visible && (scope.eligible ? scope.eligible() : true) && alive;
+  /** Who an issue open belongs to (#150): this board's eligibility and its project. */
+  const opens = new OwnedToken();
+  const issueOwner = () => `${eligible() ? 'on' : 'off'}|${cur}`;
+  $effect(() => { const now = issueOwner(); untrack(() => { opens.own(now); }); });
   // The viewer retires on this gate's false edge, in the same tick (board #447): a hidden or
   // unfocused board is not destroyed, so a late signature or download result must find its
   // claim and token dead; coming back is a fresh tap.
@@ -295,7 +283,7 @@
         if (req.session && req.session !== cur) { cur = req.session; picked = !embedded; }
         creating = false; sideOpen = false;
         if (req.id) void openIssue(req.id);
-        else sel = null;
+        else toList();
       };
       landingParked = run;
       landingParkedOk = () => gen === landingGen && eligible();
@@ -311,7 +299,7 @@
     const req = createRequest;
     if (!req || req.n === createReqSeen) return;
     createReqSeen = req.n;
-    guard(() => { sel = null; creating = true; });
+    guard(toCreate);
   });
   let talkMap = $state<Record<string, number>>({});
   let projectTick = $state(Date.now());
@@ -449,9 +437,9 @@
       if (pendingDiscard) { cancelDiscard(); return true; }
       if (submitting) return true; // consumed: the request answers first
       if (shotView) { closeShot(); return true; } // the viewer first, then the detail
-      if (sel && (dirty || noteDirty)) { pendingDiscard = () => { sel = null; }; return true; }
-      if (creating && createDirty) { pendingDiscard = () => { creating = false; }; return true; }
-      if (sel || creating) { sel = null; creating = false; return true; }
+      if (sel && (dirty || noteDirty)) { pendingDiscard = toList; return true; }
+      if (creating && createDirty) { pendingDiscard = toList; return true; }
+      if (sel || creating) { toList(); return true; }
       // Compact bare list: back LIFTS the project drawer — the drawer is the
       // FLOOR, exactly Hub's compact rule (back with it open falls through,
       // so it can never cycle open/close). Except when the page was JUMPED
@@ -758,15 +746,26 @@
     segPick(e);
   }
 
+  // The answer of an issue read belongs to the open that asked and to the owner it was asked
+  // FOR (#150, leader note 19; #144's token, core/owned-token.ts): minted at the call, retired by
+  // a newer open, by the board's owner becoming another (its focus or eligibility, its project:
+  // an edge, so away and back stays dead) and by the unmount; never by a change TO its owner.
+  /** The pane's other destinations: a newer intent retires the pending open (#150, leader note 30). */
+  function toList() { opens.retire(); sel = null; creating = false; }
+  function toCreate() { opens.retire(); sel = null; creating = true; }
   async function openIssue(id: number) {
+    const token = opens.begin(issueOwner()), session = cur;
+    const current = () => alive && opens.live(token);
     try {
-      sel = await boardGet(cur, id);
+      const got = await boardGet(session, id);
+      if (!current()) return;
+      sel = got;
       notesBase = Array.isArray(sel.notes) ? sel.notes.length : 0;
       draft = draftOf(sel);
       draftBase = draftOf(sel);
       setNoteActions(-1); // a different issue, a fresh slate (board #46)
       err = '';
-    } catch (e) { err = String((e as Error)?.message ?? e); }
+    } catch (e) { if (current()) err = String((e as Error)?.message ?? e); }
   }
   /** Re-fetch the open issue and REBASE the draft three-way: untouched
    * fields follow the server (an agent's new body shows up mid-edit),
@@ -1071,9 +1070,9 @@
     if (pendingDiscard || pendingDelete) return; // the ConfirmDialog's own capture handler closes itself
     if (narrowVp && sideOpen) { sideOpen = false; e.stopPropagation(); return; } // only a SHOWN drawer takes Escape (#123)
     if (submitting) { e.stopPropagation(); return; } // the request answers first
-    if (sel && (dirty || noteDirty)) { pendingDiscard = () => { sel = null; }; e.stopPropagation(); return; }
-    if (creating && createDirty) { pendingDiscard = () => { creating = false; }; e.stopPropagation(); return; }
-    if (sel || creating) { sel = null; creating = false; e.stopPropagation(); }
+    if (sel && (dirty || noteDirty)) { pendingDiscard = toList; e.stopPropagation(); return; }
+    if (creating && createDirty) { pendingDiscard = toList; e.stopPropagation(); return; }
+    if (sel || creating) { toList(); e.stopPropagation(); }
   }
 
   /** A card never shows a path (board #329): image refs leave the preview,
@@ -1285,7 +1284,7 @@
     {#if !sel && !creating}
       <!-- New issue lives in the page head's top-right (reopened #11:
            "不应该放到最下方…手机操作更友好"). -->
-      <button class="icon-btn" title={t('boardNew')} aria-label={t('boardNew')} onclick={() => (creating = true)}>
+      <button class="icon-btn" title={t('boardNew')} aria-label={t('boardNew')} onclick={toCreate}>
         <Icon name="plus" size={16} />
       </button>
     {/if}
@@ -1307,6 +1306,7 @@
       onJump={(m) => onJumpMessage?.(cur, m)}
       onOpenChat={() => onOpenChat?.(cur)}
       onOpenFile={(path) => onOpenFile?.(cur, path)}
+      onOpenIssue={(id) => void openIssue(id)} foldKey={embedded ? DRAWER_FOLD_KEY : BOARD_FOLD_KEY}
       onPageEdited={(e) => { pageEdited = e; }} onPageGuard={(fn) => { pageEditedNow = fn; }} />
     </div>
   {/if}
@@ -1317,7 +1317,7 @@
     <!-- ── one issue: the note thread is the issue's own record ── -->
     <div class="detail" bind:this={detailEl}>
       <div class="d-head">
-        <button class="icon-btn" title={t('back')} aria-label={t('back')} onclick={() => guard(() => (sel = null))}>
+        <button class="icon-btn" title={t('back')} aria-label={t('back')} onclick={() => guard(toList)}>
           <Icon name="arrow-left" size={14} />
         </button>
         <span class="d-id">#{sel.id}</span>
@@ -1525,7 +1525,7 @@
     <!-- ── new issue: title is the one required field ── -->
     <div class="detail">
       <div class="d-head">
-        <button class="icon-btn" title={t('cancel')} aria-label={t('cancel')} onclick={() => guard(() => (creating = false))}>
+        <button class="icon-btn" title={t('cancel')} aria-label={t('cancel')} onclick={() => guard(toList)}>
           <Icon name="arrow-left" size={14} />
         </button>
         <span class="d-title">{t('boardNew')}</span>
