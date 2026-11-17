@@ -198,6 +198,11 @@
   (server `deliver_mentions` + the client's `hub_agents` refresh), left as
   they are: a time-based cache would give a freshly launched CLI a window of
   reading as a plain shell. `child_cmd` stays a detection clue everywhere.
+- [ ] Drawer tidy-up (reviewer, #147 note 27, P2-b, no behaviour change):
+  `Drawer.svelte` passes eight props through to its board partition
+  (onpagefile, onopenagent, onjump, onopenchat, onboardguard, boardMounted,
+  boardShowing, onboardshowing); regroup them as one `board` prop object
+  when someone is next in that file.
 - [ ] Path-find tidy-ups (reviewer, #144 note 54, no behaviour change):
   the "Found and opened" notice rides Files' `copyLifetime`, built for copy
   (rename the lifetime); `Hub.routePathRef` and the Hub search's file result
