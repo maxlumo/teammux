@@ -391,7 +391,12 @@ sections stay here.
   pane by the same owner (New issue by either path, Back or Escape to the list
   or Dashboard, Cancel, a view switch) retires it too, through `toList` /
   `toCreate` and `setBoardView` (leader note 30): a late answer or error never
-  replaces a newer pane. Door table in Dashboard.fold.mount.
+  replaces a newer pane. Door table in Dashboard.fold.mount. A save's or a
+  delete's own return to the list is a completion, not a door (#150 ruling
+  35): the pending open is the person's last ask and lands, with one
+  exception (#152): a delete retires a pending open of the very issue it
+  deleted (same project), so an old read cannot reopen it. Table in
+  Board.completion.mount.
 
 ### In the Hub drawer (board #147)
 

@@ -903,7 +903,8 @@ flaky wall-clock assertions in the test.
   effect orders, which must NOT be retired. Not a door: another operation's
   own completion (the app returning to a list after a save or a delete): the
   pending request is still the last thing the person asked for and lands
-  (#150 ruling 35). A door that goes through a SHARED helper is covered by
+  (#150 ruling 35), unless that completion removed the request's own
+  target (a delete of the very issue being opened retires it, #152). A door that goes through a SHARED helper is covered by
   that helper's rows plus a source pin binding the action to the helper;
   only a door with its own code path needs its own row (#150 ruling 33).
   The one identity mechanism is `core/owned-token.ts` (begin for an owner,

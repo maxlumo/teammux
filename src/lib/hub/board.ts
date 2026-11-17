@@ -106,7 +106,7 @@ export function rebaseDraft(
 // instead of waiting out the poll.
 
 import type { BoardCountRow } from '../core/ws.ts';
-import { stateIsLive, HUMAN } from './hub.ts';
+import { stateIsLive, HUMAN, boardStatusColor } from './hub.ts';
 import type { BackendCatalog } from '../core/agents.ts';
 import { roomOf } from '../projects/projects.ts';
 
@@ -222,3 +222,24 @@ export function rememberBackends(known: Readonly<Record<string, string>>, agents
   }
   return out ?? (known as Record<string, string>);
 }
+
+// Moved unchanged from Board.svelte (#152, the file-size rule of code-quality.md § 2).
+/** The SIDEBAR count chips' colours — the owner's four CATEGORICAL colours
+ * in board order (2026-09-01, fourth ruling: "红 蓝 黄紫 吧，橙色和红色区
+ * 分不明显" — at a 5px dot the third ruling's red/orange pair blurred, so
+ * doing wears BLUE: var(--accent), the app's own blue and incidentally the
+ * colour the global language already gives doing). These are counts, not
+ * severities: red-todo is category paint, not alarm. All theme tokens (a
+ * hex literal is only right in one theme), none of them green — the first
+ * ruling (no collision with the row's green LIVE dot) holds by
+ * construction. Still deliberately SCOPED (lead): the feed's "→ done"
+ * badge keeps boardStatusColor's language, unknown statuses delegate to
+ * it, and the chips stay non-colour-readable — every one carries its
+ * label and count. */
+export const COUNT_COLORS: Record<string, string> = {
+  todo: 'var(--status-danger)',
+  doing: 'var(--accent)',
+  review: 'var(--status-warn)',
+  done: 'var(--status-purple)',
+};
+export const countColor = (st: string) => COUNT_COLORS[st] ?? boardStatusColor(st);

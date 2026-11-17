@@ -10,7 +10,7 @@
      terminal and Files. */
   import type { BoardIssue, BoardCountRow, HubAgent } from '../core/ws.ts';
   import { projectAgeLabel, sortRows } from '../projects/projects.ts';
-  import { boardStatusColor, localWhen, splitImages } from './hub.ts';
+  import { localWhen, splitImages } from './hub.ts';
   import { createStager, attachPaste, type Stager } from './attachments.svelte.ts';
   import AttachStrip from './AttachStrip.svelte';
   import ChatImage from './ChatImage.svelte';
@@ -39,7 +39,7 @@
   import { copyText } from '../core/clipboard.ts';
   import { scheduleCompletion } from '../ui/feedback-lifetime.ts';
   import { ASKS, BOARD_AGREEMENT, BOARD_BLOCKS, BOARD_DISPATCH, DASHBOARD, DASHBOARD_PAGE, lacksCap } from '../core/login-caps.ts';
-  import { draftOf, draftDirty, draftValid, draftPatch, isSubmitChord, rebaseDraft, issueRef, countsOf, applyCounts, visibleBoards, roomOf, boardTitle, chipCols, assigneeView, rememberBackends } from './board.ts';
+  import { draftOf, draftDirty, draftValid, draftPatch, isSubmitChord, rebaseDraft, issueRef, countsOf, applyCounts, visibleBoards, roomOf, boardTitle, chipCols, assigneeView, rememberBackends, countColor } from './board.ts';
   import { messageActsSet, messageActsCopyLanded, messageActsCopyFailed, messageActsExpired, MESSAGE_ACTS_IDLE, type MessageActsState } from './message-actions.ts';
   import { scrollFade } from '../core/scrollFade.ts';
   import { flip } from 'svelte/animate';
@@ -753,8 +753,11 @@
   /** The pane's other destinations: a newer intent retires the pending open (#150, leader note 30). */
   function toList() { opens.retire(); sel = null; creating = false; }
   function toCreate() { opens.retire(); sel = null; creating = true; }
+  /** What the pending open is FOR (#152): a delete of that very issue retires it. */
+  let opening: { token: number; session: string; id: number } | null = null;
   async function openIssue(id: number) {
     const token = opens.begin(issueOwner()), session = cur;
+    opening = { token, session, id };
     const current = () => alive && opens.live(token);
     try {
       const got = await boardGet(session, id);
@@ -837,7 +840,8 @@
         return;
       }
       // A FAILED save takes the catch instead — the detail stays open with
-      // the error and the typed draft (createIssue's rule).
+      // the error and the typed draft (createIssue's rule). A completion, not toList(): a
+      // pending open is the person's last ask and still lands (#150 ruling 35).
       sel = null;
       await load();
     } catch (e) { if (owns(ctx)) err = saveError(e); }
@@ -980,7 +984,11 @@
     // to another destructive retry, and cannot close another room's view.
     pendingDelete = null;
     if (cur === cap.session) {
+      // A completion, not toList() (#150 ruling 35): only a pending open of THIS issue retires (#152).
       if (sel?.id === cap.id) sel = null;
+      if (opening && opens.live(opening.token) && opening.session === cap.session && opening.id === cap.id) {
+        opens.retire();
+      }
       issues = issues.filter(issue => issue.id !== cap.id);
       countsMap = applyCounts(countsMap, cap.session, issues);
       await load();
@@ -1088,25 +1096,6 @@
     return { ...i, body: text || `[${t('hubImage')}]` };
   }
   const statusLabel = (s: string) => t(`boardStatus_${s}`);
-  /** The SIDEBAR count chips' colours — the owner's four CATEGORICAL colours
-   * in board order (2026-09-01, fourth ruling: "红 蓝 黄紫 吧，橙色和红色区
-   * 分不明显" — at a 5px dot the third ruling's red/orange pair blurred, so
-   * doing wears BLUE: var(--accent), the app's own blue and incidentally the
-   * colour the global language already gives doing). These are counts, not
-   * severities: red-todo is category paint, not alarm. All theme tokens (a
-   * hex literal is only right in one theme), none of them green — the first
-   * ruling (no collision with the row's green LIVE dot) holds by
-   * construction. Still deliberately SCOPED (lead): the feed's "→ done"
-   * badge keeps boardStatusColor's language, unknown statuses delegate to
-   * it, and the chips stay non-colour-readable — every one carries its
-   * label and count. */
-  const COUNT_COLORS: Record<string, string> = {
-    todo: 'var(--status-danger)',
-    doing: 'var(--accent)',
-    review: 'var(--status-warn)',
-    done: 'var(--status-purple)',
-  };
-  const countColor = (st: string) => COUNT_COLORS[st] ?? boardStatusColor(st);
   /** Dynamic chip layout (owner, 2026-09-01: "如果一行能 放下放一行也行，甚
    * 至两行放不下，就放一列，动态适配" — layered on 不要 3+1): a hidden GHOST
    * row (the composer's mirror-div pattern) with nowrap natural-width chips

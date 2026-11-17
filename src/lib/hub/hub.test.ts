@@ -1887,7 +1887,7 @@ test('boardStatusColor speaks the one progressive status language', () => {
     assert.equal(boardStatusColor('review'), 'var(--status-warn)'); // waits for a person
     // done keeps the language's green HERE — the feed's "→ done" badge must
     // agree with the [tmm done] state badge beside it. The Board sidebar's
-    // count chips are the one sanctioned departure (Board.svelte countColor:
+    // count chips are the one sanctioned departure (board.ts countColor:
     // four categorical colours, owner 2026-09-01).
     assert.equal(boardStatusColor('done'), 'var(--status-ok)');   // ended well
     assert.equal(boardStatusColor('todo'), 'var(--text3)');       // at rest

@@ -4,6 +4,7 @@ import { readFile } from 'node:fs/promises';
 
 const source = await readFile(new URL('./Board.svelte', import.meta.url), 'utf8');
 const lines = await readFile(new URL('./board-lines.ts', import.meta.url), 'utf8');
+const boardTs = await readFile(new URL('./board.ts', import.meta.url), 'utf8');
 const appCss = await readFile(new URL('../../app.css', import.meta.url), 'utf8');
 
 test('the issue detail is a DRAFT: explicit save, clean cancel, guarded exits (board #11)', () => {
@@ -639,10 +640,11 @@ test("the sidebar count chips wear the owner's four categorical colours — loca
   // be right in one theme), none of them the live dot's green — the first
   // ruling stands by construction. The remap stays deliberately scoped
   // (lead): the feed's "→ done" badge keeps boardStatusColor's language.
-  assert.match(source,
+  // #152 moved COUNT_COLORS and countColor, unchanged, to board.ts (the file-size rule).
+  assert.match(boardTs,
     /const COUNT_COLORS: Record<string, string> = \{\s*todo: 'var\(--status-danger\)',\s*doing: 'var\(--accent\)',\s*review: 'var\(--status-warn\)',\s*done: 'var\(--status-purple\)',\s*\};/u,
     'the four-colour map: 红蓝黄紫 in board order, tokens only');
-  assert.match(source, /const countColor = \(st: string\) => COUNT_COLORS\[st\] \?\? boardStatusColor\(st\);/u,
+  assert.match(boardTs, /const countColor = \(st: string\) => COUNT_COLORS\[st\] \?\? boardStatusColor\(st\);/u,
     'unknown statuses still delegate to the one language');
   // Purple is the only NEW token in the four-colour map. Pin BOTH theme
   // definitions: the component contract alone would stay green if one theme
@@ -690,7 +692,7 @@ test('every destructive/discarding path confirms through the SHARED dialog (boar
   assert.equal([...source.matchAll(/boardDelete\(/g)].length, 1, 'ONE call site, inside the confirm executor');
   assert.match(source, /await boardDelete\(cap\.session, cap\.id\);/u, 'the executor deletes the CAPTURED target');
   assert.match(source, /const cap = pendingDelete;\n\s*if \(!cap \|\| busy\) return;/u, 'busy blocks a double confirm');
-  assert.match(source, /if \(cur === cap\.session\) \{\n\s*if \(sel\?\.id === cap\.id\) sel = null;/u,
+  assert.match(source, /if \(cur === cap\.session\) \{\n\s*\/\/[^\n]*\n\s*if \(sel\?\.id === cap\.id\) sel = null;/u,
     'success cleans only the MATCHING view');
   // The danger dialog is the shared component in the shared shape.
   assert.match(source, /<ConfirmDialog open=\{!!pendingDelete\} danger compact=\{narrowVp\} \{busy\}/u,

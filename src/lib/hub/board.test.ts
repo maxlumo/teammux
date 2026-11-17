@@ -1,7 +1,8 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import { createBackendCatalog } from '../core/agents.ts';
-import { draftOf, draftDirty, draftValid, draftPatch, isSubmitChord, rebaseDraft, issueRef, ISSUE_REF_CHARS, chipCols, assigneeView } from './board.ts';
+import { boardStatusColor } from './hub.ts';
+import { draftOf, draftDirty, draftValid, draftPatch, isSubmitChord, rebaseDraft, issueRef, ISSUE_REF_CHARS, chipCols, assigneeView, countColor } from './board.ts';
 
 // Since board #15 a draft carries all four editable fields; these helpers
 // build the full shape from the short form the assertions speak.
@@ -284,4 +285,9 @@ test('roomOf is the client s one room rule, the server s: recorded, empty, missi
   assert.equal(roomOf({ session: 'a', room: '' }), 'proj:a', 'an EMPTY recorded room is no room, as the server maps it');
   assert.equal(roomOf({ session: 'a' }), 'proj:a');
   assert.equal(roomOf({ session: 'a', room: null }), 'proj:a');
+});
+
+test('the sidebar count chips: the owner\u2019s four category colours, anything else in the board status language (#152 move)', () => {
+  assert.deepEqual(['todo', 'doing', 'review', 'done'].map(countColor), ['var(--status-danger)', 'var(--accent)', 'var(--status-warn)', 'var(--status-purple)']);
+  assert.equal(countColor('archived'), boardStatusColor('archived'), 'an unknown status delegates');
 });

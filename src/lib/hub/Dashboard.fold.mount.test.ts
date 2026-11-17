@@ -292,7 +292,7 @@ for (const [label, props] of [
 test('S1: openIssue is minted for its owner and writes only while that token lives (#150)', async () => {
   const { readFile } = await import('node:fs/promises');
   const board = await readFile(new URL('./Board.svelte', import.meta.url), 'utf8');
-  assert.match(board, /const token = opens\.begin\(issueOwner\(\)\), session = cur;\n\s*const current = \(\) => alive && opens\.live\(token\);/u);
+  assert.match(board, /const token = opens\.begin\(issueOwner\(\)\), session = cur;\n\s*opening = \{ token, session, id \};\n\s*const current = \(\) => alive && opens\.live\(token\);/u);
   assert.match(board, /const got = await boardGet\(session, id\);\n\s*if \(!current\(\)\) return;\n\s*sel = got;/u);
   assert.match(board, /catch \(e\) \{ if \(current\(\)\) err = /u);
   assert.match(board, /\$effect\(\(\) => \{ const now = issueOwner\(\); untrack\(\(\) => \{ opens\.own\(now\); \}\); \}\);/u);
