@@ -83,15 +83,18 @@ export const NOTES_PAGE = 100;
 export const NOTES_MAX_PAGES = 10;
 
 export type BoardView = 'dashboard' | 'board';
-const VIEW_KEY = 'tmux_board_view';
+/** Where each host remembers its own choice (board #147): the Board tab, and
+ * the Hub drawer's board, each Dashboard by default (D2). */
+export const BOARD_VIEW_KEY = 'tmux_board_view';
+export const DRAWER_VIEW_KEY = 'tmux_drawer_board_view';
 
-/** The Board tab's view, remembered per device; Dashboard by default (D2). */
-export function boardViewOf(store: Pick<Storage, 'getItem'> | null = globalThis.localStorage ?? null): BoardView {
-  try { return store?.getItem(VIEW_KEY) === 'board' ? 'board' : 'dashboard'; } catch { return 'dashboard'; }
+/** A host's view, remembered per device; Dashboard by default (D2). */
+export function boardViewOf(store: Pick<Storage, 'getItem'> | null = globalThis.localStorage ?? null, key = BOARD_VIEW_KEY): BoardView {
+  try { return store?.getItem(key) === 'board' ? 'board' : 'dashboard'; } catch { return 'dashboard'; }
 }
 
-export function rememberBoardView(v: BoardView, store: Pick<Storage, 'setItem'> | null = globalThis.localStorage ?? null): void {
-  try { store?.setItem(VIEW_KEY, v); } catch { /* a private window keeps it for the session only */ }
+export function rememberBoardView(v: BoardView, store: Pick<Storage, 'setItem'> | null = globalThis.localStorage ?? null, key = BOARD_VIEW_KEY): void {
+  try { store?.setItem(key, v); } catch { /* a private window keeps it for the session only */ }
 }
 
 /** Unread = after the room's ONE server mark (board #334), the same on every

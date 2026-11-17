@@ -82,17 +82,29 @@ test('the Board tab opens on the Dashboard: Now, Notes for you, and never the re
   } finally { await app.close(); }
 });
 
-test('no dashboard capability, or the embedded board: no switch, the Board as today (#109 L1/L7)', async (context) => {
-  for (const props of [{}, { embedded: true }]) {
+test('no dashboard capability: no switch, the Board as today (#109 L1); the embedded board offers it too (#147, was L7)', async (context) => {
+  // #109 L7 said the Hub drawer's embedded board never shows the Dashboard; the owner asked
+  // for it there (2026-11-17 02:10), so L7 is now: the embedded board offers it, in a row of
+  // its own body (it has no page head), and an older server still shows neither.
+  for (const [props, caps, shown] of [
+    [{}, ['board_dispatch'], false],
+    [{ embedded: true }, ['board_dispatch'], false],
+    [{ embedded: true }, ['board_dispatch', 'dashboard'], true],
+  ] as const) {
     let asked = 0;
     const app = await (await compiled).mount(context, {
       props: { session: 'fixture', visible: true, ...props }, setup: setup(),
-      modules: [rpc({ getCaps: () => (Object.keys(props).length ? ['board_dispatch', 'dashboard'] : ['board_dispatch']), dashboard: async () => { asked++; return dash(); } })],
+      modules: [rpc({ getCaps: () => caps, dashboard: async () => { asked++; return dash(); } })],
     });
     try {
       await flush(app);
-      assert.equal(app.document.querySelector('.dash'), null, JSON.stringify(props));
-      assert.equal(asked, 0);
+      const what = JSON.stringify({ props, caps });
+      assert.equal(!!app.document.querySelector('.dash'), shown, what);
+      assert.equal(asked > 0, shown, what);
+      if ('embedded' in props) {
+        assert.equal(app.document.querySelector('.page-head'), null, `${what}: the embedded board still has no page head`);
+        assert.equal(!!app.document.querySelector('.embedded-switch'), shown, `${what}: the switch is the body's top row`);
+      }
     } finally { await app.close(); }
   }
 });

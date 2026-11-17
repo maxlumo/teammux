@@ -47,7 +47,7 @@
   import { hoverInfo } from '../ui/hover.ts';
   import Segmented from '../ui/Segmented.svelte';
   import Dashboard from './Dashboard.svelte';
-  import { boardViewOf, rememberBoardView, type BoardView } from './dashboard.ts';
+  import { boardViewOf, rememberBoardView, BOARD_VIEW_KEY, DRAWER_VIEW_KEY, type BoardView } from './dashboard.ts';
   import { slideIndicator } from '../ui/indicator.ts';
   import { selectionClickGuard } from '../ui/native-context-menu.ts';
   import ScopeNote, { type ScopeNoteSpec } from '../app/ScopeNote.svelte';
@@ -131,23 +131,25 @@
    * the host's (`onPickServer`: focus that server, land on that board — D2);
    * the board body stays this server's (D3). Null in Single: this server's
    * list, untagged, as before. */
-  let { session = '', visible = true, onGoBack = null, issueRequest = null, embedded = false, createRequest = null, jumped = false, sideCollapsed = false, guardPage = '', union = null, scopeNote = null, onPickServer = null, onOpenAgent = null, onJumpMessage = null, onOpenChat = null, onOpenFile = null, onReselect = null, onSideOpen = null }: { onOpenFile?: ((session: string, path: string) => void) | null; onReselect?: ((fn: (() => void) | undefined) => void) | null; onSideOpen?: ((open: boolean) => void) | null; onOpenAgent?: ((session: string, agent: string) => void) | null; onJumpMessage?: ((session: string, m: { seq?: number; id?: number | string; discuss?: boolean }) => void) | null; onOpenChat?: ((session: string) => void) | null; guardPage?: string; session?: string; visible?: boolean; onGoBack?: ((fn: () => boolean) => void) | null; issueRequest?: { session: string; id: number; n: number } | null; embedded?: boolean; createRequest?: { n: number } | null; jumped?: boolean; sideCollapsed?: boolean; union?: { source: BoardUnion; included: readonly { id: string; name: string }[] } | null; scopeNote?: ScopeNoteSpec | null; onPickServer?: ((ref: SessionRef) => void) | null } = $props();
+  let { session = '', visible = true, onGoBack = null, issueRequest = null, embedded = false, createRequest = null, jumped = false, sideCollapsed = false, guardPage = '', union = null, scopeNote = null, onPickServer = null, onOpenAgent = null, onJumpMessage = null, onOpenChat = null, onOpenFile = null, onCloseGuard = null, onShowing = null, onReselect = null, onSideOpen = null }: { onCloseGuard?: ((guard: { ask: (action: () => void) => void; dirty: () => boolean } | null) => void) | null; onShowing?: ((session: string) => void) | null; onOpenFile?: ((session: string, path: string) => void) | null; onReselect?: ((fn: (() => void) | undefined) => void) | null; onSideOpen?: ((open: boolean) => void) | null; onOpenAgent?: ((session: string, agent: string) => void) | null; onJumpMessage?: ((session: string, m: { seq?: number; id?: number | string; discuss?: boolean }) => void) | null; onOpenChat?: ((session: string) => void) | null; guardPage?: string; session?: string; visible?: boolean; onGoBack?: ((fn: () => boolean) => void) | null; issueRequest?: { session: string; id: number; n: number } | null; embedded?: boolean; createRequest?: { n: number } | null; jumped?: boolean; sideCollapsed?: boolean; union?: { source: BoardUnion; included: readonly { id: string; name: string }[] } | null; scopeNote?: ScopeNoteSpec | null; onPickServer?: ((ref: SessionRef) => void) | null } = $props();
   // The Dashboard view (board #109): the page head's Dashboard · Board switch,
   // remembered per device, Dashboard by default (owner's D2), only on a server
-  // that announces `dashboard`, never in the Hub drawer's embedded board.
-  let boardView = $state<BoardView>(boardViewOf());
+  // that announces `dashboard`. The Hub drawer's embedded board offers it too
+  // (board #147, the owner 2026-11-17 02:10), remembering its OWN choice.
+  const viewKey = untrack(() => embedded) ? DRAWER_VIEW_KEY : BOARD_VIEW_KEY;
+  let boardView = $state<BoardView>(boardViewOf(globalThis.localStorage ?? null, viewKey));
   // The offer follows the LAST login's answer (#109 S1): a closed socket
   // (caps undefined) is "not connected", not "no dashboard", so the view stays,
   // muted, until a login answers again.
   const capsAtMount = guardOwner.connection.getCaps?.();
   let dashCap = $state(Array.isArray(capsAtMount) && capsAtMount.includes(DASHBOARD));
   $effect(() => { if (Array.isArray(loginCaps)) dashCap = loginCaps.includes(DASHBOARD); });
-  const dashOffered = $derived(!embedded && dashCap);
+  const dashOffered = $derived(dashCap);
   // The ask cards follow the last login's answer the same way: a closed socket keeps them
   // (with their drafts), muted with the rest of the view.
   let asksCap = $state(Array.isArray(capsAtMount) && capsAtMount.includes(ASKS));
   $effect(() => { if (Array.isArray(loginCaps)) asksCap = loginCaps.includes(ASKS); });
-  const setBoardView = (v: BoardView) => { boardView = v; rememberBoardView(v); };
+  const setBoardView = (v: BoardView) => { boardView = v; rememberBoardView(v, globalThis.localStorage ?? null, viewKey); };
   // The project page (board #111) needs the server's `dashboard_page`; and the
   // Dashboard is KEPT MOUNTED while the Board view, an issue or the create
   // form is on screen (hidden, never moved: its page's frame would reload,
@@ -645,6 +647,11 @@
     if (dirty || noteDirty || createDirty || pageDirty()) pendingDiscard = action;
     else action();
   }
+  // Board #147: the Hub drawer's ONE close path asks this guard (an edited page field or an
+  // unsaved issue edit in the drawer's board is never closed away silently), and the drawer
+  // names the project this board shows (it may differ from the room while something is edited).
+  $effect(() => { onCloseGuard?.({ ask: guard, dirty: () => untrack(() => submitting || dirty || noteDirty || createDirty || pageDirty()) }); return () => onCloseGuard?.(null); });
+  $effect(() => { onShowing?.(cur); });
 
   const load = single(readBoard, () => cur ?? '');
   async function readBoard() {
@@ -1285,6 +1292,11 @@
   </div>
   {/if}
   <div class="board" class:drill-fwd={drillAnim === 'fwd'} class:drill-back={drillAnim === 'back'}>
+  {#if embedded && dashOffered && !sel && !creating}
+    <!-- The drawer has no page head (board #23): its board's one switch is a slim row
+         at the top of the body (board #147, leader note 3), the page head's Segmented. -->
+    <div class="view-switch embedded-switch"><Segmented options={[{ value: 'dashboard', label: t('dashView') }, { value: 'board', label: t('dashBoardView') }]} value={boardView} onchange={setBoardView} ariaLabel={t('dashView')} /></div>
+  {/if}
   {#if dashOffered && cur}
     <div class="dash-keep" hidden={!dashShown}>
     <Dashboard api={guardOwner.api} connected={Array.isArray(loginCaps)} now={projectTick} session={cur}
@@ -1689,6 +1701,8 @@
      project — no sidebar track, no hamburger (board #13 follow-up). */
   .board-root.embedded { grid-template-columns: minmax(0, 1fr); }
   .board-root.embedded .board { padding: 10px 12px; }
+  /* The drawer's switch (#147): sized to its options, like the page head's, not stretched by the board's column. */
+  .embedded-switch { align-self: flex-start; flex: none; }
   /* Compact: the sidebar is a DRAWER over the board — the sheet geometry and
      motion are the SHARED .side-sheet dialect in app.css (owner, 2026-08-30:
      one drawer for Chat/Terminal/Board), never a second page. */

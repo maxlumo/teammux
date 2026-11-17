@@ -5,6 +5,7 @@ import { readFileSync } from 'node:fs';
 import test from 'node:test';
 
 const source = await readFile(new URL('./Hub.svelte', import.meta.url), 'utf8');
+const labels = await readFile(new URL('./hub-labels.ts', import.meta.url), 'utf8');
 const appCssSrc = await readFile(new URL('../../app.css', import.meta.url), 'utf8');
 // The staging pipeline moved out of Hub unchanged (board #329): its rules are
 // read where it now lives; send()'s own snapshot/restore stays here.
@@ -144,7 +145,9 @@ test('an uncached room unfolds: skeletons while it loads, then the feed from its
 test('Hub hover surfaces keep the shared status vocabulary (board #87)', () => {
   // The tone of the state row is the SAME family the dot paints — no second
   // colour language (rule 6).
-  assert.match(source, /function stateTone\(state, detail = ''\) \{\s*switch \(stateDotColor\(state, detail\)\)/u, 'the hover tone derives from stateDotColor, detail included (board #362 c)');
+  // #147 moved the formatters, unchanged, to hub-labels.ts (the file-size rule).
+  assert.match(labels, /export function stateTone\(state: string, detail = ''\)[^{]*\{\s*switch \(stateDotColor\(state, detail\)\)/u, 'the hover tone derives from stateDotColor, detail included (board #362 c)');
+  assert.match(source, /import \{ detailLabel, feedLevelItems, spawnRefusal, stateLabel, stateTone, teamMembers, wheelX \} from '\.\/hub-labels\.ts';/u, 'Hub takes them from there, the one copy');
   assert.match(source, /\{stateLabel\} \{detailLabel\} \{stateTone\} onselect=\{setRecipient\}/u,
     'Roster consumes the existing shared formatters');
   assert.match(source, /\{agents\} \{panes\} \{winsExpanded\} \{stateLabel\} \{detailLabel\} \{stateTone\}/u,
@@ -235,7 +238,8 @@ test('Back keeps the original priority and current live guards in one dispatcher
     filter: "if (filterAgent) { setFilter('', 'user'); return true; }",
     reply: 'if (replyTo) { replyTo = null; return true; }',
     // #132: Back peels only a DRAWN drawer; one the fit rule hides keeps its intent.
-    files: "if (drawerDrawn && drawerView === 'files' && drawerFilesBack?.()) return true;",
+    // #147: a file a drawer page link opened returns to the drawer's Dashboard, kept.
+    files: "if (drawerDrawn && drawerView === 'files' && drawerFilesBack?.()) return true; if (drawerDrawn && drawerView === 'files' && drawerFilesFrom === 'board') { drawerFilesFrom = ''; drawerView = 'board'; return true; }",
     drawer: 'if (drawerDrawn) { closeDrawer(); return true; }',
     sidebar: 'if (compact && !sideOpen && !jumped) { sideOpen = true; return true; }',
   };
@@ -281,14 +285,16 @@ test('the filter and the detail level are reachable from menus, not only from a 
   assert.match(source, /function toggleFilter\(name\) \{\s*setFilter\(filterAgent === name \? '' : name, 'user'\);/u,
     '#168 ContextMenu retains the toggle without selecting or opening a second menu');
   assert.match(source, /projectItems\(selectedRow, true\)/u, 'the title caret asks for the view rows');
-  const lv = source.slice(source.indexOf('function feedLevelItems'), source.indexOf('// The same dismissal'));
-  assert.match(lv, /hubPrefs\.feedLevel === level \? 'check' : 'circle'/u, 'radio semantics through the menu\u2019s own icons');
-  assert.match(lv, /hubPrefs\.setFeedLevel\(level\)/u, 'and it writes the one pref Settings reads');
+  // #147 moved the rows, unchanged, to hub-labels.ts; Hub hands it its one preference store.
+  const lv = labels.slice(labels.indexOf('export function feedLevelItems'));
+  assert.match(lv, /prefs\.feedLevel === level \? 'check' : 'circle'/u, 'radio semantics through the menu\u2019s own icons');
+  assert.match(lv, /prefs\.setFeedLevel\(level!\)/u, 'and it writes the one pref Settings reads');
+  assert.match(source, /\.\.\.feedLevelItems\(hubPrefs\)/u, 'the Hub\u2019s own store, the one Settings reads');
   assert.ok(!source.includes('cycleFeedLevel'), 'the dead cycle control stays gone');
   // Board #289: "Only mine" sits beside the detail levels and is the SAME
   // filter state, so it and an agent filter exclude each other and Back
   // clears it; the roster never shows it as an agent's filter mark.
-  assert.match(source, /\.\.\.\(withView \? \[\.\.\.feedLevelItems\(\), onlyMineItem\(\)\] : \[\]\)/u);
+  assert.match(source, /\.\.\.\(withView \? \[\.\.\.feedLevelItems\(hubPrefs\), onlyMineItem\(\)\] : \[\]\)/u);
   assert.match(source, /label: t\('hubOnlyMine'\), icon: filterAgent === HUMAN \? 'check' : 'circle', onselect: \(\) => toggleFilter\(HUMAN\)/u);
   assert.match(source, /if \(filterAgent && filterAgent !== HUMAN && !managedAgents\.some/u, 'the human is not an agent that can leave the room');
   assert.match(source, /filterAgent=\{filterAgent === HUMAN \? '' : filterAgent\}/u, 'no agent card wears the Only-mine mark');
@@ -956,4 +962,13 @@ test('the shared confirm is written only through setConfirm, which moves the one
   const writes = [...source.matchAll(/(?<!let )\bpendingAct = /gu)].length;
   assert.equal(writes, 1, 'pendingAct is assigned only inside setConfirm');
   assert.match(source, /const setConfirm = \(act\) => \{ confirmEpoch\+\+; pendingAct = act; \};/u);
+});
+
+// Board #147 AC6: compact layouts, where the drawer is a page (#132), are unchanged: the
+// drawer exists only where it fits, and there the board and files buttons open the TABS.
+test('compact layouts keep their pages: no drawer where it does not fit, the buttons open the tabs (#147 AC6)', () => {
+  assert.match(source, /\{#if drawerShown && !noDrawer\}/u);
+  assert.match(source, /if \(mobile \|\| noDrawer\) \{ openBoardTab\?\.\(selected\); return; \}/u);
+  assert.match(source, /if \(mobile \|\| noDrawer\) \{ openFilesTab\?\.\(selected, drawerFilesDir \|\| projectPath\); return; \}/u);
+  assert.match(source, /function routePageFile\(file\) \{\n\s*if \(mobile \|\| noDrawer\) \{ openFilesTab\?\.\(selected, '', file\); return; \}/u, 'a page link where there is no drawer opens the Files tab, as a chat path does');
 });

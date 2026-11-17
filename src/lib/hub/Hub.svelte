@@ -38,6 +38,7 @@
   import Icon from '../ui/Icon.svelte';
   import { onDestroy, untrack, tick as settled } from 'svelte';
   import { t } from '../core/i18n.svelte.ts';
+  import { detailLabel, feedLevelItems, spawnRefusal, stateLabel, stateTone, teamMembers, wheelX } from './hub-labels.ts';
   import { firstReport, keepAvailable, settleAvailability, teamUnavailableText, unavailableText } from './backends-view.ts';
   import { roomOf, sortRows } from '../projects/projects.ts';
   import { alertOf } from './notify-centre.svelte.ts';
@@ -288,6 +289,19 @@
   let drawerIssueReq = $state(null); // a feed board-line tap on desktop: open the issue in the drawer
   let drawerFilesReq = $state(null); // a feed path-reference tap: preview the file in the drawer (board #99)
   let drawerFilesBack = null;
+  // Board #147: the drawer's board's guard ({ ask, dirty }), and whether the drawer's Files
+  // partition was opened by a link of the drawer's project page (its Back returns there).
+  let drawerBoard = null;
+  let drawerFilesFrom = '';
+  // The board partition is mounted the first time it is shown in an open drawer and then kept
+  // until the drawer stops being drawn (closed, or no longer fitting); a drawer opened on the
+  // terminal or Files alone never mounts a board, a Dashboard or a page frame (#147 Q2).
+  let drawerBoardMounted = $state(false);
+  let drawerBoardShowing = $state('');
+  $effect(() => {
+    if (!drawerShown || noDrawer) { drawerBoardMounted = false; drawerBoardShowing = ''; return; }
+    if (drawerView === 'board') drawerBoardMounted = true;
+  });
 
   async function routePathRef(raw, find = null) {
     const target = selected;
@@ -305,7 +319,16 @@
     if (selected !== target) return;
     if (mobile || noDrawer) { openFilesTab?.(target, '', file, find); return; }
     drawerFilesReq = { file, find, n: (drawerFilesReq?.n ?? 0) + 1 };
+    drawerFilesFrom = '';
     drawerView = 'files'; openDrawer();
+  }
+  /** A link of the drawer's project page (#147): its file opens where a chat path opens on
+   * desktop, the drawer's Files partition, and Back returns to the board partition. */
+  function routePageFile(file) {
+    if (mobile || noDrawer) { openFilesTab?.(selected, '', file); return; }
+    drawerFilesReq = { file, find: null, n: (drawerFilesReq?.n ?? 0) + 1 };
+    drawerFilesFrom = 'board';
+    drawerView = 'files';
   }
   let drawerBoardNew = $state(null); // the drawer head's + (board #23): new issue, requested into the embedded Board
   let drawerFilesDir = $state(''); // where the drawer's Files is — the jump hands it over
@@ -600,8 +623,13 @@
     // return, and a room where it was closed comes back closed. No reading
     // anchor here — selectProject lands at the tail regardless.
     const dv = compact ? '' : hubPrefs.drawer(session);
-    if (dv) drawerView = dv;
-    termOpen = !!dv;
+    // Board #147: while the drawer's board holds an edit (an issue or a page field) it does not
+    // follow the room (the Board's own rule), so the drawer is not closed or switched under it.
+    const holding = termOpen && !!drawerBoard?.dirty();
+    if (!holding) {
+      if (dv) drawerView = dv;
+      termOpen = !!dv;
+    }
     // The old room's pane must never leak into this one's terminal partition
     // — and the unfold is a transient reading of THAT room's bar (board #92).
     termTarget = ''; winsExpanded = false;
@@ -1590,8 +1618,16 @@
   /** The one close path, so every trigger keeps the reader's place. The close
    * moves too (lead, #174: a cut beside an animated open reads as a stutter):
    * pinned at its current width, the Drawer withdraws under the shrinking
-   * track and unmounts after the move — one size until the end. */
-  async function closeDrawer() {
+   * track and unmounts after the move — one size until the end. Board #147 (Q3):
+   * every close goes through the drawer's board's ONE guard, so an edited page
+   * field or an unsaved issue edit there asks its Keep/Discard before the drawer
+   * unmounts it. */
+  function closeDrawer() {
+    if (!termOpen) return;
+    if (drawerBoard) { drawerBoard.ask(() => { void closeDrawerNow(); }); return; }
+    return closeDrawerNow();
+  }
+  async function closeDrawerNow() {
     if (!termOpen) return;
     const unpin = drawerTrackEl ? pinTrack(drawerTrackEl, 'start') : null;
     drawerClosing = true;
@@ -1777,14 +1813,6 @@
       });
     }
   }
-  /** Why a spawn did not go, in this page's words: the gate's two refusals
-   * (#377, #382) have their own copy; anything else is the server's message
-   * (`check_join` names the team it refused). */
-  function spawnRefusal(e) {
-    if (e?.code === 'server_too_old') return t('hubJoinOldServer');
-    if (e?.code === 'login_pending') return t('boardAssignConnecting');
-    return String(e?.message ?? e);
-  }
 
   /** The start surfaces' lists: registry agents and configured teams. Read
    * before the server's first readiness check, they say `unknown`; the Hub
@@ -1801,10 +1829,6 @@
     if (await settleAvailability([...registry, ...teams], firstReport(scope.runtime.api)) && alive) void loadStartLists();
   }
 
-  /** Member names of a configured team, for the preset rows. */
-  function teamMembers(tm) {
-    try { return (JSON.parse(tm.members) ?? []).map((m) => (m.team ? `+${m.team}` : m.name)).filter(Boolean); } catch { return []; }
-  }
 
   /** Start a configured TEAM (board #74): one RPC spawns every member with its
    * role; the first member that landed becomes the recipient (the team's own
@@ -2439,7 +2463,7 @@
       backLayers.register('search', () => { if (search.open) { search.close(); return true; } return false; }),
       backLayers.register('filter', () => { if (filterAgent) { setFilter('', 'user'); return true; } return false; }),
       backLayers.register('reply', () => { if (replyTo) { replyTo = null; return true; } return false; }),
-      backLayers.register('files', () => { if (drawerDrawn && drawerView === 'files' && drawerFilesBack?.()) return true; return false; }),
+      backLayers.register('files', () => { if (drawerDrawn && drawerView === 'files' && drawerFilesBack?.()) return true; if (drawerDrawn && drawerView === 'files' && drawerFilesFrom === 'board') { drawerFilesFrom = ''; drawerView = 'board'; return true; } return false; }),
       backLayers.register('drawer', () => { if (drawerDrawn) { closeDrawer(); return true; } return false; }),
       // A chat JUMPED INTO (from the Dashboard, board #109) returns there before
       // the floor lifts the drawer, as Board's and Files' floors do.
@@ -2572,27 +2596,11 @@
       ...(row?.live ? [] : [{ label: t('projectUp'), icon: 'zap', onselect: () => { selectProject(session); setTimeout(bringUp, 0); } }]),
       { label: t('projectRename'), icon: 'edit',
         onselect: () => { selectProject(session); setTimeout(startRename, 0); } },
-      ...(withView ? [...feedLevelItems(), onlyMineItem()] : []),
+      ...(withView ? [...feedLevelItems(hubPrefs), onlyMineItem()] : []),
       ...(row?.live ? [{ label: t('projectDown'), icon: 'stop', danger: true, onselect: () => askAction('down', name, session) }] : []),
       { label: t('projectDelete'), icon: 'trash', danger: true,
         onselect: () => askAction('delete', name, session) },
     ];
-  }
-
-  /** The feed's detail level as three menu rows — chat / + status / + tools —
-   * the current one ticked. It lives in the project TITLE's menu (the one
-   * menu about "this conversation") rather than as a header switch: the
-   * header keeps no spare switches (board #72), and Settings was the only
-   * other way to reach it (review, 2026-09-03: dead code in the Hub, a
-   * setting three pages away). Radio semantics through the two icons the menu
-   * already has — a tick on the chosen level, a hollow circle on the rest. */
-  function feedLevelItems() {
-    const levels = [['chat', 'hubFeedChat'], ['status', 'hubFeedStatus'], ['tools', 'hubFeedTools']];
-    return levels.map(([level, key]) => ({
-      label: `${t('hubFeedLevel')} · ${t(key)}`,
-      icon: hubPrefs.feedLevel === level ? 'check' : 'circle',
-      onselect: () => hubPrefs.setFeedLevel(level),
-    }));
   }
   /** "Only mine" (board #289): the SAME reading filter as an agent card's
    * "Only its messages", with the human as the subject (filterBlocks). One
@@ -2648,20 +2656,6 @@
     return filterBlocks(all, filterAgent, agents.find((a) => a.name === filterAgent)?.name);
   });
 
-  /** Four states, one word each. Anything unexpected shows itself rather than
-   * being silently relabelled. */
-  function stateLabel(state) {
-    const label = t('hubState_' + state);
-    return label.startsWith('hubState_') ? state : label;
-  }
-  /** A status detail in words: the person-needed ones name their remedy
-   * (board #362 c), then the provider's error text when there is one (board
-   * #39); any other detail reads as the server wrote it. */
-  function detailLabel(detail, error = '') {
-    if (!detail) return '';
-    const label = t('hubDetail_' + detail);
-    return detailWords(label.startsWith('hubDetail_') ? detail : label, error);
-  }
 
   // ── Hover explains (motion.md principle 16, wave 9). ONE shared card
   // (`use:hoverInfo`, ui/HoverCard) on a pointer device only — the action
@@ -2670,15 +2664,6 @@
   // value goes through the formatter the page already uses (stateLabel,
   // modelLabel, fmtElapsed for the epoch-seconds `since`, agoShort for ms
   // timestamps) — a second formatter would be a second clock.
-  /** The state's tone in the card is the SAME family stateDotColor paints. */
-  function stateTone(state, detail = '') {
-    switch (stateDotColor(state, detail)) {
-      case 'var(--accent)': return 'accent';
-      case 'var(--status-warn)': return 'warn';
-      case 'var(--status-danger)': return 'danger';
-      default: return undefined;
-    }
-  }
   // A clock for the elapsed readouts. One timer for the whole page, and only
   // while the tab is on screen — a "running 2m14s" that ticks in a hidden tab
   // is pure wakeups.
@@ -2731,21 +2716,6 @@
       update(nextValue) { if (value !== nextValue) headerCopyLifetime.clear(); value = nextValue; },
       destroy() { el.removeEventListener('dblclick', onDoubleClick); headerCopyLifetime.clear(); if (headerCopyAnchor === el) headerCopyAnchor = null; },
     };
-  }
-
-  /** Vertical wheel pans the header path horizontally — the path scrolls
-   * instead of ellipsizing, and a mouse has no horizontal axis of its own.
-   * An action (not `onwheel`) because preventDefault needs a non-passive
-   * listener. */
-  function wheelX(el) {
-    const onWheel = (e) => {
-      if (!e.deltaY || e.deltaX) return; // trackpads already pan natively
-      if (el.scrollWidth <= el.clientWidth) return; // it fits — let the page have the wheel
-      el.scrollLeft += e.deltaY;
-      e.preventDefault();
-    };
-    el.addEventListener('wheel', onWheel, { passive: false });
-    return { destroy: () => el.removeEventListener('wheel', onWheel) };
   }
 </script>
 
@@ -2892,7 +2862,7 @@
           controls={mobile || noDrawer || !drawerShown ? undefined : drawerId}
           onclick={() => {
             if (mobile || noDrawer) { openFilesTab?.(selected, drawerFilesDir || projectPath); return; }
-            if (termOpen && drawerView === 'files') { closeDrawer(); } else { drawerView = 'files'; openDrawer(); }
+            if (termOpen && drawerView === 'files') { closeDrawer(); } else { drawerFilesFrom = ''; drawerView = 'files'; openDrawer(); }
           }} />
         <!-- THE terminal affordance: a button, not a permanent pane. Adding an
              agent belongs to the roster row, and chat detail belongs to the
@@ -3023,7 +2993,13 @@
       onfiles={() => openFilesTab?.(selected, drawerFilesDir || projectPath, drawerFilesPath || undefined)}
       onboard={() => openBoardTab?.(selected)}
       onnewissue={() => (drawerBoardNew = { n: (drawerBoardNew?.n ?? 0) + 1 })}
-      onfilesback={(back) => { drawerFilesBack = back; }} />
+      onfilesback={(back) => { drawerFilesBack = back; }}
+      onpagefile={routePageFile}
+      onopenagent={(s, a) => { if (s && s !== selected) selectProject(s); landing = landingFor({ session: s, agent: a }, selected, selectionGeneration); }}
+      onjump={(s, m) => { centre.requestJump({ server: serverId(), room: m.room ?? `proj:${s}`, session: s, id: String(m.id ?? ''), seq: Number(m.seq) || 0, ...(m.discuss ? { discuss: true } : {}) }); }}
+      onopenchat={(s) => { if (s && s !== selected) selectProject(s); }}
+      onboardguard={(g) => { drawerBoard = g; }}
+      boardMounted={drawerBoardMounted} boardShowing={drawerBoardShowing} onboardshowing={(s) => { drawerBoardShowing = s; }} />
     </div>
     {/if}
   </div>

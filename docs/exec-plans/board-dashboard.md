@@ -365,7 +365,7 @@ an open ask is never repeated; a project page is optional and published with
 |---|---|
 | Board tab, desktop | `ui/Segmented` in the page head: Dashboard · Board, remembered per device; default per D2 |
 | Board tab, phone | project list ⇄ the same two views; Back peels to the list; one column; nothing is hover-only |
-| Hub drawer's embedded board | Board only: the drawer is the room's side tool |
+| Hub drawer's embedded board | ~~Board only: the drawer is the room's side tool~~ AMENDED 2026-11-17 by the owner (02:10, "还有 dashboard 在右侧 board 的侧边栏应该也能支持显示"): the same two views, its own remembered choice (#147; dashboard.md § In the Hub drawer) |
 | Chat feed | an ask is a bubble with its options and both states; answering there or on the dashboard is the same act |
 | Bell and notification centre | **an ask rings at every level**, like a finished task and the unconfirmed-typing report: an explicit amendment to notifications.md's list of what is news, under the existing away, mute, dedup and cooldown rules and the running-client limit. Its entry opens the chat at that message through the existing jump and its viewed-on-success rule; there is no second jump |
 | Board sidebar row | the open-ask count as one more chip leading the row's count line, in the chip language, from one bulk read like `hub_board_counts`. The Chat row keeps its single unread count; no second number there |

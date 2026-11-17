@@ -58,8 +58,14 @@ test('Drawer renders its original window list, real partitions and single head',
   assert.ok(files.querySelector('.term-body.off'));
   assert.ok(files.querySelector('.files-body'));
   assert.equal(files.querySelector('.board-body'), null);
-  const board = view({ drawerView: 'board' });
+  // Board #147 (Q2): the board partition renders once Hub says it has been shown in this open
+  // drawer, and is then kept, hidden behind another partition (was: rendered only while shown).
+  assert.equal(view({ drawerView: 'board' }).querySelector('.board-body'), null, 'not before Hub mounts it');
+  const board = view({ drawerView: 'board', boardMounted: true });
   assert.ok(board.querySelector('.board-body .board-root'));
+  assert.equal((board.querySelector('.board-body') as HTMLElement).hidden, false);
+  const behind = view({ drawerView: 'files', boardMounted: true });
+  assert.ok((behind.querySelector('.board-body') as HTMLElement | null)?.hidden, 'kept, hidden behind Files');
   assert.equal(board.querySelector('.board-body .page-head'), null, 'the real Board keeps its embedded head gate');
   assert.equal(board.querySelectorAll('.drawer-head').length, 1);
 });

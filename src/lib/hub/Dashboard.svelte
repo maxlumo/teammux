@@ -371,8 +371,11 @@
   /* The chip is placed in a row it may fill (its name wears the atom's
      `.whole` variant, app.css): it ellipsizes only past the row's width. */
   .dash-agent .side-win { max-width: 100%; min-width: 0; }
-  /* The phone: the note's text takes its own line under sender and age. */
-  @media (max-width: 760px) {
+  /* A narrow Dashboard: the note's text takes its own line under sender and age.
+     By the width the view HAS (the Board's `board` container: the Board tab beside
+     its project list, or the Hub drawer at any width), not by the viewport (#147);
+     760 is the design language's one compact breakpoint. */
+  @container board (max-width: 760px) {
     .dash-note-row { flex-wrap: wrap; row-gap: 0; padding-block: 4px; }
     .dash-note-row .dash-text { flex-basis: 100%; }
   }

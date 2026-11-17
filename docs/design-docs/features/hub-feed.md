@@ -491,6 +491,18 @@ and `Hub.mount.test.ts` (the real maximize) pin it.
 
 Owner, 2026-11-15, the foldable's inner screen held landscape (≈776×717 CSS px): "被识别成了完全的桌面模式，整个排版比较乱，很多按钮都错位了". Measured (#131): every page fitted there except Chat with its drawer open, because the grid let the chat column fall to 280 px while its head needs 324 px (fine pointer, 28 px tools) or 414 px (coarse, 44 px tools) to keep the project name, its chevron, the path and the tools whole; below that the name vanished and the chevron lay on the path (on touch with the sidebar shown, already below a 1100 px viewport). Rule (`hub/drawer-fit.ts`, one pure function, the minimums as named constants): the drawer (Files, Terminal, Board) is drawn BESIDE the chat only when the Hub's width − the sidebar as it is now (0 collapsed) − the chat head's minimum ≥ the drawer's own minimum, 320 (its SideHandle clamp). Otherwise the drawer buttons open those PAGES, the compact Hub's own path (`noDrawer = compact || !besideFits`), and claim no disclosure. The grid's chat floor is the same constant (`minmax(var(--chat-min), 1fr)`), so when beside the chat keeps its head and the drawer yields down to 320. An open drawer that stops fitting (a resize, the sidebar shown) is not drawn; its intent and the project's drawer pref are kept, so it returns when the room does; the #126 store keeps any Files edit. Judged on the Hub's own width, which drawing or hiding the drawer does not change, so a resize at the boundary cannot flap. The sidebar term is the width the sidebar asks for (`--sidebar-w`), read whenever that root style is written (its handle, App's restore): the handle resizes no element the Hub observes (validator-2, #132 note 5: a 420 px request left the drawer drawn at 305), and the rendered track would make the rule depend on its own outcome, since it yields while the drawer is drawn and sweeps every width while the sidebar collapses. The observers live in `hub/drawer-fit.svelte.ts` (`HubLayout`), the Hub only reads it. Back and Escape act on the DRAWN drawer only (`drawerDrawn = termOpen && !noDrawer`): a drawer the rule hides is not a layer, so they reach whatever is visible next and its intent survives them (reviewer, #132 @4c381904: Back consumed an invisible drawer and cleared the project's saved one). Measured after (Chromium 148, touch, sidebar collapsed / shown): 776×717 page / page; 800×700 beside (chat 414 + drawer 340) / page; 900×820 beside (414 + 440) / page; 980×740 beside (414 + 520) / page; 1280 beside / beside; mouse 800×700 beside (324 + 430) / page; 717×776 and the phone unchanged (compact). The chat head's name is whole in every case; the pinned ask never covers the composer. Pins: `drawer-fit.test.ts`, `Hub.drawer-fit.mount.test.ts`, `Hub.source.test.ts`.
 
+### The drawer's board offers the Dashboard, kept once shown (board #147, 2026-11-17)
+
+The owner, 2026-11-17 02:10: the drawer's board should show the Dashboard too.
+Its board partition is mounted at its first showing in an open drawer and kept,
+hidden, until the drawer stops being drawn (the terminal body stays laid out
+for xterm, Files stays conditional); its close goes through the board's one
+guard, so an edited page field or an unsaved issue edit asks Keep/Discard; a
+page link opens the drawer's Files partition and its Back returns to the board
+partition (the `files` back layer). The head names the project the board
+shows. Rules and the two-instance cost: dashboard.md § In the Hub drawer.
+Pinned by Hub.drawer-board.mount.test.ts and Board.drawer.mount.test.ts.
+
 ### Drawer widths are bounded requests (#158, parent #154, 2026-09-10)
 
 The open-drawer grid treated both side widths as fixed tracks. At 1000x800,

@@ -28,3 +28,13 @@ test('an age is its own .side-age element, never inside the words that elide (#1
     assert.doesNotMatch(src, new RegExp(`class="${words}">[^<]*agoShort`, 'u'), `${words} carries no age`);
   }
 });
+
+// Board #147 (leader note 3, condition 1): the Dashboard lays out by the width it HAS, the
+// Board's `board` container (the tab beside its project list, or the Hub drawer), never by
+// the viewport; 760 stays the design language's one compact breakpoint.
+test('the Dashboard\u2019s narrow form follows its container, at the one 760 breakpoint (#147)', async () => {
+  const { readFile } = await import('node:fs/promises');
+  const dash = await readFile(new URL('./Dashboard.svelte', import.meta.url), 'utf8');
+  assert.match(dash, /@container board \(max-width: 760px\) \{\s*\.dash-note-row \{ flex-wrap: wrap;/u);
+  assert.doesNotMatch(dash, /@media/u, 'no viewport query left in the Dashboard');
+});

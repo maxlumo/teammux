@@ -142,7 +142,8 @@ nowhere to show. Pinned by the `visibleBoards` and Board mount tests.
 tested), and `Board.svelte` gains only wiring: the page head's
 `ui/Segmented` (Dashboard · Board), the choice remembered per device
 (`tmux_board_view`, Dashboard by default, the owner's D2), offered only on a
-server that announces `dashboard`, never in the Hub drawer's embedded board.
+server that announces `dashboard`. Since #147 the Hub drawer's embedded board
+offers it too (§ In the Hub drawer, below).
 The view takes the Board's own server RPCs (`api` prop), so no page names a
 server behind its scope.
 
@@ -349,6 +350,59 @@ rule), so an agent whose sandbox cannot write `.tmm/` still publishes.
 - **Not a transfer.** The #134 limiter caps the person's downloads and
   uploads; a page's pictures and media are the browser's subresource loads
   through the scope door, as in any Files HTML preview, and are not counted.
+
+### In the Hub drawer (board #147)
+
+The owner, 2026-11-17 02:10: "还有 dashboard 在右侧 board 的侧边栏应该也能支持显示，现在好像还看不到".
+The drawer's board partition is the SAME `Board` with `embedded`, so it mounts
+the same `Dashboard`, `AskCard`, reads and `ProjectPage`; nothing is copied.
+
+- **The switch** is a slim row at the top of the embedded board's body
+  (`.embedded-switch`, the page head's Segmented): the drawer has no page
+  head, and its head at the 320 px minimum holds the partition's name, New
+  issue, maximize and close. Shown when no issue or create form is open; an
+  issue request or the head's + still opens the issue or the form.
+- **Its own memory**: `tmux_drawer_board_view` beside the tab's
+  `tmux_board_view`, through the one `boardViewOf`/`rememberBoardView` pair
+  (a key argument), Dashboard by default.
+- **Width**: the Dashboard's one narrow rule is `@container board (max-width:
+  760px)`, the Board's own container, not the viewport. This changes the
+  Board TAB too, on purpose (leader note 3): a 1000 px window with the
+  project list open gets the narrow note rows, by the width the view has.
+- **Kept, lazily** (leader Q2): the board partition is mounted the first time
+  it is shown in an open drawer and then kept, hidden, never moved, until
+  the drawer stops being drawn; a drawer opened on the terminal or Files
+  alone mounts no board. A partition change keeps the page, its typed
+  fields and its media.
+- **Closing** goes through the board's ONE guard (`onCloseGuard`: `ask` and a
+  live `dirty`): an edited page field or an unsaved issue edit asks the
+  board's Keep/Discard; clean closes at once. A room switch while it holds an
+  edit leaves the drawer open on the old project (the Board does not follow
+  until saved or discarded) and the drawer's head names the project the
+  board shows. **Residual (leader note 5):** the drawer's page, its typed
+  fields and its playing media end when the drawer stops being drawn
+  without a close (a window narrowed past its fit, #132; a fold): a resize
+  cannot ask. The same loss of an unsaved issue edit is its own bug, #148.
+- **Links**: a page link opens the file in the drawer's Files partition, as a
+  chat path does on desktop; where the app owns Back, Files peels its
+  layers and the next Back returns to the board partition, the SAME kept
+  Dashboard. On the Board tab the same link opens the Files tab.
+- **Rows**: every door that lands in the chat lands in the item's OWN
+  project (validator F1, leader note 18): an agent row first selects the
+  row's project when the drawer holds another project's board, then lands
+  the chat's filter on that agent; a note, an ask's asker line and Discuss go
+  through the centre's one jump, which opens the message's own room; All in
+  chat selects the board's project when it differs from the room.
+- **Two instances**: the Board tab's and the drawer's are separate: each has
+  its own reads (only while it is on screen), its own AskBook (an answer is
+  the same RPC; the other follows by the room push it listens to and its
+  next read), its own frame and page load (two documents of one revision:
+  media playing in one does not play in the other). At most two read loops,
+  never both reading unless both are on screen.
+- The `compact` prop the Board hands the Dashboard drives one thing, the
+  discard ConfirmDialog's phone-sheet form, a viewport overlay: it stays the
+  Board's viewport flag in both hosts (AskCard is always passed `compact`
+  by the Dashboard and lays out by its own width).
 
 ### The section (client)
 

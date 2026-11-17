@@ -22,6 +22,15 @@
     onpick: pickWindow = () => {}, onclose: closeDrawer = () => {},
     onexpand = () => {}, onterminal = () => {}, onfiles = () => {},
     onboard = () => {}, onnewissue = () => {}, onfilesback = null,
+    /** Board #147: the drawer's Dashboard asks the Hub to route a page link, an agent row, a
+     * note or a Discuss; the Hub's one close path asks the board's guard. */
+    onpagefile = (_path) => {}, onopenagent = (_s, _a) => {}, onjump = (_s, _m) => {}, onopenchat = (_s) => {},
+    onboardguard = null,
+    /** Board #147 (leader note 3, Q2): Hub's word that the board partition has been shown since
+     * the drawer opened: it is then kept mounted, hidden, never moved, until the drawer closes. */
+    boardMounted = false,
+    /** The project the drawer's board shows: the room's, unless it waits on an edit (#147 (4)). */
+    boardShowing = '', onboardshowing = (_s) => {},
   } = $props();
 
   // The shell window first, agents, the pane on screen; the rest fold (#92, #320).
@@ -79,7 +88,7 @@
            New-issue lives HERE (board #23): the embedded Board renders no
            page-head of its own — that row only repeated the project name
            this head already carries. -->
-      <span class="d-files"><Icon name="layout" size={13} />{t('board')} — {selected}</span>
+      <span class="d-files"><Icon name="layout" size={13} />{t('board')} — {boardShowing || selected}</span>
       <span class="spacer"></span>
       <CommandButton variant="icon" icon="plus" label={t('boardNew')} onclick={onnewissue} />
       <CommandButton variant="icon" icon="maximize" label={t('board')} onclick={onboard} />
@@ -102,11 +111,17 @@
       <Files session={selected} root={projectPath} guardPage="hub" visible={visible} {fontSize} singlePane jumped onGoBack={onfilesback} navRequest={drawerFilesReq} bind:currentDir={drawerFilesDir} bind:currentPath={drawerFilesPath} />
     </div>
   {/if}
-  {#if drawerView === 'board'}
+  {#if boardMounted}
     <!-- The task sidebar (board #13 follow-up): the REAL Board, embedded —
-         no project sidebar, it follows this room's project. -->
-    <div class="board-body appear">
-      <Board session={selected} guardPage="hub" visible={visible && drawerView === 'board'} embedded issueRequest={drawerIssueReq} createRequest={drawerBoardNew} />
+         no project sidebar, it follows this room's project. Kept once shown (#147). -->
+    <div class="board-body appear" hidden={drawerView !== 'board'}>
+      <Board session={selected} guardPage="hub" visible={visible && drawerView === 'board'} embedded issueRequest={drawerIssueReq} createRequest={drawerBoardNew}
+        onShowing={(s) => onboardshowing(s)}
+        onOpenFile={(_s, path) => onpagefile(path)}
+        onOpenAgent={(s, a) => onopenagent(s, a)}
+        onJumpMessage={(s, m) => onjump(s, m)}
+        onOpenChat={(s) => onopenchat(s)}
+        onCloseGuard={(g) => onboardguard?.(g)} />
     </div>
   {/if}
 </section>
@@ -134,6 +149,7 @@
   .term-body.off { visibility: hidden; position: absolute; inset: 0; }
   .files-body { flex: 1; min-width: 0; min-height: 0; display: flex; flex-direction: column; background: var(--bg); }
   .board-body { flex: 1; min-width: 0; min-height: 0; display: flex; flex-direction: column; background: var(--bg); }
+  .board-body[hidden] { display: none; }
   .board-body > :global(.board-root) { flex: 1; min-height: 0; }
   /* Parent-owned suppression (board #23, lead): the drawer head is the ONLY
      header this partition may have. The embedded Board renders no page-head
