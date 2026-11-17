@@ -363,6 +363,30 @@ It is `scripts/target-lock.mjs` (`lockedCommand`): the host's own perl takes a `
 
 **A standalone probe links the lib it was built against, not the one `--lib` tests just rebuilt.** `cargo test --lib` rebuilds the TEST harness; the crate's ordinary lib `.rlib`, which a hand-written `rustc --extern <crate>=…` probe links, stays at whatever source last built it. Incident (#81 note 15, 2026-11-08): the validator's production-seam probe reproduced round 0's defect against round 1's tree until `cargo build --no-default-features --lib` rebuilt the rlib; one wasted round. A probe command therefore begins with that build step, in the same isolated invocation.
 
+## Host capacity: two heavy runs, one node suite (owner, 2026-11-17)
+
+This host is shared with other projects' jobs (renders, encoders). On
+2026-11-16 13:16 its 1-minute load reached 590 on 16 cores when three of
+our full suites overlapped them, and tests hit 60 s timeouts that had
+nothing to do with the code. Since then, and by the owner's word from
+2026-11-17:
+
+- At most TWO heavy runs of the team at a time (a full suite, a repeat
+  loop, a rig build), and at most ONE of them a full `pnpm test`, always
+  `pnpm test -- --test-concurrency=4`. The Rust suite is sequential by
+  design and may run beside one other run. A targeted run of a few files is
+  not a heavy run.
+- Before starting one: `docker ps` (is another isolated-runner container a
+  full node suite?) and `/proc/loadavg`.
+- A TIMED suite waits while the 1-minute load is above 24, for at most 15
+  minutes; then it runs anyway and its evidence states the load. A BUILD
+  with no assertions (a gateway image, `cargo build`, `check:android`) does
+  not wait; it runs with at most two jobs.
+- A red from a run that overlapped another, or that ran above that load, is
+  re-run ALONE before it is read as a finding. A red whose cause is
+  deterministic and already diagnosed (the TLS fixture row below) needs no
+  re-run.
+
 ## The known failures on this host (board #12)
 
 Every verification on 2026-11-05 rebuilt a clean-main baseline from scratch, about 6 minutes per Rust run, to tell this host's failures from a regression (#2, #3, #6, #7, both validators). This is that baseline, versioned. Compare a branch's isolated run with it instead.

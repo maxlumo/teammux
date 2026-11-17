@@ -165,6 +165,13 @@ control, browser/device matrix and versions. A defect found on the way is
 filed as its own issue, never fixed inside a move. When ready:
 `tmm board move <id> review` with a note that names the branch, HEAD, the
 base commit and the evidence.
+**A fix round re-runs the SAME named set** (owner, 2026-11-17; board #144's
+retro). The first handoff names the affected test files (the changed
+modules' tests, the mount tests of every host that draws them, the
+verifier's probe files once they exist) and every later round runs that
+whole list again and cites it. Reason: #144's round 3 reported 49/49 from a
+run that left out the Hub mount file; the regression it hid showed only on
+the rebased tip and cost one more verification cycle.
 
 **Review** is done by the role the team assigns or, for large changes, by
 one reviewer per guidance lens — architecture, agent bridge, code quality,
@@ -173,6 +180,15 @@ tagged with the lens; coordination consolidates. Review reads the commits
 against the matching checklists. Verification runs the suites **in the
 integration checkout** (a worktree with private `node_modules` can be green
 while main is red). Each verdict goes on the issue as a note.
+**One consolidated findings note per version** (owner, 2026-11-17; boards
+#144 and #150). A verifier posts what it found on a version as ONE note
+before the implementer commits a fix round; notes before it are progress,
+not handoffs, and the implementer holds its fix until it arrives. After
+that note, a finding on code the fix round does not touch is a new issue,
+not another round of this one. Reason: on #144 six findings arrived one by
+one (notes 12, 14, 17, then 39 and 44 after the round cap) and each started
+its own fix cycle; coordination had to ask for 'one closing note before the
+commit' twice.
 
 **Merge** is the act of the role assigned to merge, from the integration
 checkout, after verification and review have passed: fast-forward
