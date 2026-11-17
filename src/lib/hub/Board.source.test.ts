@@ -26,6 +26,11 @@ test('the issue detail is a DRAFT: explicit save, clean cancel, guarded exits (b
   // dialect: the back button, Escape, the phone's back gesture, a sidebar
   // project switch. Nothing silently discards.
   assert.match(source, /function toList\(\) \{ opens\.retire\(\); sel = null; creating = false; \}\n\s*function toCreate\(\) \{ opens\.retire\(\); sel = null; creating = true; \}/u, 'the two destinations are the old writes plus the retirement (#150 round 3)');
+  // #150 round 3 (leader's coverage reading, note 33): a door through a shared helper is pinned to it.
+  assert.match(source, /if \(sel \|\| creating\) \{ toList\(\); return true; \}/u, 'the Back hook\u2019s plain path leaves through toList');
+  assert.match(source, /if \(sel \|\| creating\) \{ toList\(\); e\.stopPropagation\(\); \}/u, 'and so does Escape\u2019s');
+  assert.match(source, /const setBoardView = \(v: BoardView\) => \{ opens\.retire\(\); boardView = v;/u, 'a view switch, either way, retires the pending open');
+  assert.equal([...source.matchAll(/onchange=\{setBoardView\}/gu)].length, 2, 'both switches (tab and drawer) go through setBoardView');
   assert.match(source, /aria-label=\{t\('back'\)\} onclick=\{\(\) => guard\(toList\)\}/u, 'the back button is guarded (toList since #150 round 3)');
   assert.match(source, /if \(sel && \(dirty \|\| noteDirty\)\) \{ pendingDiscard = toList; e\.stopPropagation\(\); return; \}/u,
     'Escape asks first while dirty');
