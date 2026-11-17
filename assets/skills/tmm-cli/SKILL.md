@@ -1,6 +1,6 @@
 ---
 name: tmm-cli
-description: The full tmm CLI reference — project chat, the task board, agent/project self-management, the central registry, and tmm task for work that must outlive the turn (dev servers, watchers, deploys, remote jobs — NOT ordinary commands, which run in the foreground). Use when you need a tmm capability beyond the basics your system prompt teaches (send/log), e.g. spawning a teammate, restarting a stuck agent, sending a teammate a /command, waking yourself or someone later instead of sleeping, managing projects and registry definitions, or keeping a long-running process alive in the background.
+description: The full tmm CLI reference — project chat, the task board, agent/project self-management, the central registry, and tmm task for work that must outlive the turn (dev servers, watchers, deploys, remote jobs — NOT ordinary commands, which run in the foreground). Use when you need a tmm capability beyond the basics your system prompt teaches (send/log), e.g. spawning a teammate, restarting a stuck agent, sending a teammate a /command, waking yourself or someone later instead of sleeping, asking the person a question that stays open (tmm ask), publishing the project's status page to the person's Dashboard (tmm dashboard publish), managing projects and registry definitions, or keeping a long-running process alive in the background.
 ---
 
 # The tmm CLI
@@ -117,24 +117,62 @@ tmm ask close <id> "why" [--re <seq>]  # withdraw it; --re cites a room message
 ## The project page — optional, static, the Dashboard's last section
 
 A project may have ONE page for the person: status they read at a glance on
-the Dashboard, under Needs you, Now and Notes. Write a plain `index.html`
-(headings, tables, lists, `<details>`, `<audio>`, inline SVG; your own CSS is
-optional, the app's look is applied for you) with its files beside it,
-anywhere you can write, then publish it:
+the Dashboard (the Board tab's first view), under Needs you, Now and Notes.
+Use it for what a person wants to see without asking: where the work stands,
+what was delivered, numbers, a chart, a clip to listen to, links to the files
+that matter. It is not a place for questions (use `tmm ask`) or for chat.
+
+**How to make one**
+
+1. Write a folder with a plain `index.html` and its files beside it, anywhere
+   you can write (a `status/` folder in the project is a good habit: the next
+   agent finds and updates it). Headings, paragraphs, tables, lists,
+   `<details>`, `<img>`, `<audio>`, `<video>`, inline SVG. Your own CSS is
+   optional: the app applies its look (colours of the person's theme, fonts,
+   type sizes), so a page with no CSS already reads native, in dark and light.
+2. Publish it, and publish again whenever it changes:
 
 ```bash
 tmm dashboard publish ./status      # status/index.html and the files beside it
 tmm dashboard unpublish             # take it down
 ```
 
+A minimal page:
+
+```html
+<h1>EP "Deep Space" — status</h1>
+<p>Updated 2026-11-17 02:30 by mixer. Next: master track 3.</p>
+<table>
+  <tr><th>Track</th><th>State</th><th>Listen</th></tr>
+  <tr><td>1 Rings</td><td>mastered</td>
+      <td><audio controls src="../../../EP/out/rings.mp3"></audio></td></tr>
+  <tr><td>2 Drift</td><td>mixing</td><td><a href="../../../EP/notes/drift.md">notes</a></td></tr>
+</table>
+<details><summary>Decisions</summary><ul><li>48 kHz masters</li></ul></details>
+```
+
+**What to know**
+
 - Static: no script in it ever runs, and it cannot send anything. Links to
   files open them in the app; web links leave it.
+- Everything it shows is a file of the bundle or of the project: nothing
+  loads from the web, so a picture, font or stylesheet from a URL does not
+  appear. Copy it into the folder.
 - A file beside index.html is `style.css`; a project file is
   `../../../<path from the project root>`, e.g.
   `<audio controls src="../../../EP/out/mix.mp3"></audio>`.
 - Regular files only (no symlinks), index.html up to 512 KiB, 500 files and
   20 MiB together. The last publish wins and is shown with your name; a page
   someone has on screen keeps reading its own files.
+- The server keeps what you publish as numbered revisions under
+  `<project>/.tmm/dashboard/` (`page.json` names the current one). Never
+  write there yourself: publish again. Your source folder is only read at
+  publish time; editing it afterwards changes nothing until you republish.
+- The person's view takes a newer page by itself when they are not typing in
+  it or playing its media; otherwise they are offered Refresh. So write the
+  time and your name in the page: it tells them how fresh it is.
+- One page per project: a publish replaces the whole page, so start from the
+  current source (`status/`) and keep what other agents put there.
 
 ## The task board — shared kanban, humans and agents alike
 
